@@ -51,6 +51,7 @@ from platforms.kktix import *
 from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
+from platforms.ctbc import *
 from platforms.hkticketing import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
@@ -335,6 +336,21 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
+    if is_utk_sports_url(homepage) and 'tix.ctbcsports.com' in homepage.lower():
+        if await nodriver_ctbc_inject_cookies(tab, config_dict):
+            try:
+                await tab.reload()
+                await asyncio.sleep(random.uniform(1.0, 1.5))
+                login_state = await tab.evaluate(
+                    'typeof _ul !== "undefined" ? String(_ul) : ""'
+                )
+                if login_state == "1":
+                    debug.log("[CTBC COOKIE] Logged in successfully")
+                else:
+                    debug.log("[CTBC COOKIE] Cookie set applied; session may be expired")
+            except Exception as exc:
+                debug.log(f"[CTBC COOKIE] Reload or verification failed: {exc}")
+
     return tab
 
 async def nodrver_block_urls(tab, config_dict):
@@ -610,7 +626,7 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
-                    "ocr_captcha", "tixcraft", "kktix", "cityline",
+                    "ocr_captcha", "tixcraft", "kktix", "ctbc", "cityline",
                     "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:
@@ -914,6 +930,9 @@ async def main(args):
 
         if 'ibon.com' in url:
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
+
+        if is_utk_sports_url(url):
+            tab = await nodriver_ctbc_main(tab, url, config_dict, ocr)
 
         kham_family = False
         if 'kham.com.tw' in url:

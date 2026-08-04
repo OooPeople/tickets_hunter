@@ -23,7 +23,7 @@ import chrome_downloader
 try:
     import ddddocr
 except Exception:
-    pass
+    ddddocr = None
 
 
 # ===== Constants =====
@@ -106,8 +106,9 @@ def create_ocr_for_platform(config_dict):
     Priority:
     1. use_universal=False -> None (ddddocr fallback in caller)
     2. User custom path (not the default) -> use user's path
-    3. tixcraft / ticketmaster / indievox homepage -> try tixcraft_tm model
-    4. Fallback -> universal model
+    3. CTBC Sports -> official ddddocr model (uppercase letters + digits)
+    4. tixcraft / ticketmaster / indievox homepage -> try tixcraft_tm model
+    5. Fallback -> universal model
     """
     ocr_cfg = config_dict.get("ocr_captcha", {})
     if not ocr_cfg.get("use_universal", True):
@@ -121,6 +122,24 @@ def create_ocr_for_platform(config_dict):
 
     # Auto-select based on homepage
     homepage = config_dict.get("homepage", "")
+    if any(domain in homepage.lower() for domain in ("ctbcsports.com", "tix.wdragons.com")):
+        try:
+            ocr = ddddocr.DdddOcr(
+                show_ad=False,
+                beta=ocr_cfg.get("beta", True),
+            )
+            # CTBC renders four uppercase ASCII letters/digits.  Restricting
+            # the alphabet helps the official model, while the CTBC handler
+            # still normalizes case because ddddocr may emit lowercase glyphs.
+            ocr.set_ranges(5)
+            debug = util.create_debug_logger(config_dict)
+            debug.log("[OCR] Auto-selected official ddddocr model for UTK Sports")
+            return ocr
+        except Exception as exc:
+            debug = util.create_debug_logger(config_dict)
+            debug.log(f"[OCR] Failed to initialize CTBC OCR model: {exc}")
+            return None
+
     tixcraft_domains = ["tixcraft.com", "indievox.com", "ticketmaster."]
     if any(domain in homepage for domain in tixcraft_domains):
         override = dict(config_dict)
@@ -1074,10 +1093,23 @@ def nodriver_overwrite_prefs(conf):
 
 # ===== Shared captcha image capture =====
 
-async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
+def _order_captcha_candidates(candidates, preferred_image_id=None):
+    """Prefer visible candidates, using the requested ID as a tie-breaker."""
+    preferred = (preferred_image_id or "").lower()
+    return sorted(
+        candidates,
+        key=lambda item: (
+            0 if item.get("visible") else 1,
+            0 if preferred and item.get("image_id", "").lower() == preferred else 1,
+            item.get("order", 0),
+        ),
+    )
+
+
+async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, preferred_image_id=None):
     """
     Use DOMSnapshot to find captcha image inside Shadow DOM and get base64 data.
-    Supports IMG elements with '/pic.aspx?TYPE=' pattern and CANVAS fallback.
+    Supports UTK captcha IMG URL patterns and a CANVAS fallback.
     Used by ibon and kham family platforms.
     Returns: img_base64 (bytes) or None
     """
@@ -1087,8 +1119,6 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
     import random
     await asyncio.sleep(random.uniform(0.5, 0.8))
 
-    img_base64 = None
-
     try:
         # Get DOMSnapshot with Shadow DOM content
         documents, strings = await tab.send(cdp.dom_snapshot.capture_snapshot(
@@ -1097,12 +1127,22 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
             include_paint_order=False
         ))
 
-        # Find IMG element with captcha - get both URL and backend_node_id in one pass
-        target_img_url = None
-        img_backend_node_id = None
+        # Collect all matching images rather than committing to the first DOM
+        # match. Hidden login captchas often precede the visible purchase one.
+        # CTBC uses /Home/pic?TYPE= rather than the legacy /pic.aspx?TYPE= URL.
+        candidates = []
+        order = 0
 
         for doc in documents:
             node_names = [strings[i] for i in doc.nodes.node_name]
+            visible_node_indexes = set()
+            try:
+                for layout_index, node_index in enumerate(doc.layout.node_index):
+                    bounds = doc.layout.bounds[layout_index]
+                    if len(bounds) >= 4 and bounds[2] > 0 and bounds[3] > 0:
+                        visible_node_indexes.add(node_index)
+            except Exception:
+                pass
 
             for idx, node_name in enumerate(node_names):
                 if node_name.lower() == 'img':
@@ -1115,125 +1155,106 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
                                 attr_value = strings[attrs[i + 1]]
                                 attr_dict[attr_name] = attr_value
 
-                        if '/pic.aspx?TYPE=' in attr_dict.get('src', ''):
-                            target_img_url = attr_dict.get('src', '')
+                        source = attr_dict.get('src', '')
+                        source_lower = source.lower()
+                        image_id = attr_dict.get('id', '').lower()
+                        is_captcha_source = any(pattern in source_lower for pattern in (
+                            '/pic.aspx?type=',
+                            '/home/pic?type=',
+                            '/pic?type=',
+                        ))
+                        if is_captcha_source:
                             if hasattr(doc.nodes, 'backend_node_id') and idx < len(doc.nodes.backend_node_id):
-                                img_backend_node_id = doc.nodes.backend_node_id[idx]
+                                backend_node_id = doc.nodes.backend_node_id[idx]
+                                if backend_node_id:
+                                    candidates.append({
+                                        "backend_node_id": backend_node_id,
+                                        "image_id": image_id,
+                                        "source": source,
+                                        "visible": idx in visible_node_indexes,
+                                        "order": order,
+                                    })
+                                    order += 1
 
-                            debug.log(f"[CAPTCHA] Found IMG: {target_img_url}")
-                            break
+            for idx, node_name in enumerate(node_names):
+                if node_name.lower() == 'canvas':
+                    if hasattr(doc.nodes, 'backend_node_id') and idx < len(doc.nodes.backend_node_id):
+                        backend_node_id = doc.nodes.backend_node_id[idx]
+                        if backend_node_id:
+                            candidates.append({
+                                "backend_node_id": backend_node_id,
+                                "image_id": "",
+                                "source": "canvas",
+                                "visible": idx in visible_node_indexes,
+                                "order": order + 10000,
+                            })
+                            order += 1
 
-            if img_backend_node_id:
-                break
-
-        if not img_backend_node_id:
-            # Try finding CANVAS element (new EventBuy format)
-            debug.log("[CAPTCHA] IMG not found, searching for CANVAS element...")
-
-            for doc in documents:
-                node_names = [strings[i] for i in doc.nodes.node_name]
-
-                for idx, node_name in enumerate(node_names):
-                    if node_name.lower() == 'canvas':
-                        # Found CANVAS element, use it for captcha
-                        if hasattr(doc.nodes, 'backend_node_id') and idx < len(doc.nodes.backend_node_id):
-                            img_backend_node_id = doc.nodes.backend_node_id[idx]
-
-                            debug.log(f"[CAPTCHA] Found CANVAS element")
-                            break
-
-                if img_backend_node_id:
-                    break
-
-        if not img_backend_node_id:
+        candidates = _order_captcha_candidates(candidates, preferred_image_id)
+        if not candidates:
             debug.log("[CAPTCHA] Neither IMG nor CANVAS found")
             return None
 
-        # Make URL absolute if needed
-        if target_img_url and target_img_url.startswith('/'):
-            current_url = tab.target.url
-            domain = '/'.join(current_url.split('/')[:3])
-            target_img_url = domain + target_img_url
-
-        # Use CDP DOM API to get IMG element position and screenshot
+        # Initialize DOM once, then try each candidate. A zero-size/hidden node
+        # or a transient box-model failure falls through to the next candidate.
         try:
+            await tab.send(cdp.dom.get_document())
+        except Exception:
+            pass
 
-            if img_backend_node_id:
-                # Initialize DOM document first (required after page reload)
+        for candidate in candidates:
+            backend_node_id = candidate["backend_node_id"]
+            debug.log(f"[CAPTCHA] Trying candidate: {candidate['source']}")
+            try:
+                result = await tab.send(cdp.dom.push_nodes_by_backend_ids_to_frontend([backend_node_id]))
+                if not result:
+                    continue
+                node_id = result[0]
                 try:
-                    await tab.send(cdp.dom.get_document())
-                except:
-                    pass  # Document may already be initialized
+                    await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=node_id))
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    pass
 
-                # Convert backend_node_id to node_id using DOM.pushNodesByBackendIdsToFrontend
-                try:
-                    result = await tab.send(cdp.dom.push_nodes_by_backend_ids_to_frontend([img_backend_node_id]))
-                    if result and len(result) > 0:
-                        img_node_id = result[0]
+                box_model = await tab.send(cdp.dom.get_box_model(node_id=node_id))
+                if not box_model or not hasattr(box_model, 'content'):
+                    continue
+                quad = box_model.content
+                x = min(quad[0], quad[2], quad[4], quad[6])
+                y = min(quad[1], quad[3], quad[5], quad[7])
+                width = max(quad[0], quad[2], quad[4], quad[6]) - x
+                height = max(quad[1], quad[3], quad[5], quad[7]) - y
+                if width <= 0 or height <= 0:
+                    continue
 
-                        # Scroll element into view first to ensure it's rendered
-                        try:
-                            await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=img_node_id))
-                            await asyncio.sleep(0.1)
-                        except:
-                            pass  # Element may already be visible
+                device_pixel_ratio = await tab.evaluate('window.devicePixelRatio')
+                full_screenshot = await tab.send(cdp.page.capture_screenshot(format_='png'))
+                if not full_screenshot:
+                    continue
 
-                        # Get box model for the IMG element
-                        box_model = await tab.send(cdp.dom.get_box_model(node_id=img_node_id))
+                import base64
+                import io
+                from PIL import Image
 
-                        if box_model and hasattr(box_model, 'content'):
-                            # content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
-                            quad = box_model.content
-                            x = min(quad[0], quad[2], quad[4], quad[6])
-                            y = min(quad[1], quad[3], quad[5], quad[7])
-                            width = max(quad[0], quad[2], quad[4], quad[6]) - x
-                            height = max(quad[1], quad[3], quad[5], quad[7]) - y
-
-                            # Get device pixel ratio
-                            device_pixel_ratio = await tab.evaluate('window.devicePixelRatio')
-
-                            # WORKAROUND: Full page screenshot + PIL crop
-                            # Region screenshot doesn't work with closed Shadow DOM
-                            full_screenshot = await tab.send(cdp.page.capture_screenshot(format_='png'))
-
-                            if full_screenshot:
-                                import base64
-                                from PIL import Image
-                                import io
-
-                                # Decode full screenshot
-                                full_img_bytes = base64.b64decode(full_screenshot)
-                                full_img = Image.open(io.BytesIO(full_img_bytes))
-
-                                # Crop using PIL (coordinates need to account for device pixel ratio)
-                                left = int(x * device_pixel_ratio)
-                                top = int(y * device_pixel_ratio)
-                                right = int((x + width) * device_pixel_ratio)
-                                bottom = int((y + height) * device_pixel_ratio)
-
-                                cropped_img = full_img.crop((left, top, right, bottom))
-
-                                # Convert back to bytes
-                                img_buffer = io.BytesIO()
-                                cropped_img.save(img_buffer, format='PNG')
-                                img_base64 = img_buffer.getvalue()
-
-                                debug.log(f"[CAPTCHA] Screenshot: {len(img_base64)} bytes")
-
-                        else:
-                            debug.log("[CAPTCHA] Failed to get box model")
-                    else:
-                        debug.log("[CAPTCHA] Failed to convert backend_node_id")
-                except Exception as dom_exc:
-                    debug.log(f"[CAPTCHA] DOM API error: {dom_exc}")
-            else:
-                debug.log("[CAPTCHA] No backend_node_id found for IMG")
-
-        except Exception as exc:
-            if debug.enabled:
-                debug.log(f"[CAPTCHA] Screenshot failed: {exc}")
-                import traceback
-                traceback.print_exc()
+                full_img = Image.open(io.BytesIO(base64.b64decode(full_screenshot)))
+                crop_box = (
+                    int(x * device_pixel_ratio),
+                    int(y * device_pixel_ratio),
+                    int((x + width) * device_pixel_ratio),
+                    int((y + height) * device_pixel_ratio),
+                )
+                if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
+                    continue
+                cropped_img = full_img.crop(crop_box)
+                img_buffer = io.BytesIO()
+                cropped_img.save(img_buffer, format='PNG')
+                image_bytes = img_buffer.getvalue()
+                if image_bytes:
+                    debug.log(f"[CAPTCHA] Screenshot: {len(image_bytes)} bytes")
+                    return image_bytes
+            except Exception as dom_exc:
+                debug.log(f"[CAPTCHA] Candidate failed: {dom_exc}")
+                continue
 
     except Exception as exc:
         if debug.enabled:
@@ -1241,4 +1262,4 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
             import traceback
             traceback.print_exc()
 
-    return img_base64
+    return None

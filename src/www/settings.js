@@ -17,6 +17,8 @@ const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
+const ctbc_ticket_type_keyword = document.querySelector('#ctbc_ticket_type_keyword');
+const ctbc_seat_sorting = document.querySelector('#ctbc_seat_sorting');
 const keyword_exclude = document.querySelector('#keyword_exclude');
 
 // advance
@@ -69,12 +71,14 @@ const tixcraft_sid = document.querySelector('#tixcraft_sid');
 const ibonqware = document.querySelector('#ibonqware');
 const funone_session_cookie = document.querySelector('#funone_session_cookie');
 const fansigo_cookie = document.querySelector('#fansigo_cookie');
+const ctbc_cookie = document.querySelector('#ctbc_cookie');
 const fansigo_account = document.querySelector('#fansigo_account');
 const fansigo_password = document.querySelector('#fansigo_password');
 const facebook_account = document.querySelector('#facebook_account');
 const kktix_account = document.querySelector('#kktix_account');
 const fami_account = document.querySelector('#fami_account');
 const kham_account = document.querySelector('#kham_account');
+const ctbc_account = document.querySelector('#ctbc_account');
 const ticket_account = document.querySelector('#ticket_account');
 const udn_account = document.querySelector('#udn_account');
 const ticketplus_account = document.querySelector('#ticketplus_account');
@@ -86,6 +90,7 @@ const facebook_password = document.querySelector('#facebook_password');
 const kktix_password = document.querySelector('#kktix_password');
 const fami_password = document.querySelector('#fami_password');
 const kham_password = document.querySelector('#kham_password');
+const ctbc_password = document.querySelector('#ctbc_password');
 const ticket_password = document.querySelector('#ticket_password');
 const udn_password = document.querySelector('#udn_password');
 const ticketplus_password = document.querySelector('#ticketplus_password');
@@ -462,7 +467,15 @@ function renderBasicTabTranslations() {
     setRowLabelForField('area_select_mode', fieldLabel('Area selection order', 'area_select_mode'));
     setRowLabelForField('area_keyword', fieldLabel('Area keywords', 'area_keyword'));
     setRowLabelForField('area_auto_fallback', fieldLabel('Area fallback', 'area_auto_fallback'));
+    setNearestFormText('ctbc_ticket_type_keyword', 'Used on the seat page. Defaults to Full Ticket and does not inherit area or exclusion keywords. Enter 身心 to select the disability ticket explicitly.');
+    setRowLabelForField('ctbc_seat_sorting', fieldLabel('Baseball seat ordering', 'ctbc_seat_sorting'));
     setRowLabelForField('keyword_exclude', fieldLabel('Exclude keywords', 'keyword_exclude'));
+
+    applyOrRestore('#ctbc_seat_sorting option[value="display"]', 'textContent', 'Seat-map display order (top to bottom)');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_seat"]', 'textContent', 'Smaller row, then smaller seat');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_asc_seat_desc"]', 'textContent', 'Smaller row, then larger seat');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_desc_seat_asc"]', 'textContent', 'Larger row, then smaller seat');
+    setNearestFormText('ctbc_seat_sorting', 'The default prioritizes smaller row and seat numbers. Each option directly defines seat priority.');
 
     const versionLabel = document.querySelector('#maxbot_version')?.closest('.row')?.querySelector('label.col-sm-2');
     if (versionLabel) {
@@ -610,6 +623,9 @@ function renderAutofillTabTranslations() {
     setRowLabelForField('ibonqware', fieldLabel('iBon cookie ibonqware', 'ibonqware'));
     setRowLabelForField('funone_session_cookie', fieldLabel('FunOne cookie (ticket_session)', 'funone_session_cookie'));
     setRowLabelForField('fansigo_cookie', fieldLabel('FANSI GO cookie (FansiAuthInfo)', 'fansigo_cookie'));
+    setRowLabelForField('ctbc_cookie', fieldLabel('CTBC Sports cookie set', 'ctbc_cookie'));
+    applyOrRestore('#ctbc_cookie', 'placeholder', 'Paste the complete Cookie header (all CTBC_ cookies)');
+    setNearestFormText('ctbc_cookie', 'Cookie is preferred; expired cookies fall back to the account and password below. Treat it as a login credential and never share it.');
     setRowLabelForField('discount_code', fieldLabel('Discount / member code', 'discount_code'));
 
     setInputGroupTexts('fansigo_account', ['Email', 'Password']);
@@ -617,6 +633,7 @@ function renderAutofillTabTranslations() {
     setInputGroupTexts('kktix_account', ['Account', 'Password']);
     setInputGroupTexts('fami_account', ['Account', 'Password']);
     setInputGroupTexts('kham_account', ['Account', 'Password']);
+    setInputGroupTexts('ctbc_account', ['Account', 'Password']);
     setInputGroupTexts('ticket_account', ['Account', 'Password']);
     setInputGroupTexts('udn_account', ['Account', 'Password']);
     setInputGroupTexts('ticketplus_account', ['Account', 'Password']);
@@ -630,7 +647,9 @@ function renderAutofillTabTranslations() {
     setRowLabelForField('kktix_account', 'KKTIX');
     setRowLabelForField('fami_account', 'FamiTicket');
     setRowLabelForField('kham_account', 'Kham');
+    setRowLabelForField('ctbc_account', 'CTBC Sports');
     setRowLabelForField('ticket_account', 'Ticket.com.tw');
+    setRowLabelForField('ctbc_ticket_type_keyword', 'Baseball ticket-type keyword');
     setRowLabelForField('udn_account', 'UDN');
     setRowLabelForField('ticketplus_account', 'TicketPlus');
     setRowLabelForField('cityline_account', 'Cityline');
@@ -825,6 +844,7 @@ const PROFILE_PLATFORMS = [
     { slug: 'tixcraft',     label: 'Tixcraft 拓元',    homepage: 'https://tixcraft.com' },
     { slug: 'kktix',        label: 'KKTIX',            homepage: 'https://kktix.com' },
     { slug: 'ibon',         label: 'iBon',             homepage: 'https://ticket.ibon.com.tw' },
+    { slug: 'ctbc',         label: '中信育樂售票網',     homepage: 'https://tix.ctbcsports.com/BROTHERS/' },
     { slug: 'famiticket',   label: 'FamiTicket 全網',  homepage: 'https://www.famiticket.com.tw' },
     { slug: 'kham',         label: 'Kham 寬宏',        homepage: 'https://kham.com.tw' },
     { slug: 'ticket',       label: '年代售票',          homepage: 'https://ticket.com.tw' },
@@ -1063,6 +1083,7 @@ const PLATFORM_MAP = [
     { key: 'tixcraft',    domains: ['tixcraft.com', 'teamear.com', 'indievox.com', 'ticketmaster.'] },
     { key: 'kktix',       domains: ['kktix.com', 'kktix.cc'] },
     { key: 'ibon',        domains: ['ibon.com'] },
+    { key: 'ctbc',        domains: ['tix.ctbcsports.com', 'tix.wdragons.com'] },
     { key: 'famiticket',  domains: ['famiticket.com'] },
     { key: 'kham',        domains: ['kham.com.tw'] },
     { key: 'ticket',      domains: ['ticket.com.tw'] },
@@ -1240,12 +1261,14 @@ function load_settins_to_form(settings)
         ibonqware.value = settings.accounts.ibonqware;
         funone_session_cookie.value = settings.accounts.funone_session_cookie || '';
         fansigo_cookie.value = settings.accounts.fansigo_cookie || '';
+        ctbc_cookie.value = settings.accounts.ctbc_cookie || '';
         fansigo_account.value = settings.accounts.fansigo_account || '';
         fansigo_password.value = settings.accounts.fansigo_password || '';
         facebook_account.value = settings.accounts.facebook_account;
         kktix_account.value = settings.accounts.kktix_account;
         fami_account.value = settings.accounts.fami_account;
         kham_account.value = settings.accounts.kham_account;
+        ctbc_account.value = settings.accounts.ctbc_account || '';
         ticket_account.value = settings.accounts.ticket_account;
         udn_account.value = settings.accounts.udn_account;
         ticketplus_account.value = settings.accounts.ticketplus_account;
@@ -1257,7 +1280,17 @@ function load_settins_to_form(settings)
         kktix_password.value = settings.accounts.kktix_password;
         fami_password.value = settings.accounts.fami_password;
         kham_password.value = settings.accounts.kham_password;
+        ctbc_password.value = settings.accounts.ctbc_password || '';
         ticket_password.value = settings.accounts.ticket_password;
+
+        ctbc_ticket_type_keyword.value = (settings.ctbc && settings.ctbc.ticket_type_keyword) || '全票';
+        const savedCtbcSeatSorting = (settings.ctbc && settings.ctbc.seat_sorting) || 'row_seat';
+        const validCtbcSeatSortings = [
+            'display', 'row_seat', 'row_asc_seat_desc', 'row_desc_seat_asc'
+        ];
+        ctbc_seat_sorting.value = validCtbcSeatSortings.includes(savedCtbcSeatSorting)
+            ? savedCtbcSeatSorting
+            : 'row_seat';
         udn_password.value = settings.accounts.udn_password;
         ticketplus_password.value = settings.accounts.ticketplus_password;
         discount_code.value = settings.advanced.discount_code || '';
@@ -1547,12 +1580,14 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.ibonqware = ibonqware.value;
             settings.accounts.funone_session_cookie = funone_session_cookie.value;
             settings.accounts.fansigo_cookie = fansigo_cookie.value;
+            settings.accounts.ctbc_cookie = ctbc_cookie.value;
             settings.accounts.fansigo_account = fansigo_account.value;
             settings.accounts.fansigo_password = fansigo_password.value;
             settings.accounts.facebook_account = facebook_account.value;
             settings.accounts.kktix_account = kktix_account.value;
             settings.accounts.fami_account = fami_account.value;
             settings.accounts.kham_account = kham_account.value;
+            settings.accounts.ctbc_account = ctbc_account.value;
             settings.accounts.ticket_account = ticket_account.value;
             settings.accounts.udn_account = udn_account.value;
             settings.accounts.ticketplus_account = ticketplus_account.value;
@@ -1564,7 +1599,11 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.kktix_password = kktix_password.value;
             settings.accounts.fami_password = fami_password.value;
             settings.accounts.kham_password = kham_password.value;
+            settings.accounts.ctbc_password = ctbc_password.value;
             settings.accounts.ticket_password = ticket_password.value;
+            if (!settings.ctbc) settings.ctbc = {};
+            settings.ctbc.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
+            settings.ctbc.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
             settings.accounts.udn_password = udn_password.value;
             settings.accounts.ticketplus_password = ticketplus_password.value;
             settings.advanced.discount_code = discount_code.value;
@@ -1676,11 +1715,26 @@ function check_unsaved_fields()
                 $("#"+f).removeClass("is-invalid");
             }
         });
+        if (ctbc_ticket_type_keyword) {
+            const savedValue = (settings.ctbc && settings.ctbc.ticket_type_keyword) || '全票';
+            ctbc_ticket_type_keyword.classList.toggle(
+                'is-invalid',
+                ctbc_ticket_type_keyword.value !== savedValue
+            );
+        }
+        if (ctbc_seat_sorting) {
+            const savedValue = (settings.ctbc && settings.ctbc.seat_sorting) || 'row_seat';
+            ctbc_seat_sorting.classList.toggle(
+                'is-invalid',
+                ctbc_seat_sorting.value !== savedValue
+            );
+        }
         const field_list_accounts = [
             "tixcraft_sid",
             "ibonqware",
             "funone_session_cookie",
             "fansigo_cookie",
+            "ctbc_cookie",
             "fansigo_account",
             "fansigo_password",
             "facebook_account",
@@ -1690,6 +1744,7 @@ function check_unsaved_fields()
             "urbtix_account",
             "hkticketing_account",
             "kham_account",
+            "ctbc_account",
             "ticket_account",
             "udn_account",
             "ticketplus_account",
@@ -1699,6 +1754,7 @@ function check_unsaved_fields()
             "urbtix_password",
             "hkticketing_password",
             "kham_password",
+            "ctbc_password",
             "ticket_password",
             "udn_password",
             "ticketplus_password"

@@ -310,6 +310,42 @@ const HELP_CONTENT = {
     link: null
   },
 
+  ctbc_seat_sorting: {
+    title: '職棒座位排序依據',
+    short: '直接指定座位圖順序，或排數與座號的優先方向',
+    detail: `
+      <p>適用於中信兄弟與味全龍的劃位座位頁。程式會先建立實際相鄰的連座候選，再依這個設定直接決定優先順序。</p>
+      <table class="table table-sm table-bordered">
+        <thead><tr><th>選項</th><th>行為</th></tr></thead>
+        <tbody>
+          <tr><td>座位圖顯示順序</td><td>沿用網站座位表由上到下、由左到右的元素順序。</td></tr>
+          <tr><td>較小排、較小號</td><td>優先最小排數，再選其中座號較小的連座（預設）。</td></tr>
+          <tr><td>較小排、較大號</td><td>優先最小排數，再選其中座號較大的連座。</td></tr>
+          <tr><td>較大排、較小號</td><td>優先最大排數，再選其中座號較小的連座。</td></tr>
+        </tbody>
+      </table>
+      <p>若球場座位圖採旋轉排列，程式會使用座位標題內的實際排號、座號排序，並以畫面座標判斷連座，不會把 DOM 最上方誤認為最前排。</p>
+      <p class="mb-0 text-muted small">相鄰判定仍以座位圖中實際相鄰的格子為準，不會只因座號連續就跨越走道。</p>`,
+    link: 'https://github.com/bouob/tickets_hunter/blob/main/guide/settings-guide.md#職棒座位排序依據ctbcseat_sorting'
+  },
+
+  ctbc_cookie: {
+    title: '中信育樂 Cookie',
+    short: '貼上已登入 CTBC 售票網的完整 Cookie header，可取代帳號密碼登入',
+    detail: `
+      <p>CTBC 的登入工作階段由多個 <code>CTBC_...</code> Cookie 組成，因此需要貼上完整 Cookie header，不能只複製單一 Value。</p>
+      <p><strong>取得步驟（Chrome）：</strong></p>
+      <ol>
+        <li>在 Chrome 登入中信育樂售票網</li>
+        <li>按 <code>F12</code>，切到「Network」後重新整理頁面</li>
+        <li>點選最上方的 <code>UTK...</code> 文件請求</li>
+        <li>在「Request Headers」找到 <code>Cookie</code>，複製冒號後的完整內容</li>
+        <li>貼入此欄位；程式只會取用名稱以 <code>CTBC_</code> 開頭的 Cookie</li>
+      </ol>
+      <p class="text-warning-emphasis small mb-0">Cookie 等同登入憑證，請勿分享。Cookie 失效時程式會回退到帳號密碼；若未設定帳密，請重新登入 Chrome 並複製新的 Cookie。</p>`,
+    link: null
+  },
+
   idle_keyword: {
     title: '系統時間 - 暫停關鍵字',
     short: '指定時刻自動暫停搶票（格式 HH:MM:SS，分號分隔多個）',
@@ -1188,6 +1224,38 @@ const HELP_CONTENT_EN_META = {
         <li>Copy the Value field and paste it here.</li>
       </ol>
       <p class="text-muted small mb-0">If both account credentials and a cookie are filled in, the bot uses the cookie first.</p>`,
+  },
+  ctbc_seat_sorting: {
+    title: 'Baseball seat ordering',
+    short: 'Directly choose display order or the preferred row/seat number directions.',
+    detailHtml: `
+      <p>Applies to reserved-seat pages for CTBC Brothers and Wei Chuan Dragons. The bot first builds physically adjacent seat candidates, then applies this priority directly.</p>
+      <table class="table table-sm table-bordered">
+        <thead><tr><th>Option</th><th>Behavior</th></tr></thead>
+        <tbody>
+          <tr><td>Seat-map display order</td><td>Use the website seat table's top-to-bottom and left-to-right element order.</td></tr>
+          <tr><td>Smaller row, smaller seat</td><td>Prefer the smallest row, then the smaller-numbered adjacent block (default).</td></tr>
+          <tr><td>Smaller row, larger seat</td><td>Prefer the smallest row, then the larger-numbered adjacent block.</td></tr>
+          <tr><td>Larger row, smaller seat</td><td>Prefer the largest row, then the smaller-numbered adjacent block.</td></tr>
+        </tbody>
+      </table>
+      <p>For rotated stadium maps, the bot sorts using the actual row and seat numbers in each seat title and uses screen coordinates for adjacency instead of treating the top DOM row as the front row.</p>
+      <p class="mb-0 text-muted small">Adjacency still follows neighboring cells on the actual seat map, so consecutive numbers never bridge an aisle.</p>`,
+  },
+  ctbc_cookie: {
+    title: 'CTBC Sports cookie set',
+    short: 'Paste the complete Cookie header from a logged-in CTBC Sports session.',
+    detailHtml: `
+      <p>CTBC login uses multiple <code>CTBC_...</code> cookies, so copy the complete Cookie request header rather than a single cookie value.</p>
+      <p><strong>How to get it in Chrome:</strong></p>
+      <ol>
+        <li>Log in to the CTBC Sports ticketing site.</li>
+        <li>Press <code>F12</code>, open Network, and reload the page.</li>
+        <li>Select the main <code>UTK...</code> document request.</li>
+        <li>Under Request Headers, copy the complete value after <code>Cookie:</code>.</li>
+        <li>Paste it here. Only cookie names beginning with <code>CTBC_</code> are injected.</li>
+      </ol>
+      <p class="text-warning-emphasis small mb-0">Treat this cookie set as a login credential and never share it. If it expires, account/password login is used as a fallback.</p>`,
   },
   idle_keyword: {
     title: 'System time pause keywords',

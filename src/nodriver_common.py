@@ -28,7 +28,7 @@ except Exception:
 
 # ===== Constants =====
 
-CONST_APP_VERSION = "TicketsHunter (2026.06.30)"
+CONST_APP_VERSION = "TicketsHunter (2026.09.24)"
 
 CONST_MAXBOT_ANSWER_ONLINE_FILE = "MAXBOT_ONLINE_ANSWER.txt"
 CONST_MAXBOT_CONFIG_FILE = "settings.json"
@@ -58,12 +58,25 @@ CLOUDFLARE_MAX_RETRY = 3         # max retry count
 CLOUDFLARE_WAIT_TIME = 3         # wait time after each attempt (seconds)
 CLOUDFLARE_ENABLE_EXPERT_MODE = False  # True enables more aggressive browser args
 
-# A solved embedded Turnstile writes a long response token in place, while a
-# full-page interstitial normally clears by replacing the field or navigating.
-# Polling all three proofs avoids treating a dispatched click as a successful
-# challenge pass.
+# Horizontal position of the Turnstile checkbox within its iframe, as a
+# fraction of the widget width, vertically centered. Measured from the iframe
+# box model, never from the .cf-turnstile element -- that container can be the
+# full width of the surrounding form. A ratio rather than a fixed pixel offset
+# keeps the click on the box if Cloudflare ever ships a different widget size;
+# this is the value zendriver's own verify_cf uses.
+CONST_TURNSTILE_CHECKBOX_X_RATIO = 0.15
+
+# Waiting for the token an embedded Turnstile writes into the page after a
+# successful click. Cloudflare usually answers within 0.5-3s; 6s covers a slow
+# round while still leaving room for the outer retry loop. The interval is the
+# upper bound on how long a solved challenge goes unnoticed, which matters
+# during an on-sale, so it stays well under half a second.
 CLOUDFLARE_TOKEN_WAIT = 6
 CLOUDFLARE_TOKEN_POLL = 0.25
+
+# Shortest string accepted as a real Turnstile token. Unsolved widgets hold an
+# empty value and a real token runs to hundreds of characters, so anything in
+# between is a leftover rather than a pass.
 CONST_TURNSTILE_MIN_TOKEN_LENGTH = 20
 
 
@@ -283,6 +296,30 @@ def send_telegram_notification(config_dict, stage, platform_name):
 
 # ===== DOM Tools =====
 
+# Assigning input.value directly updates the DOM but leaves a framework's model
+# stale: Vue/Vuetify, Angular's ngModel and React all install their own value
+# setter on the element and only react to changes made through the native one.
+# The field then looks filled while the form still counts it as empty, so the
+# submit button never unlocks.
+#
+# This is a fragment, not a standalone script -- paste it inside a caller's
+# IIFE so nothing reaches the global scope, then call setNativeInputValue().
+CONST_NATIVE_INPUT_SETTER_JS = '''
+        const setNativeInputValue = (input, value) => {
+            const descriptor = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value');
+            if (descriptor && descriptor.set) {
+                descriptor.set.call(input, value);
+            } else {
+                input.value = value;
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            return input.value === value;
+        };
+'''
+
+
 async def nodriver_press_button(tab, select_query):
     if tab:
         try:
@@ -302,9 +339,10 @@ async def nodriver_force_check_checkbox(tab, checkbox_element):
 
     if checkbox_element:
         try:
-            # Use JavaScript to check and set checkbox state
-            result = await tab.evaluate('''
-                (function(element) {
+            # Element.apply passes the element in; tab.evaluate's second
+            # positional argument is await_promise, not a script argument.
+            result = await checkbox_element.apply('''
+                (element) => {
                     if (!element) return false;
 
                     // Check if already checked
@@ -319,8 +357,8 @@ async def nodriver_force_check_checkbox(tab, checkbox_element):
                         element.checked = true;
                         return element.checked;
                     }
-                })(arguments[0]);
-            ''', checkbox_element)
+                }
+            ''')
 
             is_finish_checkbox_click = bool(result)
 
@@ -330,34 +368,44 @@ async def nodriver_force_check_checkbox(tab, checkbox_element):
     return is_finish_checkbox_click
 
 async def nodriver_check_checkbox_enhanced(tab, select_query, config_dict=None):
-    """Enhanced checkbox function using direct JavaScript"""
+    """Tick a checkbox, falling back to setting the property when a click will not.
+
+    click() goes through the page's handlers but never throws on a checkbox, so
+    a preventDefault handler or a not-yet-interactive element is caught by
+    re-reading .checked; the fallback then sets it and dispatches change.
+    Returns a bool; the failure reason is only logged.
+    """
     debug = util.create_debug_logger(config_dict)
     is_checkbox_checked = False
 
     try:
         debug.log(f"Checking checkbox: {select_query}")
 
-        # Direct JavaScript find and check
+        selector_js = json.dumps(select_query)
         result = await tab.evaluate(f'''
             (function() {{
-                const checkbox = document.querySelector('{select_query}');
-                if (!checkbox) return false;
+                const checkbox = document.querySelector({selector_js});
+                if (!checkbox) return {{ok: false, reason: 'not found'}};
+                if (checkbox.checked) return {{ok: true, reason: 'already checked'}};
 
-                if (checkbox.checked) return true;
+                checkbox.click();
+                if (checkbox.checked) return {{ok: true, reason: 'click'}};
 
-                try {{
-                    checkbox.click();
-                    return checkbox.checked;
-                }} catch(e) {{
-                    checkbox.checked = true;
-                    return checkbox.checked;
-                }}
+                checkbox.checked = true;
+                checkbox.dispatchEvent(new Event('change', {{bubbles: true}}));
+                return {{
+                    ok: checkbox.checked,
+                    reason: checkbox.checked ? 'forced' : 'refused'
+                }};
             }})();
         ''')
 
-        is_checkbox_checked = bool(result)
-
-        debug.log(f"Checkbox result: {is_checkbox_checked}")
+        if isinstance(result, dict):
+            is_checkbox_checked = bool(result.get('ok'))
+            debug.log(f"Checkbox result: {is_checkbox_checked} ({result.get('reason')})")
+        else:
+            is_checkbox_checked = bool(result)
+            debug.log(f"Checkbox result: {is_checkbox_checked}")
 
     except Exception as exc:
         debug.log(f"Checkbox error: {exc}")
@@ -482,21 +530,94 @@ def convert_remote_object(obj, depth=0):
     else:
         return obj
 
+CONST_URL_EXIT_ERROR_STRINGS = [
+    "server rejected WebSocket connection: HTTP 500",
+    "[Errno 61] Connect call failed ('127.0.0.1',",
+    "[WinError 1225] ",
+]
+# WebSocket connection closed normally (e.g. after purchase completed or page navigation)
+# These are expected and should not be printed.
+CONST_URL_SILENT_ERROR_STRINGS = [
+    "no close frame received or sent",
+    "no close frame sent",
+    "no close frame received",
+]
+
+# A silent close is normal once or twice per navigation, but a sustained run of
+# them means the CDP websocket is dead: nodriver_current_url keeps returning "",
+# the main loop skips every dispatch, and the bot idles forever without ever
+# quitting (issue #374). Count them so that state becomes visible.
+# The main loop polls every 50ms, so 15 consecutive failures is close to a
+# second of being completely unable to read the URL - well past any transient.
+CONST_URL_SILENT_ERROR_REPORT_THRESHOLD = 15
+CONST_URL_SILENT_ERROR_REPORT_INTERVAL = 50
+
+_url_error_state = {"silent_count": 0, "last_error": "", "last_reported": 0,
+                    "js_timeout_count": 0}
+
+
+def classify_url_error(str_exc):
+    """Classify a nodriver_current_url exception.
+
+    Returns:
+        tuple[bool, bool]: (is_silent, is_quit_bot)
+    """
+    is_silent = any(s in str_exc for s in CONST_URL_SILENT_ERROR_STRINGS)
+    is_quit_bot = any(s in str_exc for s in CONST_URL_EXIT_ERROR_STRINGS)
+    return is_silent, is_quit_bot
+
+
+def get_url_error_count():
+    """Consecutive silent websocket failures seen so far (0 when healthy)."""
+    return _url_error_state["silent_count"]
+
+
+def get_url_js_timeout_count():
+    """Times js_dumps timed out, i.e. JS execution was suspended.
+
+    A Cloudflare full-page interstitial suspends JS the same way an alert does.
+    The main loop watches this counter to know it should re-run its Cloudflare
+    check even though the URL never changed - otherwise a challenge that renders
+    after the URL settles is never detected at all.
+    """
+    return _url_error_state["js_timeout_count"]
+
+
+def record_url_silent_error(str_exc):
+    """Accumulate a silent failure; report only at the threshold and interval.
+
+    Returns:
+        bool: True when the caller should surface the error to the user.
+    """
+    _url_error_state["silent_count"] += 1
+    _url_error_state["last_error"] = str_exc
+
+    count = _url_error_state["silent_count"]
+    if count < CONST_URL_SILENT_ERROR_REPORT_THRESHOLD:
+        return False
+
+    last_reported = _url_error_state["last_reported"]
+    if last_reported == 0:
+        _url_error_state["last_reported"] = count
+        return True
+    if count - last_reported >= CONST_URL_SILENT_ERROR_REPORT_INTERVAL:
+        _url_error_state["last_reported"] = count
+        return True
+    return False
+
+
+def reset_url_error_state():
+    """Clear the counter. Returns how many failures were pending (0 if none)."""
+    recovered = _url_error_state["silent_count"]
+    _url_error_state["silent_count"] = 0
+    _url_error_state["last_error"] = ""
+    _url_error_state["last_reported"] = 0
+    return recovered
+
+
 async def nodriver_current_url(tab, config_dict=None):
     debug = util.create_debug_logger(config_dict)
     is_quit_bot = False
-    exit_bot_error_strings = [
-        "server rejected WebSocket connection: HTTP 500",
-        "[Errno 61] Connect call failed ('127.0.0.1',",
-        "[WinError 1225] ",
-    ]
-    # WebSocket connection closed normally (e.g. after purchase completed or page navigation)
-    # These are expected and should not be printed
-    silent_error_strings = [
-        "no close frame received or sent",
-        "no close frame sent",
-        "no close frame received",
-    ]
 
     url = ""
     if tab:
@@ -506,8 +627,10 @@ async def nodriver_current_url(tab, config_dict=None):
                 tab.js_dumps('window.location.href'), timeout=5.0
             )
         except asyncio.TimeoutError:
-            # js_dumps blocks when JS execution is suspended (alert dialog, navigation, tab throttling)
+            # js_dumps blocks when JS execution is suspended (alert dialog,
+            # navigation, tab throttling, or a Cloudflare full-page interstitial)
             # tab.target.url is a CDP-cached value that never requires JS execution
+            _url_error_state["js_timeout_count"] += 1
             url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
             # [URL DIAG] Step 0: surface the otherwise-invisible suspended-JS path.
             # Naturally rate-limited (this branch costs ~5s per hit).
@@ -519,13 +642,11 @@ async def nodriver_current_url(tab, config_dict=None):
                 str_exc = str(exc)
             except Exception as exc2:
                 pass
-            is_silent = any(s in str_exc for s in silent_error_strings)
+            is_silent, is_exit_error = classify_url_error(str_exc)
+            if is_exit_error:
+                is_quit_bot = True
             if not is_silent:
                 print(exc)
-            if len(str_exc) > 0:
-                for each_error_string in exit_bot_error_strings:
-                    if each_error_string in str_exc:
-                        is_quit_bot = True
             # [URL DIAG] Step 0: a stale/dead tab target surfaces here (not as timeout).
             # Expected websocket-close errors (silent list) flood the log when the page
             # is closed while the loop still polls; the throttled empty-url log in the
@@ -533,6 +654,16 @@ async def nodriver_current_url(tab, config_dict=None):
             if not is_silent:
                 target_url_now = getattr(getattr(tab, 'target', None), 'url', None)
                 debug.log(f"[URL DIAG] js_dumps error; target.url={target_url_now!r}; exc={str_exc[:120]!r}")
+            elif record_url_silent_error(str_exc):
+                # print() rather than debug.log(): this is an actionable failure
+                # the user must see even with verbose off. Behaviour is unchanged
+                # on purpose - no auto-reconnect, no forced quit - so the user
+                # decides what to do (issue #374).
+                count = get_url_error_count()
+                print(f"[URL ERROR] Browser connection lost: {count} consecutive "
+                      f"websocket failures ({str_exc[:80]}).")
+                print("[URL ERROR] The bot cannot read the page URL and will keep "
+                      "idling. Please close the browser and restart the bot.")
 
         url_array = []
         if url_dict:
@@ -541,6 +672,11 @@ async def nodriver_current_url(tab, config_dict=None):
                     if "0" in url_dict[k]:
                         url_array.append(url_dict[k]["0"])
             url = ''.join(url_array)
+
+        if len(url) > 0:
+            recovered = reset_url_error_state()
+            if recovered > 0:
+                debug.log(f"[URL DIAG] websocket recovered after {recovered} silent errors")
     return url, is_quit_bot
 
 async def nodriver_resize_window(tab, config_dict):
@@ -655,19 +791,98 @@ def _find_cf_iframe_in_dom(node, depth=0):
     return (None, None)
 
 
-async def _cdp_click(tab, x, y):
-    """Dispatch CDP mousePressed + mouseReleased at (x, y)."""
+async def cdp_click_at(tab, x, y):
+    """Dispatch CDP mousePressed + mouseReleased at (x, y).
+
+    buttons is the bitmask of what is held down at that instant: 1 while
+    pressed, 0 once released. zendriver 0.15.3 sends 1 for both, which upstream
+    corrected in cdpdriver/zendriver#267 after page scripts were observed
+    reading the stale state -- and omitting it entirely, as this used to, is
+    worse than either.
+
+    force mirrors PointerEvent.pressure, which a real mouse reports as 0.5
+    while down and 0 when up. Leaving it unset makes every synthetic click
+    pressureless, which is exactly the kind of signal a challenge script scores.
+    """
     await tab.send(cdp.input_.dispatch_mouse_event(
         type_="mousePressed", x=x, y=y,
-        button=cdp.input_.MouseButton("left"), click_count=1
+        button=cdp.input_.MouseButton("left"),
+        buttons=1, click_count=1, force=0.5,
     ))
     await tab.sleep(0.05)
     await tab.send(cdp.input_.dispatch_mouse_event(
         type_="mouseReleased", x=x, y=y,
-        button=cdp.input_.MouseButton("left"), click_count=1
+        button=cdp.input_.MouseButton("left"),
+        buttons=0, click_count=1, force=0.0,
     ))
 
 
+async def solve_turnstile_checkbox(tab, show_debug=False):
+    """Click the Turnstile checkbox after locating its iframe through CDP.
+
+    The iframe is invisible to document.querySelector -- only
+    DOM.getDocument(pierce=True) reaches it -- so the coordinates cannot come
+    from getBoundingClientRect. On a KKTIX login form, for instance, the
+    .cf-turnstile container is the full width of the form and says nothing
+    about where the checkbox actually sits.
+
+    Returns True when a click was dispatched. That is deliberately not a claim
+    that the challenge passed: a full-page interstitial and an embedded widget
+    prove success in different ways, so verification stays with the caller.
+    """
+    debug = util.create_debug_logger(enabled=show_debug)
+
+    try:
+        doc = await tab.send(cdp.dom.get_document(depth=-1, pierce=True))
+        node_id, _src = _find_cf_iframe_in_dom(doc)
+        if not node_id:
+            return False
+
+        debug.log(f"[TURNSTILE] Found iframe via DOM pierce (nodeId={node_id})")
+
+        # Coordinates are viewport-relative, so a widget below the fold would
+        # otherwise resolve to whatever happens to sit at those coordinates.
+        try:
+            await tab.send(cdp.dom.scroll_into_view_if_needed(node_id=node_id))
+        except Exception as scroll_exc:
+            debug.log(f"[TURNSTILE] Scroll into view failed, using current position: {scroll_exc}")
+
+        box = await tab.send(cdp.dom.get_box_model(node_id=node_id))
+        if not (box and box.content):
+            debug.log("[TURNSTILE] Box model unavailable for the iframe")
+            return False
+
+        # content quad: 4 points [x1,y1, x2,y2, x3,y3, x4,y4]. Take min/max
+        # rather than assuming quad[0] is the top-left corner -- the quad is
+        # not guaranteed to be axis-aligned.
+        quad = box.content
+        if len(quad) < 8:
+            debug.log(f"[TURNSTILE] Unexpected quad length: {len(quad)}")
+            return False
+
+        xs = quad[0::2]
+        ys = quad[1::2]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        width = max_x - min_x
+        height = max_y - min_y
+
+        click_x = min_x + width * CONST_TURNSTILE_CHECKBOX_X_RATIO
+        click_y = min_y + height / 2
+
+        debug.log(f"[TURNSTILE] CDP click at ({click_x:.0f}, {click_y:.0f}), "
+                  f"widget size: {width:.0f}x{height:.0f}")
+        await cdp_click_at(tab, click_x, click_y)
+        return True
+
+    except Exception as exc:
+        debug.log(f"[TURNSTILE] DOM pierce click failed: {exc}")
+        return False
+
+
+# Turnstile usually writes into cf-turnstile-response, but some challenges use
+# the underscored cf_challenge_response instead -- zendriver's verify_cf checks
+# both, and checking only the first would read a solved challenge as unsolved.
 CONST_TURNSTILE_RESPONSE_STATE_JS = '''
     (function() {
         const selectors = [
@@ -684,7 +899,11 @@ CONST_TURNSTILE_RESPONSE_STATE_JS = '''
 
 
 async def read_turnstile_response(tab):
-    """Return field presence and token value, or an unknown state in transit."""
+    """Return (field_present, token_value) for the Turnstile response input.
+
+    Raises nothing: a navigating page makes evaluate throw, and to this
+    function that is simply "unknown right now".
+    """
     try:
         state = await tab.evaluate(CONST_TURNSTILE_RESPONSE_STATE_JS)
     except Exception:
@@ -694,47 +913,91 @@ async def read_turnstile_response(tab):
     return bool(state.get("present")), str(state.get("value") or "")
 
 
-async def nodriver_current_url_safe(tab):
-    """Return the live page URL, or an empty value during navigation."""
-    try:
-        url = await tab.evaluate("window.location.href")
-    except Exception:
-        return ""
-    return url if isinstance(url, str) else ""
+async def has_turnstile_token_field(tab):
+    """True when the page carries a Turnstile response field."""
+    present, _value = await read_turnstile_response(tab)
+    return bool(present)
 
 
-async def wait_for_challenge_cleared(
-    tab, show_debug=False, timeout=None, interval=None
-):
-    """Wait for a token, response-field removal, or navigation as success proof."""
+async def wait_for_turnstile_token(tab, timeout=None, interval=None, show_debug=False):
+    """Poll the embedded Turnstile response field until it holds a real token.
+
+    Returns the token, or "" if none arrived in time. This is the only reliable
+    proof that an embedded widget was solved: the CDP target outlives a solved
+    Turnstile, and the HTML indicators that mark an active challenge never
+    appear on an embedded widget at all -- so checking those would report
+    success the moment the click was dispatched, solved or not.
+    """
     debug = util.create_debug_logger(enabled=show_debug)
-    timeout = CLOUDFLARE_TOKEN_WAIT if timeout is None else timeout
-    interval = CLOUDFLARE_TOKEN_POLL if interval is None else interval
+
+    if timeout is None:
+        timeout = CLOUDFLARE_TOKEN_WAIT
+    if interval is None:
+        interval = CLOUDFLARE_TOKEN_POLL
+
+    # Read before sleeping: a managed widget can already be solved by the time
+    # anyone asks, and waiting out an interval to discover that is pure delay.
+    waited = 0.0
+    while True:
+        _present, token = await read_turnstile_response(tab)
+        if len(token) > CONST_TURNSTILE_MIN_TOKEN_LENGTH:
+            debug.log(f"[TURNSTILE] Token received (len={len(token)}) after {waited:.2f}s")
+            return token
+
+        if waited >= timeout:
+            break
+        await tab.sleep(interval)
+        waited += interval
+
+    debug.log(f"[TURNSTILE] No token within {timeout}s")
+    return ""
+
+
+async def wait_for_challenge_cleared(tab, show_debug=False, timeout=None, interval=None):
+    """Wait until a dispatched Turnstile click is proven to have worked.
+
+    Three separate things count as proof, because the two shapes of challenge
+    finish differently and one of them is a navigation:
+
+        token filled        the widget was solved in place (embedded form)
+        field disappeared   the page moved on
+        URL changed         same thing, seen from the other side
+
+    Waiting only for a token is what made a full-page interstitial look like a
+    failure: it clears by navigating away, so the token never arrives on the
+    document being polled. Reporting failure there also triggered a reload,
+    which threw away a challenge that had in fact just been passed.
+
+    Returns True on any of the three, False on timeout.
+    """
+    debug = util.create_debug_logger(enabled=show_debug)
+
+    if timeout is None:
+        timeout = CLOUDFLARE_TOKEN_WAIT
+    if interval is None:
+        interval = CLOUDFLARE_TOKEN_POLL
 
     start_present, _start_token = await read_turnstile_response(tab)
     start_url = await nodriver_current_url_safe(tab)
+
     waited = 0.0
     while True:
         present, token = await read_turnstile_response(tab)
+
         if len(token) > CONST_TURNSTILE_MIN_TOKEN_LENGTH:
-            debug.log(
-                f"[TURNSTILE] Solved: token received (len={len(token)}) "
-                f"after {waited:.2f}s"
-            )
+            debug.log(f"[TURNSTILE] Solved: token received (len={len(token)}) after {waited:.2f}s")
             return True
+
         if start_present and present is False:
-            debug.log(
-                f"[TURNSTILE] Solved: challenge field is gone after {waited:.2f}s"
-            )
+            debug.log(f"[TURNSTILE] Solved: challenge field is gone after {waited:.2f}s")
             return True
 
         current_url = await nodriver_current_url_safe(tab)
         if start_url and current_url and current_url != start_url:
-            debug.log(
-                f"[TURNSTILE] Solved: page left the challenge after {waited:.2f}s "
-                f"({current_url})"
-            )
+            debug.log(f"[TURNSTILE] Solved: page left the challenge after {waited:.2f}s "
+                      f"({current_url})")
             return True
+
         if waited >= timeout:
             break
         await tab.sleep(interval)
@@ -742,6 +1005,15 @@ async def wait_for_challenge_cleared(
 
     debug.log(f"[TURNSTILE] No sign the challenge cleared within {timeout}s")
     return False
+
+
+async def nodriver_current_url_safe(tab):
+    """window.location.href, or "" while the page is mid-navigation."""
+    try:
+        url = await tab.evaluate('window.location.href')
+    except Exception:
+        return ""
+    return url if isinstance(url, str) else ""
 
 
 async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
@@ -775,36 +1047,8 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                 debug.log(f"[CLOUDFLARE] Retry attempt {retry_count}...")
                 await tab.sleep(3 + retry_count)
 
-            clicked = False
-
             # Method 1: CDP DOM pierce + getBoxModel (most precise)
-            try:
-                doc = await tab.send(cdp.dom.get_document(depth=-1, pierce=True))
-                node_id, src = _find_cf_iframe_in_dom(doc)
-                if node_id:
-                    debug.log(f"[CLOUDFLARE] Found iframe via DOM pierce (nodeId={node_id})")
-                    try:
-                        box = await tab.send(cdp.dom.get_box_model(node_id=node_id))
-                        if box and box.content:
-                            # content quad: 4 points [x1,y1, x2,y2, x3,y3, x4,y4]
-                            quad = box.content
-                            if len(quad) >= 6:
-                                ix = quad[0]
-                                iy = quad[1]
-                                iw = quad[2] - quad[0]
-                                ih = quad[5] - quad[1]
-                                # Checkbox is ~30px from left, vertically centered
-                                click_x = ix + 30
-                                click_y = iy + (ih / 2)
-                                debug.log(f"[CLOUDFLARE] CDP click via DOM pierce at ({click_x:.0f}, {click_y:.0f}), size: {iw:.0f}x{ih:.0f}")
-                                await _cdp_click(tab, click_x, click_y)
-                                clicked = True
-                            else:
-                                debug.log(f"[CLOUDFLARE] Unexpected quad length: {len(quad)}")
-                    except Exception as box_exc:
-                        debug.log(f"[CLOUDFLARE] getBoxModel failed: {box_exc}")
-            except Exception as exc:
-                debug.log(f"[CLOUDFLARE] DOM pierce method failed: {exc}")
+            clicked = await solve_turnstile_checkbox(tab, show_debug=cf_debug)
 
             # Method 2: Text label positioning (proven on real CF pages)
             if not clicked:
@@ -860,7 +1104,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                             click_x = label_info["x"] + 30
                             click_y = label_info["y"] + label_info["h"] + 32
                             debug.log(f"[CLOUDFLARE] CDP click via text label at ({click_x:.0f}, {click_y:.0f})")
-                            await _cdp_click(tab, click_x, click_y)
+                            await cdp_click_at(tab, click_x, click_y)
                             clicked = True
                 except Exception as exc:
                     debug.log(f"[CLOUDFLARE] Text label method failed: {exc}")
@@ -879,9 +1123,13 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
 
             wait_time = CLOUDFLARE_WAIT_TIME + (retry_count * 2)
 
-            # A click is only an attempt. Embedded widgets prove success with a
-            # token; full-page challenges prove it by removing the response
-            # field or navigating away.
+            # Verify the challenge actually cleared. Do not try to classify the
+            # challenge first: a token field is present on both an embedded
+            # widget and a full-page interstitial, but only the former fills it
+            # -- the latter clears by navigating away. Classifying on that field
+            # made every interstitial look like a failure, and the failure then
+            # triggered a reload that discarded a challenge which had just been
+            # passed. wait_for_challenge_cleared accepts whichever proof arrives.
             if clicked:
                 if await wait_for_challenge_cleared(tab, show_debug=cf_debug):
                     debug.log("[CLOUDFLARE] Challenge bypassed successfully")
@@ -895,8 +1143,10 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
 
             debug.log(f"[CLOUDFLARE] Attempt {retry_count + 1} unsuccessful")
 
-            # Do not reload an active challenge. A reload can restart the
-            # interstitial or discard a pass that is still settling.
+            # Deliberately no reload here. Reloading a challenge that is still
+            # settling restarts it, and on a transit interstitial it can throw
+            # away a pass that had already been granted. Let the outer retry
+            # click again instead.
 
         except Exception as exc:
             debug.log(f"[CLOUDFLARE] Error during processing: {exc}")

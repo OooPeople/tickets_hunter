@@ -83,8 +83,10 @@ async def nodriver_goto_homepage(driver, config_dict):
         except Exception as e:
             print(f"[ERROR] Failed to navigate to kktix homepage: {e}")
 
-        if len(config_dict["accounts"]["kktix_account"])>0:
-            if not 'https://kktix.com/users/sign_in?' in homepage:
+        # Shared with nodriver_kktix_signin and the guest redirect so all three
+        # agree on what counts as "configured" (issue #374).
+        if is_kktix_account_configured(config_dict):
+            if not is_kktix_login_page(homepage):
                 homepage = CONST_KKTIX_SIGN_IN_URL % (homepage)
 
     if 'famiticket.com' in homepage:
@@ -371,8 +373,9 @@ async def nodrver_block_urls(tab, config_dict):
     - Block: Analytics/tracking requests initiated by others.min.js
 
     Strategy for TicketPlus:
-    - Allow: analytics beacons (Clarity, GA, GTM) so the server sees normal user behavior
-    - Blocking these signals causes server-side detection (empty DOM / honeypot data)
+    - Allow: Clarity beacons only, so the server sees normal user behavior
+    - Blocking *.clarity.ms/* causes server-side detection (honeypot fake sessionId);
+      verified 2026-04-01 (commit 1c7d1547). GA/GTM stay blocked and do NOT trigger it.
     """
     # Determine target platform from homepage URL
     homepage = config_dict.get("homepage", "")
@@ -380,8 +383,8 @@ async def nodrver_block_urls(tab, config_dict):
 
     NETWORK_BLOCKED_URLS = [
         # General tracking and analytics
-        # Note: TicketPlus-specific trackers (clarity.ms, google-analytics, googletagmanager)
-        # are excluded below to avoid server-side bot detection via missing beacons
+        # Note: for TicketPlus, only clarity.ms (+ hotjar) is excluded below to avoid
+        # server-side bot detection via missing beacons. GA/GTM remain blocked (not required).
         '*.appier.net/*',
         '*.c.appier.net/*',
         # Appier-owned QGraph/AIQUA marketing automation (push, in-web campaigns, behavior tracking)
@@ -389,6 +392,20 @@ async def nodrver_block_urls(tab, config_dict):
         '*api.quantumgraph.com/*',
         '*cdn.qgr.ph/*',
         '*.aiqua.io/*',
+        # ibon self-hosted DMP SDK. Uploads mem_id + sha256(email) + UA via
+        # sendBeacon/fetch/XHR once loaded. The 2026-07-29 audit blocked the UAT
+        # host preemptively while the SDK was dead (hardcoded UAT URL, 403).
+        # Audit 2026-08-23: the inline loader now points at the production host
+        # and the SDK really runs, so the UAT-only rule matched nothing. The UAT
+        # pattern stays because the collector is still order-uat.../dmp.
+        # Block the SDK PATH ONLY -- tour.ibon.com.tw also serves activity images
+        # and the /event/{id} purchase flow handled in platforms/ibon.py, so a
+        # domain-wide pattern would break ticket buying.
+        # A/B verified 2026-08-23: window.IbonDMP falls back to the inline stub,
+        # calls queue instead of throwing, no /dmp/api/v1.0/events request is
+        # sent, and images / Guard API / Queue-it are unaffected.
+        '*tour.ibon.com.tw/static/assets/javascripts/ibon-dmp.js*',
+        '*tour-uat.ibon.com.tw/*',
         '*.cloudfront.com/*',
         '*.doubleclick.net/*',  # Covers securepubads.g.doubleclick.net
         '*.lndata.com/*',
@@ -450,6 +467,38 @@ async def nodrver_block_urls(tab, config_dict):
 
         # Cookie consent geolocation
         '*geolocation.onetrust.com/*',
+
+        # Ad / behavior trackers on the legacy ASP.NET sites (KHAM, Ticket.com,
+        # UDN) -- audit 2026-08-23. A/B verified: ticket links, buttons, body
+        # text and console error count are identical with these blocked.
+        # Dcard AdKit uploads a device fingerprint (?fingerprint=...) on KHAM+UDN
+        '*pixel.dcard.tw/*',
+        '*assets.dcard.tw/*',
+        '*.taboola.com/*',
+        '*.popin.cc/*',
+        '*rixbeedesk.com/*',
+        '*analytics.tiktok.com/*',
+        '*tiktokw.us/*',
+        '*ib.adnxs.com/*',
+
+        # AviviD / Likr (Ticket.com): behavior tracking + push marketing
+        '*.likr.tw/*',
+        '*.likr.com.tw/*',
+        '*advividnetwork.com/*',
+        '*t.ssp.hinet.net/*',
+
+        # Microsoft UET + Comscore (UDN)
+        '*bat.bing.com/*',
+        '*sb.scorecardresearch.com/*',
+
+        # LINE Tag (KHAM / Ticket.com / UDN). Does not affect LINE login,
+        # which goes through access.line.me.
+        '*d.line-scdn.net/*',
+        '*tr.line.me/*',
+
+        # UDN customer-service chatbot (same policy as botbonnie / imbee)
+        '*ccbot-front-ticket.a-p-i.io/*',
+        '*ccbot-testfront.udn-device-dept.net/*',
     ]
 
     # Block session-recording trackers for non-TicketPlus platforms only.
@@ -665,7 +714,6 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                         "play_sound", "disable_adjacent_seat", "hide_some_image",
                         "auto_guess_options", "user_guess_string", "auto_reload_page_interval", "verbose",
                         "tixcraft_soft_block_delay",
-                        "auto_reload_overheat_count", "auto_reload_overheat_cd",
                         "idle_keyword", "resume_keyword", "idle_keyword_second", "resume_keyword_second",
                         "discord_webhook_url", "telegram_bot_token", "telegram_chat_id",
                         "discount_code"
@@ -1013,7 +1061,10 @@ async def main(args):
                     last_empty_url_log = now_mono
                     target_url_now = getattr(getattr(tab, 'target', None), 'url', None)
                     util.create_debug_logger(config_dict).log(
-                        f"[URL DIAG] empty url, skipping dispatch; target.url={target_url_now!r}"
+                        f"[URL DIAG] empty url, skipping dispatch; "
+                        f"target.url={target_url_now!r}; "
+                        f"silent_ws_errors={get_url_error_count()}; "
+                        f"js_timeouts={get_url_js_timeout_count()}"
                     )
                 continue
 
@@ -1204,6 +1255,50 @@ async def main(args):
         if url[:len(facebook_login_url)]==facebook_login_url:
             await nodriver_facebook_main(tab, config_dict)
 
+def run_ocr_self_test():
+    """Load both OCR models and read one rendered image; 0 means OCR works.
+
+    Run by build_scripts/build_local.py against the frozen binary: the ddddocr
+    import is wrapped in try/except, so a bundle with a broken onnxruntime or
+    cv2 still passes --help. Uses print because the build script reads it.
+    """
+    try:
+        import ddddocr
+        from io import BytesIO
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception as exc:
+        print(f"OCR self-test FAILED: import error: {exc}")
+        return 1
+
+    # Captcha-sized glyphs: PIL's tiny default bitmap font is too small for
+    # the universal model to read reliably.
+    image = Image.new("RGB", (120, 40), color="white")
+    ImageDraw.Draw(image).text((8, 4), "A1B2", fill="black",
+                               font=ImageFont.load_default(size=28))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    models = [("universal", create_universal_ocr(settings.get_default_config()))]
+    try:
+        models.append(("builtin", ddddocr.DdddOcr(show_ad=False)))
+    except Exception as exc:
+        print(f"OCR self-test FAILED: builtin model did not load: {exc}")
+        return 1
+
+    for name, ocr in models:
+        if ocr is None:
+            print(f"OCR self-test FAILED: {name} model did not load")
+            return 1
+        result = ocr.classification(buffer.getvalue())
+        print(f"OCR self-test {name}: {result!r}")
+        if not isinstance(result, str) or not result.strip():
+            print(f"OCR self-test FAILED: {name} model returned no text")
+            return 1
+
+    print("OCR self-test passed")
+    return 0
+
+
 def cli():
     parser = argparse.ArgumentParser(
             description="MaxBot Aggument Parser")
@@ -1272,7 +1367,14 @@ def cli():
         type=int,
         metavar="PORT")
 
+    # Build check only (see run_ocr_self_test), so it stays out of --help.
+    parser.add_argument("--self-test",
+        action="store_true",
+        help=argparse.SUPPRESS)
+
     args = parser.parse_args()
+    if args.self_test:
+        sys.exit(run_ocr_self_test())
     asyncio.run(main(args))
 
 if __name__ == "__main__":

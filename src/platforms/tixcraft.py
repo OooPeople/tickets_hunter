@@ -66,6 +66,8 @@ __all__ = [
     "nodriver_tixcraft_toast",
     "nodriver_tixcraft_reload_captcha",
     "nodriver_tixcraft_get_ocr_answer",
+    "nodriver_tixcraft_has_captcha",
+    "nodriver_tixcraft_submit_without_captcha",
     "nodriver_tixcraft_auto_ocr",
     "nodriver_tixcraft_ticket_main_ocr",
     "nodriver_tixcraft_main",
@@ -75,8 +77,14 @@ __all__ = [
 # Module-level state (replaces global tixcraft_dict)
 _state = {}
 
+# Seconds the Ticketmaster check-captcha handler waits for the captcha input:
+# the URL flips before the form renders, and nodriver_tixcraft_auto_ocr reads a
+# missing input as "no captcha" and ends the OCR loop on the first pass.
+CONST_TICKETMASTER_CAPTCHA_WAIT_SEC = 6.0
 
-# Keywords that identify serial-number / membership-code style verify prompts.
+
+# Keywords that identify serial-number / membership-code / promo-code style
+# verify prompts -- i.e. prompts the discount_code setting can actually answer.
 # Used as a guard for the discount_code fallback in nodriver_tixcraft_input_check_code
 # to avoid wasting an attempt on unrelated questions (math, common knowledge, etc.).
 # Match is case-insensitive substring on question_text; covers zh-TW/zh-CN/en/ja/ko.
@@ -97,6 +105,18 @@ _SERIAL_CODE_QUESTION_KEYWORDS = (
     "member no",
     "serial",
     "weverse",
+    # Promo / discount code prompts (Ticketmaster #promoBox and TixCraft
+    # discount gates). These read the same discount_code setting as the
+    # member/serial prompts above, so they belong on the same allow list.
+    "優惠碼",      # zh-TW: promo code
+    "优惠码",      # zh-CN: promo code
+    "折扣碼",      # zh-TW: discount code
+    "折扣码",      # zh-CN: discount code
+    "兌換碼",      # zh-TW: redemption code
+    "兑换码",      # zh-CN: redemption code
+    "promo",       # also covers "promotion" / "promotional code"
+    "discount",
+    "coupon",
 )
 
 _TIXCRAFT_SOFT_BLOCK_SCOPE_HOSTS = (
@@ -114,6 +134,17 @@ def _is_serial_code_question(question_text):
         if kw.lower() in text_lower:
             return True
     return False
+
+
+def _should_leave_dialog_to_user(current_url):
+    """True when a JS dialog on this page must NOT be answered automatically.
+
+    Checkout dialogs are the user's decision, not the bot's. cdp.page
+    .handle_java_script_dialog(accept=True) is the OK button of a confirm(),
+    so auto-answering the checkout page's "Are you sure you want to cancel
+    your order?" actually cancels the order (issue #378).
+    """
+    return '/ticket/checkout' in (current_url or '')
 
 
 def _is_tixcraft_soft_block_scope(url):
@@ -176,6 +207,41 @@ def _process_queue_it_state(url, state, current_time):
     return False, None
 
 
+def _is_page_reload_enabled(config_dict, debug, log_tag):
+    """True when auto_reload_page_interval allows a polling reload (issue #396).
+
+    The settings help defines 0 as "disable auto reload", but the date and
+    area selection sites, which reload to retry when nothing was selected,
+    only skipped the wait before tab.reload(), so 0 still reloaded the page,
+    on most of them once per 50ms main-loop pass. A value <= 0 now skips
+    those polling reloads. Recovery reloads (TixCraft ticket page, issue
+    #174; Ticketmaster after 30 retries, issue #378) do not use this check
+    and keep their original behavior.
+    The skip is logged once per call site. A site's mark is cleared the next
+    time that same site runs with an interval above 0, so a change between
+    two values <= 0 is not logged again. The mark is only set while verbose
+    is on, so a site that skipped while verbose was off still logs the first
+    time verbose is on.
+    """
+    interval = config_dict.get("advanced", {}).get("auto_reload_page_interval", 0)
+    try:
+        is_enabled = interval > 0
+    except TypeError:
+        # Non-numeric value (e.g. a hand-edited string): the Ticketmaster
+        # date and area sites swallowed this TypeError inside try/except and
+        # did not reload, while the TixCraft date and area sites raised it.
+        # Treat it as reload disabled at every polling reload site.
+        is_enabled = False
+    logged_tags = _state.setdefault("reload_disabled_logged_tags", set())
+    if is_enabled:
+        logged_tags.discard(log_tag)
+        return True
+    if debug.enabled and log_tag not in logged_tags:
+        debug.log(f"[{log_tag}] auto_reload_page_interval={interval!r}, page reload disabled")
+        logged_tags.add(log_tag)
+    return False
+
+
 async def nodriver_tixcraft_home_close_window(tab):
     if _state.get('cookie_accepted'):
         return
@@ -213,7 +279,7 @@ async def nodriver_tixcraft_redirect(tab, url):
             if not has_buy_link:
                 return ret
             entry_url = url.replace("/activity/detail/", "/activity/game/").split("#")[0]
-            print("redirec to new url:", entry_url)
+            print("redirect to new url:", entry_url)
             try:
                 await tab.get(entry_url)
                 # 等待日期列表出現，確保頁面載入完成
@@ -619,7 +685,11 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
     auto_select_mode = config_dict.get("date_auto_select", {}).get("mode", "from top to bottom")
     date_keyword = config_dict.get("date_auto_select", {}).get("date_keyword", "").strip()
     pass_date_is_sold_out_enable = config_dict.get("tixcraft", {}).get("pass_date_is_sold_out", False)
-    auto_reload_coming_soon_page_enable = config_dict.get("kktix", {}).get("auto_reload_coming_soon_page", False)
+    # The key only exists under "tixcraft" (settings.py get_default_config); every
+    # other platform reads it from there too. Reading "kktix" made this always
+    # False, so a Ticketmaster page never auto-reloaded while waiting for the
+    # sale to open (issue #378).
+    auto_reload_coming_soon_page_enable = config_dict.get("tixcraft", {}).get("auto_reload_coming_soon_page", False)
 
     sold_out_text_list = ["Sold out", "No tickets available"]
     find_ticket_text_list = ['Find tickets', 'See Tickets']
@@ -798,25 +868,52 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
             # Click "See Tickets" link
             link_element = await target_area.query_selector('a')
             if link_element:
+                # Snapshot the tabs that already exist, so only a tab spawned by
+                # THIS click is closed afterwards. Closing tabs[1:] wholesale
+                # also killed tabs the user had opened themselves to queue other
+                # dates (issue #378).
+                known_target_ids = set()
+                try:
+                    for known_tab in tab.browser.tabs:
+                        known_id = getattr(getattr(known_tab, "target", None), "target_id", None)
+                        if known_id:
+                            known_target_ids.add(known_id)
+                except Exception:
+                    pass
+
                 await link_element.click()
                 is_date_clicked = True
                 debug.log("[TICKETMASTER DATE] Clicked 'See Tickets' link")
 
-                # Handle new tab (close if opened)
+                # Handle new tab (close only what this click opened)
                 await tab.sleep(0.3)
-                if len(tab.browser.tabs) > 1:
-                    # Close extra tabs
-                    for extra_tab in tab.browser.tabs[1:]:
+                for extra_tab in list(tab.browser.tabs):
+                    extra_id = getattr(getattr(extra_tab, "target", None), "target_id", None)
+                    if not extra_id or extra_id in known_target_ids:
+                        continue
+                    try:
                         await extra_tab.close()
+                        debug.log("[TICKETMASTER DATE] Closed the tab opened by the click")
+                    except Exception:
+                        pass
                     await tab.sleep(0.2)
 
         except Exception as exc:
             debug.log(f"[TICKETMASTER DATE] Failed to click link: {exc}")
 
     # Auto reload if no match
-    if auto_reload_coming_soon_page_enable and not is_date_clicked and len(formated_area_list) == 0:
+    if auto_reload_coming_soon_page_enable and not is_date_clicked and len(formated_area_list) == 0 and _is_page_reload_enabled(config_dict, debug, "TICKETMASTER DATE"):
         debug.log("[TICKETMASTER DATE] No dates available, reloading page...")
         try:
+            # Honor the user's refresh interval, the same way the area-select
+            # path does. The main loop spins every 50ms, so reloading without a
+            # delay here means 2-3 page loads per second while waiting for a
+            # sale to open -- exactly what trips Ticketmaster's EPS block
+            # (issue #378). sleep_with_pause_check keeps the pause button
+            # responsive during the wait.
+            reload_interval = config_dict.get("advanced", {}).get("auto_reload_page_interval", 0)
+            if reload_interval > 0:
+                await sleep_with_pause_check(tab, reload_interval, config_dict)
             await tab.reload()
             await tab.sleep(0.3)
         except:
@@ -909,7 +1006,7 @@ async def nodriver_ticketmaster_area_auto_select(tab, config_dict, zone_info):
         # Check if area_keyword is empty (empty = should match all areas)
         area_keyword = config_dict.get("area_auto_select", {}).get("area_keyword", "").strip()
 
-        if area_keyword:
+        if area_keyword and _is_page_reload_enabled(config_dict, debug, "TICKETMASTER AREA"):
             # Keyword specified but no match → might need to wait for availability
             debug.log("[TICKETMASTER AREA] No areas matched keyword, reloading page...")
             try:
@@ -918,7 +1015,7 @@ async def nodriver_ticketmaster_area_auto_select(tab, config_dict, zone_info):
                 await tab.reload()
             except:
                 pass
-        else:
+        elif not area_keyword:
             # No keyword but no areas → likely a data parsing issue, don't reload
             debug.log("[TICKETMASTER AREA] No areas available (possible zone_info parsing issue)")
             # Let next function (assign_ticket_number) handle it
@@ -969,6 +1066,12 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
         debug.log(f"[TICKETMASTER TICKET] Failed to check disabled status: {exc}")
         pass
 
+    # Ticketmaster shares the TixCraft backend but has its own DOM, so it needs
+    # its own allow_less_tickets handling (the TixCraft path lives in
+    # nodriver_ticket_number_select_fill).
+    ticket_number = str(config_dict.get("ticket_number", 1))
+    allow_less_tickets = config_dict.get("tixcraft", {}).get("allow_less_tickets", False)
+
     # Check current value (zendriver evaluate returns Python values directly)
     select_attrs = select_element.attrs or {}
     selector_id = select_attrs.get('id')
@@ -988,18 +1091,26 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
             pass
 
     if current_value and current_value != "0" and current_value.isnumeric():
-        debug.log(f"[TICKETMASTER TICKET] Ticket number already set to: {current_value}")
-        try:
-            auto_mode_button = await tab.query_selector('#autoMode')
-            if auto_mode_button:
-                await auto_mode_button.click()
-                debug.log("[TICKETMASTER TICKET] Clicked #autoMode button")
-        except:
-            pass
-        return True
-
-    # Set ticket number
-    ticket_number = str(config_dict.get("ticket_number", 1))
+        # A leftover value from an earlier round (or from the site itself) must
+        # still satisfy the target, otherwise the order is submitted with the
+        # wrong count. Only accept fewer tickets when the user opted in.
+        current_count = int(current_value)
+        target_count = int(ticket_number)
+        is_acceptable = (current_count == target_count) or (
+            allow_less_tickets and 0 < current_count < target_count
+        )
+        if is_acceptable:
+            debug.log(f"[TICKETMASTER TICKET] Ticket number already set to: {current_value}")
+            try:
+                auto_mode_button = await tab.query_selector('#autoMode')
+                if auto_mode_button:
+                    await auto_mode_button.click()
+                    debug.log("[TICKETMASTER TICKET] Clicked #autoMode button")
+            except:
+                pass
+            return True
+        debug.log(f"[TICKETMASTER TICKET] Existing ticket number {current_value} "
+                  f"does not satisfy target {ticket_number}, re-selecting")
 
     try:
         # Get select element ID for JavaScript manipulation
@@ -1019,9 +1130,11 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
         ''')
         debug.log(f"[TICKETMASTER TICKET] Available options: {option_texts}")
 
-        # Use JavaScript to set select value; fallback to max available if exact not found
+        # Use JavaScript to set select value. Without allow_less_tickets the exact
+        # count is mandatory; with it, fall back to the largest count BELOW the
+        # target (never above it -- that would buy more than the user asked for).
         result = await tab.evaluate(f'''
-            (function(elementId, targetText) {{
+            (function(elementId, targetText, targetCount, allowLess) {{
                 const selectEl = document.getElementById(elementId);
                 if (!selectEl) {{
                     return {{ success: false, error: "Element not found" }};
@@ -1035,12 +1148,15 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                         return {{ success: true, value: options[i].value, selected: options[i].text }};
                     }}
                 }}
-                // Fallback: select max available (last numeric option, excluding value="0")
+                if (!allowLess) {{
+                    return {{ success: false, error: "Exact ticket count unavailable" }};
+                }}
+                // Fallback: largest available count below the target
                 let maxIdx = -1;
                 let maxVal = 0;
                 for (let i = 0; i < options.length; i++) {{
                     const v = parseInt(options[i].value);
-                    if (!isNaN(v) && v > 0 && v > maxVal) {{
+                    if (!isNaN(v) && v > 0 && v < targetCount && v > maxVal) {{
                         maxVal = v;
                         maxIdx = i;
                     }}
@@ -1051,13 +1167,14 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
                     return {{ success: true, value: options[maxIdx].value, selected: options[maxIdx].text, fallback: true }};
                 }}
                 return {{ success: false, error: "Option not found" }};
-            }})('{selector_id}', '{ticket_number}');
+            }})({json.dumps(selector_id)}, {json.dumps(ticket_number)}, {json.dumps(int(ticket_number))}, {json.dumps(bool(allow_less_tickets))});
         ''')
 
         if result and result.get('success'):
             selected = result.get('selected', ticket_number)
             if result.get('fallback'):
-                debug.log(f"[TICKETMASTER TICKET] Exact '{ticket_number}' not found, selected max available: {selected}")
+                debug.log(f"[TICKETMASTER TICKET] Exact '{ticket_number}' not found, "
+                          f"allow_less_tickets enabled, selected: {selected}")
             else:
                 debug.log(f"[TICKETMASTER TICKET] Set ticket number to: {selected}")
 
@@ -1083,6 +1200,26 @@ async def nodriver_ticketmaster_assign_ticket_number(tab, config_dict):
 # User Story 4: Captcha Handling (T019)
 # ============================================
 
+async def _wait_for_captcha_input(tab):
+    """True once #TicketForm_verifyCode exists, within the wait limit.
+
+    Polls on wall-clock time, so pressing pause mid-wait neither shortens it
+    nor gives up early; the OCR loop handles pause. Each poll catches its own
+    error: a CDP error while the form is still rendering means "not yet".
+    tab.wait_for re-raises those and would give up on the first one.
+    """
+    deadline = time.monotonic() + CONST_TICKETMASTER_CAPTCHA_WAIT_SEC
+    while True:
+        try:
+            if await tab.query_selector('#TicketForm_verifyCode'):
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        await tab.sleep(0.5)
+
+
 async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
     """
     Handle captcha on Ticketmaster check-captcha page.
@@ -1104,6 +1241,21 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
         alert_state["detected"] = True
         alert_state["message"] = event.message
         debug.log(f"[TICKETMASTER CAPTCHA] Alert event: '{event.message[:60]}'")
+
+        # This handler is registered on the check-captcha page but never removed
+        # (zendriver's tab.remove_handlers drops EVERY handler of the type,
+        # including the global one), so it stays alive for the rest of the
+        # session. Without the guards below it answered OK to the checkout
+        # page's "cancel your order?" confirm and cancelled the order (#378).
+        if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
+            return
+        # tab.target.url is the CDP-cached value; js_dumps would hang here
+        # because an open dialog blocks JavaScript execution.
+        current_url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
+        if _should_leave_dialog_to_user(current_url):
+            debug.log("[TICKETMASTER CAPTCHA] Alert on checkout page, NOT auto-dismissing")
+            return
+
         # Dismiss the alert immediately to prevent blocking
         try:
             await tab.send(cdp.page.handle_java_script_dialog(accept=True))
@@ -1126,6 +1278,14 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
         fail_count = 0
         total_fail_count = 0
 
+        # The caller marks this URL done once we return, so an input that has
+        # not rendered yet must be waited for here, not skipped.
+        if not await _wait_for_captcha_input(tab):
+            print("[TICKETMASTER CAPTCHA] Captcha input did not appear. "
+                  "Please enter the captcha manually.")
+            return False
+
+        # Once the input is there, give the captcha image a moment to draw.
         await asyncio.sleep(random.uniform(0.5, 1.0))
 
         for redo_ocr in range(99):
@@ -1480,9 +1640,10 @@ async def nodriver_tixcraft_input_check_code(tab, config_dict, fail_list, questi
 
         # Fallback: use discount_code as final answer when user_guess_string is empty
         # and auto_guess_options yielded no result. Covers serial-number style prompts
-        # (e.g. Weverse Presale MY MEMBERSHIP) where users naturally fill the discount
-        # code field rather than the answer dictionary.
-        # Guard: only trigger for member/serial-number style prompts so the
+        # (e.g. Weverse Presale MY MEMBERSHIP) and promo-code gates (Ticketmaster
+        # #promoBox) where users naturally fill the discount code field rather than
+        # the answer dictionary.
+        # Guard: only trigger for member/serial/promo style prompts so the
         # discount_code is not wasted on unrelated questions (math, trivia, etc.).
         if len(answer_list)==0:
             discount_code_fallback = (config_dict["advanced"].get("discount_code") or "").strip()
@@ -1808,7 +1969,7 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                 debug.log(f"[DATE SELECT] ========================================")
 
     # Auto refresh if no date was selected (for strict mode or sold out scenarios)
-    if not is_date_clicked:
+    if not is_date_clicked and _is_page_reload_enabled(config_dict, debug, "DATE SELECT"):
         # Simple wait mode (consistent with TicketPlus/iBon/FamiTicket)
         interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
         if interval > 0:
@@ -1940,10 +2101,11 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         # T013: Log selected area with selection type
         if debug.enabled:
             try:
-                area_text = await target_area.text
-                if not area_text:
-                    area_text = await target_area.inner_text
-                area_text = area_text.strip()[:80] if area_text else "Unknown"
+                # Element.text is a property and there is no inner_text attribute;
+                # awaiting either raised and was swallowed, so this line never logged.
+                area_html = await target_area.get_html()
+                area_text = util.remove_html_tags(area_html)
+                area_text = area_text[:80] if area_text else "Unknown"
                 selection_type = "fallback" if is_fallback_selection else "keyword match"
                 debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
             except:
@@ -1953,12 +2115,15 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
             await target_area.click()
         except:
             try:
-                await target_area.evaluate('el => el.click()')
+                # Element.apply, not Element.evaluate: zendriver defines
+                # evaluate on Tab only and Element.__getattr__ returns None for
+                # unknown names, so .evaluate(...) is a TypeError.
+                await target_area.apply('(el) => el.click()')
             except:
                 pass
 
     # Auto refresh if needed (simple wait mode, consistent with TicketPlus/iBon/FamiTicket)
-    if is_need_refresh:
+    if is_need_refresh and _is_page_reload_enabled(config_dict, debug, "AREA SELECT"):
         interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
         if interval > 0:
             debug.log(f"[AREA SELECT] Waiting {interval}s before reload...")
@@ -2073,19 +2238,31 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item,
                     font_text = ''
                     font_el = await row.query_selector('font')
                     if font_el:
-                        font_text = await font_el.evaluate('el => el.textContent') or ''
+                        # Element.apply, not Element.evaluate (None on an
+                        # Element; see nodriver_tixcraft_area_auto_select).
+                        font_text = await font_el.apply('(el) => el.textContent') or ''
                 if font_text:
-                    font_text = "@%s@" % font_text
+                    font_text = font_text.strip()
 
-                    debug.log(f"[AREA KEYWORD]   Checking seats: {font_text.strip('@')}")
+                    debug.log(f"[AREA KEYWORD]   Checking seats: {font_text}")
 
-                    # Skip if only 1-9 seats remaining
-                    SEATS_1_9 = ["@%d@" % i for i in range(1, 10)]
-                    if any(seat in font_text for seat in SEATS_1_9):
-                        debug.log(f"[AREA KEYWORD]   Insufficient seats (need {config_dict['ticket_number']}, only {font_text.strip('@')} available)")
-                        continue
+                    # The count is embedded in localized text, never a bare
+                    # number: "剩餘 1" (zh) / "1 seat(s) remaining" (en). The old
+                    # "@1@".."@9@" substring test therefore never matched and
+                    # this guard silently passed every area through (#358).
+                    # A status word instead of a count (熱賣中 / Available) means
+                    # the page is not telling us how many are left, so the area
+                    # is kept - the ticket-number page is the next line of
+                    # defence.
+                    seats_match = re.search(r'\d+', font_text)
+                    if seats_match:
+                        remaining = int(seats_match.group())
+                        if remaining < config_dict["ticket_number"]:
+                            debug.log(f"[AREA KEYWORD]   Insufficient seats (need {config_dict['ticket_number']}, only {remaining} available)")
+                            continue
+                        debug.log(f"[AREA KEYWORD]   Sufficient seats available ({remaining})")
                     else:
-                        debug.log(f"[AREA KEYWORD]   Sufficient seats available")
+                        debug.log(f"[AREA KEYWORD]   No seat count in '{font_text}', keeping this area")
             except:
                 pass
 
@@ -2293,20 +2470,34 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
                         break
 
                 if parent_row and parent_row.tag.lower() == 'tr':
-                    # 嘗試找 <h4> 標籤
-                    h4_element = await parent_row.query_selector('h4')
-                    if h4_element:
-                        ticket_type_name = h4_element.text or ""
-                    else:
-                        # 嘗試找 <td class="fcBlue">
-                        td_element = await parent_row.query_selector('td.fcBlue')
-                        if td_element:
-                            ticket_type_name = td_element.text or ""
+                    # Read the whole cell, not Element.text: that property returns
+                    # only the first text node, so a name split across nested tags
+                    # (e.g. <a>full</a>+<a>voucher</a>) would lose everything after
+                    # the first fragment. Stay scoped to the name cell -- widening
+                    # this to the <tr> would pull in the remark column, whose text
+                    # can match keyword_exclude and wipe out every row.
+                    name_element = await parent_row.query_selector('h4')
+                    if not name_element:
+                        name_element = await parent_row.query_selector('td.fcBlue')
 
-                    ticket_type_name = ticket_type_name.strip()
+                    if name_element:
+                        name_html = await name_element.get_html()
+                        ticket_type_name = util.remove_html_tags(name_html)
 
             except Exception as name_exc:
                 debug.log(f"[TICKET SELECT] Failed to extract ticket type name: {name_exc}")
+
+            # Apply keyword_exclude here so keyword matching and fallback share one
+            # clean candidate list -- an excluded ticket type can never be picked
+            # by the fallback branch below (same invariant as cityline's
+            # _cityline_collect_available_areas).
+            #
+            # Guard the empty name: is_row_match_keyword reports a match for
+            # empty text, so a ticket type whose name could not be read would
+            # otherwise count as excluded and drop out of the fallback too.
+            if ticket_type_name and util.reset_row_text_if_match_keyword_exclude(config_dict, ticket_type_name):
+                debug.log(f"[TICKET SELECT] Excluded by keyword_exclude: '{ticket_type_name}'")
+                continue
 
             # 加入 valid_ticket_types
             valid_ticket_types.append({
@@ -2341,11 +2532,6 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
             for ticket_info in valid_ticket_types:
                 ticket_name = ticket_info['name']
 
-                # Apply exclude keyword filter
-                if util.reset_row_text_if_match_keyword_exclude(config_dict, ticket_name):
-                    debug.log(f"[TICKET SELECT]   Excluded by keyword_exclude: {ticket_name}")
-                    continue
-
                 # Keyword matching (support space-separated AND logic)
                 keyword_parts = keyword_item.split(' ')
                 row_text = util.format_keyword_string(ticket_name)
@@ -2369,18 +2555,11 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
         if not matched_ticket:
             debug.log(f"[TICKET SELECT] All keywords failed to match")
 
-    # Single option auto-select: when only one valid ticket type exists, select it directly
-    # (unless excluded by keyword_exclude)
+    # Single option auto-select: when only one valid ticket type exists, select it
+    # directly. keyword_exclude was already applied while collecting candidates.
     if not matched_ticket and len(valid_ticket_types) == 1:
-        single_ticket = valid_ticket_types[0]
-        ticket_name = single_ticket['name']
-
-        # Check if excluded by keyword_exclude
-        if not util.reset_row_text_if_match_keyword_exclude(config_dict, ticket_name):
-            matched_ticket = single_ticket
-            debug.log(f"[TICKET SELECT] Single option auto-select: '{ticket_name}'")
-        else:
-            debug.log(f"[TICKET SELECT] Single option excluded by keyword_exclude: '{ticket_name}'")
+        matched_ticket = valid_ticket_types[0]
+        debug.log(f"[TICKET SELECT] Single option auto-select: '{matched_ticket['name']}'")
 
     # Fallback logic (similar to area selection)
     if not matched_ticket:
@@ -2457,6 +2636,9 @@ async def nodriver_tixcraft_ticket_main_agree(tab, config_dict):
             break
         else:
             debug.log(f"Failed to check agreement, retry {i+1}/3")
+            # The page is often still rendering on the first pass; space the
+            # retries so they do not all read the same unfinished DOM.
+            await tab.sleep(0.3)
 
     if not is_finish_checkbox_click:
         debug.log("Warning: Failed to check agreement checkbox")
@@ -2841,10 +3023,12 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
 
     is_input_box_exist = False
     if not ocr is None:
-        form_verifyCode = None
         try:
+            # query_selector returns None when absent rather than raising, so
+            # the flag must test the result: events with no image captcha
+            # would otherwise burn the whole retry budget.
             form_verifyCode = await tab.query_selector('#TicketForm_verifyCode')
-            is_input_box_exist = True
+            is_input_box_exist = form_verifyCode is not None
         except Exception as exc:
             pass
     else:
@@ -2909,6 +3093,111 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
 
     return is_need_redo_ocr, previous_answer, is_form_submitted
 
+async def nodriver_tixcraft_has_captcha(tab):
+    """True when this ticket page actually shows an image captcha.
+
+    Some events use invisible reCAPTCHA and have no #TicketForm_verifyCode,
+    which every captcha path here assumes exists. A detection failure answers
+    True: guessing False on a captcha page would submit an empty answer.
+    """
+    try:
+        result = await tab.evaluate('''
+            (function() {
+                return !!(document.querySelector('#TicketForm_verifyCode') ||
+                          document.querySelector('#TicketForm_verifyCode-image'));
+            })();
+        ''')
+        return result is not False
+    except Exception:
+        return True
+
+
+def _forget_ticket_assigned(current_url):
+    """Drop the "ticket count already set" marks nodriver_tixcraft_ticket_main
+    keeps for this URL, so the next pass assigns the count again."""
+    prefix = f"ticket_assigned_{current_url}_"
+    for key in [k for k in _state if k.startswith(prefix)]:
+        del _state[key]
+
+
+async def nodriver_tixcraft_submit_without_captcha(tab, config_dict):
+    """Agree, confirm the ticket count, and submit a ticket page with no captcha.
+
+    The captcha flow cannot submit here: it is gated on the input existing and
+    its readiness check requires verify.value.length === 4.
+    """
+    debug = util.create_debug_logger(config_dict)
+
+    await nodriver_check_checkbox_enhanced(tab, '#TicketForm_agree', config_dict)
+
+    # nodriver_tixcraft_ticket_main has already assigned the count, so only
+    # confirm it here rather than duplicate keyin_captcha_code's reset.
+    ticket_number_js = json.dumps(str(config_dict.get("ticket_number", 2)))
+    allow_less_js = json.dumps(bool(
+        config_dict.get("tixcraft", {}).get("allow_less_tickets", False)))
+    ready = await tab.evaluate(f'''
+        (function() {{
+            const target = parseInt({ticket_number_js});
+            const allowLess = {allow_less_js};
+            const agree = document.querySelector('#TicketForm_agree');
+            const selects = Array.from(document.querySelectorAll(
+                '.mobile-select, select[id*="TicketForm_ticketPrice_"]'
+            )).filter(s => s && !s.disabled);
+            const matched = selects.find(s => {{
+                if (s.value === "0" || s.value === "") return false;
+                const current = parseInt(s.value);
+                if (isNaN(current) || isNaN(target)) return false;
+                return allowLess ? (current > 0 && current <= target) : (current === target);
+            }});
+            return {{
+                ticket: !!matched,
+                agree: !!(agree && agree.checked),
+                ready: !!matched && !!(agree && agree.checked)
+            }};
+        }})();
+    ''')
+
+    if not isinstance(ready, dict) or not ready.get('ready'):
+        got = ready if isinstance(ready, dict) else {}
+        debug.log("[TIXCRAFT] No captcha on this page, but the form is not ready "
+                  f"- Ticket:{got.get('ticket')} Agreement:{got.get('agree')}")
+        if got.get('ticket') is False:
+            # The count went back to 0 (refused submit or back navigation on
+            # the same URL); nodriver_tixcraft_ticket_main skips assignment
+            # while the URL is marked done, so clear the mark.
+            current_url, _ = await nodriver_current_url(tab)
+            _forget_ticket_assigned(current_url)
+            debug.log("[TIXCRAFT] Ticket count was reset, re-assigning next round")
+        return False
+
+    if not config_dict["ocr_captcha"]["force_submit"]:
+        debug.log("[TIXCRAFT] No captcha on this page; agreement and ticket count "
+                  "are set. Auto-submit is off, so the order is left for you.")
+        return False
+
+    # Click the button: Enter needs focus in the (absent) captcha input, and
+    # form.submit() skips the page's handler that enforces agreement and quota.
+    clicked = await tab.evaluate('''
+        (function() {
+            const form = document.querySelector('#form-ticket-ticket');
+            if (!form) return false;
+            const btn = form.querySelector('button[type="submit"], input[type="submit"]');
+            if (!btn || btn.disabled) return false;
+            btn.click();
+            return true;
+        })();
+    ''')
+
+    if clicked:
+        debug.log("[TIXCRAFT] Submitted a page with no captcha")
+        # Same guard the captcha path sets: keep the main loop from re-entering
+        # this page while the POST is still navigating.
+        _state["captcha_submit_until"] = time.time() + 1.5
+    else:
+        debug.log("[TIXCRAFT] No captcha on this page and no submit button found")
+    return bool(clicked)
+
+
 async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name):
     """票券頁面 OCR 處理主函數"""
     # 函數開始時檢查暫停
@@ -2916,6 +3205,13 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
         return False, "", False
 
     debug = util.create_debug_logger(config_dict)
+
+    # Handle the no-captcha case before the ocr_captcha.enable split: with OCR
+    # off the manual branch below only focuses the captcha input, so an event
+    # without one reaches the same dead end by a different route.
+    if not await nodriver_tixcraft_has_captcha(tab):
+        await nodriver_tixcraft_submit_without_captcha(tab, config_dict)
+        return
 
     away_from_keyboard_enable = config_dict["ocr_captcha"]["force_submit"]
     if not config_dict["ocr_captcha"]["enable"]:
@@ -3086,7 +3382,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         # When alert dialog is open, JavaScript execution is blocked, causing js_dumps to hang
         current_url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
 
-        if '/ticket/checkout' in current_url:
+        if _should_leave_dialog_to_user(current_url):
             debug.log(f"[GLOBAL ALERT] Alert on checkout page, NOT auto-dismissing: '{event.message}'")
             return
 
@@ -3221,7 +3517,11 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
                 except Exception:
                     pass
 
-    if "/activity/detail/" in url:
+    # Ticketmaster embeds the date list (#gameList) directly in the detail page
+    # and has no /activity/game/ URL at all, so the TixCraft detail->game
+    # redirect can never fire there. The Ticketmaster date handler below claims
+    # the detail page instead (issue #378).
+    if "/activity/detail/" in url and 'ticketmaster' not in url:
         _state["start_time"] = time.time()
         is_redirected = await nodriver_tixcraft_redirect(tab, url)
 
@@ -3240,7 +3540,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     is_ticketmaster_date_page = (
         'ticketmaster' in url and
         (('/artist/' in url and len(url.split('/'))==6) or
-         ('/activity/game/' in url))
+         ('/activity/game/' in url) or
+         ('/activity/detail/' in url))
     )
 
     if is_ticketmaster_date_page:
@@ -3294,10 +3595,24 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
                     else:
                         _state["area_retry_count"] += 1
                         if _state["area_retry_count"] >= 30:
-                            # ticketPriceList failed to load, re-select area
-                            debug.log("[TICKETMASTER] Ticket assignment failed after 30 retries, re-selecting area")
+                            # Either ticketPriceList never loaded, or the wanted
+                            # ticket count is unavailable and allow_less_tickets
+                            # is off. Re-selecting the area alone is not enough:
+                            # with an empty area_keyword the area step matches
+                            # everything and never reloads, so the phase machine
+                            # would spin on a stale page forever and miss any
+                            # returned ticket. Reload (throttled) like the
+                            # TixCraft ticket page does (issue #378 / #174).
+                            debug.log("[TICKETMASTER] Ticket assignment failed after 30 retries, reloading page")
                             _state["ticketmaster_phase"] = "area_select"
                             _state["area_retry_count"] = 0
+                            try:
+                                reload_interval = config_dict.get("advanced", {}).get("auto_reload_page_interval", 0)
+                                if reload_interval > 0:
+                                    await sleep_with_pause_check(tab, reload_interval, config_dict)
+                                await tab.reload()
+                            except Exception:
+                                pass
 
                 # phase == "done": no-op, wait for POST navigation to /ticket/ticket/
     else:

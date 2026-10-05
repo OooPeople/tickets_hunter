@@ -48,7 +48,7 @@ except Exception as exc:
 # Get script directory for resource paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CONST_APP_VERSION = "TicketsHunter (2026.07.02)"
+CONST_APP_VERSION = "TicketsHunter (2026.09.24)"
 
 CONST_MAXBOT_ANSWER_ONLINE_FILE = "MAXBOT_ONLINE_ANSWER.txt"
 CONST_MAXBOT_CONFIG_FILE = "settings.json"
@@ -112,7 +112,7 @@ CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
 CONST_CENTER = "center"
 CONST_RANDOM = "random"
 CONST_SELECT_ORDER_DEFAULT = CONST_RANDOM
-CONST_EXCLUDE_DEFAULT = "\"輪椅\",\"身障\",\"身心\",\"障礙\",\"Restricted View\",\"燈柱遮蔽\",\"視線不完整\""
+CONST_EXCLUDE_DEFAULT = "\"輪椅\",\"身障\",\"身心\",\"障礙\",\"愛心\",\"Restricted View\",\"燈柱遮蔽\",\"視線不完整\""
 CONST_CAPTCHA_SOUND_FILENAME_DEFAULT = "assets/sounds/ding-dong.wav"
 CONST_HOMEPAGE_DEFAULT = "about:blank"
 
@@ -249,7 +249,7 @@ def get_default_config():
     config_dict["advanced"]["block_facebook_network"] = False
 
     config_dict["advanced"]["headless"] = False
-    config_dict["advanced"]["verbose"] = False
+    config_dict["advanced"]["verbose"] = True
     config_dict["advanced"]["show_timestamp"] = True
     config_dict["advanced"]["auto_guess_options"] = False
     config_dict["advanced"]["user_guess_string"] = ""
@@ -262,8 +262,6 @@ def get_default_config():
 
     config_dict["advanced"]["auto_reload_page_interval"] = 5
     config_dict["advanced"]["tixcraft_soft_block_delay"] = ""
-    config_dict["advanced"]["auto_reload_overheat_count"] = 4
-    config_dict["advanced"]["auto_reload_overheat_cd"] = 1.0
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"

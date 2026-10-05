@@ -19,7 +19,12 @@ from tornado.web import Application
 from tornado.web import StaticFileHandler
 
 import requests
-from global_settings import load_global_settings, save_global_settings
+from global_settings import (
+    get_global_settings_path,
+    global_settings_revision,
+    load_global_settings,
+    save_global_settings,
+)
 import util
 
 from typing import (
@@ -689,12 +694,39 @@ class GlobalSettingsHandler(tornado.web.RequestHandler):
     """Read or update settings shared by every profile and bot process."""
 
     def get(self):
-        self.write(load_global_settings())
+        settings_value = load_global_settings(get_global_settings_path())
+        self.write({
+            "settings": settings_value,
+            "revision": global_settings_revision(settings_value),
+        })
 
     def post(self):
+        content_type = self.request.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("application/json"):
+            self.set_status(415)
+            self.write({"success": False, "error": "application/json required"})
+            return
         try:
             body = json.loads(self.request.body)
-            normalized = save_global_settings(body)
+            if not isinstance(body, dict):
+                raise ValueError("request body must be an object")
+            expected_revision = body.get("revision")
+            if not isinstance(expected_revision, str) or not expected_revision:
+                raise ValueError("global settings revision is required")
+
+            current = load_global_settings(get_global_settings_path())
+            current_revision = global_settings_revision(current)
+            if expected_revision != current_revision:
+                self.set_status(409)
+                self.write({
+                    "success": False,
+                    "error": "global settings changed in another tab",
+                    "settings": current,
+                    "revision": current_revision,
+                })
+                return
+
+            normalized = save_global_settings(body.get("settings"))
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.set_status(400)
             self.write({"success": False, "error": str(exc)})
@@ -704,7 +736,11 @@ class GlobalSettingsHandler(tornado.web.RequestHandler):
             self.set_status(500)
             self.write({"success": False, "error": "failed to save global settings"})
             return
-        self.write({"success": True, "settings": normalized})
+        self.write({
+            "success": True,
+            "settings": normalized,
+            "revision": global_settings_revision(normalized),
+        })
 
 class ResetJsonHandler(tornado.web.RequestHandler):
     def get(self):
@@ -1113,7 +1149,10 @@ async def main_server():
         print(f"[WARNING] Invalid server_port: {server_port}, using default: {CONST_SERVER_PORT}")
         server_port = CONST_SERVER_PORT
 
-    app.listen(server_port)
+    # The settings server controls launches and contains account credentials.
+    # It is intentionally local-only; exposing it on every LAN interface would
+    # let another device invoke mutation endpoints without authentication.
+    app.listen(server_port, address="127.0.0.1")
     print("server running on port:", server_port)
 
     url = "http://127.0.0.1:" + str(server_port) + "/settings.html"

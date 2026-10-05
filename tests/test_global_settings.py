@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from global_settings import (  # noqa: E402
     get_default_global_settings,
+    global_settings_revision,
     load_global_settings,
     save_global_settings,
     validate_global_settings,
@@ -99,6 +100,19 @@ class GlobalSettingsTest(unittest.TestCase):
 
         self.assertEqual(default, validate_global_settings(default))
 
+    def test_revision_is_stable_and_changes_with_content(self):
+        first = get_default_global_settings()
+        same = json.loads(json.dumps(first))
+        changed = json.loads(json.dumps(first))
+        changed["utk_sports"]["min_interval_seconds"] = 2.0
+
+        self.assertEqual(
+            global_settings_revision(first), global_settings_revision(same)
+        )
+        self.assertNotEqual(
+            global_settings_revision(first), global_settings_revision(changed)
+        )
+
 
 class GlobalSettingsHandlerTest(AsyncHTTPTestCase):
     def setUp(self):
@@ -120,8 +134,10 @@ class GlobalSettingsHandlerTest(AsyncHTTPTestCase):
     def test_get_defaults_and_post_valid_settings(self):
         response = self.fetch("/global-settings")
         self.assertEqual(200, response.code)
+        initial = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(get_default_global_settings(), initial["settings"])
         self.assertEqual(
-            get_default_global_settings(), json.loads(response.body.decode("utf-8"))
+            global_settings_revision(initial["settings"]), initial["revision"]
         )
 
         value = get_default_global_settings()
@@ -130,19 +146,21 @@ class GlobalSettingsHandlerTest(AsyncHTTPTestCase):
             "/global-settings",
             method="POST",
             headers={"Content-Type": "application/json"},
-            body=json.dumps(value),
+            body=json.dumps({"settings": value, "revision": initial["revision"]}),
         )
         self.assertEqual(200, response.code)
         payload = json.loads(response.body.decode("utf-8"))
         self.assertTrue(payload["success"])
         self.assertEqual(value, payload["settings"])
+        self.assertEqual(global_settings_revision(value), payload["revision"])
 
         response = self.fetch("/global-settings")
-        self.assertEqual(value, json.loads(response.body.decode("utf-8")))
+        self.assertEqual(value, json.loads(response.body.decode("utf-8"))["settings"])
 
     def test_post_rejects_invalid_range_without_overwriting(self):
         original = get_default_global_settings()
         save_global_settings(original)
+        revision = global_settings_revision(original)
         invalid = get_default_global_settings()
         invalid["utk_sports"]["min_interval_seconds"] = 0.5
 
@@ -150,11 +168,53 @@ class GlobalSettingsHandlerTest(AsyncHTTPTestCase):
             "/global-settings",
             method="POST",
             headers={"Content-Type": "application/json"},
-            body=json.dumps(invalid),
+            body=json.dumps({"settings": invalid, "revision": revision}),
         )
         self.assertEqual(400, response.code)
         self.assertFalse(json.loads(response.body.decode("utf-8"))["success"])
         self.assertEqual(original, load_global_settings())
+
+    def test_post_rejects_stale_revision_without_overwriting(self):
+        original = get_default_global_settings()
+        save_global_settings(original)
+        stale_revision = global_settings_revision(original)
+
+        current = get_default_global_settings()
+        current["utk_sports"]["min_interval_seconds"] = 2.0
+        save_global_settings(current)
+
+        stale_edit = get_default_global_settings()
+        stale_edit["utk_sports"]["min_interval_seconds"] = 3.0
+        response = self.fetch(
+            "/global-settings",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({
+                "settings": stale_edit,
+                "revision": stale_revision,
+            }),
+        )
+
+        self.assertEqual(409, response.code)
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(current, payload["settings"])
+        self.assertEqual(global_settings_revision(current), payload["revision"])
+        self.assertEqual(current, load_global_settings())
+
+    def test_post_requires_json_content_type(self):
+        value = get_default_global_settings()
+        response = self.fetch(
+            "/global-settings",
+            method="POST",
+            headers={"Content-Type": "text/plain"},
+            body=json.dumps({
+                "settings": value,
+                "revision": global_settings_revision(value),
+            }),
+        )
+
+        self.assertEqual(415, response.code)
+        self.assertFalse(json.loads(response.body.decode("utf-8"))["success"])
 
 
 if __name__ == "__main__":

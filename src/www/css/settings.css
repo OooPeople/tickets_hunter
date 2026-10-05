@@ -10,6 +10,8 @@
 body {
 	margin: 36px;
 	font-family: 'jf-openhuninn', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	/* Reserve room for the fixed .action-bar so it never covers the last form row */
+	padding-bottom: var(--action-bar-height, 80px);
 }
 
 textarea {
@@ -244,3 +246,100 @@ textarea {
 [data-bs-theme="dark"] #helpPanel code {
     background-color: var(--bs-tertiary-bg, #2b3035);
 }
+
+/* --- Sticky Action Bar (fixed to viewport bottom) --- */
+/* 搶票 / 存檔 / 重設 / 結束 pinned to the viewport bottom so scrolling through
+   the long settings form never hides them. z-index stays below Bootstrap's
+   offcanvas (1045) and modal (1055) so overlays still win. */
+.action-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1030;
+    padding: 0.75rem 36px;
+    background-color: var(--bs-body-bg);
+    border-top: 1px solid var(--bs-border-color);
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.action-bar-inner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    /* Positioning context for the transient run message below */
+    position: relative;
+}
+
+/* The 搶票 status message lives in the same row but must not take part in the
+   centring: it appears for three seconds after the button is pressed, and in
+   normal flow it would shove the four buttons left and let them snap back when
+   it clears. Overlaying it on the right keeps the buttons on the centre line at
+   all times. */
+.action-bar-inner #run_btn_pressed_message {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    max-width: 30%;
+    text-align: right;
+}
+
+/* Below md there is no room to overlay the message beside the buttons, so it
+   returns to the flow on its own centred line. */
+@media (max-width: 767.98px) {
+    .action-bar-inner #run_btn_pressed_message {
+        position: static;
+        transform: none;
+        flex-basis: 100%;
+        max-width: none;
+        text-align: center;
+    }
+}
+
+[data-bs-theme="dark"] .action-bar {
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* --- Sticky Header (profile bar + tab nav, pinned to viewport top) --- */
+/* Instance profile bar + tab nav pinned to the viewport top, so switching
+   profiles or tabs never requires scrolling back up. Sits below the
+   .action-bar (1030) and Bootstrap's offcanvas (1045) / modal (1055). */
+.sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 1020;
+    padding-top: 0.75rem;
+    /* Restores the gap the old .row wrapper provided, so the first form row
+       does not sit flush against the tab strip. */
+    padding-bottom: 0.5rem;
+    background-color: var(--bs-body-bg);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+/* The tab nav's own bottom border doubles as the header's edge */
+.sticky-header #myTab {
+    margin-bottom: 0;
+}
+
+[data-bs-theme="dark"] .sticky-header {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+/* Narrow viewports: match the tighter gutter and allow the buttons to wrap */
+@media (max-width: 575.98px) {
+    .action-bar {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    body {
+        --action-bar-height: 124px;
+    }
+}
+
+/* 存檔 uses Bootstrap's btn-success (see settings.html) rather than a custom
+   lighter blue. Bootstrap tunes $primary to land exactly on the WCAG AA 4.5:1
+   floor against white, so any lighter blue drops below it -- which would have
+   left the most-used button the only unreadable one. */

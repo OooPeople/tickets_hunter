@@ -18,6 +18,7 @@ from nodriver_common import (
     send_discord_notification,
     send_telegram_notification,
     sleep_with_pause_check,
+    CONST_NATIVE_INPUT_SETTER_JS,
 )
 
 
@@ -43,6 +44,150 @@ __all__ = [
 ]
 
 _state = {}
+
+# After the next button is clicked the site does one of three things: navigate to
+# the confirmation page, open a failure dialog, or enter its in-page queue. Poll
+# for all three instead of sleeping blind for a fixed window (#389).
+CONST_TICKETPLUS_SUBMIT_WAIT_MAX = 10.0
+CONST_TICKETPLUS_SUBMIT_POLL_INTERVAL = 0.3
+
+# The queue re-check keeps a randomized 5-10s cadence (anti-detection), but the
+# URL is polled at this interval so a page transition is not missed for a cycle.
+CONST_TICKETPLUS_QUEUE_URL_POLL_INTERVAL = 0.5
+
+# Absolute fuse on queue monitoring. The queue keywords include wording as
+# generic as "processing" and "please wait", so any future dialog carrying one
+# can strand the loop the same way the failure popup did (#389). While stranded
+# the main loop never runs, which also leaves the stop flag unreadable -- only
+# the pause flag is checked in here. Ten minutes is well past any real queue.
+CONST_TICKETPLUS_QUEUE_MONITOR_MAX = 600.0
+
+# Order-failure wording. Shared by the dismissal scan and the queue check so the
+# two can never disagree about the same dialog: they used to carry separate
+# lists, and a popup matched by one but not the other was dismissed as a failure
+# while simultaneously being counted as a queue.
+#
+# Deliberately excludes bare "system busy" wording: queue pages say the same
+# thing ("system busy, please wait"), and a false positive reloads the page and
+# throws away the queue position. The eight below have no queue reading.
+CONST_TICKETPLUS_FAILURE_KEYWORDS = [
+    "購票失敗",
+    "您選擇的票種已售完",
+    "已售完",
+    "別人搶先一步",
+    "已無可配座位",
+    "本活動有限制購票總張數",
+    "已被購買",
+    "無法購票",
+]
+
+# Wording that marks the in-page queue.
+CONST_TICKETPLUS_QUEUE_KEYWORDS = [
+    "排隊購票中",
+    "請稍候",
+    "請別離開頁面",
+    "請勿離開",
+    "請勿關閉網頁",
+    "同時使用多個裝置",
+    "視窗購票",
+    "正在處理",
+    "處理中",
+]
+
+# Button labels that dismiss a failure dialog.
+CONST_TICKETPLUS_DISMISS_BUTTON_TEXTS = [
+    "我知道了",
+    "知道了",
+    "確定",
+    "OK",
+    "Ok",
+]
+
+# How long to keep re-checking a next button that exists but is still disabled.
+# Vuetify unlocks it in the same tick the ticket count is written, so this only
+# has to cover mount jitter; the caller has its own budget for what happens
+# after submit, and a longer wait here just delays the next main-loop pass.
+CONST_TICKETPLUS_NEXT_BUTTON_WAIT = 2.0
+CONST_TICKETPLUS_NEXT_BUTTON_POLL = 0.15
+
+# Locate and click the next button. Every selector here must be valid CSS:
+# document.querySelector throws a DOMException on anything else, and zendriver
+# turns that into a ProtocolException that aborts the whole script -- which is
+# why the label match walks the buttons instead of using jQuery's :contains().
+CONST_TICKETPLUS_NEXT_BUTTON_JS = '''
+    (function() {
+        const selectors = [
+            'button.nextBtn:not(.disabledBtn):not(.v-btn--disabled)',
+            '.order-footer button.nextBtn:not(.disabledBtn)',
+            '.order-footer .v-btn--has-bg:not(.v-btn--disabled):not(.disabledBtn)',
+            '.nextBtn:not([disabled])'
+        ];
+        const labels = ['下一步', 'Next'];
+
+        const isEnabled = (el) => !!el && !el.disabled &&
+            !el.classList.contains('v-btn--disabled') &&
+            !el.classList.contains('disabledBtn');
+
+        let foundDisabled = false;
+
+        for (const selector of selectors) {
+            const el = document.querySelector(selector);
+            if (!el) continue;
+            if (isEnabled(el)) {
+                el.click();
+                return { clicked: true, buttonText: (el.textContent || '').trim() };
+            }
+            foundDisabled = true;
+        }
+
+        for (const button of document.querySelectorAll('button')) {
+            const text = (button.textContent || '').trim();
+            for (const label of labels) {
+                if (text.indexOf(label) === -1) continue;
+                if (isEnabled(button)) {
+                    button.click();
+                    return { clicked: true, buttonText: text };
+                }
+                foundDisabled = true;
+            }
+        }
+
+        return { clicked: false, foundDisabled: foundDisabled };
+    })();
+'''
+
+
+# Session rows on the activity page. Shared by the collect pass and the click
+# pass of the date selector so both agree on what index N refers to; the two
+# passes must never drift apart or the allowed-index list would point at the
+# wrong rows.
+# TicketPlus 2026-05 revamp: a Vue sub-component wrapper div now sits between
+# #buyTicket and .sesstion-item, hence the descendant combinator and the
+# div.row.pa-4 fallback for the older layout.
+_TICKETPLUS_SESSION_CONTAINERS_JS = '''
+    let sessionContainers = Array.from(document.querySelectorAll('div#buyTicket div.sesstion-item'))
+        .filter(c => c.querySelector('button.nextBtn'));
+
+    if (sessionContainers.length === 0) {
+        sessionContainers = Array.from(document.querySelectorAll('div#buyTicket div.row.pa-4'))
+            .filter(c => c.querySelector('button.nextBtn'));
+    }
+'''
+
+
+def _ticketplus_filter_excluded(config_dict, items, text_of):
+    """Drop items whose text matches keyword_exclude.
+
+    Keeps keyword matching and fallback on one clean candidate list, so an
+    excluded session can never be auto-picked (same invariant as cityline's
+    _cityline_collect_available_areas). Exclusion is decided in Python via
+    util so TicketPlus matches every other platform's semantics -- full-width
+    space normalization and space-separated AND logic included.
+    """
+    return [
+        item for item in items
+        if not util.reset_row_text_if_match_keyword_exclude(config_dict, text_of(item))
+    ]
 
 
 def _get_status():
@@ -351,7 +496,6 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
     find_ticket_text_list = ['>\u7acb\u5373\u8cfc', '\u5c1a\u672a\u958b\u8ce3']
     sold_out_text_list = ['\u92b7\u552e\u4e00\u7a7a']
 
-    matched_blocks = None
     formated_area_list = None
     is_vue_ready = True
 
@@ -396,50 +540,6 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                     formated_area_list.append(row)
 
         debug.log("formated_area_list count:", len(formated_area_list))
-
-        if len(date_keyword) == 0:
-            matched_blocks = formated_area_list
-        else:
-            matched_blocks = []
-            try:
-                original_keyword = config_dict["date_auto_select"]["date_keyword"].strip()
-                keyword_array = json.loads("[" + original_keyword + "]")
-
-                debug.log(f"[TicketPlus DATE] Applying keyword filter: {keyword_array}")
-
-                for i, row in enumerate(formated_area_list):
-                    row_text = ""
-                    try:
-                        row_html = await row.get_html()
-                        row_text = util.remove_html_tags(row_html).lower()
-                    except Exception as exc:
-                        debug.log(f"[TicketPlus DATE] Failed to get row text: {exc}")
-                        continue
-
-                    for keyword_item in keyword_array:
-                        sub_keywords = [kw.strip() for kw in keyword_item.split(' ') if kw.strip()]
-                        is_match = all(sub_kw.lower() in row_text for sub_kw in sub_keywords)
-
-                        if is_match:
-                            matched_blocks.append(row)
-                            debug.log(f"[TicketPlus DATE] Keyword '{keyword_item}' matched row {i}")
-                            break
-
-            except json.JSONDecodeError as exc:
-                debug.log(f"[TicketPlus DATE] Keyword parse error: {exc}")
-                debug.log(f"[TicketPlus DATE] Treating as 'all keywords failed'")
-                matched_blocks = []
-            except Exception as exc:
-                debug.log(f"[TicketPlus DATE] Keyword matching failed: {exc}")
-                matched_blocks = []
-
-        if len(matched_blocks) == 0 and date_keyword and len(date_keyword) > 0:
-            if date_auto_fallback:
-                debug.log(f"[TicketPlus DATE FALLBACK] date_auto_fallback=true, triggering auto fallback")
-                matched_blocks = formated_area_list
-            else:
-                debug.log(f"[TicketPlus DATE FALLBACK] date_auto_fallback=false, fallback is disabled")
-                debug.log(f"[TicketPlus DATE SELECT] No date selected, will check if reload needed")
     else:
         debug.log("date date-time-position is None or empty")
 
@@ -466,7 +566,17 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
             ''')
 
             if isinstance(vue_data, dict) and vue_data.get('ready') and vue_data.get('sessions'):
-                sessions = vue_data['sessions']
+                # Exclude before matching so the sessions[0] fallback below can
+                # never land on an excluded session.
+                sessions = _ticketplus_filter_excluded(
+                    config_dict,
+                    vue_data['sessions'],
+                    lambda s: (s.get('date', '') + ' ' + s.get('name', '')),
+                )
+                excluded_count = len(vue_data['sessions']) - len(sessions)
+                if excluded_count:
+                    debug.log(f"[TicketPlus DATE] Excluded {excluded_count} session(s) by keyword_exclude")
+
                 target_session = None
                 try:
                     kw_array = json.loads("[" + original_keyword + "]")
@@ -510,21 +620,52 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
     if not is_date_clicked and is_vue_ready and formated_area_list and len(formated_area_list) > 0:
         try:
             original_keyword = config_dict["date_auto_select"]["date_keyword"].strip()
+
+            # Collect first, decide exclusion in Python, then click. Keeping the
+            # exclusion test on the Python side is what makes TicketPlus agree
+            # with the other platforms; the click pass below only receives the
+            # indexes it is allowed to consider.
+            collected = await tab.evaluate('''
+                (function() {
+                    ''' + _TICKETPLUS_SESSION_CONTAINERS_JS + '''
+                    return sessionContainers.map(function(c, i) {
+                        return { index: i, text: c.textContent || '' };
+                    });
+                })();
+            ''')
+
+            if not isinstance(collected, list):
+                collected = []
+
+            allowed_indexes = [
+                item['index'] for item in _ticketplus_filter_excluded(
+                    config_dict, collected, lambda item: item.get('text', '')
+                )
+            ]
+
+            excluded_count = len(collected) - len(allowed_indexes)
+            if excluded_count:
+                debug.log(f"[TicketPlus DATE] Excluded {excluded_count} session(s) by keyword_exclude")
+
+            # An empty allowed list leaves the click pass with no containers, so
+            # it reports failure and the reload path below retries -- same as
+            # every other platform when everything is excluded.
             click_result = await tab.evaluate(f'''
                 (function() {{
                     const originalKeyword = '{original_keyword}';
                     const autoSelectMode = '{auto_select_mode}';
                     const dateAutoFallback = {'true' if date_auto_fallback else 'false'};
+                    const allowedIndexes = {json.dumps(allowed_indexes)};
 
                     console.log('[TicketPlus] Starting date selection - keyword:', originalKeyword, 'mode:', autoSelectMode, 'fallback:', dateAutoFallback);
 
-                    let sessionContainers = Array.from(document.querySelectorAll('div#buyTicket div.sesstion-item'))
-                        .filter(c => c.querySelector('button.nextBtn'));
+                    {_TICKETPLUS_SESSION_CONTAINERS_JS}
 
-                    if (sessionContainers.length === 0) {{
-                        sessionContainers = Array.from(document.querySelectorAll('div#buyTicket div.row.pa-4'))
-                            .filter(c => c.querySelector('button.nextBtn'));
-                    }}
+                    // Drop what keyword_exclude removed on the Python side, so
+                    // keyword matching and the fallback below share one clean list.
+                    sessionContainers = sessionContainers.filter(function(c, i) {{
+                        return allowedIndexes.indexOf(i) !== -1;
+                    }});
 
                     console.log('[TicketPlus] Found session containers:', sessionContainers.length);
 
@@ -1066,92 +1207,68 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
         if await sleep_with_pause_check(tab, 0.6, config_dict):
             return False
 
-        js_result = await tab.evaluate('''
-            (function() {
-                console.log('[NEXT BUTTON] Unified next button clicker started');
+        # The button is polled from here rather than from a timer inside the
+        # page: a page-side Promise needs evaluate(await_promise=True), and an
+        # un-awaited one keeps running after this function has already reported
+        # failure -- it would click Next on its own once the main loop had moved
+        # on and the ticket counts had changed underneath it.
+        waited = 0.0
+        while True:
+            result = await tab.evaluate(CONST_TICKETPLUS_NEXT_BUTTON_JS)
 
-                function waitForButtonEnable(selector, maxWait = 10000) {
-                    return new Promise((resolve) => {
-                        const startTime = Date.now();
-                        const checkButton = () => {
-                            const button = document.querySelector(selector);
-                            if (button && !button.disabled && !button.classList.contains('v-btn--disabled') && !button.classList.contains('disabledBtn')) {
-                                resolve(button);
-                                return;
-                            }
+            if isinstance(result, dict) and result.get('clicked'):
+                debug.log(f"[SUCCESS] Next button clicked - Button text: {result.get('buttonText', '')}")
+                return True
 
-                            if (Date.now() - startTime < maxWait) {
-                                setTimeout(checkButton, 100);
-                            } else {
-                                resolve(null);
-                            }
-                        };
-                        checkButton();
-                    });
-                }
+            found_disabled = isinstance(result, dict) and result.get('foundDisabled')
+            if not found_disabled:
+                debug.log("[ERROR] No next button on the page; nothing to wait for")
+                return False
 
-                const buttonSelectors = [
-                    'button.nextBtn:not(.disabledBtn):not(.v-btn--disabled)',
-                    '.order-footer button.nextBtn:not(.disabledBtn)',
-                    '.order-footer .v-btn--has-bg:not(.v-btn--disabled):not(.disabledBtn)',
-                    'button:contains("下一步"):not(.disabledBtn)',
-                    'button:contains("Next"):not(.disabledBtn)',
-                    '.nextBtn:not([disabled])'
-                ];
+            if waited >= CONST_TICKETPLUS_NEXT_BUTTON_WAIT:
+                debug.log(f"[ERROR] Next button still disabled after {waited:.1f}s")
+                return False
 
-                let nextButton = null;
-                for (let selector of buttonSelectors) {
-                    nextButton = document.querySelector(selector);
-                    if (nextButton && !nextButton.disabled && !nextButton.classList.contains('v-btn--disabled') && !nextButton.classList.contains('disabledBtn')) {
-                        console.log('[SUCCESS] Found enabled next button:', selector);
-                        break;
-                    }
-                }
-
-                if (!nextButton) {
-                    console.log('[WAITING] Waiting for next button to enable...');
-                    return waitForButtonEnable('button.nextBtn, .nextBtn').then(button => {
-                        if (button) {
-                            console.log('[SUCCESS] Next button enabled');
-                            button.click();
-                            return {
-                                success: true,
-                                message: 'Next button clicked (after wait)',
-                                buttonText: button.textContent.trim()
-                            };
-                        } else {
-                            console.log('[ERROR] Next button still not found after wait');
-                            return { success: false, message: 'Next button still not found after wait' };
-                        }
-                    });
-                }
-
-                nextButton.click();
-                console.log('[SUCCESS] Next button clicked');
-
-                return {
-                    success: true,
-                    message: 'Next button clicked',
-                    buttonText: nextButton.textContent.trim()
-                };
-            })();
-        ''')
-
-        result = util.parse_nodriver_result(js_result)
-        if isinstance(result, dict):
-            success = result.get('success', False)
-            if debug.enabled:
-                if success:
-                    button_text = result.get('buttonText', '')
-                    debug.log(f"[SUCCESS] Next button clicked successfully - Button text: {button_text}")
-                else:
-                    debug.log(f"[ERROR] Next button click failed: {result.get('message', 'Unknown error')}")
-            return success
+            if await sleep_with_pause_check(tab, CONST_TICKETPLUS_NEXT_BUTTON_POLL, config_dict):
+                return False
+            waited += CONST_TICKETPLUS_NEXT_BUTTON_POLL
 
     except Exception as exc:
         debug.log(f"Unified next button click error: {exc}")
 
     return False
+
+
+# A checkbox is ticked only when its label reads like the terms. The exclusions
+# exist because "agree" alone also matches marketing opt-ins, which must stay off.
+CONST_TICKETPLUS_AGREE_KEYWORDS = ["同意", "條款", "規則", "規定", "須知", "閱讀", "詳閱", "agree", "terms"]
+CONST_TICKETPLUS_AGREE_EXCLUDE_KEYWORDS = ["行銷", "電子報", "訂閱", "推播", "廣告", "捐贈", "加購",
+                                           "marketing", "newsletter", "subscribe", "donat"]
+
+# Label text for a checkbox: its Vuetify .v-input or wrapping <label>, else a
+# <label for=id>, else the parent's text.
+CONST_TICKETPLUS_CHECKBOX_LABEL_JS = '''
+    (el) => {
+        const box = el.closest('.v-input, label');
+        let text = box ? box.innerText : '';
+        if (!text && el.id) {
+            const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+            if (lab) text = lab.innerText;
+        }
+        if (!text && el.parentElement) text = el.parentElement.innerText;
+        return (text || '').trim().slice(0, 200);
+    }
+'''
+
+
+def _is_terms_checkbox_label(label_text):
+    """True when a checkbox label reads as a terms agreement, not an opt-in."""
+    text = (label_text or '').lower()
+    if not text:
+        return False
+    if any(kw in text for kw in CONST_TICKETPLUS_AGREE_EXCLUDE_KEYWORDS):
+        return False
+    return any(kw in text for kw in CONST_TICKETPLUS_AGREE_KEYWORDS)
 
 
 async def nodriver_ticketplus_ticket_agree(tab, config_dict):
@@ -1170,27 +1287,36 @@ async def nodriver_ticketplus_ticket_agree(tab, config_dict):
                 if not checkbox:
                     continue
 
-                is_checked = await checkbox.evaluate('el => el.checked')
+                # Terms only: add-ons, donations and marketing opt-ins stay off.
+                label_text = await checkbox.apply(CONST_TICKETPLUS_CHECKBOX_LABEL_JS)
+                if not _is_terms_checkbox_label(label_text):
+                    debug.log(f"[AGREE] Skipping checkbox that is not the terms: {(label_text or '')[:40]!r}")
+                    continue
+
+                # Element.apply, not Element.evaluate: zendriver defines evaluate
+                # only on Tab, and Element.__getattr__ returns None for unknown
+                # names, so checkbox.evaluate(...) is a TypeError the except hides.
+                is_checked = await checkbox.apply('(el) => el.checked')
 
                 if not is_checked:
                     await checkbox.click()
 
-                    is_checked_after = await checkbox.evaluate('el => el.checked')
+                    is_checked_after = await checkbox.apply('(el) => el.checked')
                     if is_checked_after:
                         is_finish_checkbox_click = True
                         debug.log("successfully checked agreement checkbox")
                     else:
                         if checkbox:
-                            await tab.evaluate('''
-                                (checkbox) => {
-                                    if (checkbox) {
-                                        checkbox.checked = true;
-                                        checkbox.dispatchEvent(new Event('change', {bubbles: true}));
-                                    }
+                            # Element.apply: tab.evaluate's second positional
+                            # arg is await_promise, not a script parameter.
+                            await checkbox.apply('''
+                                (el) => {
+                                    el.checked = true;
+                                    el.dispatchEvent(new Event('change', {bubbles: true}));
                                 }
-                            ''', checkbox)
+                            ''')
 
-                            final_check = await checkbox.evaluate('el => el.checked')
+                            final_check = await checkbox.apply('(el) => el.checked')
                             if final_check:
                                 is_finish_checkbox_click = True
                                 debug.log("successfully checked agreement checkbox via JS")
@@ -1249,28 +1375,28 @@ async def nodriver_ticketplus_accept_order_fail(tab, debug=None):
     try:
         js_result = await tab.evaluate('''
             (function() {
-                const failureTexts = [
-                    '購票失敗',
-                    '您選擇的票種已售完',
-                    '已售完',
-                    '別人搶先一步',
-                    '已無可配座位',
-                    '本活動有限制購票總張數',
-                    '已被購買',
-                    '系統忙碌',
-                    '無法購票'
-                ];
-                const buttonTexts = [
-                    '我知道了',
-                    '知道了',
-                    '確定',
-                    'OK',
-                    'Ok'
-                ];
+                const failureTexts = ''' + json.dumps(CONST_TICKETPLUS_FAILURE_KEYWORDS) + ''';
+                const buttonTexts = ''' + json.dumps(CONST_TICKETPLUS_DISMISS_BUTTON_TEXTS) + ''';
+                // .v-dialog__content is position:fixed, so its offsetParent is
+                // always null whether or not the dialog shows. rect + computed
+                // style is the only visibility test valid for every wrapper.
+                const isVisible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    if (!rect.width || !rect.height) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' &&
+                           style.visibility !== 'hidden' &&
+                           style.opacity !== '0';
+                };
+
                 const dialogs = document.querySelectorAll('[role="dialog"], .v-dialog, .v-dialog__content');
                 for (const dialog of dialogs) {
-                    if (dialog.offsetParent === null) continue;
-                    const text = (dialog.textContent || '').trim();
+                    if (!isVisible(dialog)) continue;
+                    // innerText, not textContent: a closed Vuetify dialog leaves
+                    // its full-screen .v-dialog__content wrapper mounted, which
+                    // passes isVisible, and textContent would still read the
+                    // hidden "failed" text inside it -- reloading on every pass.
+                    const text = (dialog.innerText || '').trim();
                     if (!failureTexts.some(t => text.includes(t))) continue;
                     const buttons = dialog.querySelectorAll('button');
                     for (const btn of buttons) {
@@ -1308,37 +1434,63 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
     try:
         result = await tab.evaluate('''
             (function() {
-                const queueKeywords = [
-                    '\u6392\u968a\u8cfc\u7968\u4e2d',
-                    '\u8acb\u7a0d\u5019',
-                    '\u8acb\u5225\u96e2\u958b\u9801\u9762',
-                    '\u8acb\u52ff\u96e2\u958b',
-                    '\u8acb\u52ff\u95dc\u9589\u7db2\u9801',
-                    '\u540c\u6642\u4f7f\u7528\u591a\u500b\u88dd\u7f6e',
-                    '\u8996\u7a97\u8cfc\u7968',
-                    '\u6b63\u5728\u8655\u7406',
-                    '\u8655\u7406\u4e2d'
-                ];
+                const queueKeywords = ''' + json.dumps(CONST_TICKETPLUS_QUEUE_KEYWORDS) + ''';
 
-                const bodyText = document.body.textContent || '';
+                const failureKeywords = ''' + json.dumps(CONST_TICKETPLUS_FAILURE_KEYWORDS) + ''';
+
+                // innerText, not textContent: it returns rendered text only, so
+                // the hidden dialogs Vuetify keeps mounted stay out of it. With
+                // textContent a single dormant queue dialog matched forever and
+                // the monitor ran to its fuse (#389).
+                const bodyText = document.body.innerText || '';
 
                 const hasQueueKeyword = queueKeywords.some(keyword => bodyText.includes(keyword));
 
-                const overlayScrim = document.querySelector('.v-overlay__scrim');
-                const hasOverlay = overlayScrim && overlayScrim.style.opacity === '1';
+                // Vuetify keeps every dialog mounted, so querySelector('.v-dialog')
+                // usually returns an inactive empty node and the failure veto below
+                // never fires -- which is how the failure popup got read as a queue
+                // in the first place (#389). Scan every *visible* dialog instead.
+                const isVisible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    if (!rect.width || !rect.height) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' &&
+                           style.visibility !== 'hidden' &&
+                           style.opacity !== '0';
+                };
 
-                const dialogText = document.querySelector('.v-dialog')?.textContent || '';
-                const hasQueueDialog = dialogText.includes('\u6392\u968a') ||
-                                       dialogText.includes('\u8acb\u7a0d\u5019');
+                // innerText for the same reason as bodyText above: a closed
+                // dialog's wrapper still passes isVisible.
+                const dialogTexts = Array.from(document.querySelectorAll('.v-dialog, [role="dialog"]'))
+                    .filter(isVisible)
+                    .map(el => (el.innerText || '').trim())
+                    .filter(text => text.length > 0);
+
+                const dialogText = dialogTexts.join(' | ');
+                const hasFailureDialog = dialogTexts.some(text =>
+                    failureKeywords.some(keyword => text.includes(keyword)));
+                const hasQueueDialog = !hasFailureDialog &&
+                                       dialogTexts.some(text =>
+                                           text.includes('\u6392\u968a') ||
+                                           text.includes('\u8acb\u7a0d\u5019'));
+
+                // A bare scrim is NOT a queue: every Vuetify dialog and loading
+                // mask draws one, so the order-failure popup used to be read as
+                // a queue and the monitor loop spun forever (#389). Queue
+                // wording decides now; the scrim is only reported back for the
+                // forced-debug dump below, never for the verdict.
+                const overlayScrim = document.querySelector('.v-overlay__scrim');
+                const hasOverlay = !!(overlayScrim && overlayScrim.style.opacity === '1');
 
                 const foundKeywords = queueKeywords.filter(keyword => bodyText.includes(keyword));
 
                 return {
-                    inQueue: hasQueueKeyword || hasOverlay || hasQueueDialog,
+                    inQueue: !hasFailureDialog && (hasQueueKeyword || hasQueueDialog),
                     queueTitle: '',
                     foundKeywords: foundKeywords,
                     hasOverlay: hasOverlay,
                     hasQueueDialog: hasQueueDialog,
+                    hasFailureDialog: hasFailureDialog,
                     dialogText: hasQueueDialog ? dialogText.trim() : ''
                 };
             })();
@@ -1348,6 +1500,14 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
 
         if isinstance(result, dict):
             is_in_queue = result.get('inQueue', False)
+
+            # Logged unconditionally: a failure dialog forces inQueue false, so
+            # this never reaches the queue dump below. It is the one line that
+            # explains why a queue verdict was withheld, and the popup is rare
+            # enough that reporting every hit cannot flood the log.
+            if result.get('hasFailureDialog'):
+                debug.log("[QUEUE] Failure dialog present, not treating as queue")
+
             if is_in_queue and force_show_debug:
                 debug.log("[QUEUE] Queue status detected")
                 if result.get('hasOverlay'):
@@ -1383,11 +1543,13 @@ async def nodriver_ticketplus_confirm(tab, config_dict):
                 confirm_button = await tab.query_selector('button[type="submit"]')
 
             if confirm_button:
-                is_enabled = await tab.evaluate('''
-                    (function(button) {
+                # Element.apply, not tab.evaluate(script, element): the second
+                # positional argument is await_promise, not a script argument.
+                is_enabled = await confirm_button.apply('''
+                    (button) => {
                         return button && !button.disabled && button.offsetParent !== null;
-                    })(arguments[0]);
-                ''', confirm_button)
+                    }
+                ''')
 
                 if is_enabled:
                     await confirm_button.click()
@@ -1396,6 +1558,108 @@ async def nodriver_ticketplus_confirm(tab, config_dict):
             pass
 
     return is_confirm_clicked
+
+
+async def _ticketplus_wait_after_submit(tab, config_dict, debug):
+    """Poll for the outcome of a submitted order instead of waiting blind.
+
+    The previous fixed 5-10s sleep left an order-failure popup sitting unhandled
+    for the whole window, and the queue check that followed mistook the popup's
+    overlay for a queue (#389).
+
+    Returns:
+        "confirmed"  -- confirmation page reached
+        "order_fail" -- failure popup detected (dismissed if possible)
+        "queue"      -- platform queue detected
+        "timeout"    -- none of the above within the wait budget
+    """
+    deadline = time.time() + CONST_TICKETPLUS_SUBMIT_WAIT_MAX
+
+    while time.time() < deadline:
+        if await check_and_handle_pause(config_dict):
+            return "timeout"
+
+        current_url = (tab.url or "").lower()
+        if '/confirm/' in current_url or '/confirmseat/' in current_url:
+            debug.log("[SUBMIT WAIT] Confirmation page reached")
+            return "confirmed"
+
+        if await nodriver_ticketplus_accept_order_fail(tab, debug) is True:
+            return "order_fail"
+
+        if await nodriver_ticketplus_check_queue_status(tab, config_dict):
+            debug.log("[SUBMIT WAIT] Platform queue detected")
+            return "queue"
+
+        if await sleep_with_pause_check(tab, CONST_TICKETPLUS_SUBMIT_POLL_INTERVAL, config_dict):
+            return "timeout"
+
+    debug.log("[SUBMIT WAIT] No outcome within wait budget")
+    return "timeout"
+
+
+async def _ticketplus_monitor_queue(tab, config_dict, debug):
+    """Watch the in-page queue until it clears, moves on, or the order fails.
+
+    The queue re-check keeps its randomized 5-10s cadence (anti-detection), but
+    the URL *and* the failure popup are polled every
+    CONST_TICKETPLUS_QUEUE_URL_POLL_INTERVAL seconds. Reading the popup out of the
+    local DOM sends no request, so it must not be rate-limited with the queue
+    check: doing so left the modal on screen for the whole randomized window
+    (5-10s, ~7.5s average) while it blocked every click on the page.
+
+    Gives up after CONST_TICKETPLUS_QUEUE_MONITOR_MAX: removing the scrim signal
+    fixed the popup that caused #389, but an unbounded loop would strand the bot
+    all the same the next time a dialog happens to carry queue wording.
+
+    Returns:
+        "confirmed"  -- confirmation page reached
+        "order_fail" -- failure popup detected (dismissed if possible)
+        "queue_end"  -- queue wording gone, resume normal page processing
+        "timeout"    -- monitor fuse blew, or paused / errored out
+    """
+    last_url = ""
+    monitor_deadline = time.time() + CONST_TICKETPLUS_QUEUE_MONITOR_MAX
+
+    while time.time() < monitor_deadline:
+        if await check_and_handle_pause(config_dict):
+            return "timeout"
+
+        try:
+            current_url = tab.url
+
+            if '/confirm/' in current_url.lower() or '/confirmseat/' in current_url.lower():
+                debug.log("Detected entry to confirmation page, exiting queue monitoring")
+                return "confirmed"
+
+            if current_url != last_url:
+                debug.log(f"Page status update - URL: {current_url}")
+                last_url = current_url
+
+            if await nodriver_ticketplus_accept_order_fail(tab, debug) is True:
+                debug.log("[QUEUE END] Order failure popup dismissed, exiting queue monitoring")
+                return "order_fail"
+
+            if not await nodriver_ticketplus_check_queue_status(tab, config_dict):
+                debug.log("[QUEUE END] Queue ended, continuing page processing")
+                return "queue_end"
+
+            recheck_deadline = time.time() + random.uniform(5.0, 10.0)
+            while time.time() < recheck_deadline:
+                if await sleep_with_pause_check(tab, CONST_TICKETPLUS_QUEUE_URL_POLL_INTERVAL, config_dict):
+                    return "timeout"
+                if tab.url != current_url:
+                    break
+                if await nodriver_ticketplus_accept_order_fail(tab, debug) is True:
+                    debug.log("[QUEUE END] Order failure popup dismissed mid-wait, exiting queue monitoring")
+                    return "order_fail"
+
+        except Exception as exc:
+            debug.log(f"Queue monitoring error: {exc}")
+            return "timeout"
+
+    debug.log("[QUEUE END] Queue monitoring hit its time limit, returning to main loop")
+    return "timeout"
 
 
 async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
@@ -1488,44 +1752,32 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
         is_form_submitted = await nodriver_ticketplus_click_next_button_unified(tab, config_dict)
 
         if is_form_submitted:
-            await tab.sleep(random.uniform(5.0, 10.0))
+            outcome = await _ticketplus_wait_after_submit(tab, config_dict, debug)
 
-            is_in_queue = await nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_debug=False)
-            if is_in_queue:
-                debug.log("Entered queue monitoring (check every 5 seconds, display only on status change)")
+            if outcome == "order_fail":
+                debug.log("[ORDER FAIL] Popup dismissed after submit, refreshing ticket availability")
+                _state["order_page_visited"] = False
+                try:
+                    await tab.reload()
+                except Exception as reload_exc:
+                    debug.log(f"[ORDER FAIL] Reload failed: {reload_exc}")
+                return
 
-                last_url = ""
+            if outcome == "queue":
+                debug.log("Entered queue monitoring (recheck every 5-10 seconds, display only on status change)")
+                queue_outcome = await _ticketplus_monitor_queue(tab, config_dict, debug)
 
-                while True:
-                    if await check_and_handle_pause(config_dict):
-                        break
-
+                # Mirror the direct order_fail path above: the popup is gone but the
+                # ticket counts on screen are stale, so refresh before the next
+                # attempt instead of submitting against them.
+                if queue_outcome == "order_fail":
+                    debug.log("[ORDER FAIL] Popup dismissed during queue monitoring, refreshing ticket availability")
+                    _state["order_page_visited"] = False
                     try:
-                        current_url = tab.url
-
-                        if '/confirm/' in current_url.lower() or '/confirmseat/' in current_url.lower():
-                            debug.log("Detected entry to confirmation page, exiting queue monitoring")
-                            break
-
-                        if current_url != last_url:
-                            debug.log(f"Page status update - URL: {current_url}")
-                            last_url = current_url
-
-                        is_still_in_queue = await nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_debug=False)
-
-                        if not is_still_in_queue:
-                            if '/confirm/' in current_url.lower() or '/confirmseat/' in current_url.lower():
-                                debug.log("Queue ended, entered confirmation page")
-                                break
-                            else:
-                                debug.log("[QUEUE END] Queue ended, continuing page processing")
-                                break
-
-                        await tab.sleep(random.uniform(5.0, 10.0))
-
-                    except Exception as exc:
-                        debug.log(f"Queue monitoring error: {exc}")
-                        break
+                        await tab.reload()
+                    except Exception as reload_exc:
+                        debug.log(f"[ORDER FAIL] Reload failed: {reload_exc}")
+                    return
 
         debug.log(f"Form submission: {'Success' if is_form_submitted else 'Failed'}")
     else:
@@ -1603,7 +1855,7 @@ async def nodriver_ticketplus_wait_for_vue_ready(tab, max_wait_ms=800):
                     check();
                 }});
             }})();
-        ''')
+        ''', await_promise=True)
 
         if isinstance(result, dict):
             return result.get('ready', False)
@@ -1646,72 +1898,194 @@ async def nodriver_ticketplus_check_next_button(tab):
         return False
 
 
+# The .exclusive-code container is mounted by Vue after a ticket count is
+# chosen, so a scan straight after selection can arrive before it exists.
+CONST_TICKETPLUS_EXCLUSIVE_CODE_WAIT = 0.6
+CONST_TICKETPLUS_EXCLUSIVE_CODE_POLL = 0.05
+
+# Wording that marks a card-verification box. Kept to Chinese: TicketPlus is a
+# zh-TW site, and bare English "card" or "credit" match far too much.
+CONST_TICKETPLUS_CARD_KEYWORDS = [
+    "信用卡",
+    "卡號",
+    "卡友",
+    "中國信託",
+    "中信",
+    "簽帳金融卡",
+    "金融卡",
+    "前六碼",
+    "前6碼",
+]
+
+# Wording that marks a serial or discount box.
+CONST_TICKETPLUS_DISCOUNT_KEYWORDS = [
+    "序號",
+    "加購",
+    "優惠",
+    "折扣",
+]
+
+# A card box is never called a serial number, but a card-branded discount
+# campaign routinely is ("信用卡優惠序號"), so serial wording decides first.
+CONST_TICKETPLUS_DISCOUNT_STRONG_KEYWORDS = [
+    "序號",
+    "加購",
+]
+
+CONST_TICKETPLUS_EXCLUSIVE_CODE_SCAN_JS = '''
+    (function() {
+        const fields = [];
+        const containers = document.querySelectorAll('.exclusive-code');
+        for (let i = 0; i < containers.length; i++) {
+            const container = containers[i];
+            const label = container.querySelector('.label') || container.querySelector('label');
+            const input = container.querySelector('.v-text-field__slot input[type="text"]') ||
+                          container.querySelector('input[type="text"]');
+            if (!input) continue;
+            fields.push({
+                index: i,
+                label: label ? (label.textContent || '').trim() : '',
+                placeholder: input.getAttribute('placeholder') || '',
+                value: input.value || '',
+                maxLength: input.maxLength > 0 ? input.maxLength : 0
+            });
+        }
+        return fields;
+    })();
+'''
+
+
+def _classify_exclusive_code_field(label, placeholder):
+    """Decide which configured value belongs in an .exclusive-code input.
+
+    Returns "credit_card", "discount", or "" for leave it alone. Returning ""
+    is the safe answer: an unrecognized box is far more likely to be something
+    we have no business typing into than one of the two we know.
+    """
+    text = f"{label} {placeholder}"
+
+    if any(keyword in text for keyword in CONST_TICKETPLUS_DISCOUNT_STRONG_KEYWORDS):
+        return "discount"
+    if any(keyword in text for keyword in CONST_TICKETPLUS_CARD_KEYWORDS):
+        return "credit_card"
+    if any(keyword in text for keyword in CONST_TICKETPLUS_DISCOUNT_KEYWORDS):
+        return "discount"
+    return ""
+
+
+def _ticketplus_exclusive_code_fill_js(plan):
+    """Build the fill script for an already-decided list of {index, value}."""
+    return f'''
+        (function() {{
+            {CONST_NATIVE_INPUT_SETTER_JS}
+            const plan = {json.dumps(plan)};
+            const containers = document.querySelectorAll('.exclusive-code');
+            let filled = 0;
+            for (const item of plan) {{
+                const container = containers[item.index];
+                if (!container) continue;
+                const input = container.querySelector('.v-text-field__slot input[type="text"]') ||
+                              container.querySelector('input[type="text"]');
+                if (!input) continue;
+                if (setNativeInputValue(input, item.value)) filled++;
+            }}
+            return filled;
+        }})();
+    '''
+
+
 async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
-    """Handle exclusive discount codes."""
+    """Fill the .exclusive-code inputs: a discount serial, or a card prefix.
+
+    Cardholder-exclusive events (a bank's priority window, for instance) put a
+    "first six digits of your card" box in the same .exclusive-code container
+    that ordinary events use for an add-on serial number, so the two have to be
+    told apart by their wording before anything is typed.
+    """
     debug = util.create_debug_logger(config_dict)
 
     if await check_and_handle_pause(config_dict):
         return False, fail_list, False
 
-    discount_code = config_dict["advanced"].get("discount_code", "").strip()
+    credit_card_prefix = config_dict.get("contact", {}).get("credit_card_prefix", "").strip()
+    discount_code = config_dict.get("advanced", {}).get("discount_code", "").strip()
 
-    if not discount_code:
-        debug.log("[DISCOUNT CODE] No discount code configured, skipping")
+    if not discount_code and not credit_card_prefix:
+        debug.log("[EXCLUSIVE CODE] Neither a discount code nor a card prefix is configured, skipping")
         return False, fail_list, False
 
-    debug.log(f"[DISCOUNT CODE] Attempting to fill discount code: {discount_code}")
+    values = {"discount": discount_code, "credit_card": credit_card_prefix}
 
     try:
-        escaped_discount_code = discount_code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+        # The container is mounted by Vue once a ticket count is chosen, so it
+        # may not be there yet. Poll from Python rather than from a timer in
+        # the page: an un-awaited page-side promise reports nothing back and
+        # keeps running after this call has returned.
+        waited = 0.0
+        fields = []
+        while True:
+            fields = await tab.evaluate(CONST_TICKETPLUS_EXCLUSIVE_CODE_SCAN_JS)
+            if fields:
+                break
+            if waited >= CONST_TICKETPLUS_EXCLUSIVE_CODE_WAIT:
+                break
+            if await sleep_with_pause_check(tab, CONST_TICKETPLUS_EXCLUSIVE_CODE_POLL, config_dict):
+                return False, fail_list, False
+            waited += CONST_TICKETPLUS_EXCLUSIVE_CODE_POLL
 
-        result = await tab.evaluate(f'''
-            (function() {{
-                const keywords = ['\u5e8f\u865f', '\u52a0\u8cfc', '\u512a\u60e0'];
-                const discountCode = '{escaped_discount_code}';
-                let filledCount = 0;
+        if not fields:
+            debug.log("[EXCLUSIVE CODE] No code fields on the page")
+            return False, fail_list, False
 
-                const labelDivs = document.querySelectorAll('.exclusive-code .label');
-                for (let label of labelDivs) {{
-                    const labelText = label.textContent.trim();
-                    const container = label.closest('.exclusive-code');
-                    if (!container) continue;
+        plan = []
+        for field in fields:
+            label = field.get('label', '')
+            placeholder = field.get('placeholder', '')
+            kind = _classify_exclusive_code_field(label, placeholder)
 
-                    const input = container.querySelector('.v-text-field__slot input[type="text"]');
+            if not kind:
+                # Filling a field we cannot name is how a discount code ends up
+                # in a card box. Log what it said so the wording can be added.
+                debug.log(f"[EXCLUSIVE CODE] Unrecognized field, leaving it alone "
+                          f"(label='{label}', placeholder='{placeholder}')")
+                continue
 
-                    const hasKeyword = keywords.some(keyword => labelText.includes(keyword));
-                    if (hasKeyword && input && !input.value) {{
-                        input.value = discountCode;
-                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        filledCount++;
-                    }}
-                }}
+            value = values.get(kind, '')
+            if not value:
+                debug.log(f"[EXCLUSIVE CODE] {kind} field found but nothing configured for it")
+                continue
 
-                return {{
-                    success: filledCount > 0,
-                    filledCount: filledCount
-                }};
-            }})()
-        ''')
+            existing = field.get('value', '')
+            if existing:
+                if existing == value:
+                    debug.log(f"[EXCLUSIVE CODE] {kind} field already holds the configured value")
+                else:
+                    debug.log(f"[EXCLUSIVE CODE] {kind} field already filled, not overwriting")
+                continue
 
-        if result:
-            if isinstance(result, dict):
-                success = result.get('success', False)
-                filled_count = result.get('filledCount', 0)
-            else:
-                debug.log(f"[DISCOUNT CODE] Unexpected result type: {type(result)}, value: {result}")
-                success = True
-                filled_count = 1
+            max_length = field.get('maxLength', 0)
+            if max_length and len(value) > max_length:
+                debug.log(f"[EXCLUSIVE CODE] {kind} field takes {max_length} characters "
+                          f"but the configured value is {len(value)}; leaving it alone")
+                continue
 
-            if success and filled_count > 0:
-                debug.log(f"[DISCOUNT CODE] Successfully filled {filled_count} discount code field(s)")
-                return True, fail_list, False
+            plan.append({"index": field.get('index'), "value": value, "kind": kind})
 
-        debug.log("[DISCOUNT CODE] No matching discount code fields found on page")
+        if not plan:
+            debug.log("[EXCLUSIVE CODE] Nothing to fill")
+            return False, fail_list, False
+
+        filled = await tab.evaluate(_ticketplus_exclusive_code_fill_js(plan))
+        if filled:
+            kinds = ", ".join(sorted({item["kind"] for item in plan}))
+            debug.log(f"[EXCLUSIVE CODE] Filled {filled} field(s): {kinds}")
+            return True, fail_list, False
+
+        debug.log("[EXCLUSIVE CODE] Fill did not take effect")
         return False, fail_list, False
 
     except Exception as e:
-        debug.log(f"[DISCOUNT CODE] Error filling discount code: {str(e)}")
+        debug.log(f"[EXCLUSIVE CODE] Error filling code fields: {str(e)}")
         return False, fail_list, False
 
 

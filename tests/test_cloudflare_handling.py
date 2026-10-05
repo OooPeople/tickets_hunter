@@ -153,15 +153,10 @@ class CloudflareSuccessProofTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, tab.reload_count)
 
     async def test_clicked_challenge_requires_success_proof(self):
-        tab = NoReloadTab(send_results=[
-            types.SimpleNamespace(),
-            types.SimpleNamespace(content=[0, 0, 100, 0, 100, 50, 0, 50]),
-            types.SimpleNamespace(),
-            types.SimpleNamespace(),
-        ])
+        tab = NoReloadTab()
         proof = AsyncMock(return_value=True)
         with patch(
-            "nodriver_common._find_cf_iframe_in_dom", return_value=(7, "challenge")
+            "nodriver_common.solve_turnstile_checkbox", AsyncMock(return_value=True)
         ), patch("nodriver_common.wait_for_challenge_cleared", proof):
             self.assertTrue(
                 await handle_cloudflare_challenge(

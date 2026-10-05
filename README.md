@@ -33,7 +33,7 @@ Tickets Hunter 是一個開放原始碼的多平台搶票自動化系統，支�
 
 | 地區 | 支援平台 |
 |------|----------|
-| 🇹🇼 台灣 | 拓元 TixCraft、添翼 Teamear、獨立音樂 Indievox、KKTIX、遠大 TicketPlus、ibon、寬宏 KHAM、年代售票、UDN 售票網、全網 FamiTicket、FANSI GO、FunOne |
+| 🇹🇼 台灣 | 拓元 TixCraft、添翼 Teamear、獨立音樂 Indievox、KKTIX、遠大 TicketPlus、ibon、中信育樂售票網（CTBC Sports）、味全龍官方售票網、寬宏 KHAM、年代售票、UDN 售票網、全網 FamiTicket、FANSI GO、FunOne |
 | 🌏 海外 | Ticketmaster SG、Cityline 買飛、HKTicketing 快達票、澳門銀河、Ticketek |
 
 ---

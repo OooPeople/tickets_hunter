@@ -19,6 +19,7 @@ from tornado.web import Application
 from tornado.web import StaticFileHandler
 
 import requests
+from global_settings import load_global_settings, save_global_settings
 import util
 
 from typing import (
@@ -128,6 +129,8 @@ CONST_SUPPORTED_SITES = ["https://kktix.com"
     ,"https://www.indievox.com/ (獨立音樂)"
     ,"https://www.famiticket.com.tw (全網)"
     ,"https://ticket.ibon.com.tw/"
+    ,"https://tix.ctbcsports.com/BROTHERS/ (中信育樂售票網)"
+    ,"https://tix.wdragons.com/ (味全龍官方售票網)"
     ,"https://kham.com.tw/ (寬宏)"
     ,"https://ticket.com.tw/ (年代)"
     ,"https://tickets.udnfunlife.com/ (udn售票網)"
@@ -182,6 +185,10 @@ def get_default_config():
     config_dict["kktix"]["auto_fill_ticket_number"] = True
     config_dict["kktix"]["max_dwell_time"] = 90
 
+    config_dict['ctbc']={}
+    config_dict["ctbc"]["ticket_type_keyword"] = "全票"
+    config_dict["ctbc"]["seat_sorting"] = "row_seat"
+
     config_dict['cityline']={}
 
     config_dict['tixcraft']={}
@@ -202,6 +209,7 @@ def get_default_config():
     config_dict["accounts"]["ibonqware"] = ""
     config_dict["accounts"]["funone_session_cookie"] = ""
     config_dict["accounts"]["fansigo_cookie"] = ""
+    config_dict["accounts"]["ctbc_cookie"] = ""
     config_dict["accounts"]["fansigo_account"] = ""
     config_dict["accounts"]["fansigo_password"] = ""
     config_dict["accounts"]["facebook_account"] = ""
@@ -211,6 +219,7 @@ def get_default_config():
     config_dict["accounts"]["urbtix_account"] = ""
     config_dict["accounts"]["hkticketing_account"] = ""
     config_dict["accounts"]["kham_account"] = ""
+    config_dict["accounts"]["ctbc_account"] = ""
     config_dict["accounts"]["ticket_account"] = ""
     config_dict["accounts"]["udn_account"] = ""
     config_dict["accounts"]["ticketplus_account"] = ""
@@ -222,6 +231,7 @@ def get_default_config():
     config_dict["accounts"]["cityline_password"] = ""
     config_dict["accounts"]["hkticketing_password"] = ""
     config_dict["accounts"]["kham_password"] = ""
+    config_dict["accounts"]["ctbc_password"] = ""
     config_dict["accounts"]["ticket_password"] = ""
     config_dict["accounts"]["udn_password"] = ""
     config_dict["accounts"]["ticketplus_password"] = ""
@@ -351,7 +361,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
+    for section in ["advanced", "kktix", "tixcraft", "ctbc", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -359,6 +369,15 @@ def migrate_config(config_dict):
                 for key, value in default[section].items():
                     if key not in config_dict[section]:
                         config_dict[section][key] = value
+
+    if config_dict["ctbc"].get("seat_sorting") not in (
+        "display",
+        "row_seat",
+        "row_asc_aisle",
+        "row_asc_seat_desc",
+        "row_desc_seat_asc",
+    ):
+        config_dict["ctbc"]["seat_sorting"] = default["ctbc"]["seat_sorting"]
 
     # Top-level scalar fields (auto-fill any missing non-section keys)
     dict_sections = {k for k, v in default.items() if isinstance(v, dict)}
@@ -664,6 +683,28 @@ class LoadJsonHandler(tornado.web.RequestHandler):
         config_dict["advanced"]["remote_url"] = f'"http://127.0.0.1:{server_port}/"'
 
         self.write(config_dict)
+
+
+class GlobalSettingsHandler(tornado.web.RequestHandler):
+    """Read or update settings shared by every profile and bot process."""
+
+    def get(self):
+        self.write(load_global_settings())
+
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+            normalized = save_global_settings(body)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.set_status(400)
+            self.write({"success": False, "error": str(exc)})
+            return
+        except OSError as exc:
+            print(f"[ERROR] Failed to save global settings: {exc}")
+            self.set_status(500)
+            self.write({"success": False, "error": "failed to save global settings"})
+            return
+        self.write({"success": True, "settings": normalized})
 
 class ResetJsonHandler(tornado.web.RequestHandler):
     def get(self):
@@ -1050,6 +1091,7 @@ async def main_server():
         ("/load", LoadJsonHandler),
         ("/save", SaveJsonHandler),
         ("/reset", ResetJsonHandler),
+        ("/global-settings", GlobalSettingsHandler),
         ("/profiles", ProfilesHandler),
 
         ("/test_discord_webhook", TestDiscordWebhookHandler),

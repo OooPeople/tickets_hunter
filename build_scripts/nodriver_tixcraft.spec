@@ -40,6 +40,8 @@ a = Analysis(
         'util',
         'NonBrowser',
         'chrome_downloader',
+        'global_settings',
+        'refresh_coordinator',
         # Modular architecture
         'nodriver_common',
         'platforms',
@@ -54,6 +56,7 @@ a = Analysis(
         'platforms.ibon',
         'platforms.kham',
         'platforms.hkticketing',
+        'platforms.ctbc',
         # Chrome downloader dependencies
         'requests',
         # Image processing

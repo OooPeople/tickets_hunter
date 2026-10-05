@@ -16,7 +16,9 @@
 - **`nodriver_common.py`** — 共用瀏覽器基礎設施：DOM 操作、暫停機制、Cloudflare、瀏覽器初始化、OCR 工廠、通知。禁止：平台業務邏輯、import `platforms/*` 或 `nodriver_tixcraft`。
 - **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔（家族平台同檔，如 tixcraft + ticketmaster）。狀態用模組層級 `_state = {}`；平台常數定義在各自模組。禁止：跨平台 import、import `nodriver_tixcraft`。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
-- **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。僅允許 `import util`。
+- **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
+- **`global_settings.py`** — 跨 profile 的全域設定驗證與原子化檔案存取。僅允許 import `util`。
+- **`refresh_coordinator.py`** — 跨程序刷新節流與 429 恢復狀態。僅允許 import `util` 與 Python 標準函式庫。
 
 ---
 
@@ -24,9 +26,11 @@
 
 ```
 nodriver_tixcraft  -->  nodriver_common, platforms/*, util, settings
-platforms/*        -->  nodriver_common, util
+platforms/*        -->  nodriver_common, global_settings, refresh_coordinator, util
 nodriver_common    -->  util, settings
-settings           -->  util
+settings           -->  global_settings, util
+global_settings    -->  util
+refresh_coordinator --> util
 util               -->  (無專案內部匯入)
 ```
 
@@ -97,7 +101,7 @@ async def nodriver_xxx_main(tab, url, config_dict):
 - 業務邏輯中寫死設定值（必須從 `config_dict` 讀取）
 - 可選欄位用 `config_dict["key"]` 而非 `.get()`（會 KeyError）
 - 使用 `print()` 輸出除錯訊息（必須用 `DebugLogger`）
-- `settings.py` 匯入 `nodriver_tixcraft.py`（循環依賴）
+- `settings.py` 匯入 `nodriver_tixcraft.py`（循環依賴；僅可匯入 `global_settings` 與 `util`）
 - `platforms/*.py` 匯入 `nodriver_tixcraft`（循環依賴）
 - `platforms/*.py` 之間互相匯入（跨平台依賴）
 - `nodriver_common.py` 匯入 `platforms/*`（反向依賴）

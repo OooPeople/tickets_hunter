@@ -37,6 +37,7 @@ a = Analysis(
         # Shared utilities (important!)
         'util',
         'NonBrowser',
+        'global_settings',
         # Optional: ddddocr (if settings.py uses it)
         'ddddocr',
         'onnxruntime',

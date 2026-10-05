@@ -51,6 +51,7 @@ from platforms.kktix import *
 from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
+from platforms.ctbc import *
 from platforms.hkticketing import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
@@ -337,6 +338,30 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
+    if is_utk_sports_url(homepage) and 'tix.ctbcsports.com' in homepage.lower():
+        if await nodriver_ctbc_inject_cookies(tab, config_dict):
+            try:
+                reloaded = await nodriver_utk_sports_reload_wait(
+                    tab,
+                    config_dict,
+                    "apply CTBC cookie session",
+                    apply_local_interval=False,
+                    allow_unknown_document=True,
+                )
+                if not reloaded:
+                    debug.log("[CTBC COOKIE] Shared reload was cancelled")
+                    return tab
+                await asyncio.sleep(random.uniform(1.0, 1.5))
+                login_state = await tab.evaluate(
+                    'typeof _ul !== "undefined" ? String(_ul) : ""'
+                )
+                if login_state == "1":
+                    debug.log("[CTBC COOKIE] Logged in successfully")
+                else:
+                    debug.log("[CTBC COOKIE] Cookie set applied; session may be expired")
+            except Exception as exc:
+                debug.log(f"[CTBC COOKIE] Reload or verification failed: {exc}")
+
     return tab
 
 async def nodrver_block_urls(tab, config_dict):
@@ -575,6 +600,9 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
 
     # Detect config change: reset state if user changed the value
     if current_str != state["target_str"]:
+        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+        if is_utk_sports_url(current_url):
+            await nodriver_utk_sports_cancel_refresh(tab, "refresh time changed")
         state["target_str"] = current_str
         state["reached"] = False
         state["last_countdown_print"] = 0
@@ -591,15 +619,30 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
 
     now = datetime.now()
 
-    # Already past target time (covers "bot starts after target" case)
-    if now >= target_dt:
-        state["reached"] = True
+    async def reload_at_target():
+        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+        if is_utk_sports_url(current_url):
+            return await nodriver_utk_sports_reload(
+                tab,
+                config_dict,
+                "scheduled refresh time reached",
+                apply_local_interval=False,
+                allow_unknown_document=True,
+                allow_blocked_recovery=True,
+            )
         try:
             await tab.reload()
-            print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
+            return True
         except Exception:
-            pass
-        return False
+            return False
+
+    # Already past target time (covers "bot starts after target" case)
+    if now >= target_dt:
+        if await reload_at_target():
+            state["reached"] = True
+            print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
+            return False
+        return True
 
     # Before target time: gate is active
     remaining = (target_dt - now).total_seconds()
@@ -633,13 +676,11 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     if remaining <= 2.0:
         if remaining > 0:
             await asyncio.sleep(remaining)
-        state["reached"] = True
-        try:
-            await tab.reload()
+        if await reload_at_target():
+            state["reached"] = True
             print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
-        except Exception:
-            pass
-        return False
+            return False
+        return True
 
     return True
 
@@ -659,7 +700,7 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
-                    "ocr_captcha", "tixcraft", "kktix", "cityline",
+                    "ocr_captcha", "tixcraft", "kktix", "ctbc", "cityline",
                     "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:
@@ -687,6 +728,142 @@ async def reload_config(config_dict, last_mtime, config_filepath):
         print(f"[WARNING] Failed to reload config: {e}")
 
     return config_dict, last_mtime
+
+
+def _is_kktix_login_page(url):
+    """Keep the sign-in form's Turnstile under the KKTIX login flow."""
+    if not url:
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    valid_host = any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in ("kktix.com", "kktix.cc")
+    )
+    return valid_host and parsed.path.rstrip("/") == "/users/sign_in"
+
+
+async def _current_cloudflare_clearance(tab, url):
+    """Return a same-document challenge clearance proof, or an unknown state."""
+    present, token = await read_turnstile_response(tab)
+    if len(token) > CONST_TURNSTILE_MIN_TOKEN_LENGTH:
+        return "token"
+
+    try:
+        state = await tab.evaluate('''
+            (() => {
+                const ready = document.readyState === 'interactive' ||
+                    document.readyState === 'complete';
+                const bodyText = document.body
+                    ? (document.body.innerText || document.body.textContent || '').trim()
+                    : '';
+                const html = document.documentElement
+                    ? document.documentElement.innerHTML.toLowerCase()
+                    : '';
+                const challenge = !!(
+                    document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+                    document.querySelector('.cf-turnstile') ||
+                    html.includes('cf-browser-verification') ||
+                    html.includes('cf-challenge-running') ||
+                    html.includes('cf-spinner-allow-5-secs') ||
+                    html.includes('checking your browser') ||
+                    html.includes('please wait while we verify') ||
+                    html.includes('verify you are human')
+                );
+                const normalRoot = !!document.querySelector(
+                    '#PerformanceListTable, .seats, #mapdata, #TBL, '
+                    + '.ticket, #table_tickettype'
+                );
+                return {ready, body_ready: bodyText.length > 0, challenge, normal_root: normalRoot};
+            })()
+        ''')
+    except Exception:
+        return "unknown"
+    if not isinstance(state, dict) or not state.get("ready") or not state.get("body_ready"):
+        return "unknown"
+    if state.get("challenge"):
+        return "active"
+    if is_utk_sports_url(url) and state.get("normal_root"):
+        return "normal"
+    return "absent" if not present else "unknown"
+
+
+async def _advance_cloudflare_gate(
+    tab,
+    url,
+    config_dict,
+    cloudflare_checked,
+    cloudflare_fail_count,
+    cloudflare_active=False,
+    cloudflare_clear_confirmations=0,
+):
+    """Advance global challenge handling and report whether dispatch must stop."""
+    # Login-form Turnstile ownership belongs to the platform login flow. The
+    # global handler must not race it while credentials are being submitted.
+    if is_cityline_login_page(url) or _is_kktix_login_page(url):
+        return False, True, cloudflare_fail_count, False, 0
+
+    if cloudflare_active:
+        clearance = await _current_cloudflare_clearance(tab, url)
+        if clearance == "token":
+            return False, True, 0, False, 0
+
+        still_detected = await detect_cloudflare_challenge(
+            tab,
+            show_debug=config_dict.get("advanced", {}).get("verbose", False),
+        )
+        clear_observation = clearance == "normal" or (
+            clearance == "absent" and not still_detected
+        )
+        if clear_observation:
+            cloudflare_clear_confirmations += 1
+            if cloudflare_clear_confirmations >= 2:
+                return False, True, 0, False, 0
+            return (
+                True,
+                False,
+                cloudflare_fail_count,
+                True,
+                cloudflare_clear_confirmations,
+            )
+        cloudflare_clear_confirmations = 0
+
+        # Keep retrying only while attempts remain. A positive detector result
+        # never clears the gate, and an inconclusive DOM read is fail-closed.
+        if still_detected and cloudflare_fail_count < 3:
+            print("[CLOUDFLARE] Challenge page detected, attempting to solve...")
+            solved = await handle_cloudflare_challenge(tab, config_dict)
+            if solved:
+                return True, True, 0, False, 0
+            cloudflare_fail_count += 1
+            if cloudflare_fail_count >= 3:
+                print("[CLOUDFLARE] Max failures reached, waiting for challenge clearance")
+        return True, False, cloudflare_fail_count, True, 0
+
+    # Preserve a conservative active state if older caller state only retained
+    # the failure count.
+    if cloudflare_fail_count >= 3:
+        return True, False, cloudflare_fail_count, True, 0
+    if cloudflare_checked:
+        return False, True, cloudflare_fail_count, False, 0
+
+    is_cloudflare = await detect_cloudflare_challenge(
+        tab,
+        show_debug=config_dict.get("advanced", {}).get("verbose", False),
+    )
+    if not is_cloudflare:
+        return False, True, cloudflare_fail_count, False, 0
+
+    print("[CLOUDFLARE] Challenge page detected, attempting to solve...")
+    solved = await handle_cloudflare_challenge(tab, config_dict)
+    if solved:
+        return True, True, 0, False, 0
+
+    cloudflare_fail_count += 1
+    if cloudflare_fail_count >= 3:
+        print("[CLOUDFLARE] Max failures reached, waiting for challenge clearance")
+    return True, False, cloudflare_fail_count, True, 0
+
 
 async def main(args):
     # Derive instance id for multi-instance isolation:
@@ -779,6 +956,8 @@ async def main(args):
     last_url = ""
     cloudflare_checked = False
     cloudflare_fail_count = 0
+    cloudflare_active = False
+    cloudflare_clear_confirmations = 0
     last_paused_state = False  # Track pause state changes
 
     ocr = None
@@ -854,6 +1033,11 @@ async def main(args):
             #print("url:", url)
 
         if is_quit_bot:
+            current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+            if is_utk_sports_url(current_url) or is_utk_sports_url(last_url):
+                await nodriver_utk_sports_cancel_refresh(
+                    tab, "stopped", wait=True, abandon_probe=True
+                )
             try:
                 await driver.stop()
                 driver = None
@@ -895,53 +1079,86 @@ async def main(args):
 
         if len(url) > 0 :
             if url != last_url:
+                if is_utk_sports_url(last_url) and not is_utk_sports_url(url):
+                    await nodriver_utk_sports_cancel_refresh(
+                        tab,
+                        "left UTK Sports",
+                        wait=True,
+                        abandon_probe=True,
+                    )
                 print(url)
                 write_last_url_to_file(url)
                 cloudflare_checked = False
                 cloudflare_fail_count = 0
+                cloudflare_active = False
+                cloudflare_clear_confirmations = 0
             last_url = url
+            if (
+                is_utk_sports_url(url)
+                and nodriver_utk_sports_consume_reload_event(tab)
+            ):
+                cloudflare_checked = False
+                cloudflare_fail_count = 0
+                cloudflare_active = False
+                cloudflare_clear_confirmations = 0
 
         if is_maxbot_paused:
+            if is_utk_sports_url(url) or is_utk_sports_url(last_url):
+                await nodriver_utk_sports_cancel_refresh(
+                    tab, "paused", wait=True, abandon_probe=True
+                )
             if 'kktix.c' in url:
                 await nodriver_kktix_paused_main(tab, url, config_dict)
             # sleep more when paused.
             await asyncio.sleep(0.1)
             continue
 
-        # Gate: block platform dispatching until refresh_datetime target time
-        if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state):
+        # A challenge owns the document before UTK 429 classification. Otherwise
+        # a same-URL interstitial can age into the shared unknown/429 cooldown.
+        (
+            cloudflare_gate_active,
+            cloudflare_checked,
+            cloudflare_fail_count,
+            cloudflare_active,
+            cloudflare_clear_confirmations,
+        ) = await _advance_cloudflare_gate(
+            tab,
+            url,
+            config_dict,
+            cloudflare_checked,
+            cloudflare_fail_count,
+            cloudflare_active,
+            cloudflare_clear_confirmations,
+        )
+        if cloudflare_gate_active:
             await asyncio.sleep(0.1)
             continue
 
-        # Cloudflare challenge detection (only on URL change to avoid performance hit)
-        # After 3 consecutive failures on same URL, stop retrying to avoid infinite loop
-        # Skip the Cityline and KKTIX login pages: the Turnstile there is part of
-        # the login form, not a page-wide block (covers cityline.com, the venue
-        # cityline.com.hk pages, and kktix.com / kktix.cc sign-in).
-        #
-        # Handling it from here would fight the platform module, which is about
-        # to drive the same form: the generic handler clicks the checkbox on its
-        # own schedule and can consume the widget between the sign-in code
-        # filling the credentials and submitting them. Ownership of a login-form
-        # Turnstile therefore belongs to nodriver_kktix_signin and to
-        # nodriver_cityline_login, which solve it as part of their own sequence.
-        if is_cityline_login_page(url) or is_kktix_login_page(url):
-            cloudflare_checked = True
-        if not cloudflare_checked and cloudflare_fail_count < 3:
-            is_cloudflare = await detect_cloudflare_challenge(tab, show_debug=config_dict.get("advanced", {}).get("verbose", False))
-            cloudflare_checked = True
-            if is_cloudflare:
-                print("[CLOUDFLARE] Challenge page detected, attempting to solve...")
-                cf_result = await handle_cloudflare_challenge(tab, config_dict)
-                if cf_result:
-                    cloudflare_checked = False  # Re-check after successful handling
-                    cloudflare_fail_count = 0
-                    continue
-                else:
-                    cloudflare_fail_count += 1
-                    cloudflare_checked = False  # Allow retry on next loop iteration
-                    if cloudflare_fail_count >= 3:
-                        print("[CLOUDFLARE] Max failures reached, waiting for URL change to retry")
+        utk_health_state = None
+        if is_utk_sports_url(url):
+            # Rate-limit recovery must remain active while refresh_datetime is
+            # waiting; otherwise a pre-sale 429 would only be noticed at the
+            # target second and consume the entire cooldown after opening.
+            utk_health_state = await nodriver_utk_sports_health_check(
+                tab, url, config_dict
+            )
+
+        if utk_health_state == "unknown":
+            # A challenge can render after the URL-level one-shot check. Keep
+            # the document fail-closed, but allow a later loop to re-run CF
+            # detection instead of leaving the same-URL page unknown forever.
+            cloudflare_checked = False
+            await asyncio.sleep(0.25)
+            continue
+        if utk_health_state == "blocked":
+            await asyncio.sleep(0.1)
+            continue
+
+        # Gate platform actions until refresh_datetime, after health checks so
+        # Cloudflare and 429 recovery keep progressing before the target time.
+        if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state):
+            await asyncio.sleep(0.1)
+            continue
 
         # for kktix.cc and kktix.com
         if 'kktix.c' in url:
@@ -973,6 +1190,9 @@ async def main(args):
 
         if 'ibon.com' in url:
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
+
+        if is_utk_sports_url(url):
+            tab = await nodriver_ctbc_main(tab, url, config_dict, ocr)
 
         kham_family = False
         if 'kham.com.tw' in url:

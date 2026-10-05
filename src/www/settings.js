@@ -17,6 +17,8 @@ const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
+const ctbc_ticket_type_keyword = document.querySelector('#ctbc_ticket_type_keyword');
+const ctbc_seat_sorting = document.querySelector('#ctbc_seat_sorting');
 const keyword_exclude = document.querySelector('#keyword_exclude');
 
 // advance
@@ -32,6 +34,10 @@ const auto_press_next_step_button = document.querySelector('#auto_press_next_ste
 const max_dwell_time = document.querySelector('#max_dwell_time');
 
 const auto_reload_page_interval = document.querySelector('#auto_reload_page_interval');
+const utk_shared_reload_throttle_enabled = document.querySelector('#utk_shared_reload_throttle_enabled');
+const utk_shared_reload_min_interval = document.querySelector('#utk_shared_reload_min_interval');
+const utk_rate_limit_initial_cooldown = document.querySelector('#utk_rate_limit_initial_cooldown');
+const utk_rate_limit_max_cooldown = document.querySelector('#utk_rate_limit_max_cooldown');
 const tixcraft_soft_block_delay = document.querySelector('#tixcraft_soft_block_delay');
 const tixcraft_allow_less_tickets = document.querySelector('#tixcraft_allow_less_tickets');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
@@ -69,12 +75,14 @@ const tixcraft_sid = document.querySelector('#tixcraft_sid');
 const ibonqware = document.querySelector('#ibonqware');
 const funone_session_cookie = document.querySelector('#funone_session_cookie');
 const fansigo_cookie = document.querySelector('#fansigo_cookie');
+const ctbc_cookie = document.querySelector('#ctbc_cookie');
 const fansigo_account = document.querySelector('#fansigo_account');
 const fansigo_password = document.querySelector('#fansigo_password');
 const facebook_account = document.querySelector('#facebook_account');
 const kktix_account = document.querySelector('#kktix_account');
 const fami_account = document.querySelector('#fami_account');
 const kham_account = document.querySelector('#kham_account');
+const ctbc_account = document.querySelector('#ctbc_account');
 const ticket_account = document.querySelector('#ticket_account');
 const udn_account = document.querySelector('#udn_account');
 const ticketplus_account = document.querySelector('#ticketplus_account');
@@ -86,6 +94,7 @@ const facebook_password = document.querySelector('#facebook_password');
 const kktix_password = document.querySelector('#kktix_password');
 const fami_password = document.querySelector('#fami_password');
 const kham_password = document.querySelector('#kham_password');
+const ctbc_password = document.querySelector('#ctbc_password');
 const ticket_password = document.querySelector('#ticket_password');
 const udn_password = document.querySelector('#udn_password');
 const ticketplus_password = document.querySelector('#ticketplus_password');
@@ -103,6 +112,17 @@ const theme_status = document.querySelector('#theme_status');
 const language_selector = document.querySelector('#language_selector');
 
 var settings = null;
+var globalSettings = null;
+let profileLoadGeneration = 0;
+run_button.disabled = true;
+save_button.disabled = true;
+
+function update_settings_action_state()
+{
+    const ready = !!settings && !!globalSettings;
+    run_button.disabled = !ready;
+    save_button.disabled = !ready;
+}
 let currentLanguage = 'zh-TW';
 let helpOffcanvasInstance = null;
 let currentHelpField = null;
@@ -462,7 +482,16 @@ function renderBasicTabTranslations() {
     setRowLabelForField('area_select_mode', fieldLabel('Area selection order', 'area_select_mode'));
     setRowLabelForField('area_keyword', fieldLabel('Area keywords', 'area_keyword'));
     setRowLabelForField('area_auto_fallback', fieldLabel('Area fallback', 'area_auto_fallback'));
+    setNearestFormText('ctbc_ticket_type_keyword', 'Used on the seat page. Defaults to Full Ticket and does not inherit area or exclusion keywords. Enter 身心 to select the disability ticket explicitly.');
+    setRowLabelForField('ctbc_seat_sorting', fieldLabel('Baseball seat ordering', 'ctbc_seat_sorting'));
     setRowLabelForField('keyword_exclude', fieldLabel('Exclude keywords', 'keyword_exclude'));
+
+    applyOrRestore('#ctbc_seat_sorting option[value="display"]', 'textContent', 'Seat-map display order (top to bottom)');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_seat"]', 'textContent', 'Smaller row, then smaller seat');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_asc_aisle"]', 'textContent', 'Smaller row, aisle seat');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_asc_seat_desc"]', 'textContent', 'Smaller row, then larger seat');
+    applyOrRestore('#ctbc_seat_sorting option[value="row_desc_seat_asc"]', 'textContent', 'Larger row, then smaller seat');
+    setNearestFormText('ctbc_seat_sorting', 'The default prioritizes smaller row and seat numbers. Each option directly defines seat priority.');
 
     const versionLabel = document.querySelector('#maxbot_version')?.closest('.row')?.querySelector('label.col-sm-2');
     if (versionLabel) {
@@ -526,6 +555,13 @@ function renderAdvancedTabTranslations() {
     setRowLabelForField('telegram_chat_id', fieldLabel('Telegram chat ID', 'telegram_chat_id'));
     setRowLabelForField('notification_message', 'Notification message');
     setRowLabelForField('auto_reload_page_interval', fieldLabel('Auto reload interval (sec)', 'auto_reload_page_interval'));
+    applyOrRestore('#utk-shared-throttle-label', 'textContent', 'Shared baseball refresh protection');
+    applyOrRestore('#utk-shared-throttle-enabled-label', 'textContent', 'Coordinate CTBC Brothers / Wei Chuan Dragons refreshes');
+    applyOrRestore('#utk-shared-min-interval-label', 'textContent', 'Minimum interval (sec)');
+    applyOrRestore('#utk-initial-cooldown-label', 'textContent', 'Initial 429 cooldown (sec)');
+    applyOrRestore('#utk-max-cooldown-label', 'textContent', 'Maximum 429 cooldown (sec)');
+    applyOrRestore('#utk-shared-throttle-help', 'textContent', 'These global settings are shared by every profile and every running CTBC Brothers / Wei Chuan Dragons instance. Switching profiles does not change them. The per-profile interval above still applies; this protection also prevents simultaneous refreshes.');
+    applyOrRestore('#utk-shared-throttle-warning', 'textContent', 'When disabled, tabs and processes no longer share refresh pacing or 429 cooldown protection, increasing the chance of another site-side rate limit.');
     setRowLabelForField('tixcraft_soft_block_delay', fieldLabel('TixCraft soft-block delay (sec)', 'tixcraft_soft_block_delay'));
     setRowLabelForField('tixcraft_allow_less_tickets', fieldLabel('Buy fewer TixCraft tickets if needed', 'tixcraft_allow_less_tickets'));
     setRowLabelForField('reset_browser_interval', fieldLabel('Browser restart interval (sec)', 'reset_browser_interval'));
@@ -617,6 +653,9 @@ function renderAutofillTabTranslations() {
     setRowLabelForField('ibonqware', fieldLabel('iBon cookie ibonqware', 'ibonqware'));
     setRowLabelForField('funone_session_cookie', fieldLabel('FunOne cookie (ticket_session)', 'funone_session_cookie'));
     setRowLabelForField('fansigo_cookie', fieldLabel('FANSI GO cookie (FansiAuthInfo)', 'fansigo_cookie'));
+    setRowLabelForField('ctbc_cookie', fieldLabel('CTBC Sports cookie set', 'ctbc_cookie'));
+    applyOrRestore('#ctbc_cookie', 'placeholder', 'Paste the complete Cookie header (all CTBC_ cookies)');
+    setNearestFormText('ctbc_cookie', 'Cookie is preferred; expired cookies fall back to the account and password below. Treat it as a login credential and never share it.');
     setRowLabelForField('discount_code', fieldLabel('Discount / member code', 'discount_code'));
 
     setInputGroupTexts('fansigo_account', ['Email', 'Password']);
@@ -624,6 +663,7 @@ function renderAutofillTabTranslations() {
     setInputGroupTexts('kktix_account', ['Account', 'Password']);
     setInputGroupTexts('fami_account', ['Account', 'Password']);
     setInputGroupTexts('kham_account', ['Account', 'Password']);
+    setInputGroupTexts('ctbc_account', ['Account', 'Password']);
     setInputGroupTexts('ticket_account', ['Account', 'Password']);
     setInputGroupTexts('udn_account', ['Account', 'Password']);
     setInputGroupTexts('ticketplus_account', ['Account', 'Password']);
@@ -637,7 +677,9 @@ function renderAutofillTabTranslations() {
     setRowLabelForField('kktix_account', 'KKTIX');
     setRowLabelForField('fami_account', 'FamiTicket');
     setRowLabelForField('kham_account', 'Kham');
+    setRowLabelForField('ctbc_account', 'CTBC Sports');
     setRowLabelForField('ticket_account', 'Ticket.com.tw');
+    setRowLabelForField('ctbc_ticket_type_keyword', 'Baseball ticket-type keyword');
     setRowLabelForField('udn_account', 'UDN');
     setRowLabelForField('ticketplus_account', 'TicketPlus');
     setRowLabelForField('cityline_account', 'Cityline');
@@ -789,7 +831,7 @@ function applyLanguage(language) {
 
 function uiText(key, extra = '') {
     const messages = {
-        'reset_done': { 'zh-TW': '已重設為預設值', en: 'Reset to defaults' },
+        'reset_done': { 'zh-TW': '已重設目前 profile；職棒共用刷新設定維持不變', en: 'Profile reset; shared baseball refresh settings were kept' },
         'launching': { 'zh-TW': '啟動 MaxBot 主程式中...', en: 'Launching Tickets Hunter...' },
         'launch_sent': { 'zh-TW': '啟動指令已發送，請稍候瀏覽器視窗開啟...', en: 'Launch request sent. Please wait for the browser window...' },
         'launch_failed': { 'zh-TW': `啟動失敗：無法連線到後端服務 (${extra})`, en: `Launch failed: cannot connect to the backend service (${extra})` },
@@ -798,6 +840,11 @@ function uiText(key, extra = '') {
         'saved': { 'zh-TW': '已存檔', en: 'Saved' },
         'missing_ticket_number': { 'zh-TW': '提示: 請指定張數', en: 'Please select the number of tickets.' },
         'invalid_tixcraft_soft_block_delay': { 'zh-TW': '提示: 暫時鎖定等待秒數請填 1 到 600 的整數，或留空使用預設值。', en: 'Enter an integer from 1 to 600 for the TixCraft soft-block delay, or leave it empty to use the default.' },
+        'invalid_utk_min_interval': { 'zh-TW': '提示：職棒共用刷新最小間隔不得低於 1.0 秒。', en: 'The shared baseball refresh interval must be at least 1.0 second.' },
+        'invalid_utk_cooldown': { 'zh-TW': '提示：429 冷卻時間必須是大於 0 的整數，且最大冷卻不得小於初始冷卻。', en: '429 cooldowns must be positive integers, and the maximum cannot be lower than the initial cooldown.' },
+        'global_settings_not_ready': { 'zh-TW': '全域刷新設定仍在載入，請稍候再試。', en: 'Global refresh settings are still loading. Please try again shortly.' },
+        'global_settings_load_failed': { 'zh-TW': '全域刷新設定載入失敗；儲存與啟動已停用。請重新整理頁面再試。', en: 'Global refresh settings failed to load. Save and Run are disabled; reload the page to try again.' },
+        'profile_load_failed': { 'zh-TW': '設定檔載入失敗；儲存與啟動已停用。請重新選擇或整理頁面。', en: 'The profile failed to load. Save and Run are disabled; select it again or reload the page.' },
         'status_paused': { 'zh-TW': '已暫停', en: 'Paused' },
         'status_running': { 'zh-TW': '已啟動', en: 'Running' },
         'discord_empty': { 'zh-TW': '請先輸入 Discord Webhook URL。', en: 'Please enter the Discord webhook URL first.' },
@@ -832,6 +879,7 @@ const PROFILE_PLATFORMS = [
     { slug: 'tixcraft',     label: 'Tixcraft 拓元',    homepage: 'https://tixcraft.com' },
     { slug: 'kktix',        label: 'KKTIX',            homepage: 'https://kktix.com' },
     { slug: 'ibon',         label: 'iBon',             homepage: 'https://ticket.ibon.com.tw' },
+    { slug: 'ctbc',         label: '中信育樂售票網',     homepage: 'https://tix.ctbcsports.com/BROTHERS/' },
     { slug: 'famiticket',   label: 'FamiTicket 全網',  homepage: 'https://www.famiticket.com.tw' },
     { slug: 'kham',         label: 'Kham 寬宏',        homepage: 'https://kham.com.tw' },
     { slug: 'ticket',       label: '年代售票',          homepage: 'https://ticket.com.tw' },
@@ -848,9 +896,9 @@ const PROFILE_PLATFORMS = [
 const PROFILE_STORAGE_KEY = 'maxbot_current_profile';
 let current_profile = localStorage.getItem(PROFILE_STORAGE_KEY) || 'default';
 
-function profile_query() {
-    return (current_profile && current_profile !== 'default')
-        ? '?profile=' + encodeURIComponent(current_profile) : '';
+function profile_query(profileName = current_profile) {
+    return (profileName && profileName !== 'default')
+        ? '?profile=' + encodeURIComponent(profileName) : '';
 }
 
 function refresh_profile_tabs(callback) {
@@ -894,6 +942,10 @@ function switch_profile(name) {
     if (name === current_profile) return;
     current_profile = name;
     localStorage.setItem(PROFILE_STORAGE_KEY, name);
+    // Never let the previous profile remain actionable while the new one is
+    // loading. maxbot_load_api also ignores responses from an older tab.
+    settings = null;
+    update_settings_action_state();
     // Reset question alert so the new tab's pending question shows immediately
     if (typeof lastDetectedQuestion !== 'undefined') lastDetectedQuestion = '';
     refresh_profile_tabs();
@@ -1005,6 +1057,7 @@ function delete_profile(name) {
 
 refresh_profile_tabs(function() {
     maxbot_load_api();
+    load_global_settings_api();
 });
 
 // Keyword conversion functions (aligned with util.py logic)
@@ -1070,6 +1123,7 @@ const PLATFORM_MAP = [
     { key: 'tixcraft',    domains: ['tixcraft.com', 'teamear.com', 'indievox.com', 'ticketmaster.'] },
     { key: 'kktix',       domains: ['kktix.com', 'kktix.cc'] },
     { key: 'ibon',        domains: ['ibon.com'] },
+    { key: 'ctbc',        domains: ['tix.ctbcsports.com', 'tix.wdragons.com'] },
     { key: 'famiticket',  domains: ['famiticket.com'] },
     { key: 'kham',        domains: ['kham.com.tw'] },
     { key: 'ticket',      domains: ['ticket.com.tw'] },
@@ -1280,12 +1334,14 @@ function load_settins_to_form(settings)
         ibonqware.value = settings.accounts.ibonqware;
         funone_session_cookie.value = settings.accounts.funone_session_cookie || '';
         fansigo_cookie.value = settings.accounts.fansigo_cookie || '';
+        ctbc_cookie.value = settings.accounts.ctbc_cookie || '';
         fansigo_account.value = settings.accounts.fansigo_account || '';
         fansigo_password.value = settings.accounts.fansigo_password || '';
         facebook_account.value = settings.accounts.facebook_account;
         kktix_account.value = settings.accounts.kktix_account;
         fami_account.value = settings.accounts.fami_account;
         kham_account.value = settings.accounts.kham_account;
+        ctbc_account.value = settings.accounts.ctbc_account || '';
         ticket_account.value = settings.accounts.ticket_account;
         udn_account.value = settings.accounts.udn_account;
         ticketplus_account.value = settings.accounts.ticketplus_account;
@@ -1297,7 +1353,18 @@ function load_settins_to_form(settings)
         kktix_password.value = settings.accounts.kktix_password;
         fami_password.value = settings.accounts.fami_password;
         kham_password.value = settings.accounts.kham_password;
+        ctbc_password.value = settings.accounts.ctbc_password || '';
         ticket_password.value = settings.accounts.ticket_password;
+
+        ctbc_ticket_type_keyword.value = (settings.ctbc && settings.ctbc.ticket_type_keyword) || '全票';
+        const savedCtbcSeatSorting = (settings.ctbc && settings.ctbc.seat_sorting) || 'row_seat';
+        const validCtbcSeatSortings = [
+            'display', 'row_seat', 'row_asc_aisle',
+            'row_asc_seat_desc', 'row_desc_seat_asc'
+        ];
+        ctbc_seat_sorting.value = validCtbcSeatSortings.includes(savedCtbcSeatSorting)
+            ? savedCtbcSeatSorting
+            : 'row_seat';
         udn_password.value = settings.accounts.udn_password;
         ticketplus_password.value = settings.accounts.ticketplus_password;
         discount_code.value = settings.advanced.discount_code || '';
@@ -1340,22 +1407,111 @@ function load_settins_to_form(settings)
 
 function maxbot_load_api()
 {
-    let api_url = "/load" + profile_query();
+    const requestedProfile = current_profile;
+    const loadGeneration = ++profileLoadGeneration;
+    settings = null;
+    update_settings_action_state();
+    let api_url = "/load" + profile_query(requestedProfile);
     $.get( api_url, function() {
         //alert( "success" );
     })
     .done(function(data) {
+        if (current_profile !== requestedProfile
+            || loadGeneration !== profileLoadGeneration) return;
         //alert( "second success" );
         //console.log(data);
         settings = data;
         load_settins_to_form(data);
+        update_settings_action_state();
     })
     .fail(function() {
-        //alert( "error" );
+        if (current_profile === requestedProfile
+            && loadGeneration === profileLoadGeneration) {
+            run_message(uiText('profile_load_failed'));
+            update_settings_action_state();
+        }
     })
     .always(function() {
         //alert( "finished" );
     });
+}
+
+function load_global_settings_to_form(value)
+{
+    const utk = value && value.utk_sports ? value.utk_sports : null;
+    if (!utk) return;
+    globalSettings = value;
+    utk_shared_reload_throttle_enabled.checked = utk.enabled === true;
+    utk_shared_reload_min_interval.value = utk.min_interval_seconds;
+    utk_rate_limit_initial_cooldown.value = utk.initial_cooldown_seconds;
+    utk_rate_limit_max_cooldown.value = utk.max_cooldown_seconds;
+    check_global_unsaved_fields();
+    update_settings_action_state();
+}
+
+function load_global_settings_api()
+{
+    $.get('/global-settings')
+    .done(function(data) {
+        load_global_settings_to_form(data);
+    })
+    .fail(function(xhr, status) {
+        console.error('[MaxBot] Global settings load failed:', status, xhr.responseText);
+        run_message(uiText('global_settings_load_failed'));
+        update_settings_action_state();
+    });
+}
+
+function collect_global_settings_from_form(showMessage = true)
+{
+    const minInterval = Number(utk_shared_reload_min_interval.value);
+    const initialCooldown = Number(utk_rate_limit_initial_cooldown.value);
+    const maxCooldown = Number(utk_rate_limit_max_cooldown.value);
+
+    const minIntervalValid = Number.isFinite(minInterval) && minInterval >= 1.0;
+    const cooldownValid = Number.isInteger(initialCooldown) && initialCooldown > 0
+        && Number.isInteger(maxCooldown) && maxCooldown > 0
+        && maxCooldown >= initialCooldown;
+
+    utk_shared_reload_min_interval.classList.toggle('is-invalid', !minIntervalValid);
+    utk_rate_limit_initial_cooldown.classList.toggle('is-invalid', !cooldownValid);
+    utk_rate_limit_max_cooldown.classList.toggle('is-invalid', !cooldownValid);
+    if (!minIntervalValid) {
+        if (showMessage) message(uiText('invalid_utk_min_interval'));
+        return null;
+    }
+    if (!cooldownValid) {
+        if (showMessage) message(uiText('invalid_utk_cooldown'));
+        return null;
+    }
+    return {
+        utk_sports: {
+            enabled: utk_shared_reload_throttle_enabled.checked,
+            min_interval_seconds: minInterval,
+            initial_cooldown_seconds: initialCooldown,
+            max_cooldown_seconds: maxCooldown,
+        }
+    };
+}
+
+function check_global_unsaved_fields()
+{
+    if (!globalSettings || !globalSettings.utk_sports) return;
+    const current = collect_global_settings_from_form(false);
+    if (!current) return;
+    const saved = globalSettings.utk_sports;
+    utk_shared_reload_throttle_enabled.classList.toggle(
+        'is-invalid', current.utk_sports.enabled !== saved.enabled
+    );
+    utk_shared_reload_min_interval.classList.toggle(
+        'is-invalid', current.utk_sports.min_interval_seconds !== saved.min_interval_seconds
+    );
+    utk_rate_limit_initial_cooldown.classList.toggle(
+        'is-invalid', current.utk_sports.initial_cooldown_seconds !== saved.initial_cooldown_seconds
+    );
+    utk_rate_limit_max_cooldown.classList.toggle(
+        'is-invalid', current.utk_sports.max_cooldown_seconds !== saved.max_cooldown_seconds
+    );
 }
 
 function maxbot_reset_api()
@@ -1414,35 +1570,41 @@ function next_instance_id(base, rows)
 
 function maxbot_launch()
 {
+    const targetProfile = current_profile;
     // Warn when this profile already has a live instance (same-account session
     // kick risk). If confirmed, launch a second instance under a numbered id.
     $.get('/instances').done(function(data) {
+        if (current_profile !== targetProfile) return;
         const rows = (data && data.instances) ? data.instances : [];
-        const alive = rows.some(function(it){ return it.id === current_profile && it.alive; });
+        const alive = rows.some(function(it){ return it.id === targetProfile && it.alive; });
         if (alive) {
             if (!window.confirm(uiText('dup_run_confirm'))) return;
-            do_launch(next_instance_id(current_profile, rows));
+            do_launch(next_instance_id(targetProfile, rows), targetProfile);
         } else {
-            do_launch('');
+            do_launch('', targetProfile);
         }
     }).fail(function() {
         // /instances unavailable (older backend): fall back to a plain launch.
-        do_launch('');
+        if (current_profile === targetProfile) do_launch('', targetProfile);
     });
 }
 
-function do_launch(instance_override)
+function do_launch(instance_override, targetProfile)
 {
+    if (current_profile !== targetProfile) return;
     run_message(uiText('launching'));
     if (!save_changes_to_dict(true)) return;
-    maxbot_save_api(function(){ maxbot_run_api(instance_override); });
+    maxbot_save_api(
+        function(){ maxbot_run_api(instance_override, targetProfile); },
+        targetProfile
+    );
 }
 
-function maxbot_run_api(instance_override)
+function maxbot_run_api(instance_override, targetProfile = current_profile)
 {
-    let api_url = "/run" + profile_query();
+    let api_url = "/run" + profile_query(targetProfile);
     if (instance_override) {
-        api_url += (profile_query() ? '&' : '?') + 'instance=' + encodeURIComponent(instance_override);
+        api_url += (profile_query(targetProfile) ? '&' : '?') + 'instance=' + encodeURIComponent(instance_override);
     }
     $.get( api_url, function() {
         //alert( "success" );
@@ -1481,10 +1643,17 @@ function maxbot_shutdown_api()
 
 function save_changes_to_dict(silent_flag)
 {
+    if (!globalSettings) {
+        message(uiText('global_settings_not_ready'));
+        return false;
+    }
     const ticket_number_value = parseInt(ticket_number.value);
     const tixcraft_soft_block_delay_value = (tixcraft_soft_block_delay?.value || '').trim();
+    const globalSettingsValue = collect_global_settings_from_form(true);
     //console.log(ticket_number_value);
-    if (!ticket_number_value)
+    if (!globalSettingsValue) {
+        return false;
+    } else if (!ticket_number_value)
     {
         message(uiText('missing_ticket_number'));
         return false;
@@ -1587,12 +1756,14 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.ibonqware = ibonqware.value;
             settings.accounts.funone_session_cookie = funone_session_cookie.value;
             settings.accounts.fansigo_cookie = fansigo_cookie.value;
+            settings.accounts.ctbc_cookie = ctbc_cookie.value;
             settings.accounts.fansigo_account = fansigo_account.value;
             settings.accounts.fansigo_password = fansigo_password.value;
             settings.accounts.facebook_account = facebook_account.value;
             settings.accounts.kktix_account = kktix_account.value;
             settings.accounts.fami_account = fami_account.value;
             settings.accounts.kham_account = kham_account.value;
+            settings.accounts.ctbc_account = ctbc_account.value;
             settings.accounts.ticket_account = ticket_account.value;
             settings.accounts.udn_account = udn_account.value;
             settings.accounts.ticketplus_account = ticketplus_account.value;
@@ -1604,7 +1775,11 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.kktix_password = kktix_password.value;
             settings.accounts.fami_password = fami_password.value;
             settings.accounts.kham_password = kham_password.value;
+            settings.accounts.ctbc_password = ctbc_password.value;
             settings.accounts.ticket_password = ticket_password.value;
+            if (!settings.ctbc) settings.ctbc = {};
+            settings.ctbc.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
+            settings.ctbc.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
             settings.accounts.udn_password = udn_password.value;
             settings.accounts.ticketplus_password = ticketplus_password.value;
             settings.advanced.discount_code = discount_code.value;
@@ -1627,17 +1802,32 @@ function save_changes_to_dict(silent_flag)
     return false;
 }
 
-function maxbot_save_api(callback)
+function maxbot_save_api(callback, targetProfile = current_profile)
 {
-    let api_url = "/save" + profile_query();
-    if(settings) {
+    let api_url = "/save" + profile_query(targetProfile);
+    const globalSettingsValue = collect_global_settings_from_form(true);
+    if(settings && globalSettingsValue) {
         $.post( api_url, JSON.stringify(settings), function() {
             //alert( "success" );
         })
-        .done(function(data) {
-            console.log("[MaxBot] 設定儲存成功");
-            check_unsaved_fields();
-            if(callback) callback();
+        .done(function() {
+            $.ajax({
+                url: '/global-settings',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(globalSettingsValue)
+            })
+            .done(function(data) {
+                globalSettings = data && data.settings ? data.settings : globalSettingsValue;
+                console.log("[MaxBot] Profile and global settings saved");
+                check_unsaved_fields();
+                if(callback) callback();
+            })
+            .fail(function(xhr, status, error) {
+                console.error("[MaxBot] Global settings save error:", status, error);
+                console.error("[MaxBot] Response content:", xhr.responseText);
+                run_message(uiText('save_failed', status));
+            });
         })
         .fail(function(xhr, status, error) {
             console.error("[MaxBot] Save API error:", status, error);
@@ -1689,11 +1879,12 @@ function maxbot_resume_api()
 }
 function maxbot_save()
 {
+    const targetProfile = current_profile;
     run_message(uiText('saving'));
     if (!save_changes_to_dict(true)) return;
     maxbot_save_api(function() {
         run_message(uiText('saved'));
-    });
+    }, targetProfile);
 }
 
 function check_unsaved_fields()
@@ -1716,11 +1907,26 @@ function check_unsaved_fields()
                 $("#"+f).removeClass("is-invalid");
             }
         });
+        if (ctbc_ticket_type_keyword) {
+            const savedValue = (settings.ctbc && settings.ctbc.ticket_type_keyword) || '全票';
+            ctbc_ticket_type_keyword.classList.toggle(
+                'is-invalid',
+                ctbc_ticket_type_keyword.value !== savedValue
+            );
+        }
+        if (ctbc_seat_sorting) {
+            const savedValue = (settings.ctbc && settings.ctbc.seat_sorting) || 'row_seat';
+            ctbc_seat_sorting.classList.toggle(
+                'is-invalid',
+                ctbc_seat_sorting.value !== savedValue
+            );
+        }
         const field_list_accounts = [
             "tixcraft_sid",
             "ibonqware",
             "funone_session_cookie",
             "fansigo_cookie",
+            "ctbc_cookie",
             "fansigo_account",
             "fansigo_password",
             "facebook_account",
@@ -1730,6 +1936,7 @@ function check_unsaved_fields()
             "urbtix_account",
             "hkticketing_account",
             "kham_account",
+            "ctbc_account",
             "ticket_account",
             "udn_account",
             "ticketplus_account",
@@ -1739,6 +1946,7 @@ function check_unsaved_fields()
             "urbtix_password",
             "hkticketing_password",
             "kham_password",
+            "ctbc_password",
             "ticket_password",
             "udn_password",
             "ticketplus_password"
@@ -1823,6 +2031,7 @@ function check_unsaved_fields()
         }
 
     }
+    check_global_unsaved_fields();
 }
 
 function maxbot_status_api()

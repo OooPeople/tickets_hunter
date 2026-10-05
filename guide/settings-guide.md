@@ -68,6 +68,8 @@ python settings.py
 - KKTIX: `https://kktix.com/events/...`
 - TicketPlus: `https://ticketplus.com.tw/...`
 - iBon: `https://ticket.ibon.com.tw/...`
+- 中信育樂售票網: `https://tix.ctbcsports.com/BROTHERS/...`
+- 味全龍官方售票網: `https://tix.wdragons.com/...`
 - 其他支援平台
 
 **提示**：直接複製活動頁面網址即可。
@@ -335,6 +337,27 @@ python settings.py
 | random | 隨機變化 | 分散風險（預設） |
 
 **詳細說明**：參考 [自動回退策略](keyword-mechanism.md#自動回退策略)
+
+---
+
+#### 職棒座位排序依據（ctbc.seat_sorting）
+類型：字串 | 預設：`row_seat`
+
+適用於中信兄弟與味全龍售票網的劃位頁。程式建立可用連座候選後，會直接依此欄位決定優先順序。
+
+| 值 | 圖形介面選項 | 行為 |
+|---|---|---|
+| `display` | 座位圖顯示順序（由上至下） | 沿用網站座位表由上到下、由左到右的元素順序 |
+| `row_seat` | 優先較小排數、較小座號 | 先選最小排數，再選其中座號較小的連座（預設） |
+| `row_asc_aisle` | 優先較小排數、走道位 | 只選整排最左或最右端的連座，再優先選排數較小者 |
+| `row_asc_seat_desc` | 優先較小排數、較大座號 | 先選最小排數，再選其中座號較大的連座 |
+| `row_desc_seat_asc` | 優先較大排數、較小座號 | 先選最大排數，再選其中座號較小的連座 |
+
+連座判定仍以座位圖中實際相鄰的儲存格為準。即使兩個座號數字連續，只要座位圖中間隔著走道或不可選座位，就不會被誤認為連座；只有啟用「允許不連續座位」時才會退而選擇非連座。
+
+`row_asc_aisle` 會以該排所有可辨識座位中的最小、最大座號判斷左右端點。前排只有內側座位時會繼續往後尋找；所有排都沒有端點連座時不會退回內側或不連續座位，而會等待重新整理後再找。此判斷依賴售票頁為已售座位保留可解析的排號與座號。
+
+部分球場的座位圖會旋轉排列，使畫面橫列代表座號、直欄才代表實際排數。程式會解析每個座位標題中的排號與座號，並以畫面座標判斷實際相鄰關係，因此不會把 DOM 的最上方誤認為最前排。
 
 ---
 
@@ -1179,6 +1202,7 @@ iBon 的 Cookie qware，用於快速登入。
 |------|---------|---------|-------------|
 | KKTIX | kktix_account | kktix_password | KKTIX 帳號 / KKTIX 密碼 |
 | TicketPlus | ticketplus_account | ticketplus_password | 遠大 帳號 / 遠大 密碼 |
+| 中信育樂售票網 | ctbc_account | ctbc_password | 中信育樂 帳號 / 中信育樂 密碼 |
 | KHAM | kham_account | kham_password | 寬宏 帳號 / 寬宏 密碼 |
 | Cityline | cityline_account | cityline_password | cityline 帳號 / cityline 密碼 |
 | 年代 | ticket_account | ticket_password | 年代 帳號 / 年代 密碼 |
@@ -1192,6 +1216,16 @@ iBon 的 Cookie qware，用於快速登入。
 - 密碼會以明文儲存在 settings.json
 - 圖形介面會顯示警告：`將密碼保存到設定檔中可能會讓您的密碼被盜。`
 - `cityline_password` 目前圖形介面無對應欄位，僅能直接編輯 settings.json
+
+中信育樂的座位頁另有 `ctbc.ticket_type_keyword`，預設為 `全票`。它與「區域關鍵字」分開：例如區域關鍵字可填 `A`，票種關鍵字填 `全票`。座位優先規則則可透過 [`ctbc.seat_sorting`](#職棒座位排序依據ctbcseat_sorting) 在座位圖顯示順序與排數、座號之間切換。
+
+`ctbc.ticket_type_keyword` 是明確的票種選擇，因此不會套用共用的「排除關鍵字」。例如票種關鍵字填入 `身心` 時，即使排除關鍵字包含 `身心`／`身障`，仍會正確選擇身心障礙票；排除規則仍正常套用在日期與區域候選。
+
+味全龍官方售票網沿用相同的日期、區域與票種設定。啟動後可先暫停程式並手動登入，再返回活動日期頁繼續；味全龍在選區後會查詢該票價區的站方公告，因此程式會保留原生選區導頁，不會略過公告確認。
+
+中信育樂也支援 `accounts.ctbc_cookie` 自動登入。由於登入狀態由多個 `CTBC_...` Cookie 組成，請在已登入的 Chrome 開啟開發人員工具，從 Network 的主要 `UTK...` 文件請求複製完整 `Cookie` request header。程式只會注入 `CTBC_` 開頭的 Cookie，並讓頁面重新產生防偽 Cookie；Cookie 過期時會回退到 `ctbc_account` / `ctbc_password`。
+
+中信育樂的驗證碼會自動使用 ddddocr 官方 beta 模型與原始尺寸圖片辨識，不受「使用通用 OCR 模型」的預設模型影響；自訂非預設模型路徑時則仍尊重自訂模型。
 
 **⚠️ UDN 登入是半自動的**：
 - 程式會自動填寫帳號密碼

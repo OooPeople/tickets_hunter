@@ -74,6 +74,7 @@ python build_scripts/build_local.py             # 打包並驗證能啟動（改
   寫法為 `import zendriver as uc`；檔名維持 `nodriver_*.py` 不變（模組名稱，非套件名稱）。
 - 入口點為 `src/nodriver_tixcraft.py`（主迴圈 + URL 路由），各平台邏輯拆分於 `src/platforms/*.py`。
 - `src/nodriver_common.py` 為共用瀏覽器基礎設施（DOM 工具、暫停機制、Cloudflare、瀏覽器初始化）。
+- `src/global_settings.py` 與 `src/refresh_coordinator.py` 分別管理跨 profile 設定及跨程序刷新協調。
 - `src/util.py` 為所有平台共用的純工具函式。
 - 所有執行期行為由 `settings.json` 控制。禁止把使用者可能需要調整的值寫死在程式碼中。
 - 新增設定鍵必須同時在 `src/settings.py` 的設定綱要中宣告。
@@ -84,6 +85,8 @@ python build_scripts/build_local.py             # 打包並驗證能啟動（改
 src/
   nodriver_tixcraft.py   主迴圈與 URL 路由（入口點）
   nodriver_common.py     共用瀏覽器基礎設施（DOM、暫停、Cloudflare、瀏覽器初始化）
+  global_settings.py     跨 profile 的全域設定
+  refresh_coordinator.py 跨程序刷新與 429 恢復協調
   util.py                共用純工具函式（文字比對、關鍵字解析、DebugLogger）
   settings.py            設定綱要與網頁設定介面
   platforms/*.py         各平台獨立模組
@@ -99,7 +102,9 @@ build_scripts/           PyInstaller 打包腳本
 `docs/02-development/code-boundaries.md`）：
 
 ```
-nodriver_tixcraft  ->  platforms/*  ->  nodriver_common  ->  util / settings
+nodriver_tixcraft  ->  platforms/*  ->  nodriver_common
+                              |----> global_settings / refresh_coordinator -> util
+nodriver_common    ->  util / settings
 ```
 
 ### 平台與模組對照
@@ -116,6 +121,7 @@ nodriver_tixcraft  ->  platforms/*  ->  nodriver_common  ->  util / settings
 | `platforms/hkticketing.py` | HKTicketing 快達票、澳門銀河、Ticketek |
 | `platforms/fansigo.py` | FANSI GO |
 | `platforms/funone.py` | FunOne |
+| `platforms/ctbc.py` | 中信育樂售票網、味全龍官方售票網 |
 | `platforms/facebook.py` | Facebook 登入輔助 |
 
 ---

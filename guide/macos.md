@@ -48,7 +48,7 @@ Gatekeeper 限制就能用**，不需要裝 Python、也不需要自己打包。
 打開「終端機」，輸入下面這串（**結尾留一個空格**）：
 
 ```bash
-xattr -dr com.apple.quarantine 
+xattr -dr com.apple.quarantine
 ```
 
 然後把解壓縮出來的 `tickets_hunter` **資料夾直接拖進終端機視窗**，路徑會自動補上，按 Enter。

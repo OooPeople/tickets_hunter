@@ -122,7 +122,7 @@ https://kktix.com/events/example-event
 https://ticket.ibon.com.tw/ActivityInfo/Details/25EXAMPLE
 ```
 
-**支援平台**：TixCraft 拓元、KKTIX、TicketPlus 遠大、iBon、KHAM 寬宏、年代售票、FamiTicket 全家、FANSI GO、Cityline、Ticketmaster 等
+**支援平台**：TixCraft 拓元、KKTIX、TicketPlus 遠大、iBon、中信育樂售票網（CTBC Sports）、味全龍官方售票網、KHAM 寬宏、年代售票、FamiTicket 全家、FANSI GO、Cityline、Ticketmaster 等
 
 **提示**：直接複製活動頁面網址即可
 

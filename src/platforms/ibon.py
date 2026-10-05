@@ -29,6 +29,7 @@ from nodriver_common import (
     send_discord_notification,
     send_telegram_notification,
     write_question_to_file,
+    CONST_FROM_BOTTOM_TO_TOP,
     CONST_FROM_TOP_TO_BOTTOM,
     CONST_MAXBOT_ANSWER_ONLINE_FILE,
     CONST_MAXBOT_INT28_FILE,
@@ -247,6 +248,71 @@ async def nodriver_ibon_login(tab, config_dict, driver):
             import traceback
             traceback.print_exc()
         return {'success': False, 'reason': 'exception', 'error': str(cookie_error)}
+
+
+def _normalize_ibon_select_mode(auto_select_mode):
+    return auto_select_mode.replace('_', ' ') if auto_select_mode else CONST_FROM_TOP_TO_BOTTOM
+
+
+def _parse_ibon_date_keyword_array(date_keyword):
+    keyword_array = util.parse_keyword_string_to_array(date_keyword)
+    keyword_array = [str(keyword).strip() for keyword in keyword_array if str(keyword).strip()]
+    if keyword_array:
+        return keyword_array
+
+    raw_keyword = date_keyword.strip() if date_keyword else ''
+    if not raw_keyword:
+        return []
+
+    if ';' in raw_keyword:
+        return [keyword.strip() for keyword in raw_keyword.split(';') if keyword.strip()]
+
+    return [raw_keyword]
+
+
+def _build_ibon_date_search_text(button):
+    button_text = button.get('text', '')
+    date_context = button.get('date_context', '')
+    return f"{button_text} {date_context}".lower()
+
+
+def _match_ibon_date_keyword(button, keyword_item):
+    search_text = _build_ibon_date_search_text(button)
+    sub_keywords = [kw.strip() for kw in keyword_item.split(' ') if kw.strip()]
+    if not sub_keywords:
+        return False
+    return all(sub_kw.lower() in search_text for sub_kw in sub_keywords)
+
+
+def _select_ibon_date_buttons_by_keyword(enabled_buttons, keyword_array, auto_select_mode):
+    """
+    Select ibon date candidates for the first matching keyword.
+
+    Returns:
+        matched_buttons, target_found, matched_keyword_index, matched_keyword_item
+    """
+    mode = _normalize_ibon_select_mode(auto_select_mode)
+
+    for keyword_index, keyword_item in enumerate(keyword_array):
+        if mode == CONST_FROM_BOTTOM_TO_TOP:
+            for button in reversed(enabled_buttons):
+                if _match_ibon_date_keyword(button, keyword_item):
+                    return [button], True, keyword_index, keyword_item
+        elif mode == CONST_FROM_TOP_TO_BOTTOM:
+            for button in enabled_buttons:
+                if _match_ibon_date_keyword(button, keyword_item):
+                    return [button], True, keyword_index, keyword_item
+        else:
+            matched_buttons = [
+                button
+                for button in enabled_buttons
+                if _match_ibon_date_keyword(button, keyword_item)
+            ]
+            if matched_buttons:
+                return matched_buttons, True, keyword_index, keyword_item
+
+    return [], False, None, None
+
 
 async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
     """
@@ -479,35 +545,25 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
     # Step 7: Apply keyword matching with early return pattern (T004-T007)
     matched_buttons = []
     target_found = False
+    matched_keyword_index = None
+    matched_keyword_item = None
 
     if len(date_keyword) > 0 and enabled_buttons:
-        keyword_array = util.parse_keyword_string_to_array(date_keyword)
+        keyword_array = _parse_ibon_date_keyword_array(date_keyword)
         debug.log(f"[IBON DATE PIERCE KEYWORD] Start checking keywords in order: {keyword_array}")
 
-        # NEW: Iterate keywords in priority order (early return)
-        for keyword_index, keyword_item in enumerate(keyword_array):
-            debug.log(f"[IBON DATE PIERCE KEYWORD] Checking keyword #{keyword_index + 1}: {keyword_item}")
+        matched_buttons, target_found, matched_keyword_index, matched_keyword_item = (
+            _select_ibon_date_buttons_by_keyword(
+                enabled_buttons,
+                keyword_array,
+                auto_select_mode,
+            )
+        )
 
-            # Check all buttons for this keyword
-            for button in enabled_buttons:
-                date_context = button.get('date_context', '').lower()
-                sub_keywords = [kw.strip() for kw in keyword_item.split(' ') if kw.strip()]
-                is_match = all(sub_kw.lower() in date_context for sub_kw in sub_keywords)
-
-                if is_match:
-                    # T006: Keyword matched log - IMMEDIATELY select and stop
-                    matched_buttons = [button]
-                    target_found = True
-                    debug.log(f"[IBON DATE PIERCE KEYWORD] Keyword #{keyword_index + 1} matched: '{keyword_item}'")
-                    debug.log(f"[IBON DATE PIERCE SELECT] Selected date: {date_context[:50]} (keyword match)")
-                    break
-
-            if target_found:
-                # EARLY RETURN: Stop checking further keywords
-                break
-
-        # T007: All keywords failed log
-        if not target_found:
+        if target_found:
+            debug.log(f"[IBON DATE PIERCE KEYWORD] Keyword #{matched_keyword_index + 1} matched: '{matched_keyword_item}'")
+            debug.log(f"[IBON DATE PIERCE KEYWORD] Matched candidates: {len(matched_buttons)} for mode '{auto_select_mode}'")
+        else:
             debug.log(f"[IBON DATE PIERCE KEYWORD] All keywords failed to match")
     else:
         matched_buttons = enabled_buttons
@@ -529,8 +585,7 @@ async def nodriver_ibon_date_auto_select_pierce(tab, config_dict):
 
     # T013: Log selected date with selection type
     if debug.enabled:
-        is_keyword_match = (len(date_keyword) > 0 and len(matched_buttons) < len(enabled_buttons))
-        selection_type = "keyword match" if is_keyword_match else "fallback"
+        selection_type = "keyword match" if target_found else "fallback"
         debug.log(f"[IBON DATE PIERCE SELECT] Selected date: {target_button.get('date_context', 'N/A')} ({selection_type})")
 
     # Step 10: Click button using CDP
@@ -797,41 +852,26 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
     # Format: "AA BB","CC","DD" -> (AA AND BB) OR (CC) OR (DD)
     matched_buttons = []
     target_found = False
+    matched_keyword_index = None
+    matched_keyword_item = None
 
     if len(date_keyword) > 0 and enabled_buttons:
         # Parse as JSON array (auto-removes quotes)
-        keyword_array = util.parse_keyword_string_to_array(date_keyword)
+        keyword_array = _parse_ibon_date_keyword_array(date_keyword)
         debug.log(f"[IBON DATE KEYWORD] Start checking keywords in order: {keyword_array}")
 
-        # NEW: Iterate keywords in priority order (early return)
-        for keyword_index, keyword_item in enumerate(keyword_array):
-            debug.log(f"[IBON DATE KEYWORD] Checking keyword #{keyword_index + 1}: {keyword_item}")
+        matched_buttons, target_found, matched_keyword_index, matched_keyword_item = (
+            _select_ibon_date_buttons_by_keyword(
+                enabled_buttons,
+                keyword_array,
+                auto_select_mode,
+            )
+        )
 
-            # Check all buttons for this keyword
-            for button in enabled_buttons:
-                button_text = button.get('text', '').lower()
-                date_context = button.get('date_context', '').lower()
-                search_text = f"{button_text} {date_context}"
-
-                # Split by space for AND logic (e.g., "AA BB" means AA AND BB)
-                sub_keywords = [kw.strip() for kw in keyword_item.split(' ') if kw.strip()]
-                # Check if all sub-keywords match (AND logic within group)
-                is_match = all(sub_kw.lower() in search_text for sub_kw in sub_keywords)
-
-                if is_match:
-                    # T006: Keyword matched log - IMMEDIATELY select and stop
-                    matched_buttons = [button]
-                    target_found = True
-                    debug.log(f"[IBON DATE KEYWORD] Keyword #{keyword_index + 1} matched: '{keyword_item}'")
-                    debug.log(f"[IBON DATE SELECT] Selected date: {date_context[:50]} (keyword match)")
-                    break
-
-            if target_found:
-                # EARLY RETURN: Stop checking further keywords
-                break
-
-        # T007: All keywords failed log
-        if not target_found:
+        if target_found:
+            debug.log(f"[IBON DATE KEYWORD] Keyword #{matched_keyword_index + 1} matched: '{matched_keyword_item}'")
+            debug.log(f"[IBON DATE KEYWORD] Matched candidates: {len(matched_buttons)} for mode '{auto_select_mode}'")
+        else:
             debug.log(f"[IBON DATE KEYWORD] All keywords failed to match")
     else:
         matched_buttons = enabled_buttons
@@ -853,9 +893,8 @@ async def nodriver_ibon_date_auto_select_domsnapshot(tab, config_dict):
     target_button = util.get_target_item_from_matched_list(matched_buttons, auto_select_mode)
 
     # Determine selection method (T013 equivalent)
-    is_keyword_match = (len(date_keyword) > 0 and len(matched_buttons) < len(enabled_buttons))
-    selection_type = "keyword match" if is_keyword_match else "fallback"
-    selection_method = selection_type if is_keyword_match else f"mode '{auto_select_mode}'"
+    selection_type = "keyword match" if target_found else "fallback"
+    selection_method = selection_type if target_found else f"mode '{auto_select_mode}'"
 
     debug.log(f"[IBON DATE SELECT] Selected date: {target_button.get('date_context', 'N/A')} ({selection_type})")
     debug.log(f"[IBON DATE] Selected target button ({selection_method}): date_context='{target_button.get('date_context', 'N/A')}'")

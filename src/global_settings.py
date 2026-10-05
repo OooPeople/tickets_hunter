@@ -3,6 +3,7 @@
 """Process-shared settings that must not be copied into instance profiles."""
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -96,6 +97,18 @@ def validate_global_settings(value):
             "max_cooldown_seconds": max_cooldown,
         }
     }
+
+
+def global_settings_revision(value):
+    """Return a stable content revision for optimistic concurrency control."""
+    normalized = validate_global_settings(value)
+    payload = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def load_global_settings(path=None):

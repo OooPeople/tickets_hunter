@@ -6,29 +6,45 @@ sites, but its URLs and DOM are different enough that sharing their page
 router is unsafe.  Keep the selectors and state handling local to this module.
 """
 
+import asyncio
 import base64
+import contextlib
+import glob
 import hashlib
 import json
+import os
 import re
 import time
+import uuid
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from zendriver import cdp
 
 import util
+from global_settings import get_global_settings_path, load_global_settings
 from nodriver_common import (
     check_and_handle_pause,
+    check_and_handle_quit,
     nodriver_get_captcha_image_from_dom_snapshot,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
 )
+from refresh_coordinator import (
+    UTK_SPORTS_SCOPE,
+    get_shared_refresh_coordinator,
+)
 
 
 __all__ = [
     "is_utk_sports_url",
+    "nodriver_utk_sports_cancel_refresh",
+    "nodriver_utk_sports_consume_reload_event",
+    "nodriver_utk_sports_health_check",
     "nodriver_ctbc_inject_cookies",
     "nodriver_ctbc_main",
+    "nodriver_utk_sports_reload",
+    "nodriver_utk_sports_reload_wait",
 ]
 
 
@@ -50,14 +66,35 @@ UTK_SPORTS_PROFILES = {
     },
 }
 CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
+CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
+    "td:last-child button, td:last-child a[href], "
+    "td:last-child [role=\"button\"]"
+)
 CTBC_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
 CTBC_FAST_PATH_TTL_SECONDS = 1.5
+UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
+UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
+UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
+# This must cover the coordinator's default 5-second fail-closed retry.  Every
+# pre-report writer uses the same-or-longer duration, so a later process cannot
+# shorten a marker written after a transient SQLite failure.
+UTK_EMERGENCY_MARKER_SECONDS = 6.0
+UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
 _state = {
     "submitted": {},
     "checkout_notified": set(),
     "ticket_type": {},
     "auth_failure": {},
     "fast_target": {},
+    "reload_request": {},
+    "rate_limit_observation": {},
+    "rate_limit_retry": {},
+    "recovery_probe": {},
+    "reload_event": set(),
+    "cancel_tasks": set(),
+    "document_snapshot": {},
+    "last_document": {},
+    "unknown_document": {},
     "tab_tokens": [],
 }
 
@@ -82,6 +119,14 @@ def _ctbc_tab_identity(tab):
 def _ctbc_tab_state_key(tab):
     identity = _ctbc_tab_identity(tab)
     return (identity, str(tab.target.url))
+
+
+def _pop_reload_request_if_token(identity, request_token):
+    """Remove only the logical request that the current coroutine captured."""
+    current = _state["reload_request"].get(identity)
+    if current and current.get("request_token") == request_token:
+        return _state["reload_request"].pop(identity, None)
+    return None
 
 
 def parse_ctbc_cookie_string(raw_value):
@@ -280,6 +325,26 @@ def _ctbc_unique_query(url):
     return dict(pairs)
 
 
+def _ctbc_same_origin(first, second):
+    """Compare URL origins while rejecting embedded credentials."""
+    if first.username or first.password or second.username or second.password:
+        return False
+    try:
+        first_port = first.port or (443 if first.scheme == "https" else 80)
+        second_port = second.port or (443 if second.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        first.scheme.lower(),
+        (first.hostname or "").lower(),
+        first_port,
+    ) == (
+        second.scheme.lower(),
+        (second.hostname or "").lower(),
+        second_port,
+    )
+
+
 def _parse_ctbc_date_target(onclick, current_url):
     """Strictly parse the site's ordinary date-button navigation target."""
     match = re.fullmatch(
@@ -297,6 +362,7 @@ def _parse_ctbc_date_target(onclick, current_url):
         not profile
         or target.scheme != "https"
         or target.hostname != profile["host"]
+        or not _ctbc_same_origin(current, target)
         or target.fragment
     ):
         return None
@@ -326,6 +392,228 @@ def _parse_ctbc_date_target(onclick, current_url):
         "map_namespace": profile["map_namespace"],
         "fast_area_prefetch": profile["fast_area_prefetch"],
     }
+
+
+def _parse_ctbc_vip_date_action(onclick, current_url):
+    """Parse the site's membership presale action without executing it."""
+    if _get_ctbc_page_type(current_url) != "date":
+        return None
+
+    current_query = _ctbc_unique_query(current_url)
+    product_id = (current_query or {}).get("PRODUCT_ID", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", product_id):
+        return None
+
+    match = re.fullmatch(
+        r"\s*VipSellCheck\(\s*(?P<quote>['\"])(?P<token>[A-Za-z0-9_-]{1,128})"
+        r"(?P=quote)\s*\)\s*;?\s*",
+        str(onclick or ""),
+    )
+    if not match:
+        return None
+    return {
+        "kind": "vip_native",
+        "token": match.group("token"),
+        "product_id": product_id,
+    }
+
+
+def _classify_ctbc_date_action(onclick, current_url):
+    """Classify known actions while keeping an official-row native fallback."""
+    date_target = _parse_ctbc_date_target(onclick, current_url)
+    if date_target:
+        return {
+            "kind": "normal",
+            "date_target": date_target,
+        }
+
+    vip_action = _parse_ctbc_vip_date_action(onclick, current_url)
+    if vip_action:
+        return vip_action
+
+    # Future UTK tenants may use a different membership-check function.  The
+    # caller may use a native click only after proving that this is the sole
+    # actionable control in the selected row's purchase cell.
+    if (
+        _get_ctbc_page_type(current_url) == "date"
+        and _ctbc_safe_generic_button_handler(onclick)
+    ):
+        return {"kind": "structural_native"}
+    return None
+
+
+async def _ctbc_date_control_snapshot(control):
+    """Return the structural/actionable state of a date-row purchase control."""
+    raw_value = await control.apply(r'''function(el) {
+        // __ticketsHunterDateControlSnapshot
+        const row = el.closest('tr');
+        const cell = el.closest('td');
+        const tableRoot = row && row.closest('#PerformanceListTable');
+        const style = getComputedStyle(el);
+        const rects = el.getClientRects();
+        const blockedAncestor = el.closest('[hidden], [inert], [aria-hidden="true"]');
+        const disabled = el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true';
+        const visible = el.isConnected && rects.length > 0 &&
+            style.display !== 'none' && style.visibility !== 'hidden' &&
+            style.pointerEvents !== 'none' && !blockedAncestor;
+        const inPurchaseCell = !!tableRoot && !!cell && cell === row.lastElementChild;
+        return JSON.stringify({
+            actionable: !!(visible && !disabled && inPurchaseCell),
+            connected: !!el.isConnected,
+            visible: !!visible,
+            disabled: !!disabled,
+            in_purchase_cell: !!inPurchaseCell,
+            tag_name: (el.tagName || '').toUpperCase(),
+            href: el.getAttribute('href') || '',
+            resolved_href: el.href || '',
+            role: el.getAttribute('role') || '',
+            type: el.getAttribute('type') || '',
+            target: el.getAttribute('target') || '',
+            download: el.getAttribute('download') || '',
+            ping: el.getAttribute('ping') || '',
+            formaction: el.getAttribute('formaction') || '',
+            has_form: !!el.closest('form'),
+            onclick: el.getAttribute('onclick') || '',
+            text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()
+        });
+    }''')
+    return _decode_ctbc_json_result(raw_value)
+
+
+def _ctbc_safe_generic_button_handler(onclick):
+    """Allow one inert-looking site function call, never arbitrary JavaScript."""
+    source = str(onclick or "").strip()
+    if not source:
+        return True
+    match = re.fullmatch(
+        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*"
+        r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\((?P<args>.*)\)\s*;?",
+        source,
+    )
+    if not match:
+        return False
+    arguments = match.group("args").strip()
+    if not arguments:
+        return True
+    return all(
+        re.fullmatch(r"(?P<q>['\"])[A-Za-z0-9_-]{1,128}(?P=q)", item.strip())
+        for item in arguments.split(",")
+    )
+
+
+def _ctbc_date_control_action(snapshot, current_url):
+    """Return a fail-closed action for one structurally attested date control."""
+    if not isinstance(snapshot, dict) or not snapshot.get("actionable"):
+        return None
+
+    tag_name = str(snapshot.get("tag_name") or "").upper()
+    role = str(snapshot.get("role") or "").lower()
+    onclick = str(snapshot.get("onclick") or "")
+    if tag_name == "A":
+        if onclick or any(
+            str(snapshot.get(key) or "")
+            for key in ("target", "download", "ping")
+        ):
+            return None
+        href = str(snapshot.get("resolved_href") or snapshot.get("href") or "")
+        # Anchors are navigational by nature.  Do not use the broad structural
+        # fallback for them: their own href must be the exact same-tenant,
+        # same-product UTK0204 target before a native click is permitted.
+        current = urlsplit(current_url)
+        resolved = urlsplit(urljoin(current_url, href))
+        if not _ctbc_same_origin(current, resolved):
+            return None
+        date_target = _parse_ctbc_date_target(
+            f"location.href={json.dumps(href, ensure_ascii=False)}", current_url
+        )
+        if not date_target:
+            return None
+        return {
+            "kind": "anchor_native",
+            "date_target": date_target,
+        }
+
+    date_target = _parse_ctbc_date_target(onclick, current_url)
+    if date_target:
+        return {"kind": "normal", "date_target": date_target}
+    vip_action = _parse_ctbc_vip_date_action(onclick, current_url)
+    if vip_action:
+        return vip_action
+
+    # The compatibility fallback intentionally remains independent of button
+    # text, but it is limited to an actual non-submit BUTTON and one simple
+    # site function call. This preserves future membership-sale handlers
+    # without executing assignments, multi-statement JavaScript or form posts.
+    control_type = str(snapshot.get("type") or "").lower()
+    if (
+        tag_name != "BUTTON"
+        or str(snapshot.get("formaction") or "")
+        or control_type not in ("", "button")
+        or (not control_type and snapshot.get("has_form"))
+        or not _ctbc_safe_generic_button_handler(onclick)
+    ):
+        return None
+    return {"kind": "structural_native"}
+
+
+async def _ctbc_commit_native_date_action(
+    control, source_url, expected_fingerprint, direct_url=""
+):
+    """Atomically re-attest and natively click one selected purchase control."""
+    source_json = json.dumps(source_url)
+    fingerprint_json = json.dumps(expected_fingerprint, ensure_ascii=False)
+    direct_url_json = json.dumps(str(direct_url or ""), ensure_ascii=False)
+    committed = await control.apply(f'''function(el) {{
+        // __ticketsHunterCommitNativeDateAction
+        const sourceUrl = {source_json};
+        const expectedFingerprint = {fingerprint_json};
+        const directUrl = {direct_url_json};
+        if (location.href !== sourceUrl || !el.isConnected) return false;
+        const row = el.closest('tr');
+        const cell = el.closest('td');
+        if (!row || !cell || !row.closest('#PerformanceListTable') ||
+            cell !== row.lastElementChild) return false;
+        const isActionable = candidate => {{
+            const style = getComputedStyle(candidate);
+            return candidate.isConnected && candidate.getClientRects().length > 0 &&
+                style.display !== 'none' && style.visibility !== 'hidden' &&
+                style.pointerEvents !== 'none' &&
+                !candidate.closest('[hidden], [inert], [aria-hidden="true"]') &&
+                !candidate.matches(':disabled') &&
+                candidate.getAttribute('aria-disabled') !== 'true';
+        }};
+        const controls = Array.from(cell.querySelectorAll(
+            'button, a[href], [role="button"]'
+        )).filter(isActionable);
+        if (controls.length !== 1 || controls[0] !== el) return false;
+        const currentFingerprint = {{
+            tag_name: (el.tagName || '').toUpperCase(),
+            href: el.getAttribute('href') || '',
+            resolved_href: el.href || '',
+            role: el.getAttribute('role') || '',
+            type: el.getAttribute('type') || '',
+            target: el.getAttribute('target') || '',
+            download: el.getAttribute('download') || '',
+            ping: el.getAttribute('ping') || '',
+            formaction: el.getAttribute('formaction') || '',
+            has_form: !!el.closest('form'),
+            onclick: el.getAttribute('onclick') || ''
+        }};
+        for (const key of [
+            'tag_name', 'href', 'resolved_href', 'role', 'type', 'target',
+            'download', 'ping', 'formaction', 'has_form', 'onclick'
+        ]) {{
+            if ((currentFingerprint[key] || '') !==
+                (expectedFingerprint[key] || '')) return false;
+        }}
+        if (directUrl) {{
+            location.assign(directUrl);
+            return true;
+        }}
+        el.click();
+        return true;
+    }}''')
+    return committed is True
 
 
 def _parse_ctbc_map_send(href, expected_performance_id):
@@ -500,11 +788,33 @@ def _select_ctbc_seat_indexes(
 
     numeric_sortings = {
         "row_seat",
+        "row_asc_aisle",
         "row_asc_seat_desc",
         "row_desc_seat_asc",
     }
     if seat_sorting not in numeric_sortings | {"display"}:
         seat_sorting = "row_seat"
+
+    full_row_edges = {}
+    for seat in seats:
+        title = str(seat.get("title", "") or "").strip()
+        match = re.search(r"-(\d+)排-(\d+)號\s*$", title)
+        if not match:
+            if seat_sorting == "row_asc_aisle" and title:
+                return []
+            continue
+        row_number = int(match.group(1))
+        seat_number = int(match.group(2))
+        row_edges = full_row_edges.setdefault(
+            row_number,
+            {"min_seat_number": seat_number, "max_seat_number": seat_number},
+        )
+        row_edges["min_seat_number"] = min(
+            row_edges["min_seat_number"], seat_number
+        )
+        row_edges["max_seat_number"] = max(
+            row_edges["max_seat_number"], seat_number
+        )
 
     available = [seat for seat in seats if seat.get("available") and not seat.get("selected")]
     if len(available) < needed:
@@ -532,16 +842,32 @@ def _select_ctbc_seat_indexes(
                 _ctbc_seats_are_physically_adjacent(block[offset], block[offset + 1])
                 for offset in range(len(block) - 1)
             ):
+                row_edges = full_row_edges[row_number]
+                min_seat_number = min(item["_seat_number"] for item in block)
+                max_seat_number = max(item["_seat_number"] for item in block)
                 block_candidates.append({
                     "seats": block,
                     "row_number": row_number,
-                    "min_seat_number": min(item["_seat_number"] for item in block),
-                    "max_seat_number": max(item["_seat_number"] for item in block),
+                    "min_seat_number": min_seat_number,
+                    "max_seat_number": max_seat_number,
                     "dom_index": min(item.get("index", 0) for item in block),
+                    "touches_aisle": (
+                        min_seat_number == row_edges["min_seat_number"]
+                        or max_seat_number == row_edges["max_seat_number"]
+                    ),
                 })
 
     if block_candidates:
-        if seat_sorting == "display":
+        if seat_sorting == "row_asc_aisle":
+            block_candidates = [
+                item for item in block_candidates if item["touches_aisle"]
+            ]
+            if not block_candidates:
+                return []
+            block_candidates.sort(key=lambda item: (
+                item["row_number"], item["dom_index"],
+            ))
+        elif seat_sorting == "display":
             block_candidates.sort(key=lambda item: item["dom_index"])
         elif seat_sorting == "row_seat":
             block_candidates.sort(key=lambda item: (
@@ -563,7 +889,7 @@ def _select_ctbc_seat_indexes(
         )
         return [seat["index"] for seat in target_seats]
 
-    if not allow_non_adjacent:
+    if seat_sorting == "row_asc_aisle" or not allow_non_adjacent:
         return []
 
     ordered_available = available
@@ -618,15 +944,800 @@ def _ctbc_seats_are_physically_adjacent(first, second):
     )
 
 
-async def _reload_with_interval(tab, config_dict, reason):
-    debug = util.create_debug_logger(config_dict)
-    debug.log(f"[CTBC] {reason}; waiting before reload")
-    interval = config_dict.get("advanced", {}).get("auto_reload_page_interval", 0.0)
-    await tab.sleep(interval if interval and interval > 0 else 1.0)
+def _utk_refresh_settings(*, force_refresh=False):
+    """Hot-read the one global UTK Sports pacing configuration."""
+    settings_path = get_global_settings_path() if force_refresh else None
+    return load_global_settings(settings_path).get("utk_sports", {})
+
+
+def _utk_refresh_identity(tab):
+    """Return one stable, process-unique queue identity for this browser tab."""
+    return f"{util.get_instance_id()}:{os.getpid()}:{id(tab):x}"
+
+
+def _utk_emergency_marker_path():
+    return os.path.join(
+        util.get_app_root(),
+        ".runtime",
+        "utk_sports_emergency_"
+        f"{os.getpid()}_{UTK_EMERGENCY_PROCESS_TOKEN}_{uuid.uuid4().hex}.until",
+    )
+
+
+def _mark_utk_emergency_window(seconds=UTK_EMERGENCY_MARKER_SECONDS):
+    """Best-effort cross-process stopgap while a 429 DB report is pending."""
+    marker_path = _utk_emergency_marker_path()
+    marker_dir = os.path.dirname(marker_path)
+    temp_path = f"{marker_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
-        await tab.reload()
+        os.makedirs(marker_dir, exist_ok=True)
+        new_deadline = time.time() + max(float(seconds), UTK_EMERGENCY_MARKER_SECONDS)
+        with open(temp_path, "w", encoding="utf-8") as marker_file:
+            marker_file.write(str(new_deadline))
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+        os.replace(temp_path, marker_path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(temp_path)
+
+
+def _utk_emergency_remaining():
+    marker_pattern = os.path.join(
+        util.get_app_root(), ".runtime", "utk_sports_emergency_*.until"
+    )
+    deadline = 0.0
+    now = time.time()
+    for marker_path in glob.glob(marker_pattern):
+        try:
+            with open(marker_path, encoding="utf-8") as marker_file:
+                marker_deadline = float(marker_file.read().strip())
+        except (OSError, TypeError, ValueError):
+            with contextlib.suppress(OSError):
+                os.remove(marker_path)
+            continue
+        if marker_deadline <= now:
+            with contextlib.suppress(OSError):
+                os.remove(marker_path)
+            continue
+        deadline = max(deadline, marker_deadline)
+    return max(deadline - now, 0.0)
+
+
+def _classify_utk_document_state(snapshot):
+    if not isinstance(snapshot, dict) or not snapshot.get("ready"):
+        return "unknown"
+    body_text = str(snapshot.get("body_text") or "")
+    has_code = bool(
+        re.search(r"(^|\s|[:：])(?:HTTP\s*)?429(?:\s|[-:：]|$)", body_text, re.I)
+    )
+    has_message = bool(re.search(r"請求頻率過高|Too Many Requests", body_text, re.I))
+    if has_code and has_message and not snapshot.get("has_normal_root"):
+        return "blocked"
+    if snapshot.get("has_normal_root"):
+        return "normal"
+    if not snapshot.get("requires_normal_root", True):
+        return "unverified"
+    return "unknown"
+
+
+async def _inspect_utk_document(tab, url=None, *, force=False):
+    """Classify the current document without mistaking a loading page for 429."""
+    current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
+    identity = _ctbc_tab_identity(tab)
+    cached = _state["document_snapshot"].get(identity)
+    if (
+        not force
+        and cached
+        and cached.get("url") == current_url
+        and time.monotonic() - cached.get("checked_at", 0.0) < 0.2
+    ):
+        return dict(cached["snapshot"])
+    page_type = _get_ctbc_page_type(current_url)
+    normal_selector = {
+        "date": "#PerformanceListTable",
+        "area": ".seats, #mapdata",
+        "seat": "#TBL, .ticket",
+        "general_admission": "#table_tickettype, .ticket",
+    }.get(page_type)
+    selector_expression = (
+        f"!!document.querySelector({json.dumps(normal_selector)})"
+        if normal_selector
+        else "false"
+    )
+    try:
+        raw_value = await tab.evaluate(f'''
+            (() => {{
+                const ready = document.readyState === 'interactive' ||
+                    document.readyState === 'complete';
+                const bodyText = document.body
+                    ? (document.body.innerText || document.body.textContent || '')
+                        .replace(/\\s+/g, ' ').trim().slice(0, 12000)
+                    : '';
+                const normalRoot = {selector_expression};
+                const timeOrigin = Number(performance.timeOrigin ||
+                    (performance.timing && performance.timing.navigationStart) || 0);
+                return JSON.stringify({{
+                    ready,
+                    body_text: bodyText,
+                    document_id: `${{location.href}}|${{timeOrigin}}`,
+                    document_started_at: timeOrigin > 0 ? timeOrigin / 1000 : 0,
+                    url: location.href,
+                    ready_state: document.readyState,
+                    has_normal_root: normalRoot,
+                    requires_normal_root: {str(bool(normal_selector)).lower()}
+                }});
+            }})()
+        ''')
+        snapshot = _decode_ctbc_json_result(raw_value)
+    except Exception:
+        snapshot = None
+    if not isinstance(snapshot, dict):
+        return {
+            "classification": "unknown",
+            "document_id": current_url,
+            "document_started_at": 0.0,
+            "url": current_url,
+            "ready_state": "",
+            "has_normal_root": False,
+            "requires_normal_root": bool(normal_selector),
+        }
+    snapshot["classification"] = _classify_utk_document_state(snapshot)
+    snapshot["document_id"] = str(snapshot.get("document_id") or current_url)
+    try:
+        snapshot["document_started_at"] = max(
+            float(snapshot.get("document_started_at") or 0.0), 0.0
+        )
+    except (TypeError, ValueError):
+        snapshot["document_started_at"] = 0.0
+    snapshot["url"] = str(snapshot.get("url") or current_url)
+    _state["document_snapshot"][identity] = {
+        "url": snapshot["url"],
+        "checked_at": time.monotonic(),
+        "snapshot": dict(snapshot),
+    }
+    return snapshot
+
+
+async def nodriver_utk_sports_cancel_refresh(
+    tab,
+    reason="",
+    *,
+    wait=False,
+    abandon_probe=False,
+):
+    """Cancel pending work and optionally release an owned recovery probe."""
+    identity = _ctbc_tab_identity(tab)
+    request = _state["reload_request"].pop(identity, None)
+    probe = _state["recovery_probe"].get(identity) if abandon_probe else None
+    if probe is not None:
+        probe["abandon_requested"] = True
+    if request is None and probe is None:
+        return False
+    coordinator = get_shared_refresh_coordinator()
+    async def cancel_all():
+        changed = False
+        if request is not None:
+            changed = await coordinator.cancel_request(
+                UTK_SPORTS_SCOPE,
+                _utk_refresh_identity(tab),
+                request_token=request.get("request_token"),
+            ) or changed
+        if probe is not None:
+            completion = await coordinator.complete_recovery_probe(
+                UTK_SPORTS_SCOPE,
+                _utk_refresh_identity(tab),
+                probe.get("permit_id", ""),
+                success=False,
+            )
+            if completion.accepted or "not owned" in str(completion.error or ""):
+                current = _state["recovery_probe"].get(identity)
+                if current and current.get("permit_id") == probe.get("permit_id"):
+                    _state["recovery_probe"].pop(identity, None)
+            changed = bool(completion.accepted) or changed
+        return changed
+
+    cancel_call = cancel_all()
+    if wait:
+        return await cancel_call
+    task = asyncio.create_task(cancel_call)
+    _state["cancel_tasks"].add(task)
+    task.add_done_callback(_state["cancel_tasks"].discard)
+    return True
+
+
+def nodriver_utk_sports_consume_reload_event(tab):
+    """Tell the outer router that a same-URL reload needs fresh CF detection."""
+    identity = _ctbc_tab_identity(tab)
+    if identity not in _state["reload_event"]:
+        return False
+    _state["reload_event"].discard(identity)
+    return True
+
+
+async def _report_utk_rate_limit(
+    tab,
+    config_dict,
+    document_id,
+    probe_permit_id=None,
+    document_started_at=0.0,
+    suspected=False,
+):
+    settings = _utk_refresh_settings()
+    if not settings.get("enabled", True):
+        return None
+    identity = _ctbc_tab_identity(tab)
+    coordinator = get_shared_refresh_coordinator()
+    _mark_utk_emergency_window()
+    report = await coordinator.report_rate_limited(
+        UTK_SPORTS_SCOPE,
+        _utk_refresh_identity(tab),
+        initial_cooldown_seconds=settings.get("initial_cooldown_seconds", 60),
+        max_cooldown_seconds=settings.get("max_cooldown_seconds", 240),
+        probe_permit_id=probe_permit_id,
+        document_started_at=document_started_at,
+    )
+    debug = util.create_debug_logger(config_dict)
+    if report.accepted:
+        _state["rate_limit_observation"][identity] = document_id
+        _state["rate_limit_retry"].pop(identity, None)
+    else:
+        retry_seconds = max(float(report.retry_after_seconds or 1.0), 0.5)
+        _state["rate_limit_retry"][identity] = time.monotonic() + retry_seconds
+        _mark_utk_emergency_window(retry_seconds + 1.0)
+    if report.accepted and report.new_incident:
+        if suspected:
+            debug.log(
+                "[UTK RATE] Ticket page stayed unrecognizable; starting a "
+                f"shared safety cooldown for {report.retry_after_seconds:.1f}s"
+            )
+        else:
+            debug.log(
+                "[UTK RATE] HTTP 429 detected; all baseball instances cooling down "
+                f"for {report.retry_after_seconds:.1f}s "
+                f"(level {report.consecutive_incidents})"
+            )
+    elif report.error:
+        debug.log(f"[UTK RATE] Failed to record HTTP 429 safely: {report.error}")
+    return report
+
+
+async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
+    """Resolve a probe only after a different document becomes normal or 429."""
+    identity = _ctbc_tab_identity(tab)
+    probe = _state["recovery_probe"].get(identity)
+    if not probe:
+        return False
+    now = time.monotonic()
+    probe.setdefault("started_at", now)
+    probe.setdefault(
+        "next_renew_at", now + UTK_RECOVERY_PROBE_RENEW_SECONDS
+    )
+    coordinator = get_shared_refresh_coordinator()
+    if now - probe.get("started_at", now) >= UTK_RECOVERY_PROBE_MAX_SECONDS:
+        completion = await coordinator.complete_recovery_probe(
+            UTK_SPORTS_SCOPE,
+            _utk_refresh_identity(tab),
+            probe.get("permit_id", ""),
+            success=False,
+        )
+        # The hard lifecycle limit has been reached. Stop local renewals even
+        # if SQLite is temporarily unavailable; the DB lease then expires
+        # naturally instead of being hammered on every 100ms health pass.
+        current = _state["recovery_probe"].get(identity)
+        if current and current.get("permit_id") == probe.get("permit_id"):
+            _state["recovery_probe"].pop(identity, None)
+        return True
+    if not probe.get("lease_task") and now >= probe.get("next_renew_at", 0.0):
+        renewed = await coordinator.renew_recovery_probe(
+            UTK_SPORTS_SCOPE, probe.get("permit_id", "")
+        )
+        if renewed is False:
+            _state["recovery_probe"].pop(identity, None)
+            return False
+        probe["next_renew_at"] = now + (
+            UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
+        )
+    if snapshot.get("document_id") == probe.get("source_document_id"):
+        return False
+    classification = snapshot.get("classification")
+    if classification == "unknown":
+        return False
+    if time.monotonic() < _state["rate_limit_retry"].get(identity, 0.0):
+        return True
+    if classification == "blocked":
+        report = await _report_utk_rate_limit(
+            tab,
+            config_dict,
+            snapshot.get("document_id", ""),
+            probe_permit_id=probe.get("permit_id"),
+            document_started_at=snapshot.get("document_started_at", 0.0),
+        )
+        if report and report.accepted:
+            _state["recovery_probe"].pop(identity, None)
+    else:
+        settings = _utk_refresh_settings()
+        if settings.get("enabled", True):
+            completion = await coordinator.complete_recovery_probe(
+                UTK_SPORTS_SCOPE,
+                _utk_refresh_identity(tab),
+                probe.get("permit_id", ""),
+                success=(classification == "normal"),
+            )
+            if completion.accepted:
+                _state["recovery_probe"].pop(identity, None)
+                if classification == "normal":
+                    util.create_debug_logger(config_dict).log(
+                        "[UTK RATE] Recovery probe succeeded; shared refresh resumed"
+                    )
+            elif "not owned" in str(completion.error or ""):
+                _state["recovery_probe"].pop(identity, None)
+            else:
+                _state["rate_limit_retry"][identity] = time.monotonic() + 1.0
+    return True
+
+
+async def _utk_document_guard(tab, config_dict, url=None):
+    """Apply the 429 circuit breaker before any UTK page-specific action."""
+    settings = _utk_refresh_settings()
+    if not settings.get("enabled", True):
+        return "disabled", None
+    snapshot = await _inspect_utk_document(tab, url)
+    probe_handled = await _finish_utk_recovery_probe(tab, config_dict, snapshot)
+    identity = _ctbc_tab_identity(tab)
+    document_id = snapshot.get("document_id")
+    previous_document_id = _state["last_document"].get(identity)
+    if previous_document_id and previous_document_id != document_id:
+        _state["reload_event"].add(identity)
+    _state["last_document"][identity] = document_id
+    classification = snapshot.get("classification", "unknown")
+    if classification == "unknown":
+        if _state["rate_limit_observation"].get(identity) == document_id:
+            return "blocked", snapshot
+        unknown = _state["unknown_document"].get(identity)
+        if not unknown or unknown.get("document_id") != document_id:
+            unknown = {
+                "document_id": document_id,
+                "first_seen_at": time.monotonic(),
+            }
+            _state["unknown_document"][identity] = unknown
+        # Unknown is a local fail-closed state, not evidence of HTTP 429.
+        # Cloudflare interstitials, loading/empty documents and CDP failures can
+        # all remain unknown for a long time.  Promoting those to a shared
+        # incident would unnecessarily cool down every CTBC/Dragons process.
+        # Only the explicit code+message classifier above may open a global
+        # rate-limit incident.
+        return "unknown", snapshot
+
+    _state["unknown_document"].pop(identity, None)
+    if classification == "blocked":
+        request = _state["reload_request"].get(identity)
+        request_is_stale = bool(request) and (
+            request.get("document_id") != snapshot.get("document_id")
+            or request.get("expected_url") != snapshot.get("url")
+        )
+        if (
+            not request
+            or not request.get("allow_blocked_recovery")
+            or request_is_stale
+        ):
+            await nodriver_utk_sports_cancel_refresh(tab, "HTTP 429", wait=True)
+        if (
+            not probe_handled
+            and _state["rate_limit_observation"].get(identity)
+            != snapshot.get("document_id")
+            and time.monotonic() >= _state["rate_limit_retry"].get(identity, 0.0)
+        ):
+            await _report_utk_rate_limit(
+                tab,
+                config_dict,
+                snapshot.get("document_id", ""),
+                document_started_at=snapshot.get("document_started_at", 0.0),
+            )
+        return "blocked", snapshot
+
+    request = _state["reload_request"].get(identity)
+    if request and (
+        request.get("expected_url") != snapshot.get("url")
+        or request.get("document_id") != snapshot.get("document_id")
+    ):
+        await nodriver_utk_sports_cancel_refresh(tab, "document changed", wait=True)
+    return classification, snapshot
+
+
+async def nodriver_utk_sports_reload(
+    tab,
+    config_dict,
+    reason,
+    *,
+    apply_local_interval=True,
+    allow_unknown_document=False,
+    allow_blocked_recovery=False,
+    dispatch_deadline=None,
+):
+    """Poll once and reload only after obtaining the shared one-shot permit."""
+    debug = util.create_debug_logger(config_dict)
+    settings = _utk_refresh_settings()
+    if not settings.get("enabled", True):
+        await nodriver_utk_sports_cancel_refresh(
+            tab,
+            "shared protection disabled",
+            wait=True,
+            abandon_probe=True,
+        )
+        interval = config_dict.get("advanced", {}).get(
+            "auto_reload_page_interval", 0.0
+        )
+        if apply_local_interval:
+            delay = float(interval) if interval and interval > 0 else 1.0
+            deadline = time.monotonic() + delay
+            while time.monotonic() < deadline:
+                if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
+                    return False
+                await asyncio.sleep(min(0.25, deadline - time.monotonic()))
+        if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
+            return False
+        # The switch may have been re-enabled while this tab was serving its
+        # legacy local delay.  Re-enter through the coordinator next loop
+        # instead of allowing one final uncoordinated network request.
+        if _utk_refresh_settings(force_refresh=True).get("enabled", True):
+            return False
+        try:
+            await tab.reload()
+            identity = _ctbc_tab_identity(tab)
+            _state["document_snapshot"].pop(identity, None)
+            _state["reload_event"].add(identity)
+            return True
+        except Exception as exc:
+            debug.log(f"[CTBC] Reload failed: {exc}")
+            return False
+
+    if dispatch_deadline is not None:
+        remaining = float(dispatch_deadline) - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            classification, snapshot = await asyncio.wait_for(
+                _utk_document_guard(tab, config_dict), timeout=remaining
+            )
+        except asyncio.TimeoutError:
+            return False
+    else:
+        classification, snapshot = await _utk_document_guard(tab, config_dict)
+    if classification == "blocked" and not allow_blocked_recovery:
+        return False
+    if classification == "unknown" and not allow_unknown_document:
+        return False
+
+    identity = _ctbc_tab_identity(tab)
+    request = _state["reload_request"].get(identity)
+    if request is None:
+        interval = config_dict.get("advanced", {}).get(
+            "auto_reload_page_interval", 0.0
+        )
+        local_delay = (
+            (float(interval) if interval and interval > 0 else 1.0)
+            if apply_local_interval
+            else 0.0
+        )
+        request = {
+            "document_id": snapshot.get("document_id"),
+            "expected_url": snapshot.get("url"),
+            "eligible_at": time.monotonic() + local_delay,
+            "next_poll_at": 0.0,
+            "reason": reason,
+            "allow_blocked_recovery": bool(allow_blocked_recovery),
+            "request_token": uuid.uuid4().hex,
+        }
+        _state["reload_request"][identity] = request
+        debug.log(f"[CTBC] {reason}; queued for shared refresh")
+    request_token = request.get("request_token")
+
+    now = time.monotonic()
+    if now < request.get("eligible_at", 0.0) or now < request.get("next_poll_at", 0.0):
+        return False
+
+    emergency_remaining = _utk_emergency_remaining()
+    if emergency_remaining > 0:
+        request["next_poll_at"] = time.monotonic() + min(
+            emergency_remaining, 0.5
+        )
+        return False
+
+    if dispatch_deadline is not None and time.monotonic() >= dispatch_deadline:
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+
+    coordinator = get_shared_refresh_coordinator()
+    reservation = await coordinator.reserve_refresh(
+        UTK_SPORTS_SCOPE,
+        _utk_refresh_identity(tab),
+        min_interval_seconds=settings.get("min_interval_seconds", 1.5),
+        jitter_range_seconds=(0.1, 0.3),
+        request_token=request_token,
+    )
+    if not reservation.reserved:
+        retry_delay = max(float(reservation.retry_after_seconds or 0.1), 0.05)
+        if reservation.status == "cooldown":
+            cooldown_remaining = max(
+                float(reservation.cooldown_until or 0.0) - time.time(), 0.1
+            )
+            retry_delay = min(cooldown_remaining, 1.0)
+        elif reservation.status == "recovery_probe_active":
+            retry_delay = max(retry_delay, 1.0)
+        request["next_poll_at"] = time.monotonic() + retry_delay
+        if reservation.error:
+            debug.log(
+                "[UTK RATE] Shared coordinator failed closed: "
+                f"{reservation.error}"
+            )
+        return False
+
+    async def release_reservation():
+        return await coordinator.release_refresh(
+            UTK_SPORTS_SCOPE,
+            _utk_refresh_identity(tab),
+            reservation.reservation_id,
+            request_token=request_token,
+            drop_request=True,
+        )
+
+    # Reservation does not consume the shared interval. Browser-side checks
+    # happen first; commit below is the final linearization point immediately
+    # before the network action.
+    try:
+        if dispatch_deadline is not None:
+            remaining = float(dispatch_deadline) - time.monotonic()
+            if remaining <= 0:
+                await release_reservation()
+                _pop_reload_request_if_token(identity, request_token)
+                return False
+            preflight = await asyncio.wait_for(
+                _inspect_utk_document(tab, force=True), timeout=remaining
+            )
+        else:
+            preflight = await _inspect_utk_document(tab, force=True)
+    except asyncio.TimeoutError:
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(release_reservation())
+        _pop_reload_request_if_token(identity, request_token)
+        raise
+    preflight_classification = preflight.get("classification")
+    if (
+        preflight_classification == "unknown"
+        and _state["rate_limit_observation"].get(identity)
+        == preflight.get("document_id")
+    ):
+        preflight_classification = "blocked"
+    same_blocked_document = (
+        preflight.get("document_id") == request.get("document_id")
+    )
+    recovery_probe_reload = (
+        allow_blocked_recovery
+        and reservation.is_recovery_probe
+        and same_blocked_document
+    )
+    paced_follower_reload = (
+        allow_blocked_recovery
+        and not reservation.is_recovery_probe
+        and same_blocked_document
+        and _state["rate_limit_observation"].get(identity)
+        == preflight.get("document_id")
+    )
+    if preflight_classification == "blocked" and not (
+        recovery_probe_reload or paced_follower_reload
+    ):
+        await _report_utk_rate_limit(
+            tab,
+            config_dict,
+            preflight.get("document_id", ""),
+            document_started_at=preflight.get("document_started_at", 0.0),
+        )
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+    if (
+        preflight.get("document_id") != request.get("document_id")
+        or preflight.get("url") != request.get("expected_url")
+        or (
+            preflight_classification == "unknown"
+            and not allow_unknown_document
+        )
+    ):
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+    if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+
+    if _utk_emergency_remaining() > 0:
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+
+    if dispatch_deadline is not None and time.monotonic() >= dispatch_deadline:
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+
+    try:
+        decision = await coordinator.commit_refresh(
+            UTK_SPORTS_SCOPE,
+            _utk_refresh_identity(tab),
+            reservation.reservation_id,
+            request_token=request_token,
+        )
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(release_reservation())
+        _pop_reload_request_if_token(identity, request_token)
+        raise
+    if not decision.granted:
+        # The commit transaction re-checks cooldown and recovery phase.  Any
+        # incident opened during preflight therefore revokes this dispatch.
+        if decision.status != "already_committed":
+            await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        if decision.error:
+            debug.log(
+                "[UTK RATE] Shared commit failed closed: "
+                f"{decision.error}"
+            )
+        return False
+
+    if decision.is_recovery_probe:
+        started_at = time.monotonic()
+        probe_state = {
+            "permit_id": decision.permit_id,
+            "source_document_id": preflight.get("document_id"),
+            "started_at": started_at,
+            "next_renew_at": started_at + UTK_RECOVERY_PROBE_RENEW_SECONDS,
+        }
+        _state["recovery_probe"][identity] = probe_state
+    _pop_reload_request_if_token(identity, request_token)
+    if decision.is_recovery_probe:
+        async def renew_probe_lease():
+            while True:
+                await asyncio.sleep(UTK_RECOVERY_PROBE_RENEW_SECONDS)
+                current = _state["recovery_probe"].get(identity)
+                if (
+                    not current
+                    or current.get("permit_id") != decision.permit_id
+                    or current.get("abandon_requested")
+                ):
+                    return
+                if (
+                    time.monotonic() - started_at
+                    >= UTK_RECOVERY_PROBE_MAX_SECONDS
+                ):
+                    completion = await get_shared_refresh_coordinator().complete_recovery_probe(
+                        UTK_SPORTS_SCOPE,
+                        _utk_refresh_identity(tab),
+                        decision.permit_id,
+                        success=False,
+                    )
+                    current = _state["recovery_probe"].get(identity)
+                    if current and current.get("permit_id") == decision.permit_id:
+                        _state["recovery_probe"].pop(identity, None)
+                    return
+                renewed = await get_shared_refresh_coordinator().renew_recovery_probe(
+                    UTK_SPORTS_SCOPE, decision.permit_id
+                )
+                if renewed is False:
+                    current = _state["recovery_probe"].get(identity)
+                    if current and current.get("permit_id") == decision.permit_id:
+                        _state["recovery_probe"].pop(identity, None)
+                    return
+                current["next_renew_at"] = time.monotonic() + (
+                    UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
+                )
+
+        probe_state["lease_task"] = asyncio.create_task(renew_probe_lease())
+    try:
+        reload_call = tab.reload()
+        await asyncio.wait_for(
+            reload_call, timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
+        )
+        _state["document_snapshot"].pop(identity, None)
+        _state["reload_event"].add(identity)
+        return True
     except Exception as exc:
         debug.log(f"[CTBC] Reload failed: {exc}")
+        # A CDP exception does not prove that the browser rejected the
+        # navigation.  Keep a recovery lease until the next document guard or
+        # lease expiry instead of immediately releasing a possible in-flight
+        # probe and creating a parallel retry.
+        return False
+
+
+async def nodriver_utk_sports_reload_wait(
+    tab,
+    config_dict,
+    reason,
+    *,
+    apply_local_interval=False,
+    allow_unknown_document=True,
+    allow_blocked_recovery=True,
+):
+    """Wait in short chunks for startup/fallback callers needing one reload."""
+    source_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    wait_deadline = time.monotonic() + UTK_RELOAD_WAIT_MAX_SECONDS
+    last_heartbeat_at = 0.0
+    while True:
+        if time.monotonic() >= wait_deadline:
+            await nodriver_utk_sports_cancel_refresh(
+                tab, "shared reload wait timed out", wait=True, abandon_probe=True
+            )
+            util.create_debug_logger(config_dict).log(
+                "[UTK RATE] Shared reload wait timed out; leaving the page "
+                "unchanged instead of bypassing the coordinator"
+            )
+            return False
+        heartbeat_now = time.time()
+        if heartbeat_now - last_heartbeat_at >= 5.0:
+            last_heartbeat_at = heartbeat_now
+            try:
+                with open(
+                    util.get_instance_state_path("heartbeat.txt"),
+                    "w",
+                    encoding="utf-8",
+                ) as heartbeat_file:
+                    heartbeat_file.write(str(int(heartbeat_now)))
+            except OSError:
+                pass
+        if await nodriver_utk_sports_reload(
+            tab,
+            config_dict,
+            reason,
+            apply_local_interval=apply_local_interval,
+            allow_unknown_document=allow_unknown_document,
+            allow_blocked_recovery=allow_blocked_recovery,
+            dispatch_deadline=wait_deadline,
+        ):
+            return True
+        if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
+            await nodriver_utk_sports_cancel_refresh(
+                tab, "paused or stopped", wait=True, abandon_probe=True
+            )
+            return False
+        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+        if current_url != source_url:
+            await nodriver_utk_sports_cancel_refresh(
+                tab, "navigation", wait=True, abandon_probe=True
+            )
+            return False
+        await asyncio.sleep(0.1)
+
+
+async def _reload_with_interval(tab, config_dict, reason):
+    return await nodriver_utk_sports_reload(
+        tab,
+        config_dict,
+        reason,
+        apply_local_interval=True,
+        allow_unknown_document=False,
+    )
+
+
+async def nodriver_utk_sports_health_check(tab, url, config_dict):
+    """Run only rate-limit recovery, without selecting any ticket control."""
+    guard_state, _ = await _utk_document_guard(tab, config_dict, url)
+    if guard_state == "blocked":
+        await nodriver_utk_sports_reload(
+            tab,
+            config_dict,
+            "HTTP 429 recovery probe",
+            apply_local_interval=False,
+            allow_unknown_document=False,
+            allow_blocked_recovery=True,
+        )
+    return guard_state
 
 
 async def _element_text(element):
@@ -797,8 +1908,15 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
                 .filter(button => (button.getAttribute('onclick') || '') === expectedOnclick);
             if (matches.length !== 1) return false;
             const button = matches[0];
-            if (button.disabled || button.getAttribute('aria-disabled') === 'true' ||
-                !(button.textContent || '').includes('購買')) return false;
+            const row = button.closest('tr');
+            const cell = button.closest('td');
+            const style = getComputedStyle(button);
+            if (!button.isConnected || !row || !cell ||
+                !row.closest('#PerformanceListTable') || cell !== row.lastElementChild ||
+                button.getClientRects().length === 0 || style.display === 'none' ||
+                style.visibility === 'hidden' || style.pointerEvents === 'none' ||
+                button.closest('[hidden], [inert], [aria-hidden="true"]') ||
+                button.matches(':disabled') || button.getAttribute('aria-disabled') === 'true') return false;
             window.__ticketsHunterCtbcDateCommit = destinationUrl;
             setTimeout(() => location.assign(destinationUrl), 0);
             return true;
@@ -871,6 +1989,7 @@ async def _ctbc_wait_area_snapshot(tab):
 
 async def nodriver_ctbc_date_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
     rows = []
     for _ in range(10):
         try:
@@ -884,18 +2003,48 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
     candidates = []
     for row in rows or []:
         try:
-            button = await row.query_selector('button#buy_btn')
-            if not button:
+            controls = await row.query_selector_all(CTBC_DATE_PURCHASE_CONTROL_SELECTOR)
+            if not controls:
+                # Compatibility with older DOM/test adapters.  The structural
+                # snapshot below still requires the control to be in the last
+                # purchase cell of the official performance table.
+                legacy_button = await row.query_selector('button#buy_btn')
+                controls = [legacy_button] if legacy_button else []
+
+            actionable_controls = []
+            for control in controls:
+                snapshot = await _ctbc_date_control_snapshot(control)
+                if isinstance(snapshot, dict) and snapshot.get("actionable"):
+                    actionable_controls.append((control, snapshot))
+            if len(actionable_controls) != 1:
                 continue
-            disabled = await button.apply('function(el) { return !!el.disabled; }')
-            onclick = await button.apply('function(el) { return el.getAttribute("onclick") || ""; }')
-            button_text = await _element_text(button)
-            if disabled or "購買" not in button_text:
+
+            button, button_snapshot = actionable_controls[0]
+            onclick = str(button_snapshot.get("onclick") or "")
+            action = _ctbc_date_control_action(button_snapshot, current_url)
+            if not action:
                 continue
             row_text = await _element_text(row)
             if not row_text or util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
                 continue
-            candidates.append({"text": row_text, "element": button, "onclick": onclick or ""})
+            candidates.append({
+                "text": row_text,
+                "element": button,
+                "onclick": onclick,
+                "fingerprint": {
+                    key: (
+                        bool(button_snapshot.get(key))
+                        if key == "has_form"
+                        else str(button_snapshot.get(key) or "")
+                    )
+                    for key in (
+                        "tag_name", "href", "resolved_href", "role", "type",
+                        "target", "download", "ping", "formaction", "has_form",
+                        "onclick",
+                    )
+                },
+                "action": action,
+            })
         except Exception as exc:
             debug.log(f"[CTBC DATE] Failed to inspect row: {exc}")
 
@@ -912,17 +2061,30 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         await _reload_with_interval(tab, config_dict, "no purchasable date matched")
         return False
 
+    await nodriver_utk_sports_cancel_refresh(tab, "purchasable date found")
     target = candidates[target_index]
     try:
-        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-        date_target = _parse_ctbc_date_target(target.get("onclick"), current_url)
+        action = target["action"]
+        date_target = action.get("date_target") if action.get("kind") == "normal" else None
         if date_target and config_dict.get("area_auto_select", {}).get("enable", False):
             if await _ctbc_try_fast_area_navigation(
                 tab, config_dict, date_target, target["onclick"], current_url
             ):
                 return True
-        await target["element"].apply('function(el) { el.click(); return true; }')
-        debug.log(f"[CTBC DATE] Selected: {target['text']}")
+        committed = await _ctbc_commit_native_date_action(
+            target["element"],
+            current_url,
+            target["fingerprint"],
+            direct_url=(
+                action.get("date_target", {}).get("url", "")
+                if action.get("kind") == "anchor_native"
+                else ""
+            ),
+        )
+        if not committed:
+            debug.log(f"[CTBC DATE] Native commit rejected ({action.get('kind', 'unknown')})")
+            return False
+        debug.log(f"[CTBC DATE] Selected ({action.get('kind')}): {target['text']}")
         return True
     except Exception as exc:
         debug.log(f"[CTBC DATE] Click failed: {exc}")
@@ -953,6 +2115,7 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         await _reload_with_interval(tab, config_dict, "no available area matched")
         return False
 
+    await nodriver_utk_sports_cancel_refresh(tab, "available area found")
     try:
         page_url_json = json.dumps(page_url)
         rel_json = json.dumps(target["rel"])
@@ -1533,6 +2696,7 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
             await _reload_with_interval(tab, config_dict, "requested seats are unavailable")
             return False
 
+    await nodriver_utk_sports_cancel_refresh(tab, "requested seats selected")
     # Audit again immediately before captcha/submit to block mixed or stale state.
     if not await _validate_ctbc_seat_selection(tab, config_dict):
         return False
@@ -1597,6 +2761,7 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         debug.log(f"[CTBC GENERAL] No ticket type matched: {keyword}")
         return False
 
+    await nodriver_utk_sports_cancel_refresh(tab, "ticket type found")
     quantity_limit_raw = await tab.evaluate('''
         (() => {
             const input = document.querySelector('#QUANTITY_LIMIT');
@@ -1832,6 +2997,15 @@ async def _handle_ctbc_checkout(tab, config_dict):
 
 async def nodriver_ctbc_main(tab, url, config_dict, ocr):
     if await check_and_handle_pause(config_dict):
+        await nodriver_utk_sports_cancel_refresh(
+            tab, "paused", wait=True, abandon_probe=True
+        )
+        return tab
+
+    guard_state = await nodriver_utk_sports_health_check(tab, url, config_dict)
+    if guard_state == "blocked":
+        return tab
+    if guard_state == "unknown":
         return tab
 
     page_type = _get_ctbc_page_type(url)
@@ -1845,5 +3019,15 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
     elif page_type == "general_admission":
         await nodriver_ctbc_general_admission_main(tab, config_dict, ocr)
     elif page_type == "checkout":
+        await nodriver_utk_sports_cancel_refresh(
+            tab, "checkout reached", wait=True, abandon_probe=True
+        )
         await _handle_ctbc_checkout(tab, config_dict)
+    else:
+        await nodriver_utk_sports_cancel_refresh(
+            tab,
+            "automatic refresh not applicable",
+            wait=True,
+            abandon_probe=True,
+        )
     return tab

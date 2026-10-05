@@ -58,6 +58,14 @@ CLOUDFLARE_MAX_RETRY = 3         # max retry count
 CLOUDFLARE_WAIT_TIME = 3         # wait time after each attempt (seconds)
 CLOUDFLARE_ENABLE_EXPERT_MODE = False  # True enables more aggressive browser args
 
+# A solved embedded Turnstile writes a long response token in place, while a
+# full-page interstitial normally clears by replacing the field or navigating.
+# Polling all three proofs avoids treating a dispatched click as a successful
+# challenge pass.
+CLOUDFLARE_TOKEN_WAIT = 6
+CLOUDFLARE_TOKEN_POLL = 0.25
+CONST_TURNSTILE_MIN_TOKEN_LENGTH = 20
+
 
 # ===== OCR Factory =====
 
@@ -554,7 +562,7 @@ async def detect_cloudflare_challenge(tab, show_debug=False):
     Detect Cloudflare challenge page (Turnstile widget or full-page interstitial).
 
     Three-layer detection:
-    1. CDP Target: check for iframe target with challenges.cloudflare.com (most reliable)
+    1. Pierced DOM: inspect only this tab, including shadow DOM/iframes
     2. JS DOM query: iframe or .cf-turnstile (fast but misses shadow DOM iframes)
     3. HTML keywords: full-page CF interstitial indicators (fallback)
 
@@ -563,14 +571,16 @@ async def detect_cloudflare_challenge(tab, show_debug=False):
     """
     debug = util.create_debug_logger(enabled=show_debug)
     try:
-        # Layer 1: CDP Target detection (most reliable - finds iframes invisible to JS)
+        # Layer 1: pierce this tab's DOM. Target.getTargets is browser-wide and
+        # would let a challenge in one ticket tab block every other tab.
         try:
-            targets = await tab.send(cdp.target.get_targets())
-            for t in targets:
-                url_str = str(t.url) if t.url else ""
-                if "challenges.cloudflare" in url_str:
-                    debug.log("[CF DETECT] Cloudflare target found via CDP")
-                    return True
+            document = await tab.send(
+                cdp.dom.get_document(depth=-1, pierce=True)
+            )
+            node_id, _src = _find_cf_iframe_in_dom(document)
+            if node_id:
+                debug.log("[CF DETECT] Cloudflare iframe found in this tab")
+                return True
         except Exception:
             pass
 
@@ -656,6 +666,82 @@ async def _cdp_click(tab, x, y):
         type_="mouseReleased", x=x, y=y,
         button=cdp.input_.MouseButton("left"), click_count=1
     ))
+
+
+CONST_TURNSTILE_RESPONSE_STATE_JS = '''
+    (function() {
+        const selectors = [
+            'input[name="cf-turnstile-response"]',
+            'input[name="cf_challenge_response"]'
+        ];
+        for (const selector of selectors) {
+            const el = document.querySelector(selector);
+            if (el) return { present: true, value: el.value || '' };
+        }
+        return { present: false, value: '' };
+    })();
+'''
+
+
+async def read_turnstile_response(tab):
+    """Return field presence and token value, or an unknown state in transit."""
+    try:
+        state = await tab.evaluate(CONST_TURNSTILE_RESPONSE_STATE_JS)
+    except Exception:
+        return None, ""
+    if not isinstance(state, dict):
+        return None, ""
+    return bool(state.get("present")), str(state.get("value") or "")
+
+
+async def nodriver_current_url_safe(tab):
+    """Return the live page URL, or an empty value during navigation."""
+    try:
+        url = await tab.evaluate("window.location.href")
+    except Exception:
+        return ""
+    return url if isinstance(url, str) else ""
+
+
+async def wait_for_challenge_cleared(
+    tab, show_debug=False, timeout=None, interval=None
+):
+    """Wait for a token, response-field removal, or navigation as success proof."""
+    debug = util.create_debug_logger(enabled=show_debug)
+    timeout = CLOUDFLARE_TOKEN_WAIT if timeout is None else timeout
+    interval = CLOUDFLARE_TOKEN_POLL if interval is None else interval
+
+    start_present, _start_token = await read_turnstile_response(tab)
+    start_url = await nodriver_current_url_safe(tab)
+    waited = 0.0
+    while True:
+        present, token = await read_turnstile_response(tab)
+        if len(token) > CONST_TURNSTILE_MIN_TOKEN_LENGTH:
+            debug.log(
+                f"[TURNSTILE] Solved: token received (len={len(token)}) "
+                f"after {waited:.2f}s"
+            )
+            return True
+        if start_present and present is False:
+            debug.log(
+                f"[TURNSTILE] Solved: challenge field is gone after {waited:.2f}s"
+            )
+            return True
+
+        current_url = await nodriver_current_url_safe(tab)
+        if start_url and current_url and current_url != start_url:
+            debug.log(
+                f"[TURNSTILE] Solved: page left the challenge after {waited:.2f}s "
+                f"({current_url})"
+            )
+            return True
+        if waited >= timeout:
+            break
+        await tab.sleep(interval)
+        waited += interval
+
+    debug.log(f"[TURNSTILE] No sign the challenge cleared within {timeout}s")
+    return False
 
 
 async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
@@ -791,50 +877,26 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
                 except Exception:
                     pass
 
-            # Wait for challenge to resolve
             wait_time = CLOUDFLARE_WAIT_TIME + (retry_count * 2)
-            await tab.sleep(wait_time)
 
-            # Verify: check if CF challenge is resolved
-            # Note: CDP target persists even after solved Turnstile, so use HTML-only check
-            # when a click was dispatched. HTML active indicators only appear in full-page
-            # interstitials, not in embedded (solved) Turnstile widgets.
+            # A click is only an attempt. Embedded widgets prove success with a
+            # token; full-page challenges prove it by removing the response
+            # field or navigating away.
             if clicked:
-                still_active = False
-                try:
-                    html_content = await tab.get_content()
-                    if html_content:
-                        html_lower = html_content.lower()
-                        active_indicators = [
-                            "cf-browser-verification",
-                            "cf-challenge-running",
-                            "cf-spinner-allow-5-secs",
-                            "checking your browser",
-                        ]
-                        still_active = any(ind in html_lower for ind in active_indicators)
-                except Exception as exc:
-                    debug.log(f"[CLOUDFLARE] Post-click verification failed: {exc}")
-                    still_active = True
-                if not still_active:
+                if await wait_for_challenge_cleared(tab, show_debug=cf_debug):
                     debug.log("[CLOUDFLARE] Challenge bypassed successfully")
                     return True
             else:
                 # No click dispatched; use full detection
+                await tab.sleep(wait_time)
                 if not await detect_cloudflare_challenge(tab, cf_debug):
                     debug.log("[CLOUDFLARE] Challenge resolved (no click needed)")
                     return True
 
             debug.log(f"[CLOUDFLARE] Attempt {retry_count + 1} unsuccessful")
 
-            if retry_count == max_retry - 1:
-                try:
-                    debug.log("[CLOUDFLARE] Last attempt: Refreshing page")
-                    await tab.reload()
-                    await tab.sleep(5)
-                    if not await detect_cloudflare_challenge(tab, cf_debug):
-                        return True
-                except Exception:
-                    pass
+            # Do not reload an active challenge. A reload can restart the
+            # interstitial or discard a pass that is still settling.
 
         except Exception as exc:
             debug.log(f"[CLOUDFLARE] Error during processing: {exc}")

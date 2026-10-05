@@ -6,6 +6,7 @@ import asyncio
 import json
 import random
 import time
+from urllib.parse import urlsplit
 
 import util
 from nodriver_common import (
@@ -51,7 +52,16 @@ def is_cityline_login_page(url):
     domain and path separately covers both. targetUrl slashes are percent-encoded (%2F),
     so '/Login.html' only matches the real path, never the query string.
     """
-    return 'cityline.com' in url and '/Login.html' in url
+    try:
+        parsed = urlsplit(url)
+    except (TypeError, ValueError):
+        return False
+    host = (parsed.hostname or "").lower()
+    valid_host = any(
+        host == domain or host.endswith(f".{domain}")
+        for domain in ("cityline.com", "cityline.com.hk")
+    )
+    return valid_host and parsed.path.lower().endswith("/login.html")
 
 
 async def nodriver_cityline_auto_retry_access(tab, url, config_dict):

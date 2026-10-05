@@ -19,6 +19,7 @@ from tornado.web import Application
 from tornado.web import StaticFileHandler
 
 import requests
+from global_settings import load_global_settings, save_global_settings
 import util
 
 from typing import (
@@ -374,6 +375,7 @@ def migrate_config(config_dict):
     if config_dict["ctbc"].get("seat_sorting") not in (
         "display",
         "row_seat",
+        "row_asc_aisle",
         "row_asc_seat_desc",
         "row_desc_seat_asc",
     ):
@@ -683,6 +685,28 @@ class LoadJsonHandler(tornado.web.RequestHandler):
         config_dict["advanced"]["remote_url"] = f'"http://127.0.0.1:{server_port}/"'
 
         self.write(config_dict)
+
+
+class GlobalSettingsHandler(tornado.web.RequestHandler):
+    """Read or update settings shared by every profile and bot process."""
+
+    def get(self):
+        self.write(load_global_settings())
+
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+            normalized = save_global_settings(body)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.set_status(400)
+            self.write({"success": False, "error": str(exc)})
+            return
+        except OSError as exc:
+            print(f"[ERROR] Failed to save global settings: {exc}")
+            self.set_status(500)
+            self.write({"success": False, "error": "failed to save global settings"})
+            return
+        self.write({"success": True, "settings": normalized})
 
 class ResetJsonHandler(tornado.web.RequestHandler):
     def get(self):
@@ -1069,6 +1093,7 @@ async def main_server():
         ("/load", LoadJsonHandler),
         ("/save", SaveJsonHandler),
         ("/reset", ResetJsonHandler),
+        ("/global-settings", GlobalSettingsHandler),
         ("/profiles", ProfilesHandler),
 
         ("/test_discord_webhook", TestDiscordWebhookHandler),

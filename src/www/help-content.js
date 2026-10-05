@@ -320,12 +320,13 @@ const HELP_CONTENT = {
         <tbody>
           <tr><td>座位圖顯示順序</td><td>沿用網站座位表由上到下、由左到右的元素順序。</td></tr>
           <tr><td>較小排、較小號</td><td>優先最小排數，再選其中座號較小的連座（預設）。</td></tr>
+          <tr><td>較小排、走道位</td><td>只選整排最左或最右端的連座，再優先選排數較小者；前排只剩內側座位時會繼續往後找。</td></tr>
           <tr><td>較小排、較大號</td><td>優先最小排數，再選其中座號較大的連座。</td></tr>
           <tr><td>較大排、較小號</td><td>優先最大排數，再選其中座號較小的連座。</td></tr>
         </tbody>
       </table>
       <p>若球場座位圖採旋轉排列，程式會使用座位標題內的實際排號、座號排序，並以畫面座標判斷連座，不會把 DOM 最上方誤認為最前排。</p>
-      <p class="mb-0 text-muted small">相鄰判定仍以座位圖中實際相鄰的格子為準，不會只因座號連續就跨越走道。</p>`,
+      <p class="mb-0 text-muted small">相鄰判定仍以座位圖中實際相鄰的格子為準，不會只因座號連續就跨越走道。走道位模式找不到端點連座時不會改選內側或不連續座位；端點判斷依賴網站為已售座位保留可解析的排號與座號。</p>`,
     link: 'https://github.com/bouob/tickets_hunter/blob/main/guide/settings-guide.md#職棒座位排序依據ctbcseat_sorting'
   },
 
@@ -1235,12 +1236,13 @@ const HELP_CONTENT_EN_META = {
         <tbody>
           <tr><td>Seat-map display order</td><td>Use the website seat table's top-to-bottom and left-to-right element order.</td></tr>
           <tr><td>Smaller row, smaller seat</td><td>Prefer the smallest row, then the smaller-numbered adjacent block (default).</td></tr>
+          <tr><td>Smaller row, aisle seat</td><td>Only accept an adjacent block touching either end of the full row, then prefer the smaller row number.</td></tr>
           <tr><td>Smaller row, larger seat</td><td>Prefer the smallest row, then the larger-numbered adjacent block.</td></tr>
           <tr><td>Larger row, smaller seat</td><td>Prefer the largest row, then the smaller-numbered adjacent block.</td></tr>
         </tbody>
       </table>
       <p>For rotated stadium maps, the bot sorts using the actual row and seat numbers in each seat title and uses screen coordinates for adjacency instead of treating the top DOM row as the front row.</p>
-      <p class="mb-0 text-muted small">Adjacency still follows neighboring cells on the actual seat map, so consecutive numbers never bridge an aisle.</p>`,
+      <p class="mb-0 text-muted small">Adjacency still follows neighboring cells on the actual seat map, so consecutive numbers never bridge an aisle. Aisle-seat mode does not fall back to interior or non-adjacent seats when no row-end block is available; endpoint detection depends on the site retaining parseable row and seat numbers for sold seats.</p>`,
   },
   ctbc_cookie: {
     title: 'CTBC Sports cookie set',

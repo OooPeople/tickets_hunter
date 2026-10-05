@@ -481,6 +481,7 @@
             <select class="form-select" id="ctbc_seat_sorting">
               <option value="display">座位圖顯示順序（由上至下）</option>
               <option value="row_seat" selected>優先較小排數、較小座號</option>
+              <option value="row_asc_aisle">優先較小排數、走道位</option>
               <option value="row_asc_seat_desc">優先較小排數、較大座號</option>
               <option value="row_desc_seat_asc">優先較大排數、較小座號</option>
             </select>
@@ -579,6 +580,38 @@
               </svg>
               <strong>拓元刷新速度警告：</strong>刷新間隔低於 8 秒可能導致 IP 被暫時封鎖（soft blocked）。建議設定為 8 秒以上，或使用不同網路/裝置分散風險。
               <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3" id="utk-shared-throttle-row">
+          <label class="col-sm-2 col-form-label" id="utk-shared-throttle-label">職棒共用刷新保護</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="border rounded p-3">
+              <div class="form-check form-switch mb-3">
+                <input class="form-check-input" type="checkbox" id="utk_shared_reload_throttle_enabled">
+                <label class="form-check-label" for="utk_shared_reload_throttle_enabled" id="utk-shared-throttle-enabled-label">啟用中信兄弟／味全龍共用節流</label>
+              </div>
+              <div class="row g-2">
+                <div class="col-md-4">
+                  <label class="form-label" for="utk_shared_reload_min_interval" id="utk-shared-min-interval-label">最小間隔（秒）</label>
+                  <input class="form-control" id="utk_shared_reload_min_interval" type="number" min="1" step="0.1" value="1.5" />
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="utk_rate_limit_initial_cooldown" id="utk-initial-cooldown-label">429 初始冷卻（秒）</label>
+                  <input class="form-control" id="utk_rate_limit_initial_cooldown" type="number" min="1" step="1" value="60" />
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="utk_rate_limit_max_cooldown" id="utk-max-cooldown-label">429 最大冷卻（秒）</label>
+                  <input class="form-control" id="utk_rate_limit_max_cooldown" type="number" min="1" step="1" value="240" />
+                </div>
+              </div>
+              <div class="form-text mt-2" id="utk-shared-throttle-help">
+                這是所有 profiles 與執行中的中信兄弟、味全龍實例共用的全域設定，不會隨 profile 切換。個別刷新間隔仍由上方欄位控制；共用節流會再避免多個實例同時刷新。
+              </div>
+              <div class="form-text text-warning" id="utk-shared-throttle-warning">
+                關閉後，多開分頁／程式將不再共用刷新間隔與 429 冷卻保護，較容易再次觸發站方限制。
+              </div>
             </div>
           </div>
         </div>
@@ -1319,6 +1352,6 @@
 </div>
 
   <script src="help-content.js?v=2026070215"></script>
-  <script src="settings.js?v=2026070215"></script>
+  <script src="settings.js?v=2026100601"></script>
 </body>
 </html>

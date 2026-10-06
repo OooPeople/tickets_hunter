@@ -841,7 +841,7 @@ function uiText(key, extra = '') {
         'saved': { 'zh-TW': '已存檔', en: 'Saved' },
         'missing_ticket_number': { 'zh-TW': '提示: 請指定張數', en: 'Please select the number of tickets.' },
         'invalid_tixcraft_soft_block_delay': { 'zh-TW': '提示: 暫時鎖定等待秒數請填 1 到 600 的整數，或留空使用預設值。', en: 'Enter an integer from 1 to 600 for the TixCraft soft-block delay, or leave it empty to use the default.' },
-        'invalid_utk_min_interval': { 'zh-TW': '提示：職棒共用刷新最小間隔不得低於 1.0 秒。', en: 'The shared baseball refresh interval must be at least 1.0 second.' },
+        'invalid_utk_min_interval': { 'zh-TW': '提示：職棒共用刷新最小間隔必須大於 0 秒。', en: 'The shared baseball refresh interval must be greater than 0 seconds.' },
         'invalid_utk_cooldown': { 'zh-TW': '提示：429 冷卻時間必須是大於 0 的整數，且最大冷卻不得小於初始冷卻。', en: '429 cooldowns must be positive integers, and the maximum cannot be lower than the initial cooldown.' },
         'global_settings_not_ready': { 'zh-TW': '全域刷新設定仍在載入，請稍候再試。', en: 'Global refresh settings are still loading. Please try again shortly.' },
         'global_settings_load_failed': { 'zh-TW': '全域刷新設定載入失敗；儲存與啟動已停用。請重新整理頁面再試。', en: 'Global refresh settings failed to load. Save and Run are disabled; reload the page to try again.' },
@@ -1475,7 +1475,7 @@ function collect_global_settings_from_form(showMessage = true)
     const initialCooldown = Number(utk_rate_limit_initial_cooldown.value);
     const maxCooldown = Number(utk_rate_limit_max_cooldown.value);
 
-    const minIntervalValid = Number.isFinite(minInterval) && minInterval >= 1.0;
+    const minIntervalValid = Number.isFinite(minInterval) && minInterval > 0;
     const cooldownValid = Number.isInteger(initialCooldown) && initialCooldown > 0
         && Number.isInteger(maxCooldown) && maxCooldown > 0
         && maxCooldown >= initialCooldown;

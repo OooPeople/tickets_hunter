@@ -78,7 +78,7 @@ class GlobalSettingsTest(unittest.TestCase):
         invalid_values.append(value)
 
         value = get_default_global_settings()
-        value["utk_sports"]["min_interval_seconds"] = 0.99
+        value["utk_sports"]["min_interval_seconds"] = 0
         invalid_values.append(value)
 
         value = get_default_global_settings()
@@ -99,6 +99,14 @@ class GlobalSettingsTest(unittest.TestCase):
                 validate_global_settings(value)
 
         self.assertEqual(default, validate_global_settings(default))
+
+    def test_subsecond_interval_is_allowed(self):
+        value = get_default_global_settings()
+        value["utk_sports"]["min_interval_seconds"] = 0.5
+
+        normalized = validate_global_settings(value)
+
+        self.assertEqual(0.5, normalized["utk_sports"]["min_interval_seconds"])
 
     def test_revision_is_stable_and_changes_with_content(self):
         first = get_default_global_settings()
@@ -162,7 +170,7 @@ class GlobalSettingsHandlerTest(AsyncHTTPTestCase):
         save_global_settings(original)
         revision = global_settings_revision(original)
         invalid = get_default_global_settings()
-        invalid["utk_sports"]["min_interval_seconds"] = 0.5
+        invalid["utk_sports"]["min_interval_seconds"] = 0
 
         response = self.fetch(
             "/global-settings",

@@ -38,12 +38,14 @@ def get_global_settings_path():
     return os.path.join(util.get_app_root(), GLOBAL_SETTINGS_FILENAME)
 
 
-def _number(value, field_name, *, minimum, integer=False):
+def _number(value, field_name, *, minimum, integer=False, exclusive_minimum=False):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field_name} must be a number")
     number = float(value)
-    if not math.isfinite(number) or number < minimum:
-        raise ValueError(f"{field_name} must be at least {minimum:g}")
+    below_minimum = number <= minimum if exclusive_minimum else number < minimum
+    if not math.isfinite(number) or below_minimum:
+        comparison = "greater than" if exclusive_minimum else "at least"
+        raise ValueError(f"{field_name} must be {comparison} {minimum:g}")
     if integer:
         if not number.is_integer():
             raise ValueError(f"{field_name} must be an integer")
@@ -69,7 +71,8 @@ def validate_global_settings(value):
     min_interval = _number(
         utk_sports.get("min_interval_seconds"),
         "utk_sports.min_interval_seconds",
-        minimum=1.0,
+        minimum=0.0,
+        exclusive_minimum=True,
     )
     initial_cooldown = _number(
         utk_sports.get("initial_cooldown_seconds"),

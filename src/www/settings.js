@@ -17,6 +17,7 @@ const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
+const ctbc_seat_selection_mode = document.querySelector('#ctbc_seat_selection_mode');
 const ctbc_ticket_type_keyword = document.querySelector('#ctbc_ticket_type_keyword');
 const ctbc_seat_sorting = document.querySelector('#ctbc_seat_sorting');
 const keyword_exclude = document.querySelector('#keyword_exclude');
@@ -495,6 +496,10 @@ function renderBasicTabTranslations() {
     setRowLabelForField('area_select_mode', fieldLabel('Area selection order', 'area_select_mode'));
     setRowLabelForField('area_keyword', fieldLabel('Area keywords', 'area_keyword'));
     setRowLabelForField('area_auto_fallback', fieldLabel('Area fallback', 'area_auto_fallback'));
+    setRowLabelForField('ctbc_seat_selection_mode', fieldLabel('Baseball seat selection', 'ctbc_seat_selection_mode'));
+    applyOrRestore('#ctbc_seat_selection_mode option[value="manual"]', 'textContent', 'Manual seat map');
+    applyOrRestore('#ctbc_seat_selection_mode option[value="computer"]', 'textContent', 'Website computer assignment');
+    setNearestFormText('ctbc_seat_selection_mode', 'Manual seat selection remains the default. Website computer assignment is enabled only for verified platforms and still follows the area keywords.');
     setNearestFormText('ctbc_ticket_type_keyword', 'Used on the seat page. Defaults to Full Ticket and does not inherit area or exclusion keywords. Enter 身心 to select the disability ticket explicitly.');
     setRowLabelForField('ctbc_seat_sorting', fieldLabel('Baseball seat ordering', 'ctbc_seat_sorting'));
     setRowLabelForField('keyword_exclude', fieldLabel('Exclude keywords', 'keyword_exclude'));
@@ -1371,6 +1376,10 @@ function load_settins_to_form(settings)
         ctbc_password.value = settings.accounts.ctbc_password || '';
         ticket_password.value = settings.accounts.ticket_password;
 
+        const savedCtbcSeatSelectionMode = utiki_behavior_setting(settings, 'seat_selection_mode', 'manual');
+        ctbc_seat_selection_mode.value = ['manual', 'computer'].includes(savedCtbcSeatSelectionMode)
+            ? savedCtbcSeatSelectionMode
+            : 'manual';
         ctbc_ticket_type_keyword.value = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
         const savedCtbcSeatSorting = utiki_behavior_setting(settings, 'seat_sorting', 'row_seat');
         const validCtbcSeatSortings = [
@@ -1809,8 +1818,10 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.ticket_password = ticket_password.value;
             if (!settings.utiki) settings.utiki = {};
             if (!settings.ctbc) settings.ctbc = {};
+            settings.utiki.seat_selection_mode = ctbc_seat_selection_mode.value || 'manual';
             settings.utiki.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
             settings.utiki.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
+            settings.ctbc.seat_selection_mode = settings.utiki.seat_selection_mode;
             settings.ctbc.ticket_type_keyword = settings.utiki.ticket_type_keyword;
             settings.ctbc.seat_sorting = settings.utiki.seat_sorting;
             settings.accounts.udn_password = udn_password.value;
@@ -1974,6 +1985,13 @@ function check_unsaved_fields()
                 $("#"+f).removeClass("is-invalid");
             }
         });
+        if (ctbc_seat_selection_mode) {
+            const savedValue = utiki_behavior_setting(settings, 'seat_selection_mode', 'manual');
+            ctbc_seat_selection_mode.classList.toggle(
+                'is-invalid',
+                ctbc_seat_selection_mode.value !== savedValue
+            );
+        }
         if (ctbc_ticket_type_keyword) {
             const savedValue = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
             ctbc_ticket_type_keyword.classList.toggle(

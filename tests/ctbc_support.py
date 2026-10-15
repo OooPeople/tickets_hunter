@@ -57,6 +57,7 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
     utiki_behavior = {
         "ticket_type_keyword": "全票",
         "seat_sorting": "row_seat",
+        "seat_selection_mode": "manual",
     }
     config_dict["utiki"].update(utiki_behavior)
     config_dict["ctbc"].update(utiki_behavior)
@@ -86,10 +87,58 @@ class CtbcStateIsolationMixin:
                 bucket.clear()
 
 
+class FakeUtikiDomPort:
+    """Small semantic fake for workflow-to-DOM contract tests."""
+
+    def __init__(self, area_snapshot, commit_result):
+        self.area_snapshot = area_snapshot
+        self.commit_result = commit_result
+        self.events = []
+        self.commit_count = 0
+
+    async def read_area_snapshot(self, _tab):
+        self.events.append("inspect_area")
+        return self.area_snapshot
+
+    async def commit_area(self, _tab, snapshot, plan, ticket_number,
+                          navigation_nonce, fast_marker_key):
+        self.events.append("commit_area")
+        self.commit_count += 1
+        assert snapshot is self.area_snapshot
+        assert plan.rel == "front"
+        assert ticket_number == 2
+        assert re.fullmatch(r"[a-f0-9]{32}", navigation_nonce)
+        assert fast_marker_key == "ticketsHunter.ctbc.fast-navigation.v1"
+        return self.commit_result
+
+    async def commit_server_assigned_area(
+        self, _tab, snapshot, plan, ticket_number, navigation_nonce,
+        fast_marker_key,
+    ):
+        self.events.append("commit_server_assigned_area")
+        self.commit_count += 1
+        assert snapshot is self.area_snapshot
+        assert plan.rel == "front"
+        assert ticket_number == 2
+        assert re.fullmatch(r"[a-f0-9]{32}", navigation_nonce)
+        assert fast_marker_key == "ticketsHunter.ctbc.fast-navigation.v1"
+        return self.commit_result
+
+
 CTBC_TEST_PERFORMANCE_ID = "P16D0B8Z"
 CTBC_TEST_AREA_URL = (
     "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
     "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
+)
+CTBC_TEST_QUANTITY_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+    "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+    "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+)
+CTBC_TEST_SERVER_QUANTITY_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0201_001?"
+    "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+    "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&ATYPE=N"
 )
 
 
@@ -136,9 +185,57 @@ def make_ctbc_area_snapshot(
     return {
         "ok": True,
         "page_url": CTBC_TEST_AREA_URL,
+        "document_id": "document-1",
         "rows": rows,
         "areas": areas,
     }
+
+
+def make_ctbc_quantity_snapshot(
+    *, page_url=CTBC_TEST_QUANTITY_URL, group_id="", product_id=""
+):
+    return {
+        "ok": True,
+        "page_url": page_url,
+        "document_id": "document-1",
+        "performance_id": "P16D0B8Z",
+        "product_id": product_id,
+        "group_id": group_id,
+        "price_area_id": "PRICE_FRONT",
+        "quantity_limit_raw": "4",
+        "rows": [
+            {
+                "key": "FULL", "name": "全票", "text": "全票",
+                "disabled": False, "remaining_present": True,
+                "remaining_raw": "5", "value": "0",
+            },
+            {
+                "key": "OTHER", "name": "其他票", "text": "其他票",
+                "disabled": False, "remaining_present": True,
+                "remaining_raw": "5", "value": "0",
+            },
+        ],
+    }
+
+
+class FakeUtikiQuantityDomPort:
+    def __init__(self, snapshot, commit_result):
+        self.snapshot = snapshot
+        self.commit_result = commit_result
+        self.events = []
+        self.commit_count = 0
+
+    async def read_quantity_snapshot(self, _tab):
+        self.events.append("inspect_quantity")
+        return self.snapshot
+
+    async def commit_quantity(self, _tab, snapshot, plan):
+        self.events.append("commit_quantity")
+        self.commit_count += 1
+        assert snapshot is self.snapshot
+        assert plan.target_key == "FULL"
+        assert plan.ticket_number == 2
+        return self.commit_result
 
 
 class FakeElement:
@@ -481,37 +578,52 @@ class FakeSubmitTab:
         self.dialog_visible = bool(dialog)
         self.dismiss_allowed = True
         self.dialog_closes_on_click = True
+        self.document_id = "fake-dialog-document"
         self.reload_count = 0
 
     async def evaluate(self, script):
         if "#LOGIN_ID" in script:
             if "JSON.stringify" in script:
-                return '{"account":"user","password":"secret"}'
+                expected = _script_json_constant(
+                    script, "expectedDialog"
+                )
+                if expected and (
+                    expected.get("pageUrl") != self.target.url
+                    or expected.get("documentId") != self.document_id
+                    or not self.dialog_visible
+                    or expected.get("text") != self.dialog
+                ):
+                    return '{"ok":false}'
+                return '{"ok":true,"account":"user","password":"secret"}'
             return {"required": False}
         if "#CHK" in script:
             return self.captcha_input.value
-        if "#dialog-message" in script:
-            if "const expectedText" in script:
-                expected_literal = f"const expectedText = {json.dumps(self.dialog)};"
-                if (
-                    not self.dismiss_allowed
-                    or not self.dialog_visible
-                    or expected_literal not in script
-                    or "message.closest('.ui-dialog')" not in script
-                    or "message.textContent.trim() !== expectedText" not in script
-                    or "wrapper.getClientRects().length > 0" not in script
-                    or "wrapper.querySelector('.ui-dialog-buttonset button')" not in script
-                ):
-                    return False
-                await self.dialog_button.click()
-                if self.dialog_closes_on_click:
-                    self.dialog = ""
-                    self.dialog_visible = False
-                return True
+        if "__ticketsHunterUtikiDialogSnapshot" in script:
             if self.dialogs:
                 self.dialog = self.dialogs.pop(0)
                 self.dialog_visible = bool(self.dialog)
-            return self.dialog if self.dialog_visible else ""
+            return json.dumps({
+                "page_url": self.target.url,
+                "document_id": self.document_id,
+                "visible_count": int(self.dialog_visible),
+                "text": self.dialog if self.dialog_visible else "",
+            })
+        if "__ticketsHunterUtikiDialogDismiss" in script:
+            snapshot = _script_json_constant(script, "snapshot") or {}
+            if (
+                snapshot.get("pageUrl") != self.target.url
+                or snapshot.get("documentId") != self.document_id
+                or not self.dialog_visible
+                or snapshot.get("text") != self.dialog
+            ):
+                return "stale"
+            if not self.dismiss_allowed:
+                return "rejected"
+            await self.dialog_button.click()
+            if self.dialog_closes_on_click:
+                self.dialog = ""
+                self.dialog_visible = False
+            return "committed"
         return None
 
     async def query_selector(self, selector):

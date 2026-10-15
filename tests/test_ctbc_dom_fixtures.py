@@ -2,6 +2,7 @@ import asyncio
 import os
 import tempfile
 import threading
+from dataclasses import replace
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,17 +13,34 @@ import zendriver as uc
 
 from tests.ctbc_support import config
 
+from platforms.utiki.dom import (
+    CommitResult,
+    SubmitDispatchResult,
+    commit_area,
+    commit_server_assigned_area,
+    commit_quantity,
+    dismiss_dialog,
+    dispatch_quantity_submit,
+    read_area_snapshot,
+    read_dialog_snapshot,
+    read_quantity_snapshot,
+)
+from platforms.utiki.selection import (
+    classify_submit_dialog as _classify_ctbc_submit_dialog,
+    select_area_snapshot,
+    select_quantity_snapshot,
+)
 from platforms.utiki.workflow import (
-    _classify_ctbc_submit_dialog,
     _ctbc_commit_fast_navigation,
+    _ctbc_captcha_and_submit,
     _ctbc_delete_fast_navigation_marker,
-    _ctbc_general_quantity_audit_is_valid,
+    _ctbc_login_fingerprint,
+    _ctbc_purchase_state_key,
     _ctbc_read_fast_navigation_marker,
+    _ctbc_tab_identity,
     _dismiss_ctbc_dialog,
-    _get_ctbc_visible_dialog_text,
     _state,
     _validate_ctbc_seat_selection,
-    nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
     nodriver_ctbc_seat_auto_select,
@@ -64,6 +82,7 @@ async def _run_browser_fixtures():
             _assert_area_fixture,
             _assert_seat_fixture,
             _assert_quantity_fixture,
+            _assert_server_assigned_quantity_fixture,
             _assert_dialog_fixture,
             _assert_fast_marker_fixture,
         ):
@@ -96,6 +115,15 @@ async def _open_fixture(browser, filename, query=""):
     raise AssertionError(f"fixture did not finish loading: {filename}")
 
 
+async def _open_fixture_url(browser, url):
+    tab = await browser.get(url)
+    for _ in range(50):
+        if await tab.evaluate("document.readyState === 'complete'"):
+            return tab
+        await tab.sleep(0.02)
+    raise AssertionError(f"fixture did not finish loading: {url}")
+
+
 async def _assert_date_fixture(browser):
     tab = await _open_fixture(
         browser,
@@ -116,22 +144,426 @@ async def _assert_area_fixture(browser):
         "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
     )
     cfg = config(area_keyword='"109區前排"')
+    snapshot = await read_area_snapshot(tab)
+    assert snapshot.ok
+    assert snapshot.document_id
+    assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 0
+    target = select_area_snapshot(
+        snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    assert target.rel == "front"
 
-    fixture_pending = {
-        "kind": "NATIVE",
-        "phase": "PREPARED",
-        "nonce": "f" * 32,
-        "source_url": str(tab.target.url),
-        "area_url": str(tab.target.url),
-        "created_at": 0.0,
-    }
-    with patch(
-        "platforms.utiki.workflow._ctbc_new_pending_navigation",
-        return_value=fixture_pending,
-    ):
-        assert await nodriver_ctbc_area_auto_select(tab, cfg)
+    result = await commit_area(
+        tab, snapshot, target, cfg["ticket_number"], "f" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    )
+    assert result is CommitResult.COMMITTED
     assert await tab.evaluate("document.body.dataset.selectedArea || ''") == "PRICE_FRONT"
     assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 1
+    assert await commit_area(
+        tab, snapshot, target, cfg["ticket_number"], "f" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 1
+
+    stale_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    stale_snapshot = await read_area_snapshot(stale_tab)
+    stale_target = select_area_snapshot(
+        stale_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    stale_snapshot = replace(
+        stale_snapshot, document_id=f"{stale_snapshot.document_id}-old"
+    )
+    assert await commit_area(
+        stale_tab, stale_snapshot, stale_target, cfg["ticket_number"],
+        "e" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.STALE
+    assert await stale_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
+
+    changed_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    changed_snapshot = await read_area_snapshot(changed_tab)
+    changed_target = select_area_snapshot(
+        changed_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await changed_tab.evaluate("""
+        document.querySelector('#mapdata area#front').setAttribute(
+            'href',
+            "javascript:Send('0205','OTHER','PRICE_FRONT','GROUP_FRONT','45')"
+        )
+    """)
+    assert await commit_area(
+        changed_tab, changed_snapshot, changed_target, cfg["ticket_number"],
+        "d" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await changed_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
+
+    availability_mutations = (
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '1'",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'title', '票區:109區前排 票價：1600 尚餘：1')",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','1')\")",
+    )
+    for index, mutation in enumerate(availability_mutations):
+        unavailable_tab = await _open_fixture(
+            browser,
+            "UTK0204_area.html",
+            "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+        )
+        unavailable_snapshot = await read_area_snapshot(unavailable_tab)
+        unavailable_target = select_area_snapshot(
+            unavailable_snapshot, cfg, "P16D0B8Z",
+            require_direct_destination=False,
+        )
+        await unavailable_tab.evaluate(mutation)
+        assert await commit_area(
+            unavailable_tab, unavailable_snapshot, unavailable_target,
+            cfg["ticket_number"], f"{index + 1:x}" * 32,
+            "ticketsHunter.ctbc.fast-navigation.v1",
+        ) is CommitResult.REJECTED
+        assert await unavailable_tab.evaluate(
+            "Number(document.body.dataset.areaClicks || 0)"
+        ) == 0
+
+    marker_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    marker_snapshot = await read_area_snapshot(marker_tab)
+    marker_target = select_area_snapshot(
+        marker_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    marker_raw = '{"nonce":"racing-fast-marker"}'
+    await marker_tab.evaluate(
+        "sessionStorage.setItem("
+        "'ticketsHunter.ctbc.fast-navigation.v1', "
+        f"{marker_raw!r})"
+    )
+    assert await commit_area(
+        marker_tab, marker_snapshot, marker_target, cfg["ticket_number"],
+        "a" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.STALE
+    assert await marker_tab.evaluate(
+        "sessionStorage.getItem('ticketsHunter.ctbc.fast-navigation.v1')"
+    ) == marker_raw
+    assert await marker_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
+
+    server_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    server_snapshot = await read_area_snapshot(server_tab)
+    server_target = select_area_snapshot(
+        server_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await server_tab.evaluate(
+        "sessionStorage.removeItem("
+        "'ticketsHunter.ctbc.fast-navigation.v1')"
+    )
+    assert await commit_server_assigned_area(
+        server_tab, server_snapshot, server_target, cfg["ticket_number"],
+        "c" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await server_tab.evaluate(
+        "document.querySelector('#byServer').classList.contains('active')"
+    )
+    assert not await server_tab.evaluate(
+        "document.querySelector('#byhend').classList.contains('active')"
+    )
+    assert not await server_tab.evaluate(
+        "document.querySelector('#ATYPE_CB').checked"
+    )
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.serverModeClicks || 0)"
+    ) == 1
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.checkboxClicks || 0)"
+    ) == 1
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 1
+    assert await server_tab.evaluate(
+        "document.body.dataset.selectedArea || ''"
+    ) == "PRICE_FRONT"
+    assert await commit_server_assigned_area(
+        server_tab, server_snapshot, server_target, cfg["ticket_number"],
+        "c" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 1
+
+    ambiguous_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    ambiguous_snapshot = await read_area_snapshot(ambiguous_tab)
+    ambiguous_target = select_area_snapshot(
+        ambiguous_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await ambiguous_tab.evaluate(
+        "document.querySelector('#byServer').classList.add('active')"
+    )
+    assert await commit_server_assigned_area(
+        ambiguous_tab, ambiguous_snapshot, ambiguous_target,
+        cfg["ticket_number"], "9" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await ambiguous_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    post_click_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    post_click_snapshot = await read_area_snapshot(post_click_tab)
+    post_click_target = select_area_snapshot(
+        post_click_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await post_click_tab.evaluate("""
+        (() => {
+            const oldButton = document.querySelector('#byServer');
+            const button = oldButton.cloneNode(true);
+            oldButton.replaceWith(button);
+            button.addEventListener('click', () => {
+                button.classList.add('active');
+                document.body.dataset.serverModeClicks = String(
+                    Number(document.body.dataset.serverModeClicks || 0) + 1
+                );
+            });
+        })()
+    """)
+    assert await commit_server_assigned_area(
+        post_click_tab, post_click_snapshot, post_click_target,
+        cfg["ticket_number"], "8" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await post_click_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+    assert await commit_server_assigned_area(
+        post_click_tab, post_click_snapshot, post_click_target,
+        cfg["ticket_number"], "5" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await post_click_tab.evaluate(
+        "Number(document.body.dataset.serverModeClicks || 0)"
+    ) == 1
+
+    stale_row_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    stale_row_snapshot = await read_area_snapshot(stale_row_tab)
+    stale_row_target = select_area_snapshot(
+        stale_row_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await stale_row_tab.evaluate("""
+        (() => {
+            const oldButton = document.querySelector('#byServer');
+            const button = oldButton.cloneNode(true);
+            oldButton.replaceWith(button);
+            button.addEventListener('click', () => {
+                button.classList.add('active');
+                document.querySelector('#byhend').classList.remove('active');
+                document.querySelector(
+                    'tr.saleTr[rel="front"] td[data-title^="空位"]'
+                ).textContent = '0';
+            });
+        })()
+    """)
+    assert await commit_server_assigned_area(
+        stale_row_tab, stale_row_snapshot, stale_row_target,
+        cfg["ticket_number"], "7" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await stale_row_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    stale_action_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    stale_action_snapshot = await read_area_snapshot(stale_action_tab)
+    stale_action_target = select_area_snapshot(
+        stale_action_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await stale_action_tab.evaluate("""
+        document.querySelector('tr.saleTr[rel="front"]').setAttribute(
+            'onclick',
+            "Send('0205','P16D0B8Z','PRICE_BACK','GROUP_BACK','45')"
+        )
+    """)
+    assert await commit_server_assigned_area(
+        stale_action_tab, stale_action_snapshot, stale_action_target,
+        cfg["ticket_number"], "4" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await stale_action_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    checkbox_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    checkbox_snapshot = await read_area_snapshot(checkbox_tab)
+    checkbox_target = select_area_snapshot(
+        checkbox_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await checkbox_tab.evaluate("""
+        document.querySelector('#ATYPE_CB').addEventListener(
+            'click', event => event.preventDefault())
+    """)
+    assert await commit_server_assigned_area(
+        checkbox_tab, checkbox_snapshot, checkbox_target,
+        cfg["ticket_number"], "3" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await commit_server_assigned_area(
+        checkbox_tab, checkbox_snapshot, checkbox_target,
+        cfg["ticket_number"], "2" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await checkbox_tab.evaluate(
+        "Number(document.body.dataset.checkboxClicks || 0)"
+    ) == 1
+    assert await checkbox_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    rerender_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    rerender_snapshot = await read_area_snapshot(rerender_tab)
+    rerender_target = select_area_snapshot(
+        rerender_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await rerender_tab.evaluate("""
+        (() => {
+            const oldButton = document.querySelector('#byServer');
+            const button = oldButton.cloneNode(true);
+            oldButton.replaceWith(button);
+            button.addEventListener('click', () => {
+                button.classList.add('active');
+                document.querySelector('#byhend').classList.remove('active');
+                document.body.dataset.serverModeClicks = String(
+                    Number(document.body.dataset.serverModeClicks || 0) + 1
+                );
+                window.fixtureCheckboxRoot =
+                    document.querySelector('#ABdiv_ATYPE_CB');
+                window.fixtureCheckboxRoot.remove();
+            });
+        })()
+    """)
+    assert await commit_server_assigned_area(
+        rerender_tab, rerender_snapshot, rerender_target,
+        cfg["ticket_number"], "1" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    await rerender_tab.evaluate("""
+        document.querySelector('#SeatOptions').append(
+            window.fixtureCheckboxRoot)
+    """)
+    assert await commit_server_assigned_area(
+        rerender_tab, rerender_snapshot, rerender_target,
+        cfg["ticket_number"], "0" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await rerender_tab.evaluate(
+        "Number(document.body.dataset.serverModeClicks || 0)"
+    ) == 1
+    assert await rerender_tab.evaluate(
+        "Number(document.body.dataset.checkboxClicks || 0)"
+    ) == 1
+    assert await rerender_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 1
+
+    duplicate_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    duplicate_snapshot = await read_area_snapshot(duplicate_tab)
+    duplicate_target = select_area_snapshot(
+        duplicate_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await duplicate_tab.evaluate("""
+        document.querySelector('#SeatOptions').append(
+            document.querySelector('#byServer').cloneNode(true))
+    """)
+    assert await commit_server_assigned_area(
+        duplicate_tab, duplicate_snapshot, duplicate_target,
+        cfg["ticket_number"], "6" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await duplicate_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    unknown_availability_mutations = (
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '暫停銷售'",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'title', '票區:109區前排 票價：1600 尚餘：暫停銷售')",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','暫停銷售')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"]').setAttribute("
+        "'onclick', \"Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','暫停銷售')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = "
+        "'暫停銷售，剩餘2筆資料待同步'",
+    )
+    for index, mutation in enumerate(unknown_availability_mutations):
+        unknown_tab = await _open_fixture(
+            browser,
+            "UTK0204_area.html",
+            "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+        )
+        unknown_snapshot = await read_area_snapshot(unknown_tab)
+        unknown_target = select_area_snapshot(
+            unknown_snapshot, cfg, "P16D0B8Z",
+            require_direct_destination=False,
+        )
+        await unknown_tab.evaluate(mutation)
+        assert await commit_server_assigned_area(
+            unknown_tab, unknown_snapshot, unknown_target,
+            cfg["ticket_number"], f"{index + 10:x}" * 32,
+            "ticketsHunter.ctbc.fast-navigation.v1",
+        ) is CommitResult.REJECTED
+        assert await unknown_tab.evaluate(
+            "Number(document.body.dataset.rowClicks || 0)"
+        ) == 0
 
 
 async def _assert_seat_fixture(browser):
@@ -154,87 +586,377 @@ async def _assert_seat_fixture(browser):
 
 
 async def _assert_quantity_fixture(browser):
-    tab = await _open_fixture(
-        browser,
-        "UTK0203_quantity.html",
-        (
-            "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
-            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
-        ),
+    query = (
+        "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+        "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
     )
     cfg = config()
-    events = []
+    tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    snapshot = await read_quantity_snapshot(tab)
+    plan = select_quantity_snapshot(
+        snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert plan.target_key == "FULL"
+    assert plan.ticket_number == 2
+    assert await commit_quantity(
+        tab, snapshot, plan
+    ) is CommitResult.COMMITTED
+    assert await _read_fixture_quantities(tab) == {"FULL": "2", "OTHER": "0"}
+    event_count = await tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    )
+    assert event_count == 7
+    assert await commit_quantity(
+        tab, snapshot, plan
+    ) is CommitResult.COMMITTED
+    assert await tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == event_count
+    assert await tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+    await tab.evaluate(
+        "document.querySelector('input.numbox[key=\"OTHER\"]').value = '1'"
+    )
+    assert await commit_quantity(
+        tab, snapshot, plan
+    ) is CommitResult.STALE
+    assert await tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == event_count
+    assert await tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
 
-    def audit_spy(*args):
-        events.append("audit")
-        return _ctbc_general_quantity_audit_is_valid(*args)
-
-    async def submit_effect(*_args):
-        events.append("submit")
-        return True
-
-    submit_gate = AsyncMock(side_effect=submit_effect)
-    attestation = AsyncMock(return_value=True)
+    flow_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    submit_gate = AsyncMock(return_value=True)
     with patch(
-        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
-        side_effect=audit_spy,
-    ) as audit, patch(
         "platforms.utiki.workflow._ctbc_captcha_and_submit",
         submit_gate,
     ), patch(
         "platforms.utiki.workflow._ctbc_attest_fast_destination",
-        attestation,
+        AsyncMock(return_value=True),
     ), patch(
         "platforms.utiki.workflow._ctbc_purchase_state_key",
         return_value=("fixture-purchase",),
     ):
-        assert await nodriver_ctbc_general_admission_main(tab, cfg, ocr=None)
+        assert await nodriver_ctbc_general_admission_main(
+            flow_tab, cfg, ocr=None
+        )
+    submit_gate.assert_awaited_once()
+    assert submit_gate.await_args.args == (flow_tab, cfg, None)
+    assert submit_gate.await_args.kwargs["quantity_plan"].target_key == "FULL"
+    assert await _read_fixture_quantities(flow_tab) == {
+        "FULL": "2", "OTHER": "0"
+    }
 
-    audit.assert_called_once()
-    attestation.assert_awaited_once_with(tab, "general_admission", cfg)
-    submit_gate.assert_awaited_once_with(tab, cfg, None)
-    assert events == ["audit", "submit"]
-    assert await _read_fixture_quantities(tab) == {"FULL": "2", "OTHER": "0"}
-    assert await tab.evaluate("Number(document.body.dataset.addcartClicks || 0)") == 0
-
-    race_tab = await _open_fixture(
-        browser,
-        "UTK0203_quantity.html",
-        (
-            "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
-            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&RACE=1"
-        ),
+    dispatch_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
     )
-    await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
-    race_cfg = config()
-    race_gate = AsyncMock(return_value=True)
-    race_attestation = AsyncMock(return_value=True)
-    with patch(
-        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
-        wraps=_ctbc_general_quantity_audit_is_valid,
-    ) as race_audit, patch(
-        "platforms.utiki.workflow._ctbc_captcha_and_submit",
-        race_gate,
-    ), patch(
-        "platforms.utiki.workflow._ctbc_attest_fast_destination",
-        race_attestation,
-    ), patch(
-        "platforms.utiki.workflow._ctbc_purchase_state_key",
-        return_value=("fixture-race-purchase",),
-    ):
-        assert not await nodriver_ctbc_general_admission_main(
-            race_tab, race_cfg, ocr=None
+    dispatch_snapshot = await read_quantity_snapshot(dispatch_tab)
+    dispatch_plan = select_quantity_snapshot(
+        dispatch_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert await commit_quantity(
+        dispatch_tab, dispatch_snapshot, dispatch_plan
+    ) is CommitResult.COMMITTED
+    assert await dispatch_quantity_submit(
+        dispatch_tab, dispatch_plan
+    ) is SubmitDispatchResult.DISPATCHED
+    assert await dispatch_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 1
+    assert await dispatch_quantity_submit(
+        dispatch_tab, dispatch_plan
+    ) is SubmitDispatchResult.DISPATCHED
+    assert await dispatch_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 2
+
+    marker_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    marker_snapshot = await read_quantity_snapshot(marker_tab)
+    marker_plan = select_quantity_snapshot(
+        marker_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert await commit_quantity(
+        marker_tab, marker_snapshot, marker_plan
+    ) is CommitResult.COMMITTED
+    await marker_tab.evaluate(
+        "document.documentElement.removeAttribute("
+        "'data-tickets-hunter-utiki-quantity-commit')"
+    )
+    assert await dispatch_quantity_submit(
+        marker_tab, marker_plan
+    ) is SubmitDispatchResult.STALE
+    assert await marker_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    dialog_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    dialog_snapshot = await read_quantity_snapshot(dialog_tab)
+    dialog_plan = select_quantity_snapshot(
+        dialog_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert await commit_quantity(
+        dialog_tab, dialog_snapshot, dialog_plan
+    ) is CommitResult.COMMITTED
+    await dialog_tab.evaluate('''
+        (() => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'ui-dialog';
+            wrapper.innerHTML = '<div id="dialog-message">警告</div>';
+            document.body.appendChild(wrapper);
+        })()
+    ''')
+    assert await dispatch_quantity_submit(
+        dialog_tab, dialog_plan
+    ) is SubmitDispatchResult.REJECTED
+    assert await dialog_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    for mutation in ("quantity", "identity"):
+        wait_tab = await _open_fixture(
+            browser, "UTK0203_quantity.html", query
+        )
+        wait_snapshot = await read_quantity_snapshot(wait_tab)
+        wait_plan = select_quantity_snapshot(
+            wait_snapshot, cfg["utiki"]["ticket_type_keyword"],
+            cfg["ticket_number"],
+        )
+        assert await commit_quantity(
+            wait_tab, wait_snapshot, wait_plan
+        ) is CommitResult.COMMITTED
+        await wait_tab.evaluate(
+            "document.querySelector('#CHK').value = ''"
         )
 
-    race_audit.assert_called_once()
-    race_attestation.assert_awaited_once_with(
-        race_tab, "general_admission", race_cfg
+        async def mutate_during_ocr(*_args, kind=mutation):
+            if kind == "quantity":
+                await wait_tab.evaluate(
+                    "document.querySelector("
+                    "'input.numbox[key=\"OTHER\"]').value = '1'"
+                )
+            else:
+                await wait_tab.evaluate(
+                    "document.querySelector('#PERFORMANCE_ID').value = "
+                    "'OTHER'"
+                )
+            await wait_tab.evaluate(
+                "document.querySelector('#CHK').value = 'ABCD'"
+            )
+            return True
+
+        wait_cfg = config()
+        wait_cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+        dispatch_results = []
+
+        async def capture_dispatch(*args):
+            result = await dispatch_quantity_submit(*args)
+            dispatch_results.append(result)
+            return result
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_captcha",
+            AsyncMock(side_effect=mutate_during_ocr),
+        ) as captcha_solver, patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(side_effect=capture_dispatch),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_purchase_state_key",
+            return_value=(f"fixture-wait-{mutation}",),
+        ), patch(
+            "platforms.utiki.workflow._get_ctbc_page_type",
+            return_value="general_admission",
+        ), patch(
+            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            AsyncMock(return_value=False),
+        ) as observe, patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page:
+            assert not await _ctbc_captcha_and_submit(
+                wait_tab, wait_cfg, ocr=None, quantity_plan=wait_plan
+            )
+        captcha_solver.assert_awaited_once()
+        assert dispatch_results == [SubmitDispatchResult.STALE], mutation
+        observe.assert_not_awaited()
+        assert reload_page.await_count == 1, mutation
+        assert await wait_tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 0
+        assert (f"fixture-wait-{mutation}",) not in _state["submitted"]
+
+    race_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
+    race_snapshot = await read_quantity_snapshot(race_tab)
+    race_plan = select_quantity_snapshot(
+        race_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
     )
-    race_gate.assert_not_awaited()
-    assert await _read_fixture_quantities(race_tab) == {"FULL": "2", "OTHER": "1"}
+    assert await commit_quantity(
+        race_tab, race_snapshot, race_plan
+    ) is CommitResult.STALE
+    assert await _read_fixture_quantities(race_tab) == {
+        "FULL": "2", "OTHER": "1"
+    }
+    race_event_count = await race_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    )
+    assert await commit_quantity(
+        race_tab, race_snapshot, race_plan
+    ) is CommitResult.STALE
+    assert await race_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == race_event_count
     assert await race_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 0
+
+    stale_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    stale_snapshot = await read_quantity_snapshot(stale_tab)
+    stale_plan = select_quantity_snapshot(
+        stale_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    stale_document_id = f"{stale_snapshot.document_id}-old"
+    stale_snapshot = replace(stale_snapshot, document_id=stale_document_id)
+    stale_plan = replace(stale_plan, document_id=stale_document_id)
+    assert await commit_quantity(
+        stale_tab, stale_snapshot, stale_plan
+    ) is CommitResult.STALE
+    assert await stale_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    identity_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    identity_snapshot = await read_quantity_snapshot(identity_tab)
+    identity_plan = select_quantity_snapshot(
+        identity_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await identity_tab.evaluate(
+        "document.querySelector('#PERFORMANCE_ID').value = 'OTHER'"
+    )
+    assert await commit_quantity(
+        identity_tab, identity_snapshot, identity_plan
+    ) is CommitResult.STALE
+    assert await identity_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    mutation_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    mutation_snapshot = await read_quantity_snapshot(mutation_tab)
+    mutation_plan = select_quantity_snapshot(
+        mutation_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await mutation_tab.evaluate("document.body.dataset.addExtra = '1'")
+    assert await commit_quantity(
+        mutation_tab, mutation_snapshot, mutation_plan
+    ) is CommitResult.STALE
+    mutation_event_count = await mutation_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    )
+    assert await commit_quantity(
+        mutation_tab, mutation_snapshot, mutation_plan
+    ) is CommitResult.STALE
+    assert await mutation_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == mutation_event_count
+    assert await mutation_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    recovery_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await recovery_tab.evaluate("document.body.dataset.addExtra = '1'")
+    recovery_cfg = config()
+    recovery_cfg["advanced"]["auto_reload_page_interval"] = 5
+    reload_calls = 0
+
+    async def recovery_reload(reload_tab, _config, reason):
+        nonlocal reload_calls
+        reload_calls += 1
+        identity = _ctbc_tab_identity(reload_tab)
+        if reload_calls == 1:
+            _state["reload_request"][identity] = {"reason": reason}
+            return False
+        _state["reload_request"].pop(identity, None)
+        return True
+
+    with patch(
+        "platforms.utiki.workflow._ctbc_attest_fast_destination",
+        AsyncMock(return_value=True),
+    ), patch(
+        "platforms.utiki.workflow._ctbc_purchase_state_key",
+        return_value=("fixture-stale-quantity",),
+    ), patch(
+        "platforms.utiki.workflow._reload_with_interval",
+        AsyncMock(side_effect=recovery_reload),
+    ) as reload_page, patch(
+        "platforms.utiki.workflow._ctbc_captcha_and_submit",
+        AsyncMock(return_value=True),
+    ) as submit_gate:
+        assert not await nodriver_ctbc_general_admission_main(
+            recovery_tab, recovery_cfg, ocr=None
+        )
+        recovery_event_count = await recovery_tab.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        )
+        assert not await nodriver_ctbc_general_admission_main(
+            recovery_tab, recovery_cfg, ocr=None
+        )
+    assert reload_page.await_count == 2
+    submit_gate.assert_not_awaited()
+    assert await recovery_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == recovery_event_count
+
+    malformed_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await malformed_tab.evaluate(
+        "document.querySelector('input[key=\"LAST_AMOUNT\"]').value = "
+        "'unknown'"
+    )
+    malformed_snapshot = await read_quantity_snapshot(malformed_tab)
+    assert select_quantity_snapshot(
+        malformed_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    ) is None
+
+    multi_tab = await _open_fixture(
+        browser, "UTK0202_quantity.html", query
+    )
+    multi_snapshot = await read_quantity_snapshot(multi_tab)
+    assert len(multi_snapshot.rows) == 2
+    multi_plan = select_quantity_snapshot(
+        multi_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert multi_plan.target_key == "FULL"
+    assert await commit_quantity(
+        multi_tab, multi_snapshot, multi_plan
+    ) is CommitResult.COMMITTED
+    assert await _read_fixture_quantities(multi_tab) == {
+        "OTHER": "0", "FULL": "2"
+    }
 
 
 async def _read_fixture_quantities(tab):
@@ -245,14 +967,297 @@ async def _read_fixture_quantities(tab):
     )
 
 
+async def _assert_server_assigned_quantity_fixture(browser):
+    class QuantityHandler(SimpleHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
+
+        def do_GET(self):
+            routes = (
+                "/BROTHERS/UTK0201_001",
+                "/BROTHERS/nested/UTK0201_001",
+            )
+            for route in routes:
+                if self.path == route or self.path.startswith(route + "?"):
+                    self.path = "/UTK0201_001" + self.path[len(route):]
+                    break
+            super().do_GET()
+
+        def guess_type(self, path):
+            if path.endswith("/UTK0201_001"):
+                return "text/html"
+            return super().guess_type(path)
+
+    handler = partial(QuantityHandler, directory=str(FIXTURE_ROOT))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    query = (
+        "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+        "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&ATYPE=N"
+    )
+    url = (
+        f"http://127.0.0.1:{server.server_port}"
+        f"/BROTHERS/UTK0201_001{query}"
+    )
+    try:
+        tab = await _open_fixture_url(browser, url)
+        snapshot = await read_quantity_snapshot(tab)
+        plan = select_quantity_snapshot(
+            snapshot, "全票", 2, page_type="server_assigned_quantity"
+        )
+        assert plan is not None, snapshot
+        assert await commit_quantity(
+            tab, snapshot, plan
+        ) is CommitResult.COMMITTED
+        assert await _read_fixture_quantities(tab) == {
+            "FULL": "2", "OTHER": "0"
+        }
+        assert await dispatch_quantity_submit(
+            tab, plan
+        ) is SubmitDispatchResult.DISPATCHED
+        assert await tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 1
+
+        hidden_only = await _open_fixture_url(browser, url)
+        hidden_snapshot = await read_quantity_snapshot(hidden_only)
+        hidden_plan = select_quantity_snapshot(
+            hidden_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            hidden_only, hidden_snapshot, hidden_plan
+        ) is CommitResult.COMMITTED
+        await hidden_only.evaluate("document.querySelector('#CHK').remove()")
+        assert await dispatch_quantity_submit(
+            hidden_only, hidden_plan
+        ) is SubmitDispatchResult.REJECTED
+        assert await hidden_only.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 0
+
+        invalid_form = await _open_fixture_url(browser, url)
+        invalid_snapshot = await read_quantity_snapshot(invalid_form)
+        invalid_plan = select_quantity_snapshot(
+            invalid_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            invalid_form, invalid_snapshot, invalid_plan
+        ) is CommitResult.COMMITTED
+        await invalid_form.evaluate(
+            "document.querySelector('form').setAttribute('method', 'get')"
+        )
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+        await invalid_form.evaluate('''
+            (() => {
+                const form = document.querySelector('form');
+                const button = document.querySelector('#addcart');
+                form.setAttribute('method', 'post');
+                form.setAttribute(
+                    'action', 'UTK0201_001/ADD_SHOPPING_CAR');
+                button.setAttribute('formmethod', '');
+            })()
+        ''')
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+        await invalid_form.evaluate('''
+            (() => {
+                const button = document.querySelector('#addcart');
+                button.removeAttribute('formmethod');
+                button.setAttribute('formaction', '');
+            })()
+        ''')
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+        assert await invalid_form.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 0
+        await invalid_form.evaluate('''
+            (() => {
+                const form = document.querySelector('form');
+                const button = document.querySelector('#addcart');
+                button.removeAttribute('formaction');
+                form.setAttribute('method', 'post');
+                form.setAttribute('action', 'OTHER_ACTION');
+            })()
+        ''')
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+
+        product_drift = await _open_fixture_url(browser, url)
+        product_snapshot = await read_quantity_snapshot(product_drift)
+        product_plan = select_quantity_snapshot(
+            product_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        await product_drift.evaluate('''
+            document.querySelector('form').insertAdjacentHTML(
+                'afterbegin',
+                '<input id="PRODUCT_ID" value="PRODUCT_FIXTURE" hidden>'
+            )
+        ''')
+        assert await commit_quantity(
+            product_drift, product_snapshot, product_plan
+        ) is CommitResult.STALE
+
+        nested_url = url.replace(
+            "/BROTHERS/UTK0201_001",
+            "/BROTHERS/nested/UTK0201_001",
+        )
+        nested_tab = await _open_fixture_url(browser, nested_url)
+        nested_snapshot = await read_quantity_snapshot(nested_tab)
+        nested_plan = select_quantity_snapshot(
+            nested_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            nested_tab, nested_snapshot, nested_plan
+        ) is CommitResult.REJECTED
+        assert await nested_tab.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        ) == 0
+
+        wrong_atype = await _open_fixture_url(
+            browser, url.replace("ATYPE=N", "ATYPE=Y")
+        )
+        wrong_snapshot = await read_quantity_snapshot(wrong_atype)
+        wrong_plan = select_quantity_snapshot(
+            wrong_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            wrong_atype, wrong_snapshot, wrong_plan
+        ) is CommitResult.STALE
+        assert await wrong_atype.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        ) == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 async def _assert_dialog_fixture(browser):
     tab = await _open_fixture(browser, "UTK0205_dialog.html")
-    dialog_text = await _get_ctbc_visible_dialog_text(tab)
-    assert dialog_text == "該位置已被選走"
-    assert _classify_ctbc_submit_dialog(dialog_text) == "seat_conflict"
-    assert await _dismiss_ctbc_dialog(tab, dialog_text)
-    assert await _get_ctbc_visible_dialog_text(tab) == ""
+    await tab.evaluate('''
+        (() => {
+            const visibleWrapper = document.querySelector('.ui-dialog');
+            const hidden = visibleWrapper.cloneNode(true);
+            hidden.style.display = 'none';
+            hidden.querySelector('#dialog-message').textContent = '舊警告';
+            document.body.prepend(hidden);
+            const hiddenMessage = document.createElement('div');
+            hiddenMessage.id = 'dialog-message';
+            hiddenMessage.style.display = 'none';
+            hiddenMessage.textContent = '同一容器內的舊警告';
+            visibleWrapper.prepend(hiddenMessage);
+        })()
+    ''')
+    before_html = await tab.evaluate("document.body.innerHTML")
+    snapshot = await read_dialog_snapshot(tab)
+    repeated = await read_dialog_snapshot(tab)
+    assert snapshot == repeated
+    assert snapshot.visible_count == 1
+    assert snapshot.text == "該位置已被選走"
+    assert _classify_ctbc_submit_dialog(snapshot.text) == "seat_conflict"
+    assert await tab.evaluate("document.body.innerHTML") == before_html
     assert await tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+    await tab.evaluate('''
+        (() => {
+            const account = document.createElement('input');
+            account.id = 'LOGIN_ID';
+            account.value = 'fixture-user';
+            const password = document.createElement('input');
+            password.id = 'LOGIN_PWD';
+            password.value = 'fixture-secret';
+            document.body.append(account, password);
+        })()
+    ''')
+    assert await _ctbc_login_fingerprint(
+        tab, expected_dialog=snapshot
+    )
+    assert await _ctbc_login_fingerprint(
+        tab,
+        expected_dialog=replace(
+            snapshot, document_id="different-document"
+        ),
+    ) == ""
+    assert await dismiss_dialog(tab, snapshot) is CommitResult.COMMITTED
+    assert (await read_dialog_snapshot(tab)).visible_count == 0
+    assert await tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 1
+
+    stale_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    stale_snapshot = await read_dialog_snapshot(stale_tab)
+    await stale_tab.evaluate(
+        "document.querySelector('#dialog-message').textContent = '另一個警告'"
+    )
+    assert await dismiss_dialog(
+        stale_tab, stale_snapshot
+    ) is CommitResult.STALE
+    assert await stale_tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+
+    identity_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    identity_snapshot = await read_dialog_snapshot(identity_tab)
+    assert await dismiss_dialog(
+        identity_tab,
+        replace(identity_snapshot, document_id="different-document"),
+    ) is CommitResult.STALE
+    assert await identity_tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+
+    rejected_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    rejected_snapshot = await read_dialog_snapshot(rejected_tab)
+    await rejected_tab.evaluate(
+        "document.querySelector('.ui-dialog-buttonset button').disabled = true"
+    )
+    assert await dismiss_dialog(
+        rejected_tab, rejected_snapshot
+    ) is CommitResult.REJECTED
+    assert await rejected_tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+
+    ambiguous_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    await ambiguous_tab.evaluate('''
+        (() => {
+            const duplicate = document.querySelector('.ui-dialog')
+                .cloneNode(true);
+            duplicate.querySelector('#dialog-message').textContent = '另一個警告';
+            document.body.append(duplicate);
+        })()
+    ''')
+    ambiguous = await read_dialog_snapshot(ambiguous_tab)
+    assert ambiguous.visible_count == 2
+    assert ambiguous.text == ""
+
+    delayed_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    await delayed_tab.evaluate('''
+        document.querySelector('.ui-dialog-buttonset button').onclick =
+            function() {
+                document.body.dataset.dialogClicks = String(
+                    Number(document.body.dataset.dialogClicks || 0) + 1);
+                const wrapper = this.closest('.ui-dialog');
+                setTimeout(() => { wrapper.style.display = 'none'; }, 30);
+            };
+    ''')
+    assert await _dismiss_ctbc_dialog(
+        delayed_tab, "該位置已被選走"
+    )
+    assert await delayed_tab.evaluate(
         "Number(document.body.dataset.dialogClicks || 0)"
     ) == 1
 

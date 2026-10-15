@@ -27,6 +27,30 @@ from nodriver_tixcraft import reload_config  # noqa: E402
 
 
 class ProfileConfigPersistenceTest(unittest.TestCase):
+    def test_utiki_seat_selection_ui_is_wired_to_canonical_setting(self):
+        html = (SRC / "www" / "settings.html").read_text(encoding="utf-8")
+        javascript = (SRC / "www" / "settings.js").read_text(encoding="utf-8")
+
+        self.assertEqual(1, html.count('id="ctbc_seat_selection_mode"'))
+        self.assertIn('<option value="manual" selected>', html)
+        self.assertIn('<option value="computer">', html)
+        self.assertIn(
+            "utiki_behavior_setting(settings, 'seat_selection_mode', 'manual')",
+            javascript,
+        )
+        self.assertIn(
+            "settings.utiki.seat_selection_mode = ctbc_seat_selection_mode.value",
+            javascript,
+        )
+        self.assertIn(
+            "settings.ctbc.seat_selection_mode = settings.utiki.seat_selection_mode",
+            javascript,
+        )
+        self.assertIn(
+            "ctbc_seat_selection_mode.value !== savedValue",
+            javascript,
+        )
+
     def test_atomic_failure_preserves_the_previous_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "settings.json"
@@ -44,8 +68,16 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
 
     def test_utiki_behavior_migration_is_new_wins_idempotent_and_secret_safe(self):
         config = {
-            "utiki": {"ticket_type_keyword": "", "seat_sorting": "unsupported"},
-            "ctbc": {"ticket_type_keyword": "舊票種", "seat_sorting": "display"},
+            "utiki": {
+                "ticket_type_keyword": "",
+                "seat_sorting": "unsupported",
+                "seat_selection_mode": "unsupported",
+            },
+            "ctbc": {
+                "ticket_type_keyword": "舊票種",
+                "seat_sorting": "display",
+                "seat_selection_mode": "computer",
+            },
             "accounts": {
                 "ctbc_cookie": "cookie-sentinel",
                 "ctbc_account": "account-sentinel",
@@ -56,9 +88,10 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
         migrated = migrate_config(config)
         self.assertEqual("", migrated["utiki"]["ticket_type_keyword"])
         self.assertEqual("row_seat", migrated["utiki"]["seat_sorting"])
+        self.assertEqual("manual", migrated["utiki"]["seat_selection_mode"])
         self.assertEqual(migrated["utiki"], migrated["ctbc"])
         self.assertEqual(
-            {"ticket_type_keyword", "seat_sorting"},
+            {"ticket_type_keyword", "seat_sorting", "seat_selection_mode"},
             set(migrated["utiki"]),
         )
         self.assertEqual("cookie-sentinel", migrated["accounts"]["ctbc_cookie"])
@@ -69,11 +102,16 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
     def test_utiki_behavior_migration_copies_each_missing_legacy_key(self):
         migrated = migrate_config({
             "utiki": {"ticket_type_keyword": "家族票種"},
-            "ctbc": {"ticket_type_keyword": "舊票種", "seat_sorting": "display"},
+            "ctbc": {
+                "ticket_type_keyword": "舊票種",
+                "seat_sorting": "display",
+                "seat_selection_mode": "computer",
+            },
         })
 
         self.assertEqual("家族票種", migrated["utiki"]["ticket_type_keyword"])
         self.assertEqual("display", migrated["utiki"]["seat_sorting"])
+        self.assertEqual("computer", migrated["utiki"]["seat_selection_mode"])
         self.assertEqual(migrated["utiki"], migrated["ctbc"])
 
 
@@ -85,10 +123,12 @@ class ProfileConfigReloadTest(unittest.IsolatedAsyncioTestCase):
             replacement["utiki"] = {
                 "ticket_type_keyword": "熱更新票種",
                 "seat_sorting": "display",
+                "seat_selection_mode": "computer",
             }
             replacement["ctbc"] = {
                 "ticket_type_keyword": "過時票種",
                 "seat_sorting": "row_seat",
+                "seat_selection_mode": "manual",
             }
             target.write_text(json.dumps(replacement), encoding="utf-8")
 
@@ -97,6 +137,7 @@ class ProfileConfigReloadTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(mtime, 0)
         self.assertEqual("熱更新票種", runtime["utiki"]["ticket_type_keyword"])
+        self.assertEqual("computer", runtime["utiki"]["seat_selection_mode"])
         self.assertEqual(runtime["utiki"], runtime["ctbc"])
 
 
@@ -161,6 +202,7 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
         old_config["ctbc"] = {
             "ticket_type_keyword": "學生票",
             "seat_sorting": "display",
+            "seat_selection_mode": "computer",
         }
 
         save_response = self.fetch(
@@ -172,6 +214,7 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
         saved = json.loads(save_response.body)
         self.assertEqual(saved["utiki"], saved["ctbc"])
         self.assertEqual("學生票", saved["utiki"]["ticket_type_keyword"])
+        self.assertEqual("computer", saved["utiki"]["seat_selection_mode"])
         persisted = json.loads(
             (Path(self.temp_dir.name) / "settings.json").read_text(encoding="utf-8")
         )
@@ -183,6 +226,7 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
         new_only["utiki"] = {
             "ticket_type_keyword": "家族限定票",
             "seat_sorting": "row_asc_aisle",
+            "seat_selection_mode": "computer",
         }
         (Path(self.temp_dir.name) / "settings.json").write_text(
             json.dumps(new_only), encoding="utf-8"

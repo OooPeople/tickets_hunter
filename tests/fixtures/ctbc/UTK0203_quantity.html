@@ -4,8 +4,11 @@
   <meta charset="utf-8">
   <title>CTBC quantity fixture</title>
 </head>
-<body data-addcart-clicks="0">
+<body data-addcart-clicks="0" data-quantity-events="0">
   <!-- Page kind: quantity. Fixture date: 2026-10-15. Synthetic/deidentified. -->
+  <input id="PERFORMANCE_ID" value="P16D0B8Z" hidden>
+  <input id="GROUP_ID" value="" hidden>
+  <input id="PERFORMANCE_PRICE_AREA_ID" value="PRICE_FRONT" hidden>
   <input id="QUANTITY_LIMIT" value="4">
   <table id="table_tickettype">
     <tbody>
@@ -25,15 +28,37 @@
       </tr>
     </tbody>
   </table>
+  <input id="CHK" value="ABCD">
   <button id="addcart" type="button"
           onclick="document.body.dataset.addcartClicks = String(Number(document.body.dataset.addcartClicks || 0) + 1)">
     加入購物車
   </button>
   <script>
+    document.querySelectorAll('input.numbox[key]').forEach(input => {
+      for (const eventName of ['input', 'change', 'blur']) {
+        input.addEventListener(eventName, () => {
+          document.body.dataset.quantityEvents = String(
+            Number(document.body.dataset.quantityEvents || 0) + 1
+          );
+        });
+      }
+    });
     document.querySelector('input.numbox[key="OTHER"]').addEventListener(
       'change',
       event => {
         if (document.body.dataset.reboundOther === '1') event.target.value = '1';
+      }
+    );
+    document.querySelector('input.numbox[key="FULL"]').addEventListener(
+      'change',
+      () => {
+        if (document.body.dataset.addExtra !== '1' ||
+            document.querySelector('input.numbox[key="EXTRA"]')) return;
+        const extra = document.createElement('input');
+        extra.className = 'numbox';
+        extra.setAttribute('key', 'EXTRA');
+        extra.value = '1';
+        document.body.appendChild(extra);
       }
     );
   </script>

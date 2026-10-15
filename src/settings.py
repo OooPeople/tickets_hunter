@@ -156,7 +156,11 @@ URL_CHROME_DRIVER = 'https://chromedriver.chromium.org/'
 URL_FIREFOX_DRIVER = 'https://github.com/mozilla/geckodriver/releases'
 URL_EDGE_DRIVER = 'https://developer.microsoft.com/zh-tw/microsoft-edge/tools/webdriver/'
 
-UTIKI_BEHAVIOR_KEYS = ("ticket_type_keyword", "seat_sorting")
+UTIKI_BEHAVIOR_KEYS = (
+    "ticket_type_keyword",
+    "seat_sorting",
+    "seat_selection_mode",
+)
 UTIKI_SEAT_SORTINGS = (
     "display",
     "row_seat",
@@ -164,6 +168,7 @@ UTIKI_SEAT_SORTINGS = (
     "row_asc_seat_desc",
     "row_desc_seat_asc",
 )
+UTIKI_SEAT_SELECTION_MODES = ("manual", "computer")
 
 
 def get_default_config():
@@ -203,6 +208,7 @@ def get_default_config():
     config_dict['utiki']={}
     config_dict["utiki"]["ticket_type_keyword"] = "全票"
     config_dict["utiki"]["seat_sorting"] = "row_seat"
+    config_dict["utiki"]["seat_selection_mode"] = "manual"
 
     # Keep a non-sensitive compatibility mirror while older releases still
     # read the CTBC-specific section.
@@ -403,6 +409,13 @@ def migrate_config(config_dict):
 
     if config_dict["utiki"].get("seat_sorting") not in UTIKI_SEAT_SORTINGS:
         config_dict["utiki"]["seat_sorting"] = default["utiki"]["seat_sorting"]
+    if (
+        config_dict["utiki"].get("seat_selection_mode")
+        not in UTIKI_SEAT_SELECTION_MODES
+    ):
+        config_dict["utiki"]["seat_selection_mode"] = default["utiki"][
+            "seat_selection_mode"
+        ]
 
     # Mirror only the compatibility allowlist; credentials stay in accounts.
     for key in UTIKI_BEHAVIOR_KEYS:

@@ -38,6 +38,18 @@ from .auth import (
     get_tenant_auth_profile,
     parse_ctbc_cookie_string,
 )
+from .dom import (
+    CommitResult,
+    SubmitDispatchResult,
+    commit_area,
+    commit_server_assigned_area,
+    commit_quantity,
+    dismiss_dialog,
+    dispatch_quantity_submit,
+    read_area_snapshot,
+    read_dialog_snapshot,
+    read_quantity_snapshot,
+)
 from .profiles import (
     CTBC_MAP_DOMAIN,
     PageKind,
@@ -47,6 +59,17 @@ from .profiles import (
     is_utiki_sports_url,
     same_origin,
     unique_query,
+)
+from .selection import (
+    AreaActionPlan,
+    AreaSnapshot,
+    DialogSnapshot,
+    QuantityPlan,
+    QuantitySnapshot,
+    choose_candidate_index as _choose_candidate_index,
+    classify_submit_dialog as _classify_ctbc_submit_dialog,
+    select_area_snapshot as _select_ctbc_area_snapshot,
+    select_quantity_snapshot,
 )
 
 
@@ -77,6 +100,7 @@ CTBC_PENDING_NAVIGATION_TTL_SECONDS = 15.0
 CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
 CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
+CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
@@ -94,6 +118,7 @@ _state = {
     "auth_failure": {},
     "captcha_reset": {},
     "pending_navigation": {},
+    "server_assignment_authorized": {},
     "reload_request": {},
     "rate_limit_observation": {},
     "rate_limit_retry": {},
@@ -238,68 +263,73 @@ def _get_ctbc_page_type(url):
     return None if page_kind is PageKind.UNKNOWN else page_kind.value
 
 
-def _parse_keyword_groups(keyword_string):
-    """Parse the settings keyword format while accepting raw/semicolon input."""
-    raw = (keyword_string or "").strip()
-    if not raw:
-        return []
-
-    parsed = util.parse_keyword_string_to_array(raw)
-    if parsed:
-        return parsed
-
-    # Settings normally stores JSON fragments ("A","B"), but accepting raw
-    # values makes direct config editing and older profiles less surprising.
-    delimiter = ";" if ";" in raw else ","
-    return [item.strip().strip('"').strip("'") for item in raw.split(delimiter) if item.strip()]
-
-
-def _matches_keyword_group(text, keyword_group):
-    formatted_text = util.format_keyword_string(text or "")
-    if isinstance(keyword_group, (list, tuple)):
-        parts = [str(item).strip() for item in keyword_group if str(item).strip()]
-    else:
-        parts = [part for part in str(keyword_group or "").split(" ") if part]
-    return bool(parts) and all(util.format_keyword_string(part) in formatted_text for part in parts)
-
-
-def _choose_candidate_index(candidates, keyword_string, mode, allow_fallback=False):
-    """Choose an original candidate index, preserving keyword priority."""
-    if not candidates:
-        return None
-
-    indexed = list(enumerate(candidates))
-    keyword_groups = _parse_keyword_groups(keyword_string)
-    if keyword_groups:
-        for keyword_group in keyword_groups:
-            matched = [item for item in indexed if _matches_keyword_group(item[1].get("text", ""), keyword_group)]
-            if matched:
-                target = util.get_target_item_from_matched_list(matched, mode)
-                return target[0] if target else None
-        if not allow_fallback:
-            return None
-
-    target = util.get_target_item_from_matched_list(indexed, mode)
-    return target[0] if target else None
-
-
-def _ctbc_availability_has_tickets(status_text, ticket_number=1):
-    text = re.sub(r"\s+", "", status_text or "")
-    if not text or "售完" in text or text in {"0", "0張", "無"}:
-        return False
-
-    if re.fullmatch(r"\d+", text):
-        return int(text) >= int(ticket_number)
-
-    if any(marker in text for marker in ("剩餘", "尚餘", "剩", "餘")):
-        match = re.search(r"(\d+)", text)
-        if match and int(match.group(1)) < int(ticket_number):
-            return False
-    return True
-
-
 def _ctbc_unique_query(url):
     return unique_query(url)
+
+
+def _ctbc_area_action_payload(plan):
+    if not isinstance(plan, AreaActionPlan):
+        return None
+    return {
+        "action_name": plan.action_name,
+        "route": plan.route,
+        "performance_id": plan.performance_id,
+        "price_area_id": plan.price_area_id,
+        "group_id": plan.group_id,
+        "stable_args": list(plan.stable_args),
+        "status": plan.action_status,
+    }
+
+
+def _build_ctbc_destination_url(area_url, target):
+    if _get_ctbc_page_type(area_url) != "area":
+        return None
+    source = urlsplit(area_url)
+    if target.get("route") not in {"0202", "0205"}:
+        return None
+    area_query = _ctbc_unique_query(area_url)
+    if (area_query or {}).get("PERFORMANCE_ID") != target.get("performance_id"):
+        return None
+    path = f"{source.path.rsplit('/', 1)[0]}/UTK{target['route']}_"
+    query = urlencode({
+        "PERFORMANCE_ID": target["performance_id"],
+        "GROUP_ID": target["group_id"],
+        "PERFORMANCE_PRICE_AREA_ID": target["price_area_id"],
+    })
+    return urlunsplit(("https", source.netloc, path, query, ""))
+
+
+def _build_utiki_server_assignment_destination_url(area_url, target):
+    if _get_ctbc_page_type(area_url) != "area":
+        return None
+    try:
+        source = urlsplit(area_url)
+    except ValueError:
+        return None
+    area_query = _ctbc_unique_query(area_url)
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    performance_id = str(target.get("performance_id") or "")
+    group_id = str(target.get("group_id") or "")
+    price_area_id = str(target.get("price_area_id") or "")
+    if (
+        area_query is None
+        or area_query.get("PERFORMANCE_ID") != performance_id
+        or not all(token.fullmatch(value) for value in (
+            performance_id, group_id, price_area_id
+        ))
+    ):
+        return None
+    path = f"{source.path.rsplit('/', 1)[0]}/UTK0201_001"
+    query = urlencode({
+        "PERFORMANCE_ID": performance_id,
+        "GROUP_ID": group_id,
+        "PERFORMANCE_PRICE_AREA_ID": price_area_id,
+        "ATYPE": "N",
+    })
+    destination = urlunsplit(("https", source.netloc, path, query, ""))
+    if _get_ctbc_page_type(destination) != "server_assigned_quantity":
+        return None
+    return destination
 
 
 def _ctbc_same_origin(first, second):
@@ -321,7 +351,13 @@ def _ctbc_purchase_state_key(tab):
     page_type = _get_ctbc_page_type(purchase_url)
     query = _ctbc_unique_query(purchase_url)
     profile = _get_utk_sports_profile(purchase_url)
-    if page_type not in ("seat", "general_admission") or query is None or not profile:
+    if (
+        page_type not in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
+        or query is None
+        or not profile
+    ):
         return None
 
     performance_id = query.get("PERFORMANCE_ID")
@@ -333,7 +369,7 @@ def _ctbc_purchase_state_key(tab):
         or not token_pattern.fullmatch(str(price_area_id or ""))
         or group_id is None
         or (group_id and not token_pattern.fullmatch(str(group_id)))
-        or (page_type == "seat" and not group_id)
+        or (page_type in {"seat", "server_assigned_quantity"} and not group_id)
     ):
         return None
 
@@ -345,6 +381,7 @@ def _ctbc_purchase_state_key(tab):
         performance_id,
         group_id,
         price_area_id,
+        query.get("ATYPE", ""),
     )
 
 
@@ -360,7 +397,9 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
         (source.scheme, source.netloc, source.path, source.query, "")
     )
     return (
-        _get_ctbc_page_type(source_without_fragment) in ("seat", "general_admission")
+        _get_ctbc_page_type(source_without_fragment) in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
         and _get_ctbc_page_type(destination_url) == "checkout"
         and _ctbc_same_origin(source, destination)
     )
@@ -638,214 +677,6 @@ async def _ctbc_commit_native_date_action(
         return true;
     }}''')
     return committed is True
-
-
-def _parse_ctbc_map_send(href, expected_performance_id):
-    """Parse the allowlisted five-argument Send call without evaluating JavaScript."""
-    match = re.fullmatch(
-        r"\s*javascript:\s*Send\(\s*"
-        r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
-        r"(?P<q2>['\"])(?P<performance>[A-Za-z0-9_-]+)(?P=q2)\s*,\s*"
-        r"(?P<q3>['\"])(?P<price_area>[A-Za-z0-9_-]+)(?P=q3)\s*,\s*"
-        r"(?P<q4>['\"])(?P<group>[A-Za-z0-9_-]*)(?P=q4)\s*,\s*"
-        r"(?P<q5>['\"])(?P<status>[^'\"]*)(?P=q5)\s*\)\s*;?\s*",
-        str(href or ""),
-    )
-    if not match or match.group("performance") != expected_performance_id:
-        return None
-    if match.group("route") == "0205" and not match.group("group"):
-        return None
-    return {
-        "action_name": "Send",
-        "route": match.group("route"),
-        "performance_id": match.group("performance"),
-        "price_area_id": match.group("price_area"),
-        "group_id": match.group("group"),
-        "stable_args": [
-            match.group("route"),
-            match.group("performance"),
-            match.group("price_area"),
-            match.group("group"),
-        ],
-        "status": match.group("status"),
-    }
-
-
-def _parse_ctbc_map_send_a(href, expected_performance_id):
-    """Parse the allowlisted seven-argument SendA call for native selection."""
-    match = re.fullmatch(
-        r"\s*javascript:\s*SendA\(\s*"
-        r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
-        r"(?P<q2>['\"])(?P<performance>[A-Za-z0-9_-]+)(?P=q2)\s*,\s*"
-        r"(?P<q3>['\"])(?P<group>[A-Za-z0-9_-]*)(?P=q3)\s*,\s*"
-        r"(?P<q4>['\"])(?P<price_area>[A-Za-z0-9_-]+)(?P=q4)\s*,\s*"
-        r"(?P<q5>['\"])(?P<area_group>[A-Za-z0-9_-]*)(?P=q5)\s*,\s*"
-        r"(?P<q6>['\"])(?P<area_id>[A-Za-z0-9_-]*)(?P=q6)\s*,\s*"
-        r"(?P<q7>['\"])(?P<status>[^'\"]*)(?P=q7)\s*\)\s*;?\s*",
-        str(href or ""),
-    )
-    if not match or match.group("performance") != expected_performance_id:
-        return None
-    if match.group("route") == "0205" and not match.group("group"):
-        return None
-    return {
-        "action_name": "SendA",
-        "route": match.group("route"),
-        "performance_id": match.group("performance"),
-        "price_area_id": match.group("price_area"),
-        "group_id": match.group("group"),
-        "stable_args": [
-            match.group("route"),
-            match.group("performance"),
-            match.group("group"),
-            match.group("price_area"),
-            match.group("area_group"),
-            match.group("area_id"),
-        ],
-        "status": match.group("status"),
-    }
-
-
-def _parse_ctbc_map_title(title):
-    match = re.fullmatch(
-        r"\s*票區\s*[:：]\s*(?P<area>.*?)\s+"
-        r"票價\s*[:：]\s*(?P<price>.*?)\s+"
-        r"尚餘\s*[:：]\s*(?P<status>.*?)\s*",
-        str(title or ""),
-    )
-    if not match:
-        return None
-    return {
-        "area": re.sub(r"\s+", "", match.group("area")),
-        "price": re.sub(r"[\s,$]", "", match.group("price")),
-        "status": re.sub(r"\s+", "", match.group("status")),
-    }
-
-
-def _ctbc_map_title_matches_available_row(map_title, area_text, price_text, ticket_number):
-    """Match stable row identity while evaluating map availability independently."""
-    return bool(
-        map_title
-        and map_title["area"] == re.sub(r"\s+", "", area_text)
-        and map_title["price"] == re.sub(r"[\s,$]", "", price_text)
-        and _ctbc_availability_has_tickets(map_title["status"], ticket_number)
-    )
-
-
-def _build_ctbc_destination_url(area_url, target):
-    if _get_ctbc_page_type(area_url) != "area":
-        return None
-    source = urlsplit(area_url)
-    if target.get("route") not in {"0202", "0205"}:
-        return None
-    area_query = _ctbc_unique_query(area_url)
-    if (area_query or {}).get("PERFORMANCE_ID") != target.get("performance_id"):
-        return None
-    path = f"{source.path.rsplit('/', 1)[0]}/UTK{target['route']}_"
-    query = urlencode({
-        "PERFORMANCE_ID": target["performance_id"],
-        "GROUP_ID": target["group_id"],
-        "PERFORMANCE_PRICE_AREA_ID": target["price_area_id"],
-    })
-    return urlunsplit(("https", source.netloc, path, query, ""))
-
-
-def _select_ctbc_area_snapshot(
-    snapshot, config_dict, expected_performance_id, require_direct_destination=True
-):
-    """Choose an area from one batched DOM/map snapshot using shared keyword semantics."""
-    if not isinstance(snapshot, dict):
-        return None
-    rows = snapshot.get("rows")
-    areas = snapshot.get("areas")
-    if not isinstance(rows, list) or not isinstance(areas, list):
-        return None
-    if not 0 < len(rows) <= 200 or not 0 < len(areas) <= 500:
-        return None
-
-    areas_by_id = {}
-    for area in areas:
-        if not isinstance(area, dict):
-            return None
-        area_id = str(area.get("id") or "")
-        href = str(area.get("href") or "")
-        title = str(area.get("title") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", area_id) or not href:
-            return None
-        areas_by_id.setdefault(area_id, []).append({"href": href, "title": title})
-
-    candidates = []
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    for row in rows:
-        if not isinstance(row, dict):
-            return None
-        area_text = re.sub(r"\s+", " ", str(row.get("area") or "")).strip()
-        price_text = re.sub(r"\s+", " ", str(row.get("price") or "")).strip()
-        status_text = re.sub(r"\s+", " ", str(row.get("status") or "")).strip()
-        rel_tokens = str(row.get("rel") or "").split()
-        if not area_text or not rel_tokens or not _ctbc_availability_has_tickets(status_text, ticket_number):
-            continue
-        if any(not re.fullmatch(r"[A-Za-z0-9_-]+", token) for token in rel_tokens):
-            continue
-        match_text = f"{area_text} {price_text}".strip()
-        if util.reset_row_text_if_match_keyword_exclude(config_dict, match_text):
-            continue
-
-        map_options = []
-        for rel in rel_tokens:
-            for map_area in areas_by_id.get(rel, []):
-                href = map_area["href"]
-                map_title = _parse_ctbc_map_title(map_area["title"])
-                if not _ctbc_map_title_matches_available_row(
-                    map_title, area_text, price_text, ticket_number
-                ):
-                    continue
-                parsed_send = _parse_ctbc_map_send(href, expected_performance_id)
-                if parsed_send and _ctbc_availability_has_tickets(
-                    parsed_send["status"], ticket_number
-                ):
-                    map_options.append((rel, parsed_send, parsed_send))
-                    continue
-                if require_direct_destination:
-                    continue
-                parsed_send_a = _parse_ctbc_map_send_a(href, expected_performance_id)
-                if parsed_send_a and _ctbc_availability_has_tickets(
-                    parsed_send_a["status"], ticket_number
-                ):
-                    map_options.append((rel, parsed_send_a, None))
-        if not map_options:
-            continue
-        if require_direct_destination:
-            identities = {
-                (
-                    option[2]["route"],
-                    option[2]["performance_id"],
-                    option[2]["price_area_id"],
-                    option[2]["group_id"],
-                )
-                for option in map_options
-            }
-            if len(identities) != 1:
-                continue
-        rel, map_action, destination = map_options[0]
-        candidates.append({
-            "text": match_text,
-            "area": area_text,
-            "price": price_text,
-            "status": status_text,
-            "rel": rel,
-            "map_action": map_action,
-            "destination": destination,
-        })
-
-    area_config = config_dict.get("area_auto_select", {})
-    target_index = _choose_candidate_index(
-        candidates,
-        area_config.get("area_keyword", "").strip(),
-        area_config.get("mode", "from top to bottom"),
-        config_dict.get("area_auto_fallback", False),
-    )
-    return candidates[target_index] if target_index is not None else None
 
 
 def _select_ctbc_seat_indexes(
@@ -1797,6 +1628,17 @@ async def _reload_with_interval(tab, config_dict, reason):
     )
 
 
+async def _poll_ctbc_quantity_reload(tab, config_dict):
+    """Continue one queued quantity recovery without resetting its interval."""
+    request = _state["reload_request"].get(_ctbc_tab_identity(tab))
+    if not request or request.get("reason") != CTBC_QUANTITY_STALE_RELOAD_REASON:
+        return False
+    await _reload_with_interval(
+        tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
+    )
+    return True
+
+
 async def nodriver_utk_sports_health_check(tab, url, config_dict):
     """Run only rate-limit recovery, without selecting any ticket control."""
     guard_state, _ = await _utk_document_guard(tab, config_dict, url)
@@ -1838,6 +1680,9 @@ def _ctbc_selection_config_fingerprint(config_dict):
         "area_enable": area_config.get("enable", False),
         "area_keyword": area_config.get("area_keyword", ""),
         "area_mode": area_config.get("mode", "from top to bottom"),
+        "seat_selection_mode": _get_utiki_behavior(
+            config_dict, "seat_selection_mode", "manual"
+        ),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1872,9 +1717,19 @@ def _ctbc_navigation_urls_match(first_url, second_url):
 
 
 def _ctbc_new_pending_navigation(
-    tab, kind, source_url, area_url, target, config_dict
+    tab, kind, source_url, area_url, target, config_dict,
+    selection_mode="manual",
 ):
-    destination_url = _build_ctbc_destination_url(area_url, target)
+    if selection_mode == "computer":
+        destination_url = _build_utiki_server_assignment_destination_url(
+            area_url, target
+        )
+        route = "0201_001"
+    elif selection_mode == "manual":
+        destination_url = _build_ctbc_destination_url(area_url, target)
+        route = target.get("route")
+    else:
+        return None
     area_query = _ctbc_unique_query(area_url)
     if (
         not destination_url
@@ -1892,7 +1747,8 @@ def _ctbc_new_pending_navigation(
         "source_document_id": _state["last_document"].get(identity, ""),
         "area_url": area_url,
         "destination_url": destination_url,
-        "route": target.get("route"),
+        "route": route,
+        "selection_mode": selection_mode,
         "performance_id": target.get("performance_id"),
         "product_id": area_query.get("PRODUCT_ID"),
         "group_id": target.get("group_id"),
@@ -2248,11 +2104,12 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
     target = _select_ctbc_area_snapshot(
         snapshot, config_dict, date_target["performance_id"], require_direct_destination=True
     )
-    if not target or not target.get("destination"):
+    if not target or not target.direct_destination:
         debug.log("[CTBC FAST] Native area-page fallback: no attested area matched")
         return False
+    target_action = _ctbc_area_action_payload(target)
     pending = _ctbc_new_pending_navigation(
-        tab, "FAST", source_url, date_target["url"], target["destination"], config_dict
+        tab, "FAST", source_url, date_target["url"], target_action, config_dict
     )
     if not pending:
         return False
@@ -2274,55 +2131,11 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
         return True
     pending["phase"] = "DISPATCH_UNKNOWN"
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    debug.log(f"[CTBC FAST] Selected: {target['text']} ({target['status']}) in {elapsed_ms} ms")
+    debug.log(
+        f"[CTBC FAST] Selected: {target.text} ({target.status}) "
+        f"in {elapsed_ms} ms"
+    )
     return True
-
-
-async def _ctbc_wait_area_snapshot(tab):
-    """Wait for the native map to become actionable and return one batched snapshot."""
-    raw_value = await tab.evaluate('''
-        (() => new Promise(resolve => {
-            let observer = null;
-            let timer = null;
-            let poller = null;
-            const finish = value => {
-                if (observer) observer.disconnect();
-                if (timer) clearTimeout(timer);
-                if (poller) clearInterval(poller);
-                resolve(JSON.stringify(value));
-                return true;
-            };
-            const collect = () => {
-                if (!location.pathname.includes('/UTK0204_')) return finish({ok: false, reason: 'navigation'});
-                const rows = Array.from(document.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
-                const areas = Array.from(document.querySelectorAll('#mapdata area[id][href]'));
-                const mapReady = typeof mainMap === 'object' && mainMap && Object.keys(mainMap).length > 0;
-                if (!rows.length || !areas.length || !mapReady) return false;
-                finish({
-                    ok: true,
-                    page_url: location.href,
-                    rows: rows.map(row => ({
-                        area: (row.querySelector('td[data-title^="票區"]')?.textContent || '').trim(),
-                        price: (row.querySelector('td[data-title^="票價"]')?.textContent || '').trim(),
-                        status: (row.querySelector('td[data-title^="空位"]')?.textContent || '').trim(),
-                        rel: row.getAttribute('rel') || ''
-                    })),
-                    areas: areas.map(area => ({
-                        id: area.getAttribute('id') || '',
-                        href: area.getAttribute('href') || '',
-                        title: area.getAttribute('title') || ''
-                    }))
-                });
-                return true;
-            };
-            if (collect()) return;
-            observer = new MutationObserver(collect);
-            observer.observe(document.documentElement, {childList: true, subtree: true});
-            poller = setInterval(collect, 20);
-            timer = setTimeout(() => finish({ok: false, reason: 'timeout'}), 2500);
-        }))()
-    ''', await_promise=True)
-    return _decode_ctbc_json_result(raw_value)
 
 
 async def nodriver_ctbc_date_auto_select(tab, config_dict):
@@ -2332,6 +2145,17 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         tab, current_url, "date", config_dict
     ):
         return False
+    seat_selection_mode = _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    )
+    if seat_selection_mode == "computer":
+        profile = _get_utk_sports_profile(current_url)
+        if not profile or not profile.get("supports_server_assignment", False):
+            debug.log(
+                "[UTK SPORTS] Website computer assignment is not enabled "
+                "for this platform"
+            )
+            return False
     rows = []
     for _ in range(10):
         try:
@@ -2401,7 +2225,11 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
     try:
         action = target["action"]
         date_target = action.get("date_target") if action.get("kind") == "normal" else None
-        if date_target and config_dict.get("area_auto_select", {}).get("enable", False):
+        if (
+            seat_selection_mode == "manual"
+            and date_target
+            and config_dict.get("area_auto_select", {}).get("enable", False)
+        ):
             if await _ctbc_try_fast_area_navigation(
                 tab, config_dict, date_target, target["onclick"], current_url
             ):
@@ -2426,102 +2254,6 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         return False
 
 
-async def _ctbc_commit_native_area_action(
-    tab, page_url, target, ticket_number, navigation_nonce
-):
-    page_url_json = json.dumps(page_url)
-    rel_json = json.dumps(target["rel"])
-    area_json = json.dumps(target["area"])
-    price_json = json.dumps(target["price"])
-    action_name_json = json.dumps(target["map_action"]["action_name"])
-    action_args_json = json.dumps(target["map_action"]["stable_args"])
-    ticket_number_json = json.dumps(int(ticket_number))
-    nonce_json = json.dumps(navigation_nonce)
-    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
-    committed = await tab.evaluate(f'''
-        (() => {{
-            // __ticketsHunterCtbcNativeAreaCommit
-            const pageUrl = {page_url_json};
-            const areaId = {rel_json};
-            const expectedArea = {area_json};
-            const expectedPrice = {price_json};
-            const expectedActionName = {action_name_json};
-            const expectedActionArgs = {action_args_json};
-            const ticketNumber = {ticket_number_json};
-            const navigationNonce = {nonce_json};
-            const normalizeArea = value => (value || '').replace(/\\s+/g, '');
-            const normalizePrice = value => (value || '').replace(/[\\s,$]/g, '');
-            const hasTickets = value => {{
-                const text = (value || '').replace(/\\s+/g, '');
-                if (!text || text.includes('售完') || /^(0|0張|無)$/.test(text)) return false;
-                if (/^\\d+$/.test(text)) return Number(text) >= ticketNumber;
-                if (/(?:剩餘|尚餘|剩|餘)/.test(text)) {{
-                    const count = text.match(/(\\d+)/);
-                    if (count && Number(count[1]) < ticketNumber) return false;
-                }}
-                return true;
-            }};
-            const parseAction = value => {{
-                const match = (value || '').match(
-                    /^\\s*javascript:\\s*(Send|SendA)\\(\\s*(.*?)\\s*\\)\\s*;?\\s*$/);
-                if (!match) return null;
-                const args = [];
-                let remaining = match[2];
-                while (remaining) {{
-                    const argument = remaining.match(
-                        /^\\s*(?:'([^'\"]*)'|"([^'\"]*)")\\s*(?:,\\s*|$)/);
-                    if (!argument) return null;
-                    args.push(argument[1] !== undefined ? argument[1] : argument[2]);
-                    remaining = remaining.slice(argument[0].length);
-                }}
-                const expectedLength = match[1] === 'Send' ? 5 : 7;
-                if (args.length !== expectedLength) return null;
-                return {{name: match[1], stableArgs: args.slice(0, -1), status: args.at(-1)}};
-            }};
-            const parseTitle = value => {{
-                const match = (value || '').match(
-                    /^\\s*票區\\s*[:：]\\s*(.*?)\\s+票價\\s*[:：]\\s*(.*?)\\s+尚餘\\s*[:：]\\s*(.*?)\\s*$/);
-                if (!match) return null;
-                return {{area: normalizeArea(match[1]), price: normalizePrice(match[2]), status: match[3]}};
-            }};
-            const root = document.documentElement;
-            const commitMarker = 'data-tickets-hunter-ctbc-area-commit';
-            if (location.href !== pageUrl || root.hasAttribute(commitMarker)) return false;
-            const area = document.querySelector(`#mapdata area#${{CSS.escape(areaId)}}`);
-            if (!area) return false;
-            const action = parseAction(area.getAttribute('href'));
-            const mapTitle = parseTitle(area.getAttribute('title'));
-            if (!action || !mapTitle || action.name !== expectedActionName ||
-                action.stableArgs.length !== expectedActionArgs.length ||
-                action.stableArgs.some((value, index) => value !== expectedActionArgs[index]) ||
-                mapTitle.area !== normalizeArea(expectedArea) ||
-                mapTitle.price !== normalizePrice(expectedPrice) ||
-                !hasTickets(action.status) || !hasTickets(mapTitle.status)) return false;
-            const rows = Array.from(document.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
-            const matchingRows = rows.filter(row => {{
-                if (!(row.getAttribute('rel') || '').split(/\\s+/).includes(areaId)) return false;
-                const currentArea = row.querySelector('td[data-title^="票區"]')?.textContent;
-                const currentPrice = row.querySelector('td[data-title^="票價"]')?.textContent;
-                const status = row.querySelector('td[data-title^="空位"]')?.textContent;
-                return normalizeArea(currentArea) === normalizeArea(expectedArea) &&
-                    normalizePrice(currentPrice) === normalizePrice(expectedPrice) && hasTickets(status);
-            }});
-            if (!matchingRows.length) return false;
-            try {{
-                const stale = JSON.parse(sessionStorage.getItem({marker_key_json}) || 'null');
-                const current = JSON.parse(sessionStorage.getItem({marker_key_json}) || 'null');
-                if (stale && current && stale.nonce && current.nonce === stale.nonce) {{
-                    sessionStorage.removeItem({marker_key_json});
-                }}
-            }} catch (_error) {{}}
-            root.setAttribute(commitMarker, navigationNonce);
-            area.click();
-            return true;
-        }})()
-    ''')
-    return committed is True
-
-
 async def nodriver_ctbc_area_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
@@ -2529,17 +2261,32 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         tab, current_url, config_dict
     ):
         return False
+    seat_selection_mode = _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    )
+    if seat_selection_mode == "computer":
+        profile = _get_utk_sports_profile(current_url)
+        if not profile or not profile.get("supports_server_assignment", False):
+            debug.log(
+                "[UTK SPORTS] Website computer assignment is not enabled "
+                "for this platform"
+            )
+            return False
     try:
-        snapshot = await _ctbc_wait_area_snapshot(tab)
+        snapshot = await read_area_snapshot(tab)
     except Exception as exc:
         debug.log(f"[CTBC AREA] Action-ready wait failed: {exc}")
         snapshot = None
-    if not isinstance(snapshot, dict) or not snapshot.get("ok"):
-        reason = snapshot.get("reason", "invalid-result") if isinstance(snapshot, dict) else "invalid-result"
+    if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
+        reason = (
+            snapshot.reason
+            if isinstance(snapshot, AreaSnapshot)
+            else "invalid-result"
+        )
         await _reload_with_interval(tab, config_dict, f"area map was not ready ({reason})")
         return False
 
-    page_url = str(snapshot.get("page_url") or "")
+    page_url = snapshot.page_url
     query = _ctbc_unique_query(page_url)
     performance_id = query.get("PERFORMANCE_ID", "") if query else ""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", performance_id):
@@ -2556,22 +2303,50 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
     if _state["pending_navigation"].get(identity):
         return False
     pending = _ctbc_new_pending_navigation(
-        tab, "NATIVE", page_url, page_url, target["map_action"], config_dict
+        tab, "NATIVE", page_url, page_url,
+        _ctbc_area_action_payload(target), config_dict,
+        selection_mode=seat_selection_mode,
     )
     if not pending:
         return False
     _state["pending_navigation"][identity] = pending
     try:
-        committed = await _ctbc_commit_native_area_action(
-            tab, page_url, target, config_dict.get("ticket_number", 1),
-            pending["nonce"],
+        committer = (
+            commit_server_assigned_area
+            if seat_selection_mode == "computer"
+            else commit_area
         )
-        if not committed:
+        commit_result = await committer(
+            tab, snapshot, target, config_dict.get("ticket_number", 1),
+            pending["nonce"], CTBC_FAST_MARKER_KEY,
+        )
+        if (
+            commit_result is CommitResult.REJECTED
+            or (
+                seat_selection_mode == "manual"
+                and commit_result is CommitResult.STALE
+            )
+        ):
             _pop_pending_navigation_if_nonce(identity, pending["nonce"])
-            debug.log("[CTBC AREA] Area changed before commit; no click was sent")
+            debug.log(
+                "[CTBC AREA] Area commit "
+                f"{commit_result.value}; no navigation row click was sent"
+            )
             return False
+        if (
+            seat_selection_mode == "computer"
+            and commit_result is CommitResult.STALE
+        ):
+            pending["phase"] = "DISPATCH_UNKNOWN"
+            debug.log(
+                "[CTBC AREA] Computer-assignment preparation changed "
+                "document; navigation outcome is unknown"
+            )
+            return False
+        if commit_result is not CommitResult.COMMITTED:
+            raise RuntimeError("area commit returned an unknown result")
         pending["phase"] = "DISPATCH_UNKNOWN"
-        debug.log(f"[CTBC AREA] Selected: {target['text']} ({target['status']})")
+        debug.log(f"[CTBC AREA] Selected: {target.text} ({target.status})")
         return True
     except Exception as exc:
         pending["phase"] = "DISPATCH_UNKNOWN"
@@ -2889,105 +2664,118 @@ async def _fill_ctbc_inline_login(tab, config_dict):
     return bool(result)
 
 
-async def _ctbc_login_fingerprint(tab):
-    raw = await tab.evaluate('''
-        (() => {
+async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
+    if expected_dialog is not None and not isinstance(
+        expected_dialog, DialogSnapshot
+    ):
+        return ""
+    expected_json = "null"
+    if expected_dialog is not None:
+        expected_json = json.dumps({
+            "pageUrl": expected_dialog.page_url,
+            "documentId": expected_dialog.document_id,
+            "text": expected_dialog.text,
+        }, ensure_ascii=False)
+    raw = await tab.evaluate(f'''
+        (() => {{
+            const expectedDialog = {expected_json};
+            if (expectedDialog) {{
+                if (location.href !== expectedDialog.pageUrl ||
+                    String(performance.timeOrigin) !==
+                        expectedDialog.documentId) {{
+                    return JSON.stringify({{ok: false}});
+                }}
+                const visible = element => {{
+                    if (!element || !element.isConnected || element.hidden ||
+                        element.getAttribute('aria-hidden') === 'true') {{
+                        return false;
+                    }}
+                    const style = getComputedStyle(element);
+                    return style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        element.getClientRects().length > 0;
+                }};
+                const dialogs = Array.from(
+                    document.querySelectorAll('#dialog-message'))
+                    .map(message => ({{
+                        message,
+                        wrapper: message.closest('.ui-dialog')
+                    }}))
+                    .filter(item =>
+                        visible(item.wrapper) && visible(item.message));
+                if (dialogs.length !== 1 ||
+                    (dialogs[0].message.textContent || '').trim() !==
+                        expectedDialog.text) {{
+                    return JSON.stringify({{ok: false}});
+                }}
+            }}
             const account = document.querySelector('#LOGIN_ID');
             const password = document.querySelector('#LOGIN_PWD');
-            return JSON.stringify({
+            return JSON.stringify({{
+                ok: true,
                 account: account ? account.value : '',
                 password: password ? password.value : ''
-            });
-        })()
+            }});
+        }})()
     ''')
     try:
         credentials = json.loads(raw) if isinstance(raw, str) else {}
     except (TypeError, ValueError):
         credentials = {}
-    if not credentials.get("account") or not credentials.get("password"):
+    if (
+        credentials.get("ok") is not True
+        or not credentials.get("account")
+        or not credentials.get("password")
+    ):
         return ""
     material = f"{credentials['account']}\0{credentials['password']}".encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
 
-def _is_ctbc_auth_error(dialog_text):
-    return (
-        any(marker in (dialog_text or "") for marker in ("帳號", "密碼", "登入"))
-        and any(marker in (dialog_text or "") for marker in ("錯誤", "有誤", "失敗", "不正確", "不存在", "無效"))
-    )
-
-
-def _classify_ctbc_submit_dialog(dialog_text):
-    text = str(dialog_text or "").strip()
-    if not text:
-        return None
-    if _is_ctbc_auth_error(text):
-        return "auth"
-    if "驗證碼" in text and any(marker in text for marker in ("錯誤", "失敗", "不正確")):
-        return "captcha"
-    seat_conflict = "請再重新選取座位" in text or (
-        any(subject in text for subject in ("座位", "位置"))
-        and any(
-            marker in text
-            for marker in ("已被選走", "已被選取", "已被訂走", "已被預訂")
-        )
-    )
-    if seat_conflict:
-        return "seat_conflict"
-    quota_exceeded = (
-        "限購" in text and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
-    ) or (
-        "購買額度" in text and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
-    )
-    if quota_exceeded:
-        return "quota"
-    if "成功" in text and "加入購物車" in text:
-        return "success"
-    return "rejected"
-
-
 async def _get_ctbc_visible_dialog_text(tab):
-    dialog_raw = await tab.evaluate('''
-        (() => {
-            const message = document.querySelector('#dialog-message');
-            const wrapper = message ? message.closest('.ui-dialog') : null;
-            if (!message || !wrapper) return '';
-            const style = getComputedStyle(wrapper);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
-                wrapper.getClientRects().length > 0;
-            return visible ? message.textContent.trim() : '';
-        })()
-    ''')
-    return dialog_raw if isinstance(dialog_raw, str) else ""
+    """Compatibility wrapper for callers that still consume dialog text."""
+    snapshot = await read_dialog_snapshot(tab)
+    if snapshot and snapshot.visible_count == 1:
+        return snapshot.text
+    return ""
+
+
+async def _ctbc_dialog_is_visible(tab):
+    """Fail closed when dialog observation is malformed or ambiguous."""
+    snapshot = await read_dialog_snapshot(tab)
+    return snapshot is None or snapshot.visible_count != 0
+
+
+async def _wait_ctbc_dialog_closed(tab, snapshot):
+    for _ in range(10):
+        await tab.sleep(0.1)
+        current = await read_dialog_snapshot(tab)
+        if current is None:
+            return False
+        if (
+            current.page_url != snapshot.page_url
+            or current.document_id != snapshot.document_id
+        ):
+            return False
+        if current.visible_count == 0:
+            return True
+        if current.visible_count != 1 or current.text != snapshot.text:
+            return False
+    return False
 
 
 async def _dismiss_ctbc_dialog(tab, expected_text):
-    clicked = bool(await tab.evaluate(f'''
-        (() => {{
-            const expectedText = {json.dumps(expected_text)};
-            const message = document.querySelector('#dialog-message');
-            const wrapper = message ? message.closest('.ui-dialog') : null;
-            if (!message || !wrapper || message.textContent.trim() !== expectedText) return false;
-            const style = getComputedStyle(wrapper);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
-                wrapper.getClientRects().length > 0;
-            if (!visible) return false;
-            const button = wrapper.querySelector('.ui-dialog-buttonset button');
-            if (!button) return false;
-            button.click();
-            return true;
-        }})()
-    '''))
-    if not clicked:
+    """Compatibility wrapper around the dialog snapshot/commit seam."""
+    snapshot = await read_dialog_snapshot(tab)
+    if not (
+        snapshot
+        and snapshot.visible_count == 1
+        and snapshot.text == expected_text
+    ):
         return False
-    for _ in range(10):
-        await tab.sleep(0.1)
-        visible_text = await _get_ctbc_visible_dialog_text(tab)
-        if not visible_text:
-            return True
-        if visible_text != expected_text:
-            return False
-    return False
+    if await dismiss_dialog(tab, snapshot) is not CommitResult.COMMITTED:
+        return False
+    return await _wait_ctbc_dialog_closed(tab, snapshot)
 
 
 async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
@@ -3033,7 +2821,24 @@ async def _handle_ctbc_submit_dialog(
     tab, config_dict, submit_key=None, source_url=None
 ):
     debug = util.create_debug_logger(config_dict)
-    dialog_text = await _get_ctbc_visible_dialog_text(tab)
+    dialog_snapshot = await read_dialog_snapshot(tab)
+    if dialog_snapshot is None:
+        debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
+        return "rejected"
+    if dialog_snapshot.visible_count == 0:
+        return None
+    if dialog_snapshot.visible_count != 1 or not dialog_snapshot.text:
+        if submit_key is None:
+            submit_key = _ctbc_purchase_state_key(tab)
+        if submit_key is not None:
+            _state["submitted"].pop(submit_key, None)
+            if _state["submit_blocked"].get(submit_key) not in (
+                "success", "quota"
+            ):
+                _state["submit_blocked"][submit_key] = "rejected"
+        debug.log("[CTBC] Submit dialog is ambiguous; action blocked")
+        return "rejected"
+    dialog_text = dialog_snapshot.text
     outcome = _classify_ctbc_submit_dialog(dialog_text)
     if outcome is None:
         return None
@@ -3065,18 +2870,34 @@ async def _handle_ctbc_submit_dialog(
             },
         )
     elif outcome == "auth":
-        login_fingerprint = await _ctbc_login_fingerprint(tab)
         identity = _ctbc_tab_identity(tab)
-        _state["auth_failure"][submit_key] = {
-            "fingerprint": login_fingerprint,
+        auth_failure = {
+            "fingerprint": "",
             "source_document_id": _state["last_document"].get(identity, ""),
         }
+        _state["auth_failure"][submit_key] = auth_failure
+        try:
+            login_fingerprint = await _ctbc_login_fingerprint(
+                tab, expected_dialog=dialog_snapshot
+            )
+        except Exception as exc:
+            debug.log(
+                "[CTBC LOGIN] Credential fingerprint observation failed; "
+                f"document-scoped blocker retained: {exc}"
+            )
+        else:
+            if _state["auth_failure"].get(submit_key) is auth_failure:
+                auth_failure["fingerprint"] = login_fingerprint
     elif outcome == "captcha":
         _state["submit_blocked"][submit_key] = "captcha_pending"
     elif outcome in ("quota", "rejected"):
         _state["submit_blocked"][submit_key] = outcome
 
-    if not await _dismiss_ctbc_dialog(tab, dialog_text):
+    dismiss_result = await dismiss_dialog(tab, dialog_snapshot)
+    if (
+        dismiss_result is not CommitResult.COMMITTED
+        or not await _wait_ctbc_dialog_closed(tab, dialog_snapshot)
+    ):
         debug.log(f"[CTBC] Visible dialog changed before it could be dismissed: {dialog_text}")
         return outcome
 
@@ -3108,7 +2929,7 @@ async def _recover_ctbc_captcha_dialog(tab, config_dict):
     submit_key = _ctbc_purchase_state_key(tab)
     if _state["submit_blocked"].get(submit_key) != "captcha_pending":
         return False
-    if await _get_ctbc_visible_dialog_text(tab):
+    if await _ctbc_dialog_is_visible(tab):
         return True
     reset_complete = await _reset_ctbc_captcha(
         tab, refresh_image=True, submit_key=submit_key
@@ -3137,7 +2958,7 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
         return False
 
     if not pending.get("dialog_dismissed", False):
-        if await _get_ctbc_visible_dialog_text(tab):
+        if await _ctbc_dialog_is_visible(tab):
             return True
         pending["dialog_dismissed"] = True
 
@@ -3211,7 +3032,9 @@ async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key)
     destination_page_type = _get_ctbc_page_type(destination_url)
     if (
         destination_key != submit_key
-        or destination_page_type not in ("seat", "general_admission")
+        or destination_page_type not in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
     ):
         submitted.pop(submit_key, None)
         _state["submit_blocked"][submit_key] = "unknown"
@@ -3299,15 +3122,103 @@ async def _ctbc_captcha(tab, config_dict, ocr):
     return True
 
 
-async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
+async def _dispatch_ctbc_submit(
+    tab, config_dict, submit_key, quantity_plan=None
+):
+    """Dispatch once; the caller still has to observe a verified outcome."""
+    debug = util.create_debug_logger(config_dict)
+    button = None
+    if quantity_plan is None:
+        button = await tab.query_selector('button#addcart')
+        if not button:
+            return False
+    submitted = _state["submitted"]
+    if submit_key in submitted:
+        return False
+    dispatched_at = time.monotonic()
+    dispatch_state = {
+        "dispatched_at": dispatched_at,
+        "phase": "dispatching",
+        "source_url": str(tab.target.url),
+    }
+    submit_nonce = None
+    if quantity_plan is not None:
+        submit_nonce = uuid.uuid4().hex
+        dispatch_state["nonce"] = submit_nonce
+    submitted[submit_key] = dispatch_state
+    try:
+        if quantity_plan is None:
+            await button.click()
+        else:
+            result = await dispatch_quantity_submit(
+                tab, quantity_plan
+            )
+            if result is not SubmitDispatchResult.DISPATCHED:
+                if submitted.get(submit_key) is not dispatch_state:
+                    return False
+                debug.log(
+                    f"[CTBC GENERAL] Submit dispatch {result.value}; "
+                    "click blocked"
+                )
+                if (
+                    result is SubmitDispatchResult.STALE
+                    and str(tab.target.url) == quantity_plan.page_url
+                ):
+                    try:
+                        await _reload_with_interval(
+                            tab, config_dict,
+                            CTBC_QUANTITY_STALE_RELOAD_REASON,
+                        )
+                    finally:
+                        if submitted.get(submit_key) is dispatch_state:
+                            submitted.pop(submit_key, None)
+                else:
+                    submitted.pop(submit_key, None)
+                return False
+    except Exception as exc:
+        if submitted.get(submit_key) is dispatch_state:
+            submitted.pop(submit_key, None)
+            _state["submit_blocked"][submit_key] = "unknown"
+        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
+        return False
+    if submitted.get(submit_key) is not dispatch_state:
+        return False
+    submitted[submit_key] = {
+        "dispatched_at": dispatched_at,
+        "phase": "awaiting_result",
+        "source_url": dispatch_state["source_url"],
+        **({"nonce": submit_nonce} if submit_nonce else {}),
+    }
+    return True
+
+
+def _ctbc_submit_plan_matches_page(page_type, quantity_plan):
+    if page_type == "seat":
+        return quantity_plan is None
+    return bool(
+        page_type in {"general_admission", "server_assigned_quantity"}
+        and isinstance(quantity_plan, QuantityPlan)
+        and quantity_plan.page_type == page_type
+    )
+
+
+async def _ctbc_captcha_and_submit(
+    tab, config_dict, ocr, *, quantity_plan=None
+):
     debug = util.create_debug_logger(config_dict)
     current_url = str(tab.target.url)
     submit_key = _ctbc_purchase_state_key(tab)
+    page_type = _get_ctbc_page_type(current_url)
     if (
         submit_key is None
-        or _get_ctbc_page_type(current_url) not in ("seat", "general_admission")
+        or page_type not in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
     ):
         debug.log("[CTBC] Purchase identity is incomplete; automatic submit is blocked")
+        return False
+    if not _ctbc_submit_plan_matches_page(page_type, quantity_plan):
+        debug.log("[CTBC] Submit plan does not match the purchase page")
         return False
 
     dialog_outcome = await _handle_ctbc_submit_dialog(
@@ -3377,31 +3288,20 @@ async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
     ):
         return False
 
-    button = await tab.query_selector('button#addcart')
-    if not button:
+    if not await _dispatch_ctbc_submit(
+        tab, config_dict, submit_key, quantity_plan
+    ):
         return False
-    dispatched_at = time.monotonic()
-    submitted[submit_key] = {
-        "dispatched_at": dispatched_at,
-        "phase": "dispatching",
-    }
-    try:
-        await button.click()
-    except Exception as exc:
-        submitted.pop(submit_key, None)
-        _state["submit_blocked"][submit_key] = "unknown"
-        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
-        return False
-    submitted[submit_key] = {
-        "dispatched_at": dispatched_at,
-        "phase": "awaiting_result",
-    }
     debug.log("[CTBC] Add-to-cart submitted")
     return await _observe_ctbc_submit_outcome(tab, config_dict, current_url, submit_key)
 
 
 async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
+        return False
+    if _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    ) != "manual":
         return False
 
     submit_key = _ctbc_purchase_state_key(tab)
@@ -3439,11 +3339,16 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
 
 
-async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
-    """Select quantity on the unnumbered-seat UTK0203 page."""
+async def _nodriver_utiki_quantity_main(
+    tab, config_dict, ocr, page_type, expected_product_id=""
+):
+    """Run the shared quantity-page workflow after route attestation."""
     debug = util.create_debug_logger(config_dict)
-    if not await _ctbc_attest_fast_destination(tab, "general_admission", config_dict):
-        return False
+    label = (
+        "SERVER ASSIGNMENT"
+        if page_type == "server_assigned_quantity"
+        else "GENERAL"
+    )
     submit_key = _ctbc_purchase_state_key(tab)
     if submit_key is None:
         return False
@@ -3458,135 +3363,182 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         return False
     if dialog_outcome is not None:
         return False
+    if await _poll_ctbc_quantity_reload(tab, config_dict):
+        return False
 
-    current_url = str(tab.target.url).lower()
-    row_selector = (
-        '[id="table_tickettype"]'
-        if "/utk0202_" in current_url
-        else '#table_tickettype > tbody > tr'
-    )
-    rows = []
-    for _ in range(10):
-        try:
-            rows = await tab.query_selector_all(row_selector)
-        except Exception:
-            rows = []
-        if rows:
-            break
-        await tab.sleep(0.2)
+    try:
+        snapshot = await read_quantity_snapshot(tab)
+    except Exception as exc:
+        debug.log(f"[CTBC {label}] Quantity snapshot failed: {exc}")
+        return False
+    if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
+        reason = (
+            snapshot.reason
+            if isinstance(snapshot, QuantitySnapshot)
+            else "invalid-result"
+        )
+        debug.log(f"[CTBC {label}] Quantity page was not ready: {reason}")
+        return False
+    if (
+        page_type == "server_assigned_quantity"
+        and snapshot.product_id != expected_product_id
+    ):
+        debug.log(
+            "[CTBC SERVER ASSIGNMENT] Product identity changed after "
+            "destination attestation"
+        )
+        return False
 
-    candidates = []
     ticket_number = int(config_dict.get("ticket_number", 1))
-    for row in rows or []:
-        try:
-            amount = await row.query_selector('input.numbox[key]')
-            if not amount:
-                continue
-            disabled = await amount.apply('function(el) { return !!el.disabled; }')
-            row_text = await _element_text(row)
-            if disabled or "售完" in row_text:
-                continue
-            remaining_input = await row.query_selector('input[key="LAST_AMOUNT"]')
-            if remaining_input:
-                remaining_raw = await remaining_input.apply('function(el) { return el.value || "0"; }')
-                try:
-                    if int(remaining_raw) < ticket_number:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            cells = await row.query_selector_all('td.fill')
-            name = await _element_text(cells[0]) if cells else row_text
-            if not name:
-                continue
-            candidates.append({"text": name, "element": amount})
-        except Exception as exc:
-            debug.log(f"[CTBC GENERAL] Failed to inspect ticket type: {exc}")
-
-    keyword = _get_utiki_behavior(config_dict, "ticket_type_keyword", "全票")
-    target_index = _choose_candidate_index(candidates, keyword, "from top to bottom", False)
-    if target_index is None:
-        debug.log(f"[CTBC GENERAL] No ticket type matched: {keyword}")
+    keyword = _get_utiki_behavior(
+        config_dict, "ticket_type_keyword", "全票"
+    )
+    plan = select_quantity_snapshot(
+        snapshot, keyword, ticket_number, page_type=page_type
+    )
+    if plan is None:
+        debug.log(
+            f"[CTBC {label}] No available ticket type matched: {keyword}"
+        )
         return False
 
     await nodriver_utk_sports_cancel_refresh(tab, "ticket type found")
-    quantity_limit_raw = await tab.evaluate('''
-        (() => {
-            const input = document.querySelector('#QUANTITY_LIMIT');
-            return input ? parseInt(input.value || '0', 10) : 0;
-        })()
-    ''')
-    quantity_limit = int(quantity_limit_raw or 0)
-    if quantity_limit and ticket_number > quantity_limit:
-        debug.log(f"[CTBC GENERAL] Requested {ticket_number}, limit is {quantity_limit}")
-        return False
-
-    amount = candidates[target_index]["element"]
-    target_key = await amount.apply('function(el) { return el.getAttribute("key") || ""; }')
-    if not target_key:
-        return False
     try:
-        all_amounts = await tab.query_selector_all('input.numbox[key]')
-        for other_amount in all_amounts or []:
-            await other_amount.apply('''function(el) {
-                el.value = "0";
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-            }''')
-        await amount.apply(f'''function(el) {{
-            el.value = "{ticket_number}";
-            el.dispatchEvent(new Event('input', {{bubbles: true}}));
-            el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            el.dispatchEvent(new Event('blur', {{bubbles: true}}));
-        }}''')
-        debug.log(f"[CTBC GENERAL] Selected {ticket_number} x {candidates[target_index]['text']}")
+        commit_result = await commit_quantity(tab, snapshot, plan)
     except Exception as exc:
-        debug.log(f"[CTBC GENERAL] Quantity assignment failed: {exc}")
+        debug.log(
+            f"[CTBC {label}] Quantity commit outcome is unknown: {exc}"
+        )
         return False
-
-    quantities_raw = await tab.evaluate('''
-        (() => {
-            const inputs = Array.from(document.querySelectorAll('input.numbox[key]'));
-            return JSON.stringify(inputs.map(input => ({
-                key: input.getAttribute('key') || '',
-                value: Number(input.value || 0)
-            })));
-        })()
-    ''')
-    try:
-        quantities = json.loads(quantities_raw) if isinstance(quantities_raw, str) else []
-    except (TypeError, ValueError):
-        quantities = []
-    if not _ctbc_general_quantity_audit_is_valid(quantities, target_key, ticket_number):
-        debug.log("[CTBC GENERAL] Quantity verification failed; submit blocked")
+    if commit_result is CommitResult.STALE:
+        debug.log(
+            f"[CTBC {label}] Quantity state changed during commit; "
+            "waiting to reload"
+        )
+        await _reload_with_interval(
+            tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
+        )
         return False
-
-    return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
-
-
-def _ctbc_general_quantity_audit_is_valid(quantities, target_key, ticket_number):
-    if not isinstance(quantities, list) or not target_key:
+    if commit_result is not CommitResult.COMMITTED:
+        debug.log(
+            f"[CTBC {label}] Quantity commit {commit_result.value}; "
+            "submit blocked"
+        )
         return False
-    target_matches = [item for item in quantities if isinstance(item, dict) and item.get("key") == target_key]
-    if len(target_matches) != 1:
+    debug.log(
+        f"[CTBC {label}] Selected {plan.ticket_number} x "
+        f"{plan.target_name}"
+    )
+    return await _ctbc_captcha_and_submit(
+        tab, config_dict, ocr, quantity_plan=plan
+    )
+
+
+async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
+    """Select quantity on an unnumbered-seat UTK0202/UTK0203 page."""
+    if not await _ctbc_attest_fast_destination(
+        tab, "general_admission", config_dict
+    ):
         return False
-    try:
-        if int(target_matches[0].get("value", 0)) != int(ticket_number):
+    if _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    ) != "manual":
+        return False
+    return await _nodriver_utiki_quantity_main(
+        tab, config_dict, ocr, "general_admission"
+    )
+
+
+def _ctbc_server_assignment_pending_is_expected(pending):
+    return bool(
+        pending
+        and pending.get("kind") == "NATIVE"
+        and pending.get("route") == "0201_001"
+        and pending.get("selection_mode") == "computer"
+        and re.fullmatch(
+            r"[A-Za-z0-9_-]+", str(pending.get("product_id") or "")
+        )
+    )
+
+
+def _ctbc_server_assignment_is_authorized(tab):
+    identity = _ctbc_tab_identity(tab)
+    purchase_key = _ctbc_purchase_state_key(tab)
+    authorized = _state["server_assignment_authorized"].get(identity)
+    if (
+        purchase_key is not None
+        and isinstance(authorized, dict)
+        and authorized.get("purchase_key") == purchase_key
+        and re.fullmatch(
+            r"[A-Za-z0-9_-]+",
+            str(authorized.get("product_id") or ""),
+        )
+    ):
+        return authorized
+    _state["server_assignment_authorized"].pop(identity, None)
+    return None
+
+
+async def nodriver_utiki_server_assigned_quantity_main(
+    tab, config_dict, ocr
+):
+    """Select quantity after an attested native computer-area click."""
+    identity = _ctbc_tab_identity(tab)
+    current_url = str(tab.target.url)
+    profile = _get_utk_sports_profile(current_url)
+    if (
+        _get_utiki_behavior(
+            config_dict, "seat_selection_mode", "manual"
+        ) != "computer"
+        or not profile
+        or not profile.get("supports_server_assignment", False)
+    ):
+        _state["server_assignment_authorized"].pop(identity, None)
+        return False
+    pending = _state["pending_navigation"].get(identity)
+    authorization = _ctbc_server_assignment_is_authorized(tab)
+    if pending:
+        if not _ctbc_server_assignment_pending_is_expected(pending):
+            _state["server_assignment_authorized"].pop(identity, None)
             return False
-        return all(
-            item is target_matches[0] or int(item.get("value", 0)) == 0
-            for item in quantities
-            if isinstance(item, dict)
-        ) and all(isinstance(item, dict) for item in quantities)
-    except (TypeError, ValueError):
+        if not await _ctbc_attest_fast_destination(
+            tab, "server_assigned_quantity", config_dict
+        ):
+            return False
+        purchase_key = _ctbc_purchase_state_key(tab)
+        if purchase_key is None:
+            return False
+        authorization = {
+            "purchase_key": purchase_key,
+            "product_id": pending["product_id"],
+        }
+        _state["server_assignment_authorized"][identity] = authorization
+    elif authorization is None:
         return False
+    return await _nodriver_utiki_quantity_main(
+        tab, config_dict, ocr, "server_assigned_quantity",
+        expected_product_id=authorization["product_id"],
+    )
 
 
 def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
     if not isinstance(expected, dict) or not isinstance(dom_ids, dict):
         return False
     route = expected.get("route")
-    expected_page_type = "seat" if route == "0205" else "general_admission" if route == "0202" else None
+    expected_page_type = {
+        "0205": "seat",
+        "0202": "general_admission",
+        "0201_001": "server_assigned_quantity",
+    }.get(route)
     if expected_page_type is None or page_type != expected_page_type:
+        return False
+    if (
+        (route == "0201_001" and expected.get("selection_mode") != "computer")
+        or (
+            route != "0201_001"
+            and expected.get("selection_mode", "manual") != "manual"
+        )
+    ):
         return False
     area_url = str(expected.get("area_url") or "")
     if (
@@ -3611,7 +3563,12 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
     ):
         return False
     query = _ctbc_unique_query(current_url)
-    if query is None or set(query) != {"PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"}:
+    expected_query_keys = {
+        "PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"
+    }
+    if route == "0201_001":
+        expected_query_keys.add("ATYPE")
+    if query is None or set(query) != expected_query_keys:
         return False
     checks = {
         "PERFORMANCE_ID": expected.get("performance_id"),
@@ -3619,6 +3576,8 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
         "PERFORMANCE_PRICE_AREA_ID": expected.get("price_area_id"),
     }
     if any(query.get(key) != value for key, value in checks.items()):
+        return False
+    if route == "0201_001" and query.get("ATYPE") != "N":
         return False
     return (
         str(dom_ids.get("performance_id") or "") == expected.get("performance_id")
@@ -3632,7 +3591,9 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
     area_url = str(expected.get("area_url") or "")
     if (
         _get_ctbc_page_type(area_url) != "area"
-        or _get_ctbc_page_type(source_url) not in {"seat", "general_admission"}
+        or _get_ctbc_page_type(source_url) not in {
+            "seat", "general_admission", "server_assigned_quantity"
+        }
     ):
         return False
     area_url_json = json.dumps(area_url)
@@ -3666,7 +3627,14 @@ async def _ctbc_read_destination_state(tab, page_type):
     price_area_selector_json = json.dumps(
         "#PRICE_AREA_ID" if page_type == "seat" else "#PERFORMANCE_PRICE_AREA_ID"
     )
-    group_required_json = "true" if page_type == "seat" else "false"
+    group_required_json = (
+        "true"
+        if page_type in {"seat", "server_assigned_quantity"}
+        else "false"
+    )
+    strict_identity_json = (
+        "true" if page_type == "server_assigned_quantity" else "false"
+    )
     raw_value = await tab.evaluate(f'''
         (() => new Promise(resolve => {{
             // __ticketsHunterCtbcDestinationState
@@ -3682,10 +3650,16 @@ async def _ctbc_read_destination_state(tab, page_type):
             const read = () => {{
                 const markers = {marker_json};
                 const markerReady = markers.every(selector => document.querySelector(selector));
-                const performanceInput = document.querySelector('#PERFORMANCE_ID');
-                const productInput = document.querySelector('#PRODUCT_ID');
-                const groupInput = document.querySelector('#GROUP_ID');
-                const priceAreaInput = document.querySelector({price_area_selector_json});
+                const identityInput = selector => {{
+                    const inputs = Array.from(document.querySelectorAll(selector));
+                    return {strict_identity_json} ?
+                        (inputs.length === 1 ? inputs[0] : null) :
+                        (inputs[0] || null);
+                }};
+                const performanceInput = identityInput('#PERFORMANCE_ID');
+                const productInput = identityInput('#PRODUCT_ID');
+                const groupInput = identityInput('#GROUP_ID');
+                const priceAreaInput = identityInput({price_area_selector_json});
                 const groupReady = !{group_required_json} || !!groupInput;
                 if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
                 finish({{ready: true, page_url: location.href,
@@ -3959,6 +3933,11 @@ async def _handle_ctbc_checkout(tab, config_dict):
 
 
 async def nodriver_ctbc_main(tab, url, config_dict, ocr):
+    page_type = _get_ctbc_page_type(url)
+    if page_type != "server_assigned_quantity":
+        _state["server_assignment_authorized"].pop(
+            _ctbc_tab_identity(tab), None
+        )
     if await check_and_handle_pause(config_dict):
         await nodriver_utk_sports_cancel_refresh(
             tab, "paused", wait=True, abandon_probe=True
@@ -3971,7 +3950,6 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
     if guard_state == "unknown":
         return tab
 
-    page_type = _get_ctbc_page_type(url)
     if page_type == "date" and config_dict.get("date_auto_select", {}).get("enable", False):
         await nodriver_ctbc_date_auto_select(tab, config_dict)
     elif page_type == "area":
@@ -3983,6 +3961,10 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
         await nodriver_ctbc_seat_main(tab, config_dict, ocr)
     elif page_type == "general_admission":
         await nodriver_ctbc_general_admission_main(tab, config_dict, ocr)
+    elif page_type == "server_assigned_quantity":
+        await nodriver_utiki_server_assigned_quantity_main(
+            tab, config_dict, ocr
+        )
     elif page_type == "checkout":
         await nodriver_utk_sports_cancel_refresh(
             tab, "checkout reached", wait=True, abandon_probe=True

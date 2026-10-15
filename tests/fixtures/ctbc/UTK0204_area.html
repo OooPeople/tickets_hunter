@@ -4,17 +4,28 @@
   <meta charset="utf-8">
   <title>CTBC area fixture</title>
 </head>
-<body data-area-clicks="0">
+<body data-area-clicks="0" data-server-mode-clicks="0"
+      data-checkbox-clicks="0" data-row-clicks="0">
   <!-- Page kind: area. Fixture date: 2026-10-15. Synthetic/deidentified. -->
+  <div id="SeatOptions">
+    <button id="byServer" type="button">電腦選位</button>
+    <button id="byhend" class="active" type="button">手動選位</button>
+    <div id="ABdiv_ATYPE_CB">
+      <input id="ATYPE_CB" type="checkbox" checked>
+      <label for="ATYPE_CB">電腦配位接受不連號</label>
+    </div>
+  </div>
   <div class="seats">
     <table class="f1">
       <tbody>
-        <tr class="saleTr" rel="front">
+        <tr class="saleTr" rel="front"
+            onclick="Send('0205','P16D0B8Z','PRICE_FRONT','GROUP_FRONT','45')">
           <td data-title="票區">109區前排</td>
           <td data-title="票價">1600</td>
           <td data-title="空位">40</td>
         </tr>
-        <tr class="saleTr" rel="back">
+        <tr class="saleTr" rel="back"
+            onclick="SendA('0205','P16D0B8Z','GROUP_BACK','PRICE_BACK','AREA_GROUP','back','熱賣中')">
           <td data-title="票區">109區後排</td>
           <td data-title="票價">1300</td>
           <td data-title="空位">熱賣中</td>
@@ -34,6 +45,29 @@
   </map>
   <script>
     window.mainMap = {front: true, back: true};
+    document.querySelector('#byServer').addEventListener('click', () => {
+      document.querySelector('#byServer').classList.add('active');
+      document.querySelector('#byhend').classList.remove('active');
+      document.body.dataset.serverModeClicks = String(
+        Number(document.body.dataset.serverModeClicks || 0) + 1
+      );
+    });
+    document.querySelector('#byhend').addEventListener('click', () => {
+      document.querySelector('#byhend').classList.add('active');
+      document.querySelector('#byServer').classList.remove('active');
+    });
+    document.querySelector('#ATYPE_CB').addEventListener('click', () => {
+      document.body.dataset.checkboxClicks = String(
+        Number(document.body.dataset.checkboxClicks || 0) + 1
+      );
+    });
+    document.querySelectorAll('tr.saleTr').forEach(row => {
+      row.addEventListener('click', () => {
+        document.body.dataset.rowClicks = String(
+          Number(document.body.dataset.rowClicks || 0) + 1
+        );
+      });
+    });
     function Send(_page, _performanceId, priceAreaId) {
       document.body.dataset.selectedArea = priceAreaId;
       document.body.dataset.areaClicks = String(

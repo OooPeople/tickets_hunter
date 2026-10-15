@@ -171,9 +171,13 @@ git push origin fix/123-ticketplus-date-list
 ## 測試
 
 ```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest
 python -m unittest discover -s tests -p 'test_*.py'
 git diff --check
 ```
+
+pytest 是主要測試入口；保留 unittest 命令是為了在測試遷移期間核對既有 suite 的收集與執行結果。
 
 Python、瀏覽器流程與打包驗證的分級及完整命令見
 [`docs/02-development/testing_execution_guide.md`](docs/02-development/testing_execution_guide.md)。

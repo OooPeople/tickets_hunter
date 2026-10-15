@@ -16,7 +16,7 @@
 
 ## 2. 目前測試基線
 
-本專案使用 Python 標準函式庫 `unittest`，測試目前位於：
+本專案以 pytest 作為主要測試入口，並保留既有 `unittest.TestCase` 測試的相容性。測試目前位於：
 
 ```text
 tests/
@@ -27,8 +27,25 @@ tests/
   test_refresh_coordinator.py
 ```
 
-repository 目前沒有 `tests/unit/`、`tests/integration/`、`requirements-dev.txt` 或 pytest 設定。
-若未來正式導入新的測試工具或目錄，必須在同一變更中更新本文件與相依套件。
+Phase 1 導入時的基線是 pytest 收集並通過 155 個測試（其中 CTBC 94 個）；這是用來偵測遷移差異的起始快照，不是永久數量門檻。`pytest.ini` 定義預設收集與 marker，`requirements-dev.txt` 固定直接使用的測試工具版本。
+
+安裝開發相依套件：
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+若既有專案 `.venv` 沒有內建 pip，但本機已安裝 uv，可使用：
+
+```bash
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+```
+
+Windows 的既有 `.venv` 對應命令為：
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
+```
 
 ## 3. 驗證層級
 
@@ -38,8 +55,8 @@ repository 目前沒有 `tests/unit/`、`tests/integration/`、`requirements-dev
 | 層級 | 目的 | 典型命令／方式 |
 |------|------|----------------|
 | A. 靜態檢查 | 發現語法、空白與文件問題 | `py_compile`、`git diff --check`、連結檢查 |
-| B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m unittest tests.test_<module>` |
-| C. 完整單元套件 | 發現跨模組回歸 | `python -m unittest discover -s tests -p 'test_*.py'` |
+| B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m pytest tests/test_<module>.py` |
+| C. 完整單元套件 | 發現跨模組回歸 | `python -m pytest` |
 | D. 建置驗證 | 驗證 import、相依套件與 PyInstaller | `python build_scripts/build_local.py` |
 | E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
 
@@ -72,22 +89,41 @@ python -m py_compile src/platforms/ctbc.py tests/test_ctbc_selection.py
 ### 4.3 聚焦測試
 
 ```bash
-python -m unittest tests.test_ctbc_selection
-python -m unittest tests.test_refresh_coordinator
+python -m pytest tests/test_ctbc_selection.py
+python -m pytest tests/test_refresh_coordinator.py
 ```
 
 也可以執行單一 test class 或 method：
 
 ```bash
-python -m unittest tests.test_ctbc_selection.CtbcPureSelectionTest
-python -m unittest tests.test_ctbc_selection.CtbcPureSelectionTest.test_name
+python -m pytest tests/test_ctbc_selection.py::CtbcPureSelectionTest
+python -m pytest tests/test_ctbc_selection.py::CtbcPureSelectionTest::test_name
 ```
 
 ### 4.4 完整測試
 
 ```bash
+python -m pytest
+```
+
+需要核對收集範圍或遷移相容性時：
+
+```bash
+python -m pytest --collect-only -q
 python -m unittest discover -s tests -p 'test_*.py'
 ```
+
+pytest 可以執行現有 `unittest.TestCase`。日後若新增 pytest 原生函式或 fixture 測試，unittest 不會收集它們；屆時兩個 runner 的測試數不同是預期結果，不得把 unittest 當成完整 suite。
+
+需要觀察覆蓋範圍時：
+
+```bash
+python -m pytest --cov=src --cov-report=term-missing
+```
+
+導入時在 macOS／Python 3.11 的當次整體 coverage 是 15%，僅作為技術債與後續補測的觀察值，目前不設失敗門檻。
+
+依本專案測試約定，所有會啟動瀏覽器或連線真實售票網站的測試都必須分別標記 `browser` 或 `live`；預設 pytest 命令排除這兩個 marker。本機、非真站的瀏覽器測試使用 `python -m pytest -m "browser and not live"`，避免同時選中雙重標記的 live 案例。`live` 測試必須另有明確授權與就緒環境才能執行。Marker 在 collection 後才篩選，因此測試模組匯入本身不得產生瀏覽器、網路或其他外部副作用。
 
 若完整套件因環境相依而失敗，要保存第一個可處理的失敗訊息，區分：
 
@@ -113,6 +149,8 @@ python build_scripts/build_local.py
 ```
 
 本地建置成功不等同 GitHub Actions 的 Windows 與 macOS release job 都已成功；兩者要分開陳述。
+
+`.github/workflows/tests.yml` 會在 Ubuntu 與 Windows 的 Python 3.11.9 執行預設 pytest suite 與 coverage 報告；依上述 marker 約定排除 browser/live 測試。只有 workflow 實際完成後才可宣稱這兩個平台的 CI 通過。
 
 ## 5. 依變更類型選擇驗證
 
@@ -203,8 +241,8 @@ fixture 必須：
 
 ```text
 - `git diff --check`：通過。
-- `python -m unittest tests.test_ctbc_selection`：82 tests passed（此數字是當次輸出，不是永久門檻）。
-- 完整 unittest：未執行，原因是本次只修改文件。
+- `python -m pytest tests/test_ctbc_selection.py`：94 tests passed（此數字是當次輸出，不是永久門檻）。
+- 完整 pytest：未執行，原因是本次只修改文件。
 - 實機：未執行；售票入口已關閉，因此 dialog recovery 仍待下一次可用活動驗證。
 ```
 

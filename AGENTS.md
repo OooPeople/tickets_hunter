@@ -83,12 +83,12 @@
 
 ## 7. 驗證與審查
 
-先啟用已安裝 `requirement.txt` 的專案虛擬環境，再依
+測試工作先啟用已安裝 `requirements-dev.txt` 的專案虛擬環境；只執行 production／build 工作時至少安裝 `requirement.txt`。再依
 [測試執行指南](docs/02-development/testing_execution_guide.md) 選擇與變更風險相稱的層級。最低要求：
 
 - 文件變更：檢查連結、格式、`git diff --check`，並確認描述符合 repository 現況。
 - Python 變更：對修改過的檔案執行 `python -m py_compile`。
-- 可單元測試的邏輯：先跑相關測試，再跑 `python -m unittest discover -s tests -p 'test_*.py'`。
+- 可單元測試的邏輯：先跑相關 pytest，再跑 `python -m pytest`；過渡期間亦維持既有 unittest suite 相容。
 - import、相依套件或 spec 變更：執行本地打包驗證。
 - 即時售票流程：單元測試不能取代實機煙霧測試；記錄實際平台、頁面、操作範圍與刷新間隔。
 

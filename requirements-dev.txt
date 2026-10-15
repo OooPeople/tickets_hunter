@@ -1,0 +1,4 @@
+-r requirement.txt
+
+pytest==9.0.3
+pytest-cov==7.1.0

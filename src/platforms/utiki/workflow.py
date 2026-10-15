@@ -38,6 +38,7 @@ from .auth import (
     get_tenant_auth_profile,
     parse_ctbc_cookie_string,
 )
+from .dom import CommitResult, commit_area, read_area_snapshot
 from .profiles import (
     CTBC_MAP_DOMAIN,
     PageKind,
@@ -49,6 +50,8 @@ from .profiles import (
     unique_query,
 )
 from .selection import (
+    AreaActionPlan,
+    AreaSnapshot,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
@@ -246,6 +249,20 @@ def _get_ctbc_page_type(url):
 
 def _ctbc_unique_query(url):
     return unique_query(url)
+
+
+def _ctbc_area_action_payload(plan):
+    if not isinstance(plan, AreaActionPlan):
+        return None
+    return {
+        "action_name": plan.action_name,
+        "route": plan.route,
+        "performance_id": plan.performance_id,
+        "price_area_id": plan.price_area_id,
+        "group_id": plan.group_id,
+        "stable_args": list(plan.stable_args),
+        "status": plan.action_status,
+    }
 
 
 def _build_ctbc_destination_url(area_url, target):
@@ -2004,11 +2021,12 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
     target = _select_ctbc_area_snapshot(
         snapshot, config_dict, date_target["performance_id"], require_direct_destination=True
     )
-    if not target or not target.get("destination"):
+    if not target or not target.direct_destination:
         debug.log("[CTBC FAST] Native area-page fallback: no attested area matched")
         return False
+    target_action = _ctbc_area_action_payload(target)
     pending = _ctbc_new_pending_navigation(
-        tab, "FAST", source_url, date_target["url"], target["destination"], config_dict
+        tab, "FAST", source_url, date_target["url"], target_action, config_dict
     )
     if not pending:
         return False
@@ -2030,55 +2048,11 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
         return True
     pending["phase"] = "DISPATCH_UNKNOWN"
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    debug.log(f"[CTBC FAST] Selected: {target['text']} ({target['status']}) in {elapsed_ms} ms")
+    debug.log(
+        f"[CTBC FAST] Selected: {target.text} ({target.status}) "
+        f"in {elapsed_ms} ms"
+    )
     return True
-
-
-async def _ctbc_wait_area_snapshot(tab):
-    """Wait for the native map to become actionable and return one batched snapshot."""
-    raw_value = await tab.evaluate('''
-        (() => new Promise(resolve => {
-            let observer = null;
-            let timer = null;
-            let poller = null;
-            const finish = value => {
-                if (observer) observer.disconnect();
-                if (timer) clearTimeout(timer);
-                if (poller) clearInterval(poller);
-                resolve(JSON.stringify(value));
-                return true;
-            };
-            const collect = () => {
-                if (!location.pathname.includes('/UTK0204_')) return finish({ok: false, reason: 'navigation'});
-                const rows = Array.from(document.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
-                const areas = Array.from(document.querySelectorAll('#mapdata area[id][href]'));
-                const mapReady = typeof mainMap === 'object' && mainMap && Object.keys(mainMap).length > 0;
-                if (!rows.length || !areas.length || !mapReady) return false;
-                finish({
-                    ok: true,
-                    page_url: location.href,
-                    rows: rows.map(row => ({
-                        area: (row.querySelector('td[data-title^="票區"]')?.textContent || '').trim(),
-                        price: (row.querySelector('td[data-title^="票價"]')?.textContent || '').trim(),
-                        status: (row.querySelector('td[data-title^="空位"]')?.textContent || '').trim(),
-                        rel: row.getAttribute('rel') || ''
-                    })),
-                    areas: areas.map(area => ({
-                        id: area.getAttribute('id') || '',
-                        href: area.getAttribute('href') || '',
-                        title: area.getAttribute('title') || ''
-                    }))
-                });
-                return true;
-            };
-            if (collect()) return;
-            observer = new MutationObserver(collect);
-            observer.observe(document.documentElement, {childList: true, subtree: true});
-            poller = setInterval(collect, 20);
-            timer = setTimeout(() => finish({ok: false, reason: 'timeout'}), 2500);
-        }))()
-    ''', await_promise=True)
-    return _decode_ctbc_json_result(raw_value)
 
 
 async def nodriver_ctbc_date_auto_select(tab, config_dict):
@@ -2182,102 +2156,6 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         return False
 
 
-async def _ctbc_commit_native_area_action(
-    tab, page_url, target, ticket_number, navigation_nonce
-):
-    page_url_json = json.dumps(page_url)
-    rel_json = json.dumps(target["rel"])
-    area_json = json.dumps(target["area"])
-    price_json = json.dumps(target["price"])
-    action_name_json = json.dumps(target["map_action"]["action_name"])
-    action_args_json = json.dumps(target["map_action"]["stable_args"])
-    ticket_number_json = json.dumps(int(ticket_number))
-    nonce_json = json.dumps(navigation_nonce)
-    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
-    committed = await tab.evaluate(f'''
-        (() => {{
-            // __ticketsHunterCtbcNativeAreaCommit
-            const pageUrl = {page_url_json};
-            const areaId = {rel_json};
-            const expectedArea = {area_json};
-            const expectedPrice = {price_json};
-            const expectedActionName = {action_name_json};
-            const expectedActionArgs = {action_args_json};
-            const ticketNumber = {ticket_number_json};
-            const navigationNonce = {nonce_json};
-            const normalizeArea = value => (value || '').replace(/\\s+/g, '');
-            const normalizePrice = value => (value || '').replace(/[\\s,$]/g, '');
-            const hasTickets = value => {{
-                const text = (value || '').replace(/\\s+/g, '');
-                if (!text || text.includes('售完') || /^(0|0張|無)$/.test(text)) return false;
-                if (/^\\d+$/.test(text)) return Number(text) >= ticketNumber;
-                if (/(?:剩餘|尚餘|剩|餘)/.test(text)) {{
-                    const count = text.match(/(\\d+)/);
-                    if (count && Number(count[1]) < ticketNumber) return false;
-                }}
-                return true;
-            }};
-            const parseAction = value => {{
-                const match = (value || '').match(
-                    /^\\s*javascript:\\s*(Send|SendA)\\(\\s*(.*?)\\s*\\)\\s*;?\\s*$/);
-                if (!match) return null;
-                const args = [];
-                let remaining = match[2];
-                while (remaining) {{
-                    const argument = remaining.match(
-                        /^\\s*(?:'([^'\"]*)'|"([^'\"]*)")\\s*(?:,\\s*|$)/);
-                    if (!argument) return null;
-                    args.push(argument[1] !== undefined ? argument[1] : argument[2]);
-                    remaining = remaining.slice(argument[0].length);
-                }}
-                const expectedLength = match[1] === 'Send' ? 5 : 7;
-                if (args.length !== expectedLength) return null;
-                return {{name: match[1], stableArgs: args.slice(0, -1), status: args.at(-1)}};
-            }};
-            const parseTitle = value => {{
-                const match = (value || '').match(
-                    /^\\s*票區\\s*[:：]\\s*(.*?)\\s+票價\\s*[:：]\\s*(.*?)\\s+尚餘\\s*[:：]\\s*(.*?)\\s*$/);
-                if (!match) return null;
-                return {{area: normalizeArea(match[1]), price: normalizePrice(match[2]), status: match[3]}};
-            }};
-            const root = document.documentElement;
-            const commitMarker = 'data-tickets-hunter-ctbc-area-commit';
-            if (location.href !== pageUrl || root.hasAttribute(commitMarker)) return false;
-            const area = document.querySelector(`#mapdata area#${{CSS.escape(areaId)}}`);
-            if (!area) return false;
-            const action = parseAction(area.getAttribute('href'));
-            const mapTitle = parseTitle(area.getAttribute('title'));
-            if (!action || !mapTitle || action.name !== expectedActionName ||
-                action.stableArgs.length !== expectedActionArgs.length ||
-                action.stableArgs.some((value, index) => value !== expectedActionArgs[index]) ||
-                mapTitle.area !== normalizeArea(expectedArea) ||
-                mapTitle.price !== normalizePrice(expectedPrice) ||
-                !hasTickets(action.status) || !hasTickets(mapTitle.status)) return false;
-            const rows = Array.from(document.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
-            const matchingRows = rows.filter(row => {{
-                if (!(row.getAttribute('rel') || '').split(/\\s+/).includes(areaId)) return false;
-                const currentArea = row.querySelector('td[data-title^="票區"]')?.textContent;
-                const currentPrice = row.querySelector('td[data-title^="票價"]')?.textContent;
-                const status = row.querySelector('td[data-title^="空位"]')?.textContent;
-                return normalizeArea(currentArea) === normalizeArea(expectedArea) &&
-                    normalizePrice(currentPrice) === normalizePrice(expectedPrice) && hasTickets(status);
-            }});
-            if (!matchingRows.length) return false;
-            try {{
-                const stale = JSON.parse(sessionStorage.getItem({marker_key_json}) || 'null');
-                const current = JSON.parse(sessionStorage.getItem({marker_key_json}) || 'null');
-                if (stale && current && stale.nonce && current.nonce === stale.nonce) {{
-                    sessionStorage.removeItem({marker_key_json});
-                }}
-            }} catch (_error) {{}}
-            root.setAttribute(commitMarker, navigationNonce);
-            area.click();
-            return true;
-        }})()
-    ''')
-    return committed is True
-
-
 async def nodriver_ctbc_area_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
@@ -2286,16 +2164,20 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
     ):
         return False
     try:
-        snapshot = await _ctbc_wait_area_snapshot(tab)
+        snapshot = await read_area_snapshot(tab)
     except Exception as exc:
         debug.log(f"[CTBC AREA] Action-ready wait failed: {exc}")
         snapshot = None
-    if not isinstance(snapshot, dict) or not snapshot.get("ok"):
-        reason = snapshot.get("reason", "invalid-result") if isinstance(snapshot, dict) else "invalid-result"
+    if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
+        reason = (
+            snapshot.reason
+            if isinstance(snapshot, AreaSnapshot)
+            else "invalid-result"
+        )
         await _reload_with_interval(tab, config_dict, f"area map was not ready ({reason})")
         return False
 
-    page_url = str(snapshot.get("page_url") or "")
+    page_url = snapshot.page_url
     query = _ctbc_unique_query(page_url)
     performance_id = query.get("PERFORMANCE_ID", "") if query else ""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", performance_id):
@@ -2312,22 +2194,28 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
     if _state["pending_navigation"].get(identity):
         return False
     pending = _ctbc_new_pending_navigation(
-        tab, "NATIVE", page_url, page_url, target["map_action"], config_dict
+        tab, "NATIVE", page_url, page_url,
+        _ctbc_area_action_payload(target), config_dict,
     )
     if not pending:
         return False
     _state["pending_navigation"][identity] = pending
     try:
-        committed = await _ctbc_commit_native_area_action(
-            tab, page_url, target, config_dict.get("ticket_number", 1),
-            pending["nonce"],
+        commit_result = await commit_area(
+            tab, snapshot, target, config_dict.get("ticket_number", 1),
+            pending["nonce"], CTBC_FAST_MARKER_KEY,
         )
-        if not committed:
+        if commit_result in {CommitResult.REJECTED, CommitResult.STALE}:
             _pop_pending_navigation_if_nonce(identity, pending["nonce"])
-            debug.log("[CTBC AREA] Area changed before commit; no click was sent")
+            debug.log(
+                "[CTBC AREA] Area commit "
+                f"{commit_result.value}; no click was sent"
+            )
             return False
+        if commit_result is not CommitResult.COMMITTED:
+            raise RuntimeError("area commit returned an unknown result")
         pending["phase"] = "DISPATCH_UNKNOWN"
-        debug.log(f"[CTBC AREA] Selected: {target['text']} ({target['status']})")
+        debug.log(f"[CTBC AREA] Selected: {target.text} ({target.status})")
         return True
     except Exception as exc:
         pending["phase"] = "DISPATCH_UNKNOWN"

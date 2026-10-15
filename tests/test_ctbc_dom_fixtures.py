@@ -2,6 +2,7 @@ import asyncio
 import os
 import tempfile
 import threading
+from dataclasses import replace
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,9 +13,11 @@ import zendriver as uc
 
 from tests.ctbc_support import config
 
+from platforms.utiki.dom import CommitResult, commit_area, read_area_snapshot
 from platforms.utiki.selection import (
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
+    select_area_snapshot,
 )
 from platforms.utiki.workflow import (
     _ctbc_commit_fast_navigation,
@@ -24,7 +27,6 @@ from platforms.utiki.workflow import (
     _get_ctbc_visible_dialog_text,
     _state,
     _validate_ctbc_seat_selection,
-    nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
     nodriver_ctbc_seat_auto_select,
@@ -118,22 +120,126 @@ async def _assert_area_fixture(browser):
         "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
     )
     cfg = config(area_keyword='"109區前排"')
+    snapshot = await read_area_snapshot(tab)
+    assert snapshot.ok
+    assert snapshot.document_id
+    assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 0
+    target = select_area_snapshot(
+        snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    assert target.rel == "front"
 
-    fixture_pending = {
-        "kind": "NATIVE",
-        "phase": "PREPARED",
-        "nonce": "f" * 32,
-        "source_url": str(tab.target.url),
-        "area_url": str(tab.target.url),
-        "created_at": 0.0,
-    }
-    with patch(
-        "platforms.utiki.workflow._ctbc_new_pending_navigation",
-        return_value=fixture_pending,
-    ):
-        assert await nodriver_ctbc_area_auto_select(tab, cfg)
+    result = await commit_area(
+        tab, snapshot, target, cfg["ticket_number"], "f" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    )
+    assert result is CommitResult.COMMITTED
     assert await tab.evaluate("document.body.dataset.selectedArea || ''") == "PRICE_FRONT"
     assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 1
+    assert await commit_area(
+        tab, snapshot, target, cfg["ticket_number"], "f" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 1
+
+    stale_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    stale_snapshot = await read_area_snapshot(stale_tab)
+    stale_target = select_area_snapshot(
+        stale_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    stale_snapshot = replace(
+        stale_snapshot, document_id=f"{stale_snapshot.document_id}-old"
+    )
+    assert await commit_area(
+        stale_tab, stale_snapshot, stale_target, cfg["ticket_number"],
+        "e" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.STALE
+    assert await stale_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
+
+    changed_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    changed_snapshot = await read_area_snapshot(changed_tab)
+    changed_target = select_area_snapshot(
+        changed_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await changed_tab.evaluate("""
+        document.querySelector('#mapdata area#front').setAttribute(
+            'href',
+            "javascript:Send('0205','OTHER','PRICE_FRONT','GROUP_FRONT','45')"
+        )
+    """)
+    assert await commit_area(
+        changed_tab, changed_snapshot, changed_target, cfg["ticket_number"],
+        "d" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await changed_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
+
+    availability_mutations = (
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '1'",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'title', '票區:109區前排 票價：1600 尚餘：1')",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','1')\")",
+    )
+    for index, mutation in enumerate(availability_mutations):
+        unavailable_tab = await _open_fixture(
+            browser,
+            "UTK0204_area.html",
+            "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+        )
+        unavailable_snapshot = await read_area_snapshot(unavailable_tab)
+        unavailable_target = select_area_snapshot(
+            unavailable_snapshot, cfg, "P16D0B8Z",
+            require_direct_destination=False,
+        )
+        await unavailable_tab.evaluate(mutation)
+        assert await commit_area(
+            unavailable_tab, unavailable_snapshot, unavailable_target,
+            cfg["ticket_number"], f"{index + 1:x}" * 32,
+            "ticketsHunter.ctbc.fast-navigation.v1",
+        ) is CommitResult.REJECTED
+        assert await unavailable_tab.evaluate(
+            "Number(document.body.dataset.areaClicks || 0)"
+        ) == 0
+
+    marker_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    marker_snapshot = await read_area_snapshot(marker_tab)
+    marker_target = select_area_snapshot(
+        marker_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    marker_raw = '{"nonce":"racing-fast-marker"}'
+    await marker_tab.evaluate(
+        "sessionStorage.setItem("
+        "'ticketsHunter.ctbc.fast-navigation.v1', "
+        f"{marker_raw!r})"
+    )
+    assert await commit_area(
+        marker_tab, marker_snapshot, marker_target, cfg["ticket_number"],
+        "a" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.STALE
+    assert await marker_tab.evaluate(
+        "sessionStorage.getItem('ticketsHunter.ctbc.fast-navigation.v1')"
+    ) == marker_raw
+    assert await marker_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
 
 
 async def _assert_seat_fixture(browser):

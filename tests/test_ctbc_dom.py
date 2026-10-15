@@ -1300,50 +1300,6 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertTrue(button.clicked)
         self.assertEqual(0, tab.evaluate_count)
 
-    async def test_native_area_path_accepts_available_status_skew(self):
-        snapshot = make_ctbc_area_snapshot(include_back=False)
-        tab = FakeTab(
-            CTBC_AREA_ROW_SELECTOR,
-            [],
-            url=CTBC_TEST_AREA_URL,
-            evaluate_results=[json.dumps(snapshot), True],
-        )
-
-        self.assertTrue(await nodriver_ctbc_area_auto_select(
-            tab, config(area_keyword='"109區前排"')
-        ))
-        self.assertEqual(2, tab.evaluate_count)
-
-    async def test_native_area_commit_is_quantity_aware_and_fails_closed(self):
-        snapshot = make_ctbc_area_snapshot(
-            front_title_status="40",
-            front_action_status="40",
-            include_back=False,
-        )
-        tab = FakeTab(
-            CTBC_AREA_ROW_SELECTOR,
-            [],
-            url=CTBC_TEST_AREA_URL,
-            evaluate_results=[json.dumps(snapshot), False],
-        )
-        self.assertFalse(await nodriver_ctbc_area_auto_select(
-            tab, config(area_keyword='"109區前排"')
-        ))
-        commit_script = tab.evaluate_scripts[-1]
-        self.assertIn("const ticketNumber = 2;", commit_script)
-        self.assertIn("action.stableArgs.some", commit_script)
-        self.assertIn("hasTickets(action.status)", commit_script)
-        self.assertIn("hasTickets(mapTitle.status)", commit_script)
-        self.assertIn("hasTickets(status)", commit_script)
-        self.assertIn("root.hasAttribute(commitMarker)", commit_script)
-        self.assertIn("root.setAttribute(commitMarker, navigationNonce)", commit_script)
-        self.assertIn("area.click();", commit_script)
-        self.assertNotIn("setTimeout", commit_script)
-        self.assertNotIn("expectedHref", commit_script)
-        self.assertNotIn("expectedTitle", commit_script)
-        self.assertNotIn("window.__ticketsHunterCtbcAreaCommit", commit_script)
-        self.assertNotIn("status !== expectedStatus", commit_script)
-
     async def test_failed_fast_destination_remains_fail_closed_until_area_page(self):
         seat_url = "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&PERFORMANCE_PRICE_AREA_ID=P16D12YO"
         tab = FakeTab("", [], url=seat_url, evaluate_results=[True, True])

@@ -76,6 +76,7 @@ hiddenimports=[
     'platforms.ctbc',       # 舊公開名稱相容 facade
     'platforms.utiki',
     'platforms.utiki.auth',
+    'platforms.utiki.dom',
     'platforms.utiki.profiles',
     'platforms.utiki.selection',
     'platforms.utiki.workflow',

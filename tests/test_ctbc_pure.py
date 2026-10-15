@@ -475,7 +475,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
         target = _select_ctbc_area_snapshot(
             snapshot, config(), "P16D0B8Z", require_direct_destination=True
         )
-        self.assertEqual("a35", target["rel"])
+        self.assertEqual("a35", target.rel)
         snapshot["areas"][0]["href"] = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','0')"
         self.assertIsNone(_select_ctbc_area_snapshot(
             snapshot, config(), "P16D0B8Z", require_direct_destination=True
@@ -501,9 +501,10 @@ class CtbcPureSelectionTest(unittest.TestCase):
                         require_direct_destination=require_direct_destination,
                     )
                     self.assertIsNotNone(target)
-                    self.assertEqual("front", target["rel"])
+                    self.assertEqual("front", target.rel)
                     if require_direct_destination:
-                        self.assertEqual("PRICE_FRONT", target["destination"]["price_area_id"])
+                        self.assertTrue(target.direct_destination)
+                        self.assertEqual("PRICE_FRONT", target.price_area_id)
 
     def test_area_selection_rejects_unavailable_status_from_each_source(self):
         unavailable_by_source = (
@@ -566,7 +567,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
             send_a, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=False
         )
         self.assertIsNotNone(native_target)
-        self.assertIsNone(native_target["destination"])
+        self.assertFalse(native_target.direct_destination)
         self.assertIsNone(_select_ctbc_area_snapshot(
             send_a, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=True
         ))

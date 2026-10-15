@@ -86,6 +86,31 @@ class CtbcStateIsolationMixin:
                 bucket.clear()
 
 
+class FakeUtikiDomPort:
+    """Small semantic fake for workflow-to-DOM contract tests."""
+
+    def __init__(self, area_snapshot, commit_result):
+        self.area_snapshot = area_snapshot
+        self.commit_result = commit_result
+        self.events = []
+        self.commit_count = 0
+
+    async def read_area_snapshot(self, _tab):
+        self.events.append("inspect_area")
+        return self.area_snapshot
+
+    async def commit_area(self, _tab, snapshot, plan, ticket_number,
+                          navigation_nonce, fast_marker_key):
+        self.events.append("commit_area")
+        self.commit_count += 1
+        assert snapshot is self.area_snapshot
+        assert plan.rel == "front"
+        assert ticket_number == 2
+        assert re.fullmatch(r"[a-f0-9]{32}", navigation_nonce)
+        assert fast_marker_key == "ticketsHunter.ctbc.fast-navigation.v1"
+        return self.commit_result
+
+
 CTBC_TEST_PERFORMANCE_ID = "P16D0B8Z"
 CTBC_TEST_AREA_URL = (
     "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
@@ -136,6 +161,7 @@ def make_ctbc_area_snapshot(
     return {
         "ok": True,
         "page_url": CTBC_TEST_AREA_URL,
+        "document_id": "document-1",
         "rows": rows,
         "areas": areas,
     }

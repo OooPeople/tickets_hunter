@@ -59,6 +59,7 @@ a = Analysis(
         'platforms.ctbc',
         'platforms.utiki',
         'platforms.utiki.auth',
+        'platforms.utiki.dom',
         'platforms.utiki.profiles',
         'platforms.utiki.selection',
         'platforms.utiki.workflow',

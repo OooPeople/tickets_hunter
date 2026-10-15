@@ -1,8 +1,83 @@
 """Pure selection and audit rules for the uTiki2 ticketing family."""
 
 import re
+from dataclasses import dataclass
 
 import util
+
+
+@dataclass(frozen=True)
+class AreaSnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    rows: tuple
+    areas: tuple
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class AreaActionPlan:
+    text: str
+    area: str
+    price: str
+    status: str
+    rel: str
+    action_name: str
+    route: str
+    performance_id: str
+    price_area_id: str
+    group_id: str
+    stable_args: tuple
+    action_status: str
+    direct_destination: bool
+
+
+def parse_area_snapshot(raw_snapshot):
+    """Freeze an area reader result before it crosses into decision code."""
+    if isinstance(raw_snapshot, AreaSnapshot):
+        return raw_snapshot
+    if not isinstance(raw_snapshot, dict):
+        return None
+    if raw_snapshot.get("ok") is False:
+        return AreaSnapshot(
+            ok=False,
+            page_url=str(raw_snapshot.get("page_url") or ""),
+            document_id=str(raw_snapshot.get("document_id") or ""),
+            rows=(),
+            areas=(),
+            reason=str(raw_snapshot.get("reason") or "invalid-result"),
+        )
+    rows = raw_snapshot.get("rows")
+    areas = raw_snapshot.get("areas")
+    if not isinstance(rows, list) or not isinstance(areas, list):
+        return None
+    if any(not isinstance(row, dict) for row in rows):
+        return None
+    if any(not isinstance(area, dict) for area in areas):
+        return None
+    return AreaSnapshot(
+        ok=True,
+        page_url=str(raw_snapshot.get("page_url") or ""),
+        document_id=str(raw_snapshot.get("document_id") or ""),
+        rows=tuple(
+            (
+                str(row.get("area") or ""),
+                str(row.get("price") or ""),
+                str(row.get("status") or ""),
+                str(row.get("rel") or ""),
+            )
+            for row in rows
+        ),
+        areas=tuple(
+            (
+                str(area.get("id") or ""),
+                str(area.get("href") or ""),
+                str(area.get("title") or ""),
+            )
+            for area in areas
+        ),
+    )
 
 
 def parse_keyword_groups(keyword_string):
@@ -151,15 +226,10 @@ def map_title_matches_available_row(map_title, area_text, price_text, ticket_num
 
 
 def _index_map_areas(areas):
-    if not isinstance(areas, list) or not 0 < len(areas) <= 500:
+    if not isinstance(areas, tuple) or not 0 < len(areas) <= 500:
         return None
     indexed = {}
-    for area in areas:
-        if not isinstance(area, dict):
-            return None
-        area_id = str(area.get("id") or "")
-        href = str(area.get("href") or "")
-        title = str(area.get("title") or "")
+    for area_id, href, title in areas:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", area_id) or not href:
             return None
         indexed.setdefault(area_id, []).append({"href": href, "title": title})
@@ -195,12 +265,11 @@ def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
 
 def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
                     ticket_number, require_direct):
-    if not isinstance(row, dict):
-        return False
-    area_text = re.sub(r"\s+", " ", str(row.get("area") or "")).strip()
-    price_text = re.sub(r"\s+", " ", str(row.get("price") or "")).strip()
-    status_text = re.sub(r"\s+", " ", str(row.get("status") or "")).strip()
-    rel_tokens = str(row.get("rel") or "").split()
+    area, price, status, rel = row
+    area_text = re.sub(r"\s+", " ", area).strip()
+    price_text = re.sub(r"\s+", " ", price).strip()
+    status_text = re.sub(r"\s+", " ", status).strip()
+    rel_tokens = rel.split()
     if not area_text or not rel_tokens or not availability_has_tickets(
         status_text, ticket_number
     ):
@@ -235,17 +304,17 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
 def select_area_snapshot(snapshot, config_dict, expected_performance_id,
                          require_direct_destination=True):
     """Choose an area from one batched DOM/map snapshot."""
-    if not isinstance(snapshot, dict):
+    snapshot = parse_area_snapshot(snapshot)
+    if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
         return None
-    rows = snapshot.get("rows")
-    if not isinstance(rows, list) or not 0 < len(rows) <= 200:
+    if not 0 < len(snapshot.rows) <= 200:
         return None
-    indexed_areas = _index_map_areas(snapshot.get("areas"))
+    indexed_areas = _index_map_areas(snapshot.areas)
     if indexed_areas is None:
         return None
     ticket_number = int(config_dict.get("ticket_number", 1))
     candidates = []
-    for row in rows:
+    for row in snapshot.rows:
         candidate = _area_candidate(
             row, indexed_areas, config_dict, expected_performance_id,
             ticket_number, require_direct_destination,
@@ -261,7 +330,25 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
         area_config.get("mode", "from top to bottom"),
         config_dict.get("area_auto_fallback", False),
     )
-    return candidates[target_index] if target_index is not None else None
+    if target_index is None:
+        return None
+    target = candidates[target_index]
+    action = target["map_action"]
+    return AreaActionPlan(
+        text=target["text"],
+        area=target["area"],
+        price=target["price"],
+        status=target["status"],
+        rel=target["rel"],
+        action_name=action["action_name"],
+        route=action["route"],
+        performance_id=action["performance_id"],
+        price_area_id=action["price_area_id"],
+        group_id=action["group_id"],
+        stable_args=tuple(action["stable_args"]),
+        action_status=action["status"],
+        direct_destination=target["destination"] is not None,
+    )
 
 
 def quantity_audit_is_valid(quantities, target_key, ticket_number):

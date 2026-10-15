@@ -397,6 +397,7 @@ platforms/utiki/
 ├── profiles.py   # tenant allowlist、PageKind 與 route classifier
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
+├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
 └── workflow.py   # 唯一的瀏覽器副作用與 runtime state owner
 
 platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態

@@ -4,6 +4,7 @@ import time
 import types
 import unittest
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
@@ -14,6 +15,9 @@ from tests.ctbc_support import (
     config,
     make_ctbc_area_snapshot,
 )
+
+from platforms.utiki.dom import SubmitDispatchResult
+from platforms.utiki.selection import QuantityPlan
 
 from platforms.utiki.workflow import (
     CTBC_AREA_ROW_SELECTOR,
@@ -43,6 +47,20 @@ from platforms.utiki.workflow import (
 
 class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
     ctbc_state = _state
+
+    def _quantity_plan(self, page_url):
+        query = parse_qs(urlsplit(page_url).query, keep_blank_values=True)
+        return QuantityPlan(
+            page_url=page_url,
+            document_id="fixture-document",
+            performance_id=query["PERFORMANCE_ID"][0],
+            group_id=query["GROUP_ID"][0],
+            price_area_id=query["PERFORMANCE_PRICE_AREA_ID"][0],
+            quantity_limit=4,
+            target_key="FULL",
+            target_name="全票",
+            ticket_number=2,
+        )
 
     def _track_submit_state(self, tab):
         submit_key = _ctbc_purchase_state_key(tab)
@@ -1334,8 +1352,16 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = _ctbc_purchase_state_key(tab)
         try:
-            self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+            with patch(
+                "platforms.utiki.workflow.dispatch_quantity_submit",
+                AsyncMock(),
+            ) as quantity_dispatch:
+                self.assertTrue(await _ctbc_captcha_and_submit(
+                    tab, cfg, ocr=None
+                ))
+            quantity_dispatch.assert_not_awaited()
             self.assertTrue(tab.button.clicked)
+            self.assertEqual(1, tab.button.click_count)
         finally:
             _state["submitted"].pop(submit_key, None)
             _state["submit_blocked"].pop(submit_key, None)
@@ -1454,9 +1480,27 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     tab.target.url = target
 
                 tab.button.click = click_and_change_url
-                with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
+                quantity_plan = (
+                    self._quantity_plan(source_url)
+                    if label.startswith("general") else None
+                )
+
+                async def dispatch_quantity(*_args):
+                    await tab.button.click()
+                    return SubmitDispatchResult.DISPATCHED
+
+                with patch(
+                    "platforms.utiki.workflow.time.monotonic",
+                    return_value=100.0,
+                ), patch(
+                    "platforms.utiki.workflow.dispatch_quantity_submit",
+                    AsyncMock(side_effect=dispatch_quantity),
+                ):
                     self.assertFalse(
-                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                        await _ctbc_captcha_and_submit(
+                            tab, cfg, ocr=None,
+                            quantity_plan=quantity_plan,
+                        )
                     )
                 if label.endswith("fragment"):
                     self.assertNotIn(submit_key, _state["submitted"])
@@ -1467,7 +1511,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     self.assertIn(submit_key, _state["submitted"])
                 with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
                     self.assertFalse(
-                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                        await _ctbc_captcha_and_submit(
+                            tab, cfg, ocr=None,
+                            quantity_plan=quantity_plan,
+                        )
                     )
 
                 self.assertEqual(submit_key, _ctbc_purchase_state_key(tab))
@@ -1529,10 +1576,28 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     tab.target.url = target
 
                 tab.button.click = click_and_navigate
-                with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
+                quantity_plan = (
+                    self._quantity_plan(source_url)
+                    if label == "general-checkout" else None
+                )
+
+                async def dispatch_quantity(*_args):
+                    await tab.button.click()
+                    return SubmitDispatchResult.DISPATCHED
+
+                with patch(
+                    "platforms.utiki.workflow.time.monotonic",
+                    return_value=100.0,
+                ), patch(
+                    "platforms.utiki.workflow.dispatch_quantity_submit",
+                    AsyncMock(side_effect=dispatch_quantity),
+                ):
                     self.assertEqual(
                         expected,
-                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None),
+                        await _ctbc_captcha_and_submit(
+                            tab, cfg, ocr=None,
+                            quantity_plan=quantity_plan,
+                        ),
                     )
                 self.assertEqual(1, tab.button.click_count)
                 if expected:
@@ -1542,7 +1607,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     )
                     tab.target.url = source_url
                     self.assertFalse(
-                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                        await _ctbc_captcha_and_submit(
+                            tab, cfg, ocr=None,
+                            quantity_plan=quantity_plan,
+                        )
                     )
                     self.assertEqual(1, tab.button.click_count)
                     continue
@@ -1750,9 +1818,22 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 tab.target.url = second_url
                 second_key = _ctbc_purchase_state_key(tab)
                 self.assertNotEqual(first_key, second_key)
-                self.assertFalse(
-                    await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                quantity_plan = (
+                    self._quantity_plan(second_url)
+                    if label == "mode" else None
                 )
+
+                async def dispatch_quantity(*_args):
+                    await tab.button.click()
+                    return SubmitDispatchResult.DISPATCHED
+
+                with patch(
+                    "platforms.utiki.workflow.dispatch_quantity_submit",
+                    AsyncMock(side_effect=dispatch_quantity),
+                ):
+                    self.assertFalse(await _ctbc_captcha_and_submit(
+                        tab, cfg, ocr=None, quantity_plan=quantity_plan
+                    ))
 
                 self.assertEqual(1, tab.button.click_count)
                 self.assertEqual("quota", _state["submit_blocked"][first_key])

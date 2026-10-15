@@ -14,13 +14,21 @@ from tests.ctbc_support import (
     make_ctbc_quantity_snapshot,
 )
 
-from platforms.utiki.dom import CommitResult, commit_area
+from platforms.utiki.dom import (
+    CommitResult,
+    SubmitDispatchResult,
+    commit_area,
+    dispatch_quantity_submit,
+)
 from platforms.utiki.selection import (
     parse_area_snapshot,
     parse_quantity_snapshot,
     select_area_snapshot,
+    select_quantity_snapshot,
 )
 from platforms.utiki.workflow import (
+    _ctbc_captcha_and_submit,
+    _ctbc_purchase_state_key,
     _ctbc_tab_identity,
     _state,
     nodriver_ctbc_area_auto_select,
@@ -142,7 +150,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         )
         tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
 
-        async def submit_effect(*_args):
+        async def submit_effect(*_args, **_kwargs):
             dom_port.events.append("submit")
             return True
 
@@ -229,6 +237,150 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             tab, cfg, "quantity state changed during commit"
         )
         submit.assert_not_awaited()
+
+    async def test_quantity_dispatch_is_not_purchase_success(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+        submit_key = _ctbc_purchase_state_key(tab)
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
+        ) as dispatch, patch(
+            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            AsyncMock(return_value=False),
+        ) as observe:
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+
+        self.assertEqual(1, dispatch.await_count)
+        self.assertEqual(1, observe.await_count)
+        self.assertEqual(
+            "awaiting_result", _state["submitted"][submit_key]["phase"]
+        )
+        self.assertNotIn(submit_key, _state["submit_blocked"])
+
+    async def test_unknown_quantity_dispatch_is_sticky(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+        submit_key = _ctbc_purchase_state_key(tab)
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(side_effect=RuntimeError("unknown result")),
+        ) as dispatch:
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+
+        self.assertEqual(1, dispatch.await_count)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+
+    async def test_late_stale_dispatch_cannot_reload_after_losing_guard(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+        submit_key = _ctbc_purchase_state_key(tab)
+        replacement = {
+            "dispatched_at": 1.0,
+            "phase": "awaiting_result",
+            "source_url": CTBC_TEST_QUANTITY_URL,
+        }
+
+        async def lose_guard(*_args):
+            _state["submitted"][submit_key] = replacement
+            return SubmitDispatchResult.STALE
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(side_effect=lose_guard),
+        ), patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(),
+        ) as reload_page:
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+
+        reload_page.assert_not_awaited()
+        self.assertIs(_state["submitted"][submit_key], replacement)
+
+    async def test_captcha_rejection_allows_one_new_quantity_dispatch(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
+        ) as dispatch, patch(
+            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            AsyncMock(return_value=False),
+        ):
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+            tab.dialog = "驗證碼錯誤"
+            tab.dialog_visible = True
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+            tab.captcha_input.value = "WXYZ"
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+
+        self.assertEqual(2, dispatch.await_count)
+        self.assertEqual(1, tab.dialog_button.click_count)
+
+    async def test_general_submit_without_quantity_plan_is_blocked(self):
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+
+        self.assertFalse(await _ctbc_captcha_and_submit(
+            tab, cfg, ocr=None
+        ))
+        self.assertEqual(0, tab.button.click_count)
+
+    async def test_quantity_dispatch_rejects_unknown_driver_result(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        tab = FakeTab(
+            "", [], url=CTBC_TEST_QUANTITY_URL,
+            evaluate_results=[True],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "outcome is unknown"):
+            await dispatch_quantity_submit(tab, plan)
 
 
 if __name__ == "__main__":

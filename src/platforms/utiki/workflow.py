@@ -40,8 +40,10 @@ from .auth import (
 )
 from .dom import (
     CommitResult,
+    SubmitDispatchResult,
     commit_area,
     commit_quantity,
+    dispatch_quantity_submit,
     read_area_snapshot,
     read_quantity_snapshot,
 )
@@ -58,6 +60,7 @@ from .profiles import (
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
+    QuantityPlan,
     QuantitySnapshot,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
@@ -2926,15 +2929,96 @@ async def _ctbc_captcha(tab, config_dict, ocr):
     return True
 
 
-async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
+async def _dispatch_ctbc_submit(
+    tab, config_dict, submit_key, quantity_plan=None
+):
+    """Dispatch once; the caller still has to observe a verified outcome."""
+    debug = util.create_debug_logger(config_dict)
+    button = None
+    if quantity_plan is None:
+        button = await tab.query_selector('button#addcart')
+        if not button:
+            return False
+    submitted = _state["submitted"]
+    if submit_key in submitted:
+        return False
+    dispatched_at = time.monotonic()
+    dispatch_state = {
+        "dispatched_at": dispatched_at,
+        "phase": "dispatching",
+        "source_url": str(tab.target.url),
+    }
+    submit_nonce = None
+    if quantity_plan is not None:
+        submit_nonce = uuid.uuid4().hex
+        dispatch_state["nonce"] = submit_nonce
+    submitted[submit_key] = dispatch_state
+    try:
+        if quantity_plan is None:
+            await button.click()
+        else:
+            result = await dispatch_quantity_submit(
+                tab, quantity_plan
+            )
+            if result is not SubmitDispatchResult.DISPATCHED:
+                if submitted.get(submit_key) is not dispatch_state:
+                    return False
+                debug.log(
+                    f"[CTBC GENERAL] Submit dispatch {result.value}; "
+                    "click blocked"
+                )
+                if (
+                    result is SubmitDispatchResult.STALE
+                    and str(tab.target.url) == quantity_plan.page_url
+                ):
+                    try:
+                        await _reload_with_interval(
+                            tab, config_dict,
+                            CTBC_QUANTITY_STALE_RELOAD_REASON,
+                        )
+                    finally:
+                        if submitted.get(submit_key) is dispatch_state:
+                            submitted.pop(submit_key, None)
+                else:
+                    submitted.pop(submit_key, None)
+                return False
+    except Exception as exc:
+        if submitted.get(submit_key) is dispatch_state:
+            submitted.pop(submit_key, None)
+            _state["submit_blocked"][submit_key] = "unknown"
+        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
+        return False
+    if submitted.get(submit_key) is not dispatch_state:
+        return False
+    submitted[submit_key] = {
+        "dispatched_at": dispatched_at,
+        "phase": "awaiting_result",
+        "source_url": dispatch_state["source_url"],
+        **({"nonce": submit_nonce} if submit_nonce else {}),
+    }
+    return True
+
+
+async def _ctbc_captcha_and_submit(
+    tab, config_dict, ocr, *, quantity_plan=None
+):
     debug = util.create_debug_logger(config_dict)
     current_url = str(tab.target.url)
     submit_key = _ctbc_purchase_state_key(tab)
+    page_type = _get_ctbc_page_type(current_url)
     if (
         submit_key is None
-        or _get_ctbc_page_type(current_url) not in ("seat", "general_admission")
+        or page_type not in ("seat", "general_admission")
     ):
         debug.log("[CTBC] Purchase identity is incomplete; automatic submit is blocked")
+        return False
+    if (
+        (page_type == "general_admission" and not isinstance(
+            quantity_plan, QuantityPlan
+        ))
+        or (page_type == "seat" and quantity_plan is not None)
+    ):
+        debug.log("[CTBC] Submit plan does not match the purchase page")
         return False
 
     dialog_outcome = await _handle_ctbc_submit_dialog(
@@ -3004,25 +3088,10 @@ async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
     ):
         return False
 
-    button = await tab.query_selector('button#addcart')
-    if not button:
+    if not await _dispatch_ctbc_submit(
+        tab, config_dict, submit_key, quantity_plan
+    ):
         return False
-    dispatched_at = time.monotonic()
-    submitted[submit_key] = {
-        "dispatched_at": dispatched_at,
-        "phase": "dispatching",
-    }
-    try:
-        await button.click()
-    except Exception as exc:
-        submitted.pop(submit_key, None)
-        _state["submit_blocked"][submit_key] = "unknown"
-        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
-        return False
-    submitted[submit_key] = {
-        "dispatched_at": dispatched_at,
-        "phase": "awaiting_result",
-    }
     debug.log("[CTBC] Add-to-cart submitted")
     return await _observe_ctbc_submit_outcome(tab, config_dict, current_url, submit_key)
 
@@ -3140,7 +3209,9 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         f"[CTBC GENERAL] Selected {plan.ticket_number} x "
         f"{plan.target_name}"
     )
-    return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
+    return await _ctbc_captcha_and_submit(
+        tab, config_dict, ocr, quantity_plan=plan
+    )
 
 
 def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):

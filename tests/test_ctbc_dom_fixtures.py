@@ -15,8 +15,10 @@ from tests.ctbc_support import config
 
 from platforms.utiki.dom import (
     CommitResult,
+    SubmitDispatchResult,
     commit_area,
     commit_quantity,
+    dispatch_quantity_submit,
     read_area_snapshot,
     read_quantity_snapshot,
 )
@@ -27,7 +29,9 @@ from platforms.utiki.selection import (
 )
 from platforms.utiki.workflow import (
     _ctbc_commit_fast_navigation,
+    _ctbc_captcha_and_submit,
     _ctbc_delete_fast_navigation_marker,
+    _ctbc_purchase_state_key,
     _ctbc_read_fast_navigation_marker,
     _ctbc_tab_identity,
     _dismiss_ctbc_dialog,
@@ -327,10 +331,158 @@ async def _assert_quantity_fixture(browser):
         assert await nodriver_ctbc_general_admission_main(
             flow_tab, cfg, ocr=None
         )
-    submit_gate.assert_awaited_once_with(flow_tab, cfg, None)
+    submit_gate.assert_awaited_once()
+    assert submit_gate.await_args.args == (flow_tab, cfg, None)
+    assert submit_gate.await_args.kwargs["quantity_plan"].target_key == "FULL"
     assert await _read_fixture_quantities(flow_tab) == {
         "FULL": "2", "OTHER": "0"
     }
+
+    dispatch_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    dispatch_snapshot = await read_quantity_snapshot(dispatch_tab)
+    dispatch_plan = select_quantity_snapshot(
+        dispatch_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert await commit_quantity(
+        dispatch_tab, dispatch_snapshot, dispatch_plan
+    ) is CommitResult.COMMITTED
+    assert await dispatch_quantity_submit(
+        dispatch_tab, dispatch_plan
+    ) is SubmitDispatchResult.DISPATCHED
+    assert await dispatch_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 1
+    assert await dispatch_quantity_submit(
+        dispatch_tab, dispatch_plan
+    ) is SubmitDispatchResult.DISPATCHED
+    assert await dispatch_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 2
+
+    marker_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    marker_snapshot = await read_quantity_snapshot(marker_tab)
+    marker_plan = select_quantity_snapshot(
+        marker_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert await commit_quantity(
+        marker_tab, marker_snapshot, marker_plan
+    ) is CommitResult.COMMITTED
+    await marker_tab.evaluate(
+        "document.documentElement.removeAttribute("
+        "'data-tickets-hunter-utiki-quantity-commit')"
+    )
+    assert await dispatch_quantity_submit(
+        marker_tab, marker_plan
+    ) is SubmitDispatchResult.STALE
+    assert await marker_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    dialog_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    dialog_snapshot = await read_quantity_snapshot(dialog_tab)
+    dialog_plan = select_quantity_snapshot(
+        dialog_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert await commit_quantity(
+        dialog_tab, dialog_snapshot, dialog_plan
+    ) is CommitResult.COMMITTED
+    await dialog_tab.evaluate('''
+        (() => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'ui-dialog';
+            wrapper.innerHTML = '<div id="dialog-message">警告</div>';
+            document.body.appendChild(wrapper);
+        })()
+    ''')
+    assert await dispatch_quantity_submit(
+        dialog_tab, dialog_plan
+    ) is SubmitDispatchResult.REJECTED
+    assert await dialog_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    for mutation in ("quantity", "identity"):
+        wait_tab = await _open_fixture(
+            browser, "UTK0203_quantity.html", query
+        )
+        wait_snapshot = await read_quantity_snapshot(wait_tab)
+        wait_plan = select_quantity_snapshot(
+            wait_snapshot, cfg["utiki"]["ticket_type_keyword"],
+            cfg["ticket_number"],
+        )
+        assert await commit_quantity(
+            wait_tab, wait_snapshot, wait_plan
+        ) is CommitResult.COMMITTED
+        await wait_tab.evaluate(
+            "document.querySelector('#CHK').value = ''"
+        )
+
+        async def mutate_during_ocr(*_args, kind=mutation):
+            if kind == "quantity":
+                await wait_tab.evaluate(
+                    "document.querySelector("
+                    "'input.numbox[key=\"OTHER\"]').value = '1'"
+                )
+            else:
+                await wait_tab.evaluate(
+                    "document.querySelector('#PERFORMANCE_ID').value = "
+                    "'OTHER'"
+                )
+            await wait_tab.evaluate(
+                "document.querySelector('#CHK').value = 'ABCD'"
+            )
+            return True
+
+        wait_cfg = config()
+        wait_cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+        dispatch_results = []
+
+        async def capture_dispatch(*args):
+            result = await dispatch_quantity_submit(*args)
+            dispatch_results.append(result)
+            return result
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_captcha",
+            AsyncMock(side_effect=mutate_during_ocr),
+        ) as captcha_solver, patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(side_effect=capture_dispatch),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_purchase_state_key",
+            return_value=(f"fixture-wait-{mutation}",),
+        ), patch(
+            "platforms.utiki.workflow._get_ctbc_page_type",
+            return_value="general_admission",
+        ), patch(
+            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            AsyncMock(return_value=False),
+        ) as observe, patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page:
+            assert not await _ctbc_captcha_and_submit(
+                wait_tab, wait_cfg, ocr=None, quantity_plan=wait_plan
+            )
+        captcha_solver.assert_awaited_once()
+        assert dispatch_results == [SubmitDispatchResult.STALE], mutation
+        observe.assert_not_awaited()
+        assert reload_page.await_count == 1, mutation
+        assert await wait_tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 0
+        assert (f"fixture-wait-{mutation}",) not in _state["submitted"]
 
     race_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
     await race_tab.evaluate("document.body.dataset.reboundOther = '1'")

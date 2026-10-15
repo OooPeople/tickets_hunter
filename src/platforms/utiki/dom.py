@@ -22,6 +22,12 @@ class CommitResult(Enum):
     STALE = "stale"
 
 
+class SubmitDispatchResult(Enum):
+    DISPATCHED = "dispatched"
+    REJECTED = "rejected"
+    STALE = "stale"
+
+
 def _decode_json_result(raw_value):
     if isinstance(raw_value, str):
         try:
@@ -470,3 +476,160 @@ async def commit_quantity(tab, snapshot, plan):
         return CommitResult(raw_result)
     except (TypeError, ValueError):
         raise RuntimeError("quantity commit outcome is unknown")
+
+
+def _valid_quantity_submit_input(plan):
+    token = r"[A-Za-z0-9_-]+"
+    return bool(
+        isinstance(plan, QuantityPlan)
+        and plan.page_url
+        and plan.document_id
+        and re.fullmatch(token, plan.performance_id)
+        and re.fullmatch(token, plan.price_area_id)
+        and (not plan.group_id or re.fullmatch(token, plan.group_id))
+        and re.fullmatch(token, plan.target_key)
+        and plan.ticket_number > 0
+        and plan.quantity_limit >= 0
+    )
+
+
+async def dispatch_quantity_submit(tab, plan):
+    """Atomically revalidate quantity state and dispatch add-to-cart once."""
+    if not _valid_quantity_submit_input(plan):
+        return SubmitDispatchResult.REJECTED
+    plan_json = json.dumps({
+        "pageUrl": plan.page_url,
+        "documentId": plan.document_id,
+        "performanceId": plan.performance_id,
+        "groupId": plan.group_id,
+        "priceAreaId": plan.price_area_id,
+        "quantityLimit": plan.quantity_limit,
+        "targetKey": plan.target_key,
+        "targetName": plan.target_name,
+        "ticketNumber": plan.ticket_number,
+    }, ensure_ascii=False)
+    raw_result = await tab.evaluate(fr'''
+        (() => {{
+            // __ticketsHunterUtikiQuantitySubmit
+            const plan = {plan_json};
+            if (location.href !== plan.pageUrl ||
+                String(performance.timeOrigin) !== plan.documentId) {{
+                return 'stale';
+            }}
+            const query = new URLSearchParams(location.search);
+            const exactQuery = (key, expected) => {{
+                const values = query.getAll(key);
+                return values.length === 1 && values[0] === expected;
+            }};
+            const hiddenMatches = (selector, expected) => {{
+                const input = document.querySelector(selector);
+                return !input || (input.value || '') === expected;
+            }};
+            if (!exactQuery('PERFORMANCE_ID', plan.performanceId) ||
+                !exactQuery('GROUP_ID', plan.groupId) ||
+                !exactQuery(
+                    'PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) ||
+                !hiddenMatches('#PERFORMANCE_ID', plan.performanceId) ||
+                !hiddenMatches('#GROUP_ID', plan.groupId) ||
+                !hiddenMatches(
+                    '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId)) {{
+                return 'stale';
+            }}
+            const quantityIntent = JSON.stringify([
+                plan.targetKey, plan.ticketNumber]);
+            if (document.documentElement.getAttribute(
+                'data-tickets-hunter-utiki-quantity-commit'
+            ) !== quantityIntent) return 'stale';
+            const roots = Array.from(document.querySelectorAll(
+                '[id="table_tickettype"]'));
+            const scoped = Array.from(new Set(roots.flatMap(root =>
+                Array.from(root.querySelectorAll('input.numbox[key]')))));
+            const inputs = Array.from(document.querySelectorAll(
+                'input.numbox[key]'));
+            const scopedSet = new Set(scoped);
+            const keys = inputs.map(input =>
+                input.getAttribute('key') || '');
+            if (!roots.length || !inputs.length ||
+                inputs.length !== scoped.length ||
+                inputs.some(input => !scopedSet.has(input)) ||
+                keys.some(key => !/^[A-Za-z0-9_-]+$/.test(key)) ||
+                new Set(keys).size !== keys.length) return 'stale';
+            const targets = scoped.filter(input =>
+                input.getAttribute('key') === plan.targetKey);
+            if (targets.length !== 1) return 'stale';
+            const limitInput = document.querySelector('#QUANTITY_LIMIT');
+            const limitRaw = limitInput ?
+                (limitInput.value || '').trim() : '';
+            if (limitRaw && !/^\d+$/.test(limitRaw)) return 'stale';
+            const liveLimit = limitRaw ? Number(limitRaw) : 0;
+            if (liveLimit !== plan.quantityLimit ||
+                (liveLimit && plan.ticketNumber > liveLimit)) {{
+                return 'stale';
+            }}
+            const target = targets[0];
+            const row = target.closest('tr') ||
+                target.closest('[id="table_tickettype"]');
+            const name = (row.querySelector('td.fill')?.textContent || '')
+                .trim();
+            const text = (row.innerText || row.textContent || '')
+                .replace(/\s+/g, ' ').trim();
+            const remaining = Array.from(
+                row.querySelectorAll('input[key="LAST_AMOUNT"]'));
+            if (name !== plan.targetName || text.includes('售完') ||
+                target.disabled ||
+                target.getAttribute('aria-disabled') === 'true' ||
+                remaining.length > 1) return 'stale';
+            if (remaining.length === 1) {{
+                const raw = (remaining[0].value || '').trim();
+                if (!/^\d+$/.test(raw) ||
+                    Number(raw) < plan.ticketNumber) return 'stale';
+            }}
+            const quantitiesValid = inputs.every(input =>
+                Number(input.value || 0) ===
+                    (input === target ? plan.ticketNumber : 0));
+            if (!quantitiesValid) return 'stale';
+            const visible = element => {{
+                if (!element || !element.isConnected || element.hidden ||
+                    element.getAttribute('aria-hidden') === 'true') return false;
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            }};
+            const dialogs = Array.from(
+                document.querySelectorAll('#dialog-message'))
+                .map(message => message.closest('.ui-dialog'))
+                .filter(visible);
+            if (dialogs.length) return 'rejected';
+            const loginIds = Array.from(
+                document.querySelectorAll('#LOGIN_ID')).filter(visible);
+            const loginPasswords = Array.from(
+                document.querySelectorAll('#LOGIN_PWD')).filter(visible);
+            if (loginIds.length || loginPasswords.length) {{
+                if (loginIds.length !== 1 || loginPasswords.length !== 1 ||
+                    !(loginIds[0].value || '').trim() ||
+                    !(loginPasswords[0].value || '')) return 'rejected';
+            }}
+            const captchas = Array.from(
+                document.querySelectorAll('input#CHK')).filter(visible);
+            if (captchas.length !== 1 ||
+                captchas[0].disabled ||
+                captchas[0].getAttribute('aria-disabled') === 'true' ||
+                captchas[0].readOnly ||
+                (captchas[0].value || '').trim().length !== 4) {{
+                return 'rejected';
+            }}
+            const buttons = Array.from(
+                document.querySelectorAll('button#addcart')).filter(visible);
+            if (buttons.length !== 1 || buttons[0].disabled ||
+                buttons[0].getAttribute('aria-disabled') === 'true') {{
+                return 'rejected';
+            }}
+            buttons[0].click();
+            return 'dispatched';
+        }})()
+    ''')
+    try:
+        return SubmitDispatchResult(raw_result)
+    except (TypeError, ValueError):
+        raise RuntimeError("quantity submit dispatch outcome is unknown")

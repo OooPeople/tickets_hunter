@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -412,16 +413,40 @@ def load_json(profile_name=""):
 
     return config_filepath, config_dict
 
+
+def save_profile_config(config_dict, target_path):
+    """Atomically replace one complete profile configuration."""
+    target_path = os.path.abspath(target_path)
+    target_dir = os.path.dirname(target_path)
+    os.makedirs(target_dir, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target_dir,
+            prefix=".profile_settings_",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = temp_file.name
+            json.dump(config_dict, temp_file, ensure_ascii=False, indent=4)
+            temp_file.write("\n")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, target_path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 def reset_json():
     app_root = util.get_app_root()
     config_filepath = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
-    if os.path.exists(str(config_filepath)):
-        try:
-            os.unlink(str(config_filepath))
-        except Exception as exc:
-            print(exc)
-            pass
-
     config_dict = get_default_config()
     return config_filepath, config_dict
 
@@ -752,7 +777,12 @@ class ResetJsonHandler(tornado.web.RequestHandler):
             self.write({"error": "reset only supports the default profile"})
             return
         config_filepath, config_dict = reset_json()
-        util.save_json(config_dict, config_filepath)
+        try:
+            save_profile_config(config_dict, config_filepath)
+        except OSError:
+            self.set_status(500)
+            self.write({"error": "failed to save profile settings"})
+            return
         self.write(config_dict)
 
 class SaveJsonHandler(tornado.web.RequestHandler):
@@ -797,7 +827,14 @@ class SaveJsonHandler(tornado.web.RequestHandler):
             if ".cityline.com" in config_dict["homepage"]:
                 config_dict["webdriver_type"] = CONST_WEBDRIVER_TYPE_NODRIVER
 
-            util.save_json(config_dict, config_filepath)
+            try:
+                save_profile_config(config_dict, config_filepath)
+            except OSError:
+                self.set_status(500)
+                self.write(dict(error=dict(
+                    message="failed to save profile settings", code=1004
+                )))
+                return
 
         if not is_pass_check:
             self.set_status(401)
@@ -849,8 +886,12 @@ class ProfilesHandler(tornado.web.RequestHandler):
             _, config_dict = load_json()
         config_dict = migrate_config(config_dict)
 
-        os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
-        util.save_json(config_dict, config_filepath)
+        try:
+            save_profile_config(config_dict, config_filepath)
+        except OSError:
+            self.set_status(500)
+            self.write({"success": False, "error": "failed to save profile settings"})
+            return
         self.write({"success": True, "profile": profile_name})
 
     def delete(self):

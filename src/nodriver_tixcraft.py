@@ -77,6 +77,7 @@ from platforms.utiki import (
     nodriver_utk_sports_cancel_refresh,
     nodriver_utk_sports_consume_reload_event,
     nodriver_utk_sports_health_check,
+    nodriver_utk_sports_pause_refresh,
     nodriver_utk_sports_reload,
     nodriver_utk_sports_reload_wait,
 )
@@ -106,6 +107,13 @@ def _should_inject_ctbc_cookies(homepage):
     except ValueError:
         return False
     return host == "tix.ctbcsports.com" and is_utk_sports_url(homepage)
+
+
+async def _pause_utk_refresh(tab, url, last_url):
+    if not (is_utk_sports_url(url) or is_utk_sports_url(last_url)):
+        return False
+    await nodriver_utk_sports_pause_refresh(tab, "paused")
+    return True
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -1086,10 +1094,16 @@ async def main(args):
             util.force_remove_file(util.get_instance_state_path(heartbeat_filename))
             break
 
+        is_maxbot_paused = await check_and_handle_pause(config_dict)
+
         if url is None:
+            if is_maxbot_paused:
+                await _pause_utk_refresh(tab, url or "", last_url)
             continue
         else:
             if len(url) == 0:
+                if is_maxbot_paused:
+                    await _pause_utk_refresh(tab, url or "", last_url)
                 # [URL DIAG] Step 0: empty url makes the loop skip all dispatch
                 # silently (this is the suspected on-sale-reload freeze point).
                 # Throttle so a sustained empty-url stretch logs ~every 2s.
@@ -1104,8 +1118,6 @@ async def main(args):
                         f"js_timeouts={get_url_js_timeout_count()}"
                     )
                 continue
-
-        is_maxbot_paused = await check_and_handle_pause(config_dict)
 
         # Detect pause state change and show message immediately
         # Label with instance id so mixed multi-instance logs stay readable
@@ -1140,10 +1152,7 @@ async def main(args):
                 cloudflare_clear_confirmations = 0
 
         if is_maxbot_paused:
-            if is_utk_sports_url(url) or is_utk_sports_url(last_url):
-                await nodriver_utk_sports_cancel_refresh(
-                    tab, "paused", wait=True, abandon_probe=True
-                )
+            await _pause_utk_refresh(tab, url, last_url)
             if 'kktix.c' in url:
                 await nodriver_kktix_paused_main(tab, url, config_dict)
             # sleep more when paused.

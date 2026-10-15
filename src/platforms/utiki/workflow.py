@@ -79,6 +79,7 @@ from .selection import (
 __all__ = [
     "is_utk_sports_url",
     "nodriver_utk_sports_cancel_refresh",
+    "nodriver_utk_sports_pause_refresh",
     "nodriver_utk_sports_consume_reload_event",
     "nodriver_utk_sports_health_check",
     "nodriver_ctbc_inject_cookies",
@@ -467,6 +468,18 @@ async def nodriver_utk_sports_cancel_refresh(
         reason,
         wait=wait,
         abandon_probe=abandon_probe,
+    )
+
+
+async def nodriver_utk_sports_pause_refresh(tab, reason="paused"):
+    """Pause one tab's queued/reserved refresh intent without resetting it."""
+    runtime, refresh_identity = _utk_refresh_context(tab)
+    return await refresh_engine.pause_refresh(
+        tab,
+        runtime,
+        refresh_identity,
+        _state["cancel_tasks"],
+        reason,
     )
 
 
@@ -3283,9 +3296,7 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
             "server_assignment_authorized"
         ] = None
     if await check_and_handle_pause(config_dict):
-        await nodriver_utk_sports_cancel_refresh(
-            tab, "paused", wait=True, abandon_probe=True
-        )
+        await nodriver_utk_sports_pause_refresh(tab, "paused")
         return tab
 
     guard_state = await nodriver_utk_sports_health_check(tab, url, config_dict)

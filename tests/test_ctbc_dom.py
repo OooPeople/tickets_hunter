@@ -21,6 +21,7 @@ from platforms.ctbc import (
     CTBC_DATE_ROW_SELECTOR,
     _ctbc_attest_fast_destination,
     _ctbc_captcha_and_submit,
+    _ctbc_purchase_state_key,
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
     _get_ctbc_captcha_image_bytes,
@@ -40,7 +41,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     ctbc_state = _state
 
     def _track_submit_state(self, tab):
-        submit_key = _ctbc_tab_state_key(tab)
+        submit_key = _ctbc_purchase_state_key(tab)
         for state_name in (
             "submitted",
             "seat_conflict_pending",
@@ -623,7 +624,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab = FakeSubmitTab(dialog="")
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": False}
-        submit_key = _ctbc_tab_state_key(tab)
+        submit_key = _ctbc_purchase_state_key(tab)
         self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertFalse(tab.button.clicked)
         self.assertNotIn(submit_key, _state["submitted"])
@@ -633,7 +634,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab = FakeSubmitTab(dialog="", dialogs=["", "", "成功加入購物車"])
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
-        submit_key = _ctbc_tab_state_key(tab)
+        submit_key = _ctbc_purchase_state_key(tab)
         try:
             self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
             self.assertTrue(tab.button.clicked)
@@ -645,7 +646,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab = FakeSubmitTab(dialog="")
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
-        submit_key = _ctbc_tab_state_key(tab)
+        submit_key = _ctbc_purchase_state_key(tab)
 
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(1, tab.button.click_count)
@@ -708,6 +709,356 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(1, tab.button.click_count)
         self.assertNotIn(submit_key, _state["submitted"])
         self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+
+    async def test_cosmetic_purchase_url_changes_never_submit_twice(self):
+        cases = []
+        for mode, route, group_id in (
+            ("reserved", "UTK0205_", "G1"),
+            ("general", "UTK0203_", ""),
+        ):
+            prefix = f"https://tix.ctbcsports.com/BROTHERS/{route}?"
+            source_url = (
+                f"{prefix}PERFORMANCE_ID=P1&GROUP_ID={group_id}&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            )
+            cases.extend((
+                (
+                    f"{mode}-query-order",
+                    source_url,
+                    f"{prefix}GROUP_ID={group_id}&PERFORMANCE_PRICE_AREA_ID=A1&"
+                    "PERFORMANCE_ID=P1",
+                ),
+                (f"{mode}-tracking", source_url, f"{source_url}&tracking=fixture"),
+                (f"{mode}-fragment", source_url, f"{source_url}#fixture"),
+            ))
+        cases.append((
+            "general-route-alias",
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0202_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=&PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_PRICE_AREA_ID=A1&GROUP_ID=&PERFORMANCE_ID=P1"
+            ),
+        ))
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+
+        for label, source_url, cosmetic_url in cases:
+            with self.subTest(label=label):
+                tab = FakeSubmitTab(dialog="", url=source_url)
+                submit_key = _ctbc_purchase_state_key(tab)
+
+                async def click_and_change_url(target=cosmetic_url):
+                    tab.button.clicked = True
+                    tab.button.click_count += 1
+                    tab.target.url = target
+
+                tab.button.click = click_and_change_url
+                with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+                    self.assertFalse(
+                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                    )
+                if label.endswith("fragment"):
+                    self.assertNotIn(submit_key, _state["submitted"])
+                    self.assertEqual(
+                        "unknown", _state["submit_blocked"][submit_key]
+                    )
+                else:
+                    self.assertIn(submit_key, _state["submitted"])
+                with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+                    self.assertFalse(
+                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                    )
+
+                self.assertEqual(submit_key, _ctbc_purchase_state_key(tab))
+                self.assertEqual(1, tab.button.click_count)
+                self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+
+    async def test_submit_navigation_requires_same_tenant_checkout(self):
+        reserved_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        general_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        destinations = (
+            (
+                "reserved-checkout",
+                reserved_url,
+                "https://tix.ctbcsports.com/BROTHERS/UTK0206_",
+                True,
+            ),
+            (
+                "general-checkout",
+                general_url,
+                "https://tix.ctbcsports.com/BROTHERS/UTK0206_",
+                True,
+            ),
+            (
+                "cross-tenant-checkout",
+                reserved_url,
+                "https://tix.wdragons.com/UTK0206_",
+                False,
+            ),
+            (
+                "same-origin-unknown",
+                reserved_url,
+                "https://tix.ctbcsports.com/BROTHERS/complete",
+                False,
+            ),
+            (
+                "checkout-prefix-only",
+                reserved_url,
+                "https://tix.ctbcsports.com/BROTHERS/UTK0206_extra",
+                False,
+            ),
+        )
+
+        for label, source_url, destination, expected in destinations:
+            with self.subTest(label=label):
+                tab = FakeSubmitTab(dialog="", url=source_url)
+                submit_key = _ctbc_purchase_state_key(tab)
+
+                async def click_and_navigate(target=destination):
+                    tab.button.clicked = True
+                    tab.button.click_count += 1
+                    tab.target.url = target
+
+                tab.button.click = click_and_navigate
+                with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+                    self.assertEqual(
+                        expected,
+                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None),
+                    )
+                self.assertEqual(1, tab.button.click_count)
+                if expected:
+                    self.assertNotIn(submit_key, _state["submitted"])
+                    self.assertEqual(
+                        "success", _state["submit_blocked"][submit_key]
+                    )
+                    tab.target.url = source_url
+                    self.assertFalse(
+                        await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                    )
+                    self.assertEqual(1, tab.button.click_count)
+                    continue
+
+                self.assertNotIn(submit_key, _state["submitted"])
+                self.assertEqual(1, tab.button.click_count)
+                self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+
+    async def test_checkout_only_completes_its_own_tab_submit(self):
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        waiting_tab = FakeSubmitTab(dialog="")
+        checkout_tab = FakeSubmitTab(dialog="")
+        waiting_key = _ctbc_purchase_state_key(waiting_tab)
+        checkout_key = _ctbc_purchase_state_key(checkout_tab)
+
+        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+            self.assertFalse(
+                await _ctbc_captcha_and_submit(waiting_tab, cfg, ocr=None)
+            )
+
+            async def click_and_checkout():
+                checkout_tab.button.clicked = True
+                checkout_tab.button.click_count += 1
+                checkout_tab.target.url = (
+                    "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+                )
+
+            checkout_tab.button.click = click_and_checkout
+            self.assertTrue(
+                await _ctbc_captcha_and_submit(checkout_tab, cfg, ocr=None)
+            )
+
+        self.assertIn(waiting_key, _state["submitted"])
+        self.assertNotIn(checkout_key, _state["submitted"])
+        self.assertEqual("success", _state["submit_blocked"][checkout_key])
+
+    async def test_submit_dialog_after_unverified_navigation_uses_source_purchase(self):
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        tab = FakeSubmitTab(
+            dialog="",
+            dialogs=["", "", "已超出可購買額度"],
+        )
+        submit_key = _ctbc_purchase_state_key(tab)
+
+        async def click_and_leave_purchase():
+            tab.button.clicked = True
+            tab.button.click_count += 1
+            tab.target.url = "https://tix.ctbcsports.com/BROTHERS/complete"
+
+        tab.button.click = click_and_leave_purchase
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("quota", _state["submit_blocked"][submit_key])
+        self.assertEqual(1, tab.button.click_count)
+
+    async def test_negative_dialog_takes_priority_over_checkout_navigation(self):
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+
+        for label, dialog, state_name, expected in (
+            ("quota", "已超出可購買額度", "submit_blocked", "quota"),
+            ("seat-conflict", "該位置已被選走", "seat_conflict_pending", None),
+        ):
+            with self.subTest(label=label):
+                tab = FakeSubmitTab(dialog="", dialogs=["", "", dialog])
+                submit_key = _ctbc_purchase_state_key(tab)
+
+                async def click_and_checkout():
+                    tab.button.clicked = True
+                    tab.button.click_count += 1
+                    tab.target.url = (
+                        "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+                    )
+
+                tab.button.click = click_and_checkout
+                self.assertFalse(
+                    await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                )
+
+                self.assertNotIn(submit_key, _state["submitted"])
+                self.assertIn(submit_key, _state[state_name])
+                if expected is not None:
+                    self.assertEqual(expected, _state[state_name][submit_key])
+                if state_name == "seat_conflict_pending":
+                    self.assertEqual(
+                        "seat", _state[state_name][submit_key]["page_type"]
+                    )
+                self.assertNotEqual(
+                    "success", _state["submit_blocked"].get(submit_key)
+                )
+                self.assertEqual(1, tab.dialog_button.click_count)
+
+    async def test_incomplete_purchase_identity_never_submits(self):
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        urls = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1",
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P1&GROUP_ID="
+            ),
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+                "PERFORMANCE_ID=P1&PERFORMANCE_ID=P2&GROUP_ID=G1&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+        )
+
+        for url in urls:
+            with self.subTest(url=url):
+                tab = FakeSubmitTab(dialog="", url=url)
+                self.assertIsNone(_ctbc_purchase_state_key(tab))
+                self.assertFalse(
+                    await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                )
+                self.assertEqual(0, tab.button.click_count)
+                self.assertNotIn(None, _state["submitted"])
+
+    async def test_submit_blockers_survive_cosmetic_url_variants(self):
+        source_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        cosmetic_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "tracking=fixture&PERFORMANCE_PRICE_AREA_ID=A1&GROUP_ID=G1&"
+            "PERFORMANCE_ID=P1#fixture"
+        )
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+
+        quota_tab = FakeSubmitTab(dialog="已超出可購買額度", url=source_url)
+        quota_key = _ctbc_purchase_state_key(quota_tab)
+        self.assertFalse(await _ctbc_captcha_and_submit(quota_tab, cfg, ocr=None))
+        quota_tab.dialog = ""
+        quota_tab.dialog_visible = False
+        quota_tab.target.url = cosmetic_url
+        self.assertEqual(quota_key, _ctbc_purchase_state_key(quota_tab))
+        self.assertFalse(await _ctbc_captcha_and_submit(quota_tab, cfg, ocr=None))
+        self.assertEqual(0, quota_tab.button.click_count)
+        self.assertEqual("quota", _state["submit_blocked"][quota_key])
+
+        unknown_tab = FakeSubmitTab(dialog="", url=source_url)
+        unknown_key = _ctbc_purchase_state_key(unknown_tab)
+        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+            self.assertFalse(
+                await _ctbc_captcha_and_submit(unknown_tab, cfg, ocr=None)
+            )
+        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+            self.assertFalse(
+                await _ctbc_captcha_and_submit(unknown_tab, cfg, ocr=None)
+            )
+        unknown_tab.target.url = cosmetic_url
+        self.assertEqual(unknown_key, _ctbc_purchase_state_key(unknown_tab))
+        self.assertFalse(await _ctbc_captcha_and_submit(unknown_tab, cfg, ocr=None))
+        self.assertEqual(1, unknown_tab.button.click_count)
+        self.assertEqual("unknown", _state["submit_blocked"][unknown_key])
+
+    async def test_submit_state_isolated_by_purchase_identity(self):
+        first_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+
+        for label, second_url in (
+            (
+                "performance",
+                "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+                "PERFORMANCE_ID=P2&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1",
+            ),
+            (
+                "group",
+                "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=G2&PERFORMANCE_PRICE_AREA_ID=A1",
+            ),
+            (
+                "price-area",
+                "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A2",
+            ),
+            (
+                "mode",
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1",
+            ),
+            (
+                "tenant",
+                "https://tix.wdragons.com/UTK0205_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1",
+            ),
+        ):
+            with self.subTest(label=label):
+                tab = FakeSubmitTab(dialog="已超出可購買額度", url=first_url)
+                first_key = _ctbc_purchase_state_key(tab)
+                self.assertFalse(
+                    await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                )
+                tab.dialog = ""
+                tab.dialog_visible = False
+                tab.target.url = second_url
+                second_key = _ctbc_purchase_state_key(tab)
+                self.assertNotEqual(first_key, second_key)
+                self.assertFalse(
+                    await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+                )
+
+                self.assertEqual(1, tab.button.click_count)
+                self.assertEqual("quota", _state["submit_blocked"][first_key])
+                self.assertIn(second_key, _state["submitted"])
 
     async def test_late_conflict_replaces_unknown_submit_outcome(self):
         tab = FakeSubmitTab(dialog="")
@@ -928,7 +1279,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_general_conflict_uses_same_reload_recovery(self):
         tab = FakeSubmitTab(
             dialog="",
-            url="https://tix.ctbcsports.com/BROTHERS/UTK0203_?PERFORMANCE_ID=P1",
+            url=(
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=&PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
         )
         cfg = config()
         submit_key = self._track_submit_state(tab)
@@ -969,7 +1323,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
     async def test_quota_dialog_blocks_only_current_purchase(self):
         original_url = (
-            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1"
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
         )
         tab = FakeSubmitTab(dialog="已超出可購買額度", url=original_url)
         cfg = config()
@@ -986,7 +1341,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(0, tab.button.click_count)
 
         tab.target.url = (
-            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P2"
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P2&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
         )
         new_key = self._track_submit_state(tab)
         self.assertNotIn(new_key, _state["submit_blocked"])

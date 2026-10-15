@@ -376,6 +376,66 @@ def _ctbc_same_origin(first, second):
     )
 
 
+def _ctbc_purchase_state_key(tab):
+    """Key submit state by purchase identity, not cosmetic URL details."""
+    identity = _ctbc_tab_identity(tab)
+    current_url = str(tab.target.url)
+    try:
+        parsed = urlsplit(current_url)
+    except ValueError:
+        return None
+
+    purchase_url = urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+    )
+    page_type = _get_ctbc_page_type(purchase_url)
+    query = _ctbc_unique_query(purchase_url)
+    profile = _get_utk_sports_profile(purchase_url)
+    if page_type not in ("seat", "general_admission") or query is None or not profile:
+        return None
+
+    performance_id = query.get("PERFORMANCE_ID")
+    group_id = query.get("GROUP_ID")
+    price_area_id = query.get("PERFORMANCE_PRICE_AREA_ID")
+    token_pattern = re.compile(r"[A-Za-z0-9_-]+")
+    if (
+        not token_pattern.fullmatch(str(performance_id or ""))
+        or not token_pattern.fullmatch(str(price_area_id or ""))
+        or group_id is None
+        or (group_id and not token_pattern.fullmatch(str(group_id)))
+        or (page_type == "seat" and not group_id)
+    ):
+        return None
+
+    return (
+        identity,
+        profile["host"],
+        profile["tenant_path"],
+        page_type,
+        performance_id,
+        group_id,
+        price_area_id,
+    )
+
+
+def _ctbc_submit_reached_checkout(source_url, destination_url):
+    """Accept submit navigation only for the source tenant's checkout route."""
+    try:
+        source = urlsplit(source_url)
+        destination = urlsplit(destination_url)
+    except ValueError:
+        return False
+
+    source_without_fragment = urlunsplit(
+        (source.scheme, source.netloc, source.path, source.query, "")
+    )
+    return (
+        _get_ctbc_page_type(source_without_fragment) in ("seat", "general_admission")
+        and _get_ctbc_page_type(destination_url) == "checkout"
+        and _ctbc_same_origin(source, destination)
+    )
+
+
 def _parse_ctbc_date_target(onclick, current_url):
     """Strictly parse the site's ordinary date-button navigation target."""
     if _get_ctbc_page_type(current_url) != "date":
@@ -2732,14 +2792,20 @@ async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
     return True
 
 
-async def _handle_ctbc_submit_dialog(tab, config_dict):
+async def _handle_ctbc_submit_dialog(
+    tab, config_dict, submit_key=None, source_url=None
+):
     debug = util.create_debug_logger(config_dict)
     dialog_text = await _get_ctbc_visible_dialog_text(tab)
     outcome = _classify_ctbc_submit_dialog(dialog_text)
     if outcome is None:
         return None
 
-    submit_key = _ctbc_tab_state_key(tab)
+    if submit_key is None:
+        submit_key = _ctbc_purchase_state_key(tab)
+    if submit_key is None:
+        debug.log("[CTBC] Submit dialog appeared outside a valid purchase context")
+        return "rejected"
     _state["submitted"].pop(submit_key, None)
     if _state["submit_blocked"].get(submit_key) in ("unknown", "captcha_pending"):
         _state["submit_blocked"].pop(submit_key, None)
@@ -2751,7 +2817,7 @@ async def _handle_ctbc_submit_dialog(tab, config_dict):
 
     if outcome == "seat_conflict":
         identity = _ctbc_tab_identity(tab)
-        page_type = _get_ctbc_page_type(str(tab.target.url))
+        page_type = _get_ctbc_page_type(source_url or str(tab.target.url))
         _state["seat_conflict_pending"].setdefault(
             submit_key,
             {
@@ -2802,7 +2868,7 @@ async def _handle_ctbc_submit_dialog(tab, config_dict):
 
 
 async def _recover_ctbc_captcha_dialog(tab, config_dict):
-    submit_key = _ctbc_tab_state_key(tab)
+    submit_key = _ctbc_purchase_state_key(tab)
     if _state["submit_blocked"].get(submit_key) != "captcha_pending":
         return False
     if await _get_ctbc_visible_dialog_text(tab):
@@ -2822,7 +2888,7 @@ async def _recover_ctbc_captcha_dialog(tab, config_dict):
 
 
 async def _recover_ctbc_seat_conflict(tab, config_dict):
-    submit_key = _ctbc_tab_state_key(tab)
+    submit_key = _ctbc_purchase_state_key(tab)
     pending = _state["seat_conflict_pending"].get(submit_key)
     if not pending:
         return False
@@ -2885,6 +2951,35 @@ def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
 def _normalize_ctbc_captcha_answer(answer):
     """Normalize ddddocr output to CTBC's four uppercase ASCII characters."""
     return re.sub(r"[^A-Za-z0-9]", "", str(answer or "")).upper()
+
+
+async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key):
+    """Reduce the first observable result after an add-to-cart dispatch."""
+    debug = util.create_debug_logger(config_dict)
+    submitted = _state["submitted"]
+    await tab.sleep(1.0)
+    dialog_outcome = await _handle_ctbc_submit_dialog(
+        tab, config_dict, submit_key=submit_key, source_url=source_url
+    )
+    if dialog_outcome is not None:
+        return dialog_outcome == "success"
+
+    if _ctbc_submit_reached_checkout(source_url, str(tab.target.url)):
+        submitted.pop(submit_key, None)
+        _state["submit_blocked"][submit_key] = "success"
+        return True
+
+    destination_url = str(tab.target.url)
+    destination_key = _ctbc_purchase_state_key(tab)
+    destination_page_type = _get_ctbc_page_type(destination_url)
+    if (
+        destination_key != submit_key
+        or destination_page_type not in ("seat", "general_admission")
+    ):
+        submitted.pop(submit_key, None)
+        _state["submit_blocked"][submit_key] = "unknown"
+        debug.log("[CTBC] Submit left the purchase page without verified checkout")
+    return False
 
 
 async def _get_ctbc_captcha_image_bytes(tab, config_dict):
@@ -2970,9 +3065,17 @@ async def _ctbc_captcha(tab, config_dict, ocr):
 async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
     debug = util.create_debug_logger(config_dict)
     current_url = str(tab.target.url)
-    submit_key = _ctbc_tab_state_key(tab)
+    submit_key = _ctbc_purchase_state_key(tab)
+    if (
+        submit_key is None
+        or _get_ctbc_page_type(current_url) not in ("seat", "general_admission")
+    ):
+        debug.log("[CTBC] Purchase identity is incomplete; automatic submit is blocked")
+        return False
 
-    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
+    dialog_outcome = await _handle_ctbc_submit_dialog(
+        tab, config_dict, submit_key=submit_key
+    )
     if dialog_outcome is not None:
         return dialog_outcome == "success"
     if await _recover_ctbc_captcha_dialog(tab, config_dict):
@@ -3026,7 +3129,9 @@ async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
     if not ocr_config.get("enable", False) or not ocr_config.get("force_submit", False):
         return True
 
-    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
+    dialog_outcome = await _handle_ctbc_submit_dialog(
+        tab, config_dict, submit_key=submit_key
+    )
     if dialog_outcome is not None:
         return dialog_outcome == "success"
     if (
@@ -3055,21 +3160,19 @@ async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
         "phase": "awaiting_result",
     }
     debug.log("[CTBC] Add-to-cart submitted")
-
-    await tab.sleep(1.0)
-    if str(tab.target.url) != current_url:
-        submitted.pop(submit_key, None)
-        return True
-
-    return await _handle_ctbc_submit_dialog(tab, config_dict) == "success"
+    return await _observe_ctbc_submit_outcome(tab, config_dict, current_url, submit_key)
 
 
 async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
         return False
 
-    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
-    submit_key = _ctbc_tab_state_key(tab)
+    submit_key = _ctbc_purchase_state_key(tab)
+    if submit_key is None:
+        return False
+    dialog_outcome = await _handle_ctbc_submit_dialog(
+        tab, config_dict, submit_key=submit_key
+    )
     if await _recover_ctbc_captcha_dialog(tab, config_dict):
         return False
     if submit_key in _state["submit_blocked"]:
@@ -3104,8 +3207,12 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
     debug = util.create_debug_logger(config_dict)
     if not await _ctbc_attest_fast_destination(tab, "general_admission", config_dict):
         return False
-    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
-    submit_key = _ctbc_tab_state_key(tab)
+    submit_key = _ctbc_purchase_state_key(tab)
+    if submit_key is None:
+        return False
+    dialog_outcome = await _handle_ctbc_submit_dialog(
+        tab, config_dict, submit_key=submit_key
+    )
     if await _recover_ctbc_captcha_dialog(tab, config_dict):
         return False
     if submit_key in _state["submit_blocked"]:

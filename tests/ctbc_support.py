@@ -308,7 +308,10 @@ class FakeSubmitTab:
         dialog="",
         *,
         dialogs=None,
-        url="https://tix.ctbcsports.com/BROTHERS/UTK0205_?P=1",
+        url=(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        ),
     ):
         self.target = types.SimpleNamespace(url=url)
         self.captcha = captcha

@@ -33,16 +33,20 @@ UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
 
 
 def build_refresh_identity(tab_identity):
-    """Build the process-unique coordinator identity for one canonical tab."""
+    """為單一標準分頁建立程序內唯一的刷新協調識別。"""
     return f"{util.get_instance_id()}:{os.getpid()}:{tab_identity}"
 
 
 def _refresh_settings(*, force_refresh=False):
+    """依強制刷新設定建立節流參數。"""
+
     settings_path = get_global_settings_path() if force_refresh else None
     return load_global_settings(settings_path).get("utk_sports", {})
 
 
 def _emergency_marker_path():
+    """取得跨程序緊急限流標記的檔案路徑。"""
+
     return os.path.join(
         util.get_app_root(),
         ".runtime",
@@ -52,7 +56,7 @@ def _emergency_marker_path():
 
 
 def _mark_utk_emergency_window(seconds=UTK_EMERGENCY_MARKER_SECONDS):
-    """Best-effort cross-process stopgap while a 429 DB report is pending."""
+    """在 429 資料庫回報完成前盡力標記跨程序緊急停止區間。"""
     marker_path = _emergency_marker_path()
     marker_dir = os.path.dirname(marker_path)
     temp_path = f"{marker_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
@@ -70,6 +74,8 @@ def _mark_utk_emergency_window(seconds=UTK_EMERGENCY_MARKER_SECONDS):
 
 
 def _utk_emergency_remaining():
+    """計算跨程序緊急停止區間的剩餘秒數。"""
+
     pattern = os.path.join(
         util.get_app_root(), ".runtime", "utk_sports_emergency_*.until"
     )
@@ -92,6 +98,8 @@ def _utk_emergency_remaining():
 
 
 def _classify_utk_document_state(snapshot):
+    """依文件快照判別正常、載入中或限流狀態。"""
+
     if not isinstance(snapshot, dict) or not snapshot.get("ready"):
         return "unknown"
     body_text = str(snapshot.get("body_text") or "")
@@ -109,6 +117,8 @@ def _classify_utk_document_state(snapshot):
 
 
 def _decode_json_result(raw_value):
+    """將瀏覽器回傳值解碼為 JSON 資料。"""
+
     if isinstance(raw_value, str):
         try:
             return json.loads(raw_value)
@@ -118,7 +128,7 @@ def _decode_json_result(raw_value):
 
 
 def _canonical_document_token(value):
-    """Return one non-zero performance time-origin token or fail closed."""
+    """取得非零的標準文件時間來源識別，無效時採保守失敗。"""
     token = str(value or "").strip()
     try:
         numeric = float(token)
@@ -128,7 +138,7 @@ def _canonical_document_token(value):
 
 
 async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
-    """Classify the current document without mistaking loading for HTTP 429."""
+    """判別目前文件，避免把載入中狀態誤認為 HTTP 429。"""
     current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
     document = runtime["document"]
     cached = document["snapshot"]
@@ -208,7 +218,7 @@ async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
 
 
 def _pop_reload_request_if_token(runtime, request_token):
-    """Remove only the logical request captured by the current coroutine."""
+    """僅移除目前協程所持有的邏輯刷新請求。"""
     refresh = runtime["refresh"]
     current = refresh["reload_request"]
     if current and current.get("request_token") == request_token:
@@ -218,6 +228,8 @@ def _pop_reload_request_if_token(runtime, request_token):
 
 
 def _reload_request_is_current(runtime, request):
+    """判斷刷新請求是否仍為執行期目前持有的請求。"""
+
     current = runtime["refresh"]["reload_request"]
     return bool(
         current is request
@@ -226,6 +238,8 @@ def _reload_request_is_current(runtime, request):
 
 
 def _reload_request_is_awaiting(request):
+    """判斷刷新請求是否正在等待新文件。"""
+
     return bool(
         request and request.get("phase") in {"awaiting_document", "completed"}
     )
@@ -234,6 +248,8 @@ def _reload_request_is_awaiting(request):
 def _mark_reload_awaiting(
     runtime, request, *, reservation=None, allow_paused_ambiguous=False,
 ):
+    """標記刷新請求已送出並開始等待文件切換。"""
+
     if not _reload_request_is_current(runtime, request):
         return False
     if reservation is not None:
@@ -263,6 +279,8 @@ def _mark_reload_awaiting(
 
 
 def _reconcile_reload_document(runtime, snapshot):
+    """依最新文件快照協調刷新請求狀態。"""
+
     request = runtime["refresh"]["reload_request"]
     if not request or request.get("phase") != "awaiting_document":
         return False
@@ -280,6 +298,8 @@ def _reconcile_reload_document(runtime, snapshot):
 
 
 def _consume_completed_reload(runtime, request):
+    """消費已完成的刷新請求並清除執行期狀態。"""
+
     if not (
         _reload_request_is_current(runtime, request)
         and request.get("phase") == "completed"
@@ -290,6 +310,8 @@ def _consume_completed_reload(runtime, request):
 
 
 def _reserved_request_is_current(runtime, request, reservation):
+    """判斷預約結果是否仍屬於目前刷新請求。"""
+
     return bool(
         _reload_request_is_current(runtime, request)
         and request.get("phase") == "reserved"
@@ -299,6 +321,8 @@ def _reserved_request_is_current(runtime, request, reservation):
 
 
 def _mark_paused_request_clean(runtime, request):
+    """將暫停的刷新請求標記為已完成清理。"""
+
     if not (
         _reload_request_is_current(runtime, request)
         and request.get("paused")
@@ -314,6 +338,8 @@ def _mark_paused_request_clean(runtime, request):
 
 
 def _pause_cleanup_due(record):
+    """判斷暫停中的刷新紀錄是否已到清理時間。"""
+
     return bool(
         record and not record.get("pause_cleanup_done", False)
         and time.monotonic() >= float(record.get("pause_cleanup_retry_at") or 0.0)
@@ -323,6 +349,8 @@ def _pause_cleanup_due(record):
 async def _abandon_recovery_probe(
     runtime, refresh_identity, cancel_tasks, coordinator, probe,
 ):
+    """放棄復原探測並安排其資源清理。"""
+
     lease_task = probe.get("lease_task")
     if lease_task is not None and lease_task is not asyncio.current_task():
         if not lease_task.done():
@@ -343,6 +371,8 @@ async def _abandon_recovery_probe(
 async def _retry_abandoned_probe_cleanup(
     runtime, refresh_identity, cancel_tasks, coordinator=None,
 ):
+    """重試清理先前放棄的復原探測。"""
+
     probe = runtime["refresh"]["recovery_probe"]
     if not probe or not probe.get("abandon_requested"):
         return False, False
@@ -364,7 +394,7 @@ async def cancel_refresh(
     tab, runtime, refresh_identity, cancel_tasks, reason="", *,
     wait=False, abandon_probe=False,
 ):
-    """Cancel pending work and optionally release an owned recovery probe."""
+    """取消待處理刷新，並視需要釋放持有的復原探測。"""
     refresh = runtime["refresh"]
     request = refresh["reload_request"]
     if request is not None:
@@ -377,6 +407,8 @@ async def cancel_refresh(
     coordinator = get_shared_refresh_coordinator()
 
     async def cancel_all():
+        """取消目前分頁執行期持有的所有背景工作。"""
+
         changed = False
         request_error = None
         if request is not None:
@@ -413,7 +445,7 @@ async def cancel_refresh(
 async def pause_refresh(
     tab, runtime, refresh_identity, cancel_tasks, reason="",
 ):
-    """Pause refresh work without discarding or rewinding its local intent."""
+    """暫停刷新工作，同時保留本機意圖與進度。"""
     del tab, reason
     refresh = runtime["refresh"]
     request = refresh["reload_request"]
@@ -467,6 +499,8 @@ async def pause_refresh(
 
 
 def consume_reload_event(runtime):
+    """消費一次需由外層路由重新偵測的同網址刷新事件。"""
+
     refresh = runtime["refresh"]
     if not refresh["reload_event"]:
         return False
@@ -478,6 +512,8 @@ async def _report_utk_rate_limit(
     tab, runtime, refresh_identity, config_dict, document_id,
     probe_permit_id=None, document_started_at=0.0, suspected=False,
 ):
+    """回報 uTiki 限流狀態並建立復原探測資訊。"""
+
     settings = _refresh_settings()
     if not settings.get("enabled", True):
         return None
@@ -517,6 +553,8 @@ async def _report_utk_rate_limit(
 
 
 async def _clear_completed_recovery_probe(runtime, cancel_tasks, probe):
+    """清除已完成復原探測的本機狀態與工作。"""
+
     if runtime["refresh"]["recovery_probe"] is not probe:
         return False
     lease_task = probe.get("lease_task")
@@ -534,7 +572,7 @@ async def _clear_completed_recovery_probe(runtime, cancel_tasks, probe):
 async def _finish_utk_recovery_probe(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot,
 ):
-    """Resolve a probe only after a different document becomes normal or 429."""
+    """僅在新文件變為正常或確認限流後完成復原探測。"""
     refresh = runtime["refresh"]
     probe = refresh["recovery_probe"]
     if not probe:
@@ -607,7 +645,7 @@ async def _finish_utk_recovery_probe(
 async def _utk_document_guard(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, url=None,
 ):
-    """Apply the 429 circuit breaker before any uTiki page action."""
+    """在任何 uTiki 頁面操作前套用 429 斷路保護。"""
     settings = _refresh_settings()
     snapshot = await _inspect_utk_document(tab, runtime, url)
     document = runtime["document"]
@@ -695,6 +733,8 @@ async def _utk_document_guard(
 
 
 async def _invoke_browser_reload(tab, debug):
+    """呼叫瀏覽器刷新並記錄除錯資訊。"""
+
     try:
         await asyncio.wait_for(
             tab.reload(), timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
@@ -709,6 +749,8 @@ async def _invoke_browser_reload(tab, debug):
 async def _detach_shared_reload_request(
     runtime, refresh_identity, request, coordinator,
 ):
+    """將本機執行期與共用刷新請求解除關聯。"""
+
     if not request.get("shared_enqueued"):
         return True
     if time.monotonic() < float(request.get("pause_cleanup_retry_at") or 0.0):
@@ -741,6 +783,8 @@ async def _reload_without_shared_protection(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, debug,
     reason, apply_local_interval, snapshot, dispatch_deadline,
 ):
+    """在共用協調器不可用時執行受本機間隔保護的刷新。"""
+
     del cancel_tasks
     if not snapshot.get("document_id"):
         return False
@@ -782,6 +826,8 @@ async def _reload_without_shared_protection(
 async def _guard_for_reload(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, deadline,
 ):
+    """在刷新前檢查文件狀態與限流保護。"""
+
     if deadline is None:
         return await _utk_document_guard(
             tab, runtime, refresh_identity, cancel_tasks, config_dict
@@ -803,6 +849,8 @@ async def _guard_for_reload(
 async def _poll_committed_reload(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, request, deadline,
 ):
+    """輪詢已提交的刷新，直到觀察到新文件或逾時。"""
+
     if not _reload_request_is_awaiting(request):
         return False, False
     needs_observation = request.get("phase") == "awaiting_document" or (
@@ -838,6 +886,8 @@ async def _poll_committed_reload(
 
 
 def _tighten_reload_deadline(request, dispatch_deadline):
+    """以呼叫端限制縮短刷新請求的截止時間。"""
+
     new_deadline = float(dispatch_deadline or 0.0)
     old_deadline = float(request.get("deadline_at") or 0.0)
     if new_deadline > 0 and (old_deadline <= 0 or new_deadline < old_deadline):
@@ -846,6 +896,8 @@ def _tighten_reload_deadline(request, dispatch_deadline):
 
 
 async def _resume_reload_request(config_dict, request):
+    """以目前設定恢復既有刷新請求。"""
+
     if not request.get("paused"):
         return True
     if await check_and_handle_pause(config_dict):
@@ -861,6 +913,8 @@ def _get_reload_request(
     runtime, snapshot, config_dict, reason, apply_local_interval,
     allow_blocked_recovery, dispatch_deadline, debug,
 ):
+    """取得既有刷新請求或建立新的刷新意圖。"""
+
     refresh = runtime["refresh"]
     request = refresh["reload_request"]
     if request is not None:
@@ -896,6 +950,8 @@ def _get_reload_request(
 
 
 def _reservation_retry(request, reservation, debug):
+    """處理刷新預約要求稍後重試的結果。"""
+
     retry_delay = max(float(reservation.retry_after_seconds or 0.1), 0.05)
     if reservation.status == "cooldown":
         remaining = max(float(reservation.cooldown_until or 0.0) - time.time(), 0.1)
@@ -910,6 +966,8 @@ def _reservation_retry(request, reservation, debug):
 async def _release_reservation(
     coordinator, refresh_identity, reservation, request_token,
 ):
+    """釋放協調器中的刷新預約。"""
+
     return await coordinator.release_refresh(
         UTK_SPORTS_SCOPE, refresh_identity, reservation.reservation_id,
         request_token=request_token, drop_request=True,
@@ -919,6 +977,8 @@ async def _release_reservation(
 async def _release_noncommit_reservation(
     runtime, coordinator, refresh_identity, reservation, request,
 ):
+    """釋放未提交的預約並同步本機請求狀態。"""
+
     if (
         _reload_request_is_current(runtime, request)
         and request.get("paused")
@@ -939,6 +999,8 @@ async def _release_noncommit_reservation(
 async def _drop_reserve_result(
     coordinator, refresh_identity, request_token, reservation,
 ):
+    """丟棄已失效的預約結果並釋放其資源。"""
+
     if reservation is not None and reservation.reserved:
         return await _release_reservation(
             coordinator, refresh_identity, reservation, request_token
@@ -951,6 +1013,8 @@ async def _drop_reserve_result(
 async def _reserve_refresh_owned(
     runtime, coordinator, refresh_identity, request, settings,
 ):
+    """為目前請求取得由本機持有的刷新預約。"""
+
     token = request.get("request_token")
     reserve_task = asyncio.create_task(coordinator.reserve_refresh(
         UTK_SPORTS_SCOPE, refresh_identity,
@@ -974,6 +1038,8 @@ async def _reserve_refresh_owned(
 async def _read_reserved_preflight(
     tab, runtime, deadline,
 ):
+    """在預約有效期間讀取刷新前文件狀態。"""
+
     if not deadline:
         return await _inspect_utk_document(tab, runtime, force=True)
     remaining = float(deadline) - time.monotonic()
@@ -991,6 +1057,8 @@ async def _preflight_allows_reload(
     tab, runtime, refresh_identity, config_dict, request, reservation,
     preflight, allow_unknown_document, allow_blocked_recovery,
 ):
+    """判斷刷新前檢查結果是否允許送出刷新。"""
+
     refresh = runtime["refresh"]
     classification = preflight.get("classification")
     if (
@@ -1022,6 +1090,8 @@ async def _preflight_allows_reload(
 
 
 async def _renew_probe_lease(runtime, refresh_identity, permit_id, started_at):
+    """延長目前復原探測許可的租期。"""
+
     refresh = runtime["refresh"]
     while True:
         await asyncio.sleep(UTK_RECOVERY_PROBE_RENEW_SECONDS)
@@ -1056,6 +1126,8 @@ async def _renew_probe_lease(runtime, refresh_identity, permit_id, started_at):
 def _install_recovery_probe(
     runtime, refresh_identity, cancel_tasks, decision, preflight,
 ):
+    """將協調器核發的復原探測安裝至本機執行期。"""
+
     if not decision.is_recovery_probe:
         return
     started_at = time.monotonic()
@@ -1075,6 +1147,8 @@ def _install_recovery_probe(
 
 
 def _install_abandoned_probe_cleanup(runtime, decision, preflight):
+    """登記失去所有權之復原探測的後續清理。"""
+
     now = time.monotonic()
     probe = {
         "permit_id": decision.permit_id,
@@ -1093,6 +1167,8 @@ async def _commit_reserved_reload(
     tab, runtime, refresh_identity, cancel_tasks, coordinator, reservation,
     request, preflight, debug,
 ):
+    """提交已預約的刷新並建立等待新文件的狀態。"""
+
     request_token = request.get("request_token")
     try:
         decision = await coordinator.commit_refresh(
@@ -1167,6 +1243,8 @@ async def _execute_reserved_reload(
     reservation, request, allow_unknown_document, allow_blocked_recovery,
     deadline, debug,
 ):
+    """執行已預約刷新的前置檢查、提交與結果處理。"""
+
     try:
         preflight = await _read_reserved_preflight(tab, runtime, deadline)
         if not _reserved_request_is_current(runtime, request, reservation):
@@ -1229,6 +1307,8 @@ async def _poll_owned_reload(
     tab, runtime, refresh_identity, cancel_tasks, config_dict,
     existing, reason, dispatch_deadline,
 ):
+    """輪詢目前分頁持有的既有刷新請求。"""
+
     new_deadline = float(dispatch_deadline or 0.0)
     existing_reason = str(existing.get("reason") or "") if existing else ""
     reason_mismatch = bool(
@@ -1259,7 +1339,7 @@ async def reload(
     apply_local_interval=True, allow_unknown_document=False,
     allow_blocked_recovery=False, dispatch_deadline=None,
 ):
-    """Advance one reload intent; succeed only after observing its new document."""
+    """推進一次刷新意圖，僅在觀察到新文件後回報成功。"""
     debug = util.create_debug_logger(config_dict)
     existing = runtime["refresh"]["reload_request"]
     handled, completed, existing, deadline = await _poll_owned_reload(
@@ -1359,7 +1439,7 @@ async def reload_wait(
     apply_local_interval=False, allow_unknown_document=True,
     allow_blocked_recovery=True,
 ):
-    """Wait in short chunks for startup/fallback callers needing one reload."""
+    """以短間隔等待啟動或備援流程所需的一次刷新。"""
     source_url = str(getattr(getattr(tab, "target", None), "url", ""))
     deadline = time.monotonic() + UTK_RELOAD_WAIT_MAX_SECONDS
     last_heartbeat_at = 0.0
@@ -1427,6 +1507,8 @@ async def reload_wait(
 async def health_check(
     tab, runtime, refresh_identity, cancel_tasks, url, config_dict,
 ):
+    """只執行限流復原健康檢查，不選擇任何票券控制項。"""
+
     guard_state, _ = await _utk_document_guard(
         tab, runtime, refresh_identity, cancel_tasks, config_dict, url
     )

@@ -171,6 +171,8 @@ class DialogSnapshot:
 
 
 def _freeze_date_control(raw_control):
+    """將場次控制項轉成不可變的安全資料。"""
+
     if not isinstance(raw_control, dict):
         return None
     actionable = raw_control.get("actionable")
@@ -188,7 +190,7 @@ def _freeze_date_control(raw_control):
 
 
 def parse_date_snapshot(raw_snapshot):
-    """Freeze one side-effect-free observation of the date table."""
+    """固定一份無副作用的場次表觀察快照。"""
     if isinstance(raw_snapshot, DateSnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
@@ -223,7 +225,7 @@ def parse_date_snapshot(raw_snapshot):
 
 
 def parse_area_snapshot(raw_snapshot):
-    """Freeze an area reader result before it crosses into decision code."""
+    """在區域快照進入決策邏輯前轉成不可變資料。"""
     if isinstance(raw_snapshot, AreaSnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
@@ -270,6 +272,8 @@ def parse_area_snapshot(raw_snapshot):
 
 
 def _quantity_presence_fields(raw_snapshot):
+    """讀取票數快照中用來判斷欄位是否存在的資訊。"""
+
     product_id = str(raw_snapshot.get("product_id") or "")
     limit_raw = str(raw_snapshot.get("quantity_limit_raw") or "")
     return {
@@ -294,7 +298,7 @@ def _quantity_presence_fields(raw_snapshot):
 
 
 def parse_quantity_snapshot(raw_snapshot):
-    """Freeze a general-admission quantity reader result."""
+    """固定一份自由入座票數頁面的觀察快照。"""
     if isinstance(raw_snapshot, QuantitySnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
@@ -342,6 +346,8 @@ def parse_quantity_snapshot(raw_snapshot):
 
 
 def _freeze_scalar_tuple(value):
+    """將純量序列轉成不可變元組。"""
+
     if not isinstance(value, (list, tuple)) or not value:
         return None
     if any(not isinstance(item, (str, int, float, bool)) for item in value):
@@ -350,6 +356,8 @@ def _freeze_scalar_tuple(value):
 
 
 def _freeze_ticket_type(raw_type):
+    """將票種資料轉成不可變快照。"""
+
     if not isinstance(raw_type, dict):
         return None
     fingerprint = _freeze_scalar_tuple(raw_type.get("fingerprint"))
@@ -370,6 +378,8 @@ def _freeze_ticket_type(raw_type):
 
 
 def _freeze_seat(raw_seat):
+    """將可選座位資料轉成不可變快照。"""
+
     if not isinstance(raw_seat, dict):
         return None
     fingerprint = _freeze_scalar_tuple(raw_seat.get("fingerprint"))
@@ -396,6 +406,8 @@ def _freeze_seat(raw_seat):
 
 
 def _freeze_submitted_seat(raw_seat):
+    """將已送出的座位資料轉成不可變快照。"""
+
     if not isinstance(raw_seat, dict):
         return None
     if any(not isinstance(raw_seat.get(field), str) for field in ("A", "Y", "Z")):
@@ -404,6 +416,8 @@ def _freeze_submitted_seat(raw_seat):
 
 
 def _freeze_seat_counter(raw_counter):
+    """將座位票種計數資料轉成不可變快照。"""
+
     if not isinstance(raw_counter, dict):
         return None
     if not isinstance(raw_counter.get("id"), str) or not isinstance(
@@ -414,7 +428,7 @@ def _freeze_seat_counter(raw_counter):
 
 
 def parse_seat_snapshot(raw_snapshot):
-    """Freeze one combined ticket-type and reserved-seat observation."""
+    """固定票種與劃位座位的合併觀察快照。"""
     if isinstance(raw_snapshot, SeatSnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
@@ -461,7 +475,7 @@ def parse_seat_snapshot(raw_snapshot):
 
 
 def parse_dialog_snapshot(raw_snapshot):
-    """Freeze one side-effect-free observation of the visible submit dialog."""
+    """固定一份無副作用的可見送出對話框快照。"""
     if isinstance(raw_snapshot, DialogSnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
@@ -493,7 +507,7 @@ def parse_dialog_snapshot(raw_snapshot):
 
 
 def parse_keyword_groups(keyword_string):
-    """Parse the settings keyword format while accepting raw/semicolon input."""
+    """解析設定中的關鍵字格式，並相容字串或分號分組輸入。"""
     raw = (keyword_string or "").strip()
     if not raw:
         return []
@@ -509,6 +523,8 @@ def parse_keyword_groups(keyword_string):
 
 
 def matches_keyword_group(text, keyword_group):
+    """判斷文字是否符合一組必要與排除關鍵字。"""
+
     formatted_text = util.format_keyword_string(text or "")
     if isinstance(keyword_group, (list, tuple)):
         parts = [str(item).strip() for item in keyword_group if str(item).strip()]
@@ -520,7 +536,7 @@ def matches_keyword_group(text, keyword_group):
 
 
 def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=False):
-    """Choose an original candidate index, preserving keyword priority."""
+    """依關鍵字優先序選出原始候選項目索引。"""
     if not candidates:
         return None
     indexed = list(enumerate(candidates))
@@ -541,6 +557,8 @@ def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=Fals
 
 
 def _parse_date_target_url(target_value, current_url):
+    """從場次目標解析並驗證導覽網址。"""
+
     if classify_utiki_page(current_url) != PageKind.DATE:
         return None
     profile = get_utiki_tenant_profile(current_url)
@@ -587,6 +605,8 @@ def _parse_date_target_url(target_value, current_url):
 
 
 def _parse_date_target(onclick, current_url):
+    """從場次按鈕事件解析一般導覽目標。"""
+
     match = re.fullmatch(
         r"\s*location\.href\s*=\s*(?P<quote>['\"])(?P<url>[^'\"]+)"
         r"(?P=quote)\s*;?\s*",
@@ -596,6 +616,8 @@ def _parse_date_target(onclick, current_url):
 
 
 def _parse_vip_date_token(onclick, current_url):
+    """從場次按鈕事件解析 VIP 導覽識別。"""
+
     if classify_utiki_page(current_url) != PageKind.DATE:
         return None
     current_query = unique_query(current_url)
@@ -611,6 +633,8 @@ def _parse_vip_date_token(onclick, current_url):
 
 
 def _safe_date_button_handler(onclick):
+    """驗證場次按鈕事件是否屬於允許的安全格式。"""
+
     source = str(onclick or "").strip()
     if not source:
         return True
@@ -631,6 +655,8 @@ def _safe_date_button_handler(onclick):
 
 
 def _classify_date_control(fingerprint, current_url):
+    """依控制項指紋與目前網址判別場次操作類型。"""
+
     control = dict(fingerprint)
     tag_name = control.get("tag_name", "").upper()
     onclick = control.get("onclick", "")
@@ -661,6 +687,8 @@ def _classify_date_control(fingerprint, current_url):
 
 
 def _date_candidates(snapshot, config_dict):
+    """從場次快照建立符合設定的候選清單。"""
+
     candidates = []
     for row_index, (row_text, controls) in enumerate(snapshot.rows):
         actionable = [
@@ -686,7 +714,7 @@ def _date_candidates(snapshot, config_dict):
 
 
 def select_date_snapshot(snapshot, config_dict):
-    """Choose one safe date action from an immutable table snapshot."""
+    """從不可變場次快照選出一個安全操作。"""
     snapshot = parse_date_snapshot(snapshot)
     if (
         not isinstance(snapshot, DateSnapshot)
@@ -729,7 +757,7 @@ def select_date_snapshot(snapshot, config_dict):
 
 
 def date_plan_matches_snapshot(snapshot, plan):
-    """Verify that one immutable plan is derived from the supplied snapshot."""
+    """驗證不可變場次計畫確實由指定快照產生。"""
     if not isinstance(snapshot, DateSnapshot) or not isinstance(
         plan, DateActionPlan
     ):
@@ -776,6 +804,8 @@ def date_plan_matches_snapshot(snapshot, plan):
 
 
 def availability_has_tickets(status_text, ticket_number=1):
+    """判斷區域庫存文字是否足以供應要求票數。"""
+
     text = re.sub(r"\s+", "", status_text or "")
     if not text or "售完" in text or text in {"0", "0張", "無"}:
         return False
@@ -789,6 +819,8 @@ def availability_has_tickets(status_text, ticket_number=1):
 
 
 def parse_area_send_action(href, expected_performance_id):
+    """解析區域連結中的一般送出操作。"""
+
     match = re.fullmatch(
         r"\s*javascript:\s*Send\(\s*"
         r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
@@ -817,6 +849,8 @@ def parse_area_send_action(href, expected_performance_id):
 
 
 def parse_area_send_a_action(href, expected_performance_id):
+    """解析區域連結中的替代送出操作。"""
+
     match = re.fullmatch(
         r"\s*javascript:\s*SendA\(\s*"
         r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
@@ -848,6 +882,8 @@ def parse_area_send_a_action(href, expected_performance_id):
 
 
 def parse_map_title(title):
+    """解析座位區圖標題中的區域與票價資訊。"""
+
     match = re.fullmatch(
         r"\s*票區\s*[:：]\s*(?P<area>.*?)\s+"
         r"票價\s*[:：]\s*(?P<price>.*?)\s+"
@@ -864,6 +900,8 @@ def parse_map_title(title):
 
 
 def map_title_matches_available_row(map_title, area_text, price_text, ticket_number):
+    """判斷區域圖標題是否對應有足夠庫存的區域列。"""
+
     return bool(
         map_title
         and map_title["area"] == re.sub(r"\s+", "", area_text)
@@ -873,6 +911,8 @@ def map_title_matches_available_row(map_title, area_text, price_text, ticket_num
 
 
 def _index_map_areas(areas):
+    """依區域圖識別建立可查詢的區域索引。"""
+
     if not isinstance(areas, tuple) or not 0 < len(areas) <= 500:
         return None
     indexed = {}
@@ -885,6 +925,8 @@ def _index_map_areas(areas):
 
 def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
                       expected_performance_id, ticket_number, require_direct):
+    """建立一筆區域列可用的地圖目的地選項。"""
+
     options = []
     for rel in rel_tokens:
         for map_area in indexed_areas.get(rel, []):
@@ -912,6 +954,8 @@ def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
 
 def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
                     ticket_number, require_direct):
+    """依設定與庫存將區域列轉成候選項目。"""
+
     area, price, status, rel = row
     area_text = re.sub(r"\s+", " ", area).strip()
     price_text = re.sub(r"\s+", " ", price).strip()
@@ -950,7 +994,7 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
 
 def select_area_snapshot(snapshot, config_dict, expected_performance_id,
                          require_direct_destination=True):
-    """Choose an area from one batched DOM/map snapshot."""
+    """從批次 DOM 與地圖快照選出一個區域。"""
     snapshot = parse_area_snapshot(snapshot)
     if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
         return None
@@ -999,7 +1043,7 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
 
 
 def seats_are_physically_adjacent(first, second):
-    """Support horizontal and rotated vertical uTiki seat maps."""
+    """判斷 uTiki 水平或旋轉垂直座位圖中的兩席是否相鄰。"""
     geometry = ("center_x", "center_y", "width", "height")
     if all(
         isinstance(seat.get(field), (int, float))
@@ -1023,11 +1067,15 @@ def seats_are_physically_adjacent(first, second):
 
 
 def _seat_number(seat):
+    """解析座位資料中的數字座號。"""
+
     match = re.search(r"-(\d+)排-(\d+)號\s*$", str(seat.get("title") or ""))
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
 def _seat_row_edges(seats, strict_titles):
+    """找出各排座位在目前清單中的邊界。"""
+
     edges = {}
     for seat in seats:
         numbers = _seat_number(seat)
@@ -1043,6 +1091,8 @@ def _seat_row_edges(seats, strict_titles):
 
 
 def _seat_block_candidates(available, needed, row_edges):
+    """建立符合張數需求的連續座位區塊候選。"""
+
     rows = {}
     for seat in available:
         numbers = _seat_number(seat)
@@ -1073,6 +1123,8 @@ def _seat_block_candidates(available, needed, row_edges):
 
 
 def _sort_seat_blocks(candidates, seat_sorting):
+    """依座位排序設定排列連續座位區塊。"""
+
     if seat_sorting == "row_asc_aisle":
         candidates = [item for item in candidates if item["touches_aisle"]]
         key = lambda item: (item["row_number"], item["dom_index"])
@@ -1094,6 +1146,8 @@ def _sort_seat_blocks(candidates, seat_sorting):
 
 
 def _numeric_seat_key(seat, seat_sorting):
+    """建立數字座號的排序鍵。"""
+
     numbers = _seat_number(seat)
     if numbers is None:
         return (1, 0, 0, seat.get("row_index", 0), seat.get("cell_index", 0))
@@ -1110,7 +1164,7 @@ def _numeric_seat_key(seat, seat_sorting):
 
 def select_seat_indexes(seats, needed, allow_non_adjacent=False,
                         seat_sorting="row_seat"):
-    """Choose reserved-seat indexes while preserving legacy priorities."""
+    """保留既有優先規則後選出劃位座位索引。"""
     if needed <= 0:
         return []
     numeric_sortings = {
@@ -1144,6 +1198,8 @@ def select_seat_indexes(seats, needed, allow_non_adjacent=False,
 
 
 def _seat_snapshot_route_is_valid(snapshot):
+    """驗證座位快照所屬的頁面路由。"""
+
     query = unique_query(snapshot.page_url)
     token = re.compile(r"[A-Za-z0-9_-]+")
     identities = {
@@ -1162,12 +1218,16 @@ def _seat_snapshot_route_is_valid(snapshot):
 
 
 def _counter_value(raw_value):
+    """將票種計數值正規化為整數。"""
+
     if not re.fullmatch(r"\d+", str(raw_value or "")):
         return None
     return int(raw_value)
 
 
 def _seat_snapshot_structure_is_valid(snapshot):
+    """驗證座位快照必要欄位與結構。"""
+
     if not _seat_snapshot_route_is_valid(snapshot):
         return False
     if not snapshot.quantity_limit_present or _counter_value(
@@ -1193,6 +1253,8 @@ def _seat_snapshot_structure_is_valid(snapshot):
 
 
 def _target_seat_ticket_type(snapshot, keyword):
+    """依關鍵字從座位快照選出目標票種。"""
+
     candidates = []
     seen_fingerprints = set()
     seen_type_ids = set()
@@ -1222,7 +1284,7 @@ def _target_seat_ticket_type(snapshot, keyword):
 
 def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
                             ticket_type_name):
-    """Audit visual seats, submitted payload and every ticket counter."""
+    """稽核畫面座位、送出資料與所有票種計數。"""
     snapshot = parse_seat_snapshot(snapshot)
     try:
         requested = int(ticket_number)
@@ -1249,6 +1311,8 @@ def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
 
 
 def _seat_request(snapshot, ticket_number):
+    """建立座位選擇所需的張數與目前狀態。"""
+
     try:
         requested = int(ticket_number)
     except (TypeError, ValueError):
@@ -1260,6 +1324,8 @@ def _seat_request(snapshot, ticket_number):
 
 
 def _seat_dicts(snapshot):
+    """將座位快照項目整理成可供決策的字典清單。"""
+
     return [
         {
             "index": index, "title": seat[1], "row_index": seat[2],
@@ -1272,6 +1338,8 @@ def _seat_dicts(snapshot):
 
 
 def _seat_targets_are_adjacent(snapshot, fingerprints):
+    """判斷目標座位指紋是否形成連續座位。"""
+
     by_fingerprint = dict(zip(
         (seat[0] for seat in snapshot.seats), _seat_dicts(snapshot)
     ))
@@ -1284,6 +1352,8 @@ def _seat_targets_are_adjacent(snapshot, fingerprints):
 
 def _make_seat_plan(snapshot, ticket_type, action, requested,
                     selected=(), targets=(), require_adjacency=False):
+    """建立包含身分與相鄰限制的座位操作計畫。"""
+
     return SeatActionPlan(
         page_url=snapshot.page_url,
         document_id=snapshot.document_id,
@@ -1303,6 +1373,8 @@ def _make_seat_plan(snapshot, ticket_type, action, requested,
 
 
 def _seat_state_is_clean(snapshot):
+    """判斷座位頁是否尚未殘留任何選擇。"""
+
     return (
         snapshot.visual_selected_count == 0
         and not snapshot.submitted_seats
@@ -1313,7 +1385,7 @@ def _seat_state_is_clean(snapshot):
 
 def select_seat_snapshot(snapshot, keyword, ticket_number,
                          allow_non_adjacent=False, seat_sorting="row_seat"):
-    """Plan one clear, select or ready action from a reserved-seat snapshot."""
+    """從劃位快照規劃清除、選擇或就緒操作。"""
     snapshot = parse_seat_snapshot(snapshot)
     if not isinstance(snapshot, SeatSnapshot) or not _seat_snapshot_structure_is_valid(snapshot):
         return None, "invalid-snapshot"
@@ -1361,6 +1433,8 @@ def select_seat_snapshot(snapshot, keyword, ticket_number,
 
 
 def _seat_plan_identity_matches(snapshot, plan):
+    """驗證座位計畫與快照的頁面身分一致。"""
+
     if (
         plan.page_url != snapshot.page_url
         or plan.document_id != snapshot.document_id
@@ -1389,7 +1463,7 @@ def _seat_plan_identity_matches(snapshot, plan):
 
 
 def seat_plan_matches_snapshot(snapshot, plan):
-    """Verify action grammar before the browser-side atomic revalidation."""
+    """在瀏覽器端原子驗證前檢查座位操作文法。"""
     snapshot = parse_seat_snapshot(snapshot)
     if (
         not isinstance(snapshot, SeatSnapshot)
@@ -1437,6 +1511,8 @@ def seat_plan_matches_snapshot(snapshot, plan):
 
 
 def quantity_audit_is_valid(quantities, target_key, ticket_number):
+    """稽核目標票種與各票數欄位是否符合要求。"""
+
     if not isinstance(quantities, list) or not target_key:
         return False
     target_matches = [
@@ -1457,6 +1533,8 @@ def quantity_audit_is_valid(quantities, target_key, ticket_number):
 
 
 def _parse_quantity_request(snapshot, ticket_number):
+    """從票數快照解析要求張數與既有選擇。"""
+
     try:
         requested = int(ticket_number)
     except (TypeError, ValueError):
@@ -1482,6 +1560,8 @@ def _parse_quantity_request(snapshot, ticket_number):
 
 
 def _quantity_candidates(snapshot, requested):
+    """建立符合張數需求的票種候選清單。"""
+
     token = re.compile(r"[A-Za-z0-9_-]+")
     if not 0 < len(snapshot.rows) <= 100:
         return None
@@ -1509,12 +1589,16 @@ def _quantity_candidates(snapshot, requested):
 
 
 def _quantity_page_type_matches(page_url, page_type):
+    """判斷網址是否符合預期的票數頁面類型。"""
+
     if page_type == "general_admission":
         return classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION
     return page_type == "server_assigned_quantity"
 
 
 def _quantity_snapshot_identity_is_valid(snapshot, page_type):
+    """驗證票數快照的文件與商品身分。"""
+
     token = r"[A-Za-z0-9_-]+"
     if not _quantity_page_type_matches(snapshot.page_url, page_type):
         return False
@@ -1536,7 +1620,7 @@ def _quantity_snapshot_identity_is_valid(snapshot, page_type):
 def select_quantity_snapshot(snapshot, keyword, ticket_number,
                              mode="from top to bottom",
                              page_type="general_admission"):
-    """Choose one live quantity row from an immutable page snapshot."""
+    """從不可變票數快照選出仍可購買的票種列。"""
     snapshot = parse_quantity_snapshot(snapshot)
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
         return None
@@ -1577,6 +1661,8 @@ def select_quantity_snapshot(snapshot, keyword, ticket_number,
 
 
 def _seat_submit_payload(plan):
+    """建立劃位計畫的最終送出資料。"""
+
     if not isinstance(plan, SeatActionPlan) or plan.action not in {
         "select", "ready"
     }:
@@ -1626,6 +1712,8 @@ def _seat_submit_payload(plan):
 
 
 def _quantity_submit_payload(plan):
+    """建立票數計畫的最終送出資料。"""
+
     if not isinstance(plan, QuantityPlan):
         return None
     page_kinds = {
@@ -1670,7 +1758,7 @@ def _quantity_submit_payload(plan):
 
 
 def build_submit_plan(selection_plan):
-    """Freeze one non-sensitive final-submit intent from an action plan."""
+    """從選擇計畫固定一份不含敏感資料的最終送出意圖。"""
     if isinstance(selection_plan, SeatActionPlan):
         page_kind = PageKind.RESERVED_SEAT
         payload = _seat_submit_payload(selection_plan)
@@ -1694,7 +1782,7 @@ def build_submit_plan(selection_plan):
 
 
 def submit_plan_is_valid(plan):
-    """Reject forged submit metadata by rebuilding its pure fingerprint."""
+    """重建純資料指紋以拒絕遭竄改的送出資訊。"""
     if not isinstance(plan, SubmitPlan):
         return False
     expected = build_submit_plan(plan.selection_plan)
@@ -1708,6 +1796,8 @@ def submit_plan_is_valid(plan):
 
 
 def is_auth_error(dialog_text):
+    """判斷對話框文字是否表示登入狀態失效。"""
+
     return (
         any(marker in (dialog_text or "") for marker in ("帳號", "密碼", "登入"))
         and any(
@@ -1718,6 +1808,8 @@ def is_auth_error(dialog_text):
 
 
 def classify_submit_dialog(dialog_text):
+    """依對話框文字判別送出結果與後續處理類型。"""
+
     text = str(dialog_text or "").strip()
     if not text:
         return None

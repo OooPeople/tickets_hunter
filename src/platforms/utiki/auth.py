@@ -20,10 +20,14 @@ class TenantAuthProfile:
 
     @property
     def supports_cookie_login(self):
+        """判斷目前租戶是否支援 Cookie 登入。"""
+
         return bool(self.cookie_config_key and self.cookie_set_host)
 
     @property
     def supports_inline_login(self):
+        """判斷目前租戶是否支援頁面內帳號密碼登入。"""
+
         return bool(
             self.account_key and self.password_key and self.inline_login_origin
         )
@@ -45,11 +49,15 @@ TENANT_AUTH_PROFILES = MappingProxyType({
 
 
 def get_tenant_auth_profile(url):
+    """依售票網址取得對應租戶的登入設定。"""
+
     tenant = get_utiki_tenant_profile(url)
     return TENANT_AUTH_PROFILES.get(tenant.key) if tenant else None
 
 
 def cookie_domain_is_in_scope(auth_profile, cookie_domain):
+    """判斷 Cookie 網域是否屬於租戶允許的範圍。"""
+
     if not auth_profile or not auth_profile.cookie_scope_domain:
         return False
     domain = str(cookie_domain or "").lstrip(".").lower()
@@ -58,6 +66,8 @@ def cookie_domain_is_in_scope(auth_profile, cookie_domain):
 
 
 def _cookie_pairs_from_json(raw):
+    """從 JSON 匯出內容讀取 Cookie 名稱與值。"""
+
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -80,7 +90,7 @@ def _cookie_pairs_from_json(raw):
 
 
 def parse_ctbc_cookie_string(raw_value):
-    """Return CTBC session cookie pairs from a Cookie header or JSON export."""
+    """從 Cookie 標頭或 JSON 匯出內容解析中信售票工作階段 Cookie。"""
     raw = str(raw_value or "").strip()
     if not raw:
         return []

@@ -70,6 +70,8 @@ _CONFLICT_CLEAR_PAGE_KINDS = (
 
 
 def _decode_json_result(raw_value):
+    """將瀏覽器回傳值解碼為 JSON 資料。"""
+
     if isinstance(raw_value, str):
         try:
             return json.loads(raw_value)
@@ -79,6 +81,8 @@ def _decode_json_result(raw_value):
 
 
 def _valid_conflict_clear_input(page_kind, page_url, document_id, product_id):
+    """驗證清除衝突選擇所需的頁面識別資料。"""
+
     query = unique_query(page_url)
     product_required = page_kind in (
         PageKind.RESERVED_SEAT, PageKind.SERVER_ASSIGNED_QUANTITY,
@@ -261,7 +265,7 @@ CONST_CONFLICT_CLEAR_SCRIPT = r'''
 async def clear_conflict_selection(
     tab, page_kind, page_url, document_id, product_id,
 ):
-    """Atomically clear one rejected seat or quantity selection."""
+    """以原子操作清除一筆被拒絕的座位或票數選擇。"""
     if not _valid_conflict_clear_input(
         page_kind, page_url, document_id, product_id
     ):
@@ -360,7 +364,7 @@ CONST_DATE_SNAPSHOT_SCRIPT = r'''
 
 
 async def read_date_snapshot(tab):
-    """Read the official performance table without changing browser state."""
+    """在不改變頁面狀態下讀取官方場次表快照。"""
     raw_value = await tab.evaluate(CONST_DATE_SNAPSHOT_SCRIPT)
     snapshot = parse_date_snapshot(_decode_json_result(raw_value))
     if (
@@ -375,6 +379,8 @@ async def read_date_snapshot(tab):
 
 
 def _valid_date_commit_input(snapshot, plan, navigation_nonce):
+    """驗證場次提交所需的快照、計畫與導覽識別。"""
+
     return bool(
         date_plan_matches_snapshot(snapshot, plan)
         and re.fullmatch(r"[a-f0-9]{32}", str(navigation_nonce or ""))
@@ -382,6 +388,8 @@ def _valid_date_commit_input(snapshot, plan, navigation_nonce):
 
 
 def _valid_fast_date_destination(snapshot, plan, destination_url, marker_key, ttl_ms):
+    """驗證快速場次導覽的目的地與標記設定。"""
+
     if not destination_url:
         return not marker_key and ttl_ms in (0, None)
     fingerprint = dict(plan.control_fingerprint)
@@ -558,7 +566,7 @@ async def commit_date_action(
     fast_marker_key="",
     fast_marker_ttl_ms=0,
 ):
-    """Atomically revalidate and dispatch one date action per document intent."""
+    """重新驗證場次計畫，並對同一文件意圖最多送出一次操作。"""
     if not _valid_date_commit_input(snapshot, plan, navigation_nonce):
         return CommitResult.REJECTED
     if not _valid_fast_date_destination(
@@ -591,7 +599,7 @@ async def commit_date_action(
 
 
 async def read_dialog_snapshot(tab):
-    """Read all visible uTiki dialog messages without changing the page."""
+    """在不改變頁面狀態下讀取所有可見的 uTiki 對話框。"""
     raw_value = await tab.evaluate('''
         (() => {
             // __ticketsHunterUtikiDialogSnapshot
@@ -624,7 +632,7 @@ async def read_dialog_snapshot(tab):
 
 
 async def dismiss_dialog(tab, snapshot):
-    """Revalidate and click the only action for one observed dialog."""
+    """重新驗證已觀察的對話框並按下其唯一操作按鈕。"""
     if not (
         isinstance(snapshot, DialogSnapshot)
         and snapshot.page_url
@@ -682,7 +690,7 @@ async def dismiss_dialog(tab, snapshot):
 
 
 async def read_area_snapshot(tab):
-    """Wait for an actionable area map and read it in one browser call."""
+    """等待可操作的區域圖後，以單次瀏覽器呼叫讀取快照。"""
     raw_value = await tab.evaluate('''
         (() => new Promise(resolve => {
             let observer = null;
@@ -741,6 +749,8 @@ async def read_area_snapshot(tab):
 
 
 def _valid_area_commit_input(snapshot, plan, ticket_number, navigation_nonce):
+    """驗證區域提交所需的快照、計畫與票數。"""
+
     if not isinstance(snapshot, AreaSnapshot) or not isinstance(
         plan, AreaActionPlan
     ):
@@ -762,7 +772,7 @@ def _valid_area_commit_input(snapshot, plan, ticket_number, navigation_nonce):
 async def commit_area(
     tab, snapshot, plan, ticket_number, navigation_nonce, fast_marker_key
 ):
-    """Revalidate one area plan and dispatch at most one click per document intent."""
+    """重新驗證區域計畫，並對同一文件意圖最多點擊一次。"""
     if not _valid_area_commit_input(
         snapshot, plan, ticket_number, navigation_nonce
     ):
@@ -1086,7 +1096,7 @@ CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
 async def commit_server_assigned_area(
     tab, snapshot, plan, ticket_number, navigation_nonce, fast_marker_key
 ):
-    """Switch to native server assignment and click one revalidated area row."""
+    """切換至電腦配位並點擊重新驗證過的區域列。"""
     if not _valid_area_commit_input(
         snapshot, plan, ticket_number, navigation_nonce
     ):
@@ -1278,7 +1288,7 @@ CONST_SEAT_SNAPSHOT_SCRIPT = r'''
 
 
 async def read_seat_snapshot(tab):
-    """Read one combined ticket-type and reserved-seat snapshot."""
+    """讀取票種與劃位座位的合併快照。"""
     raw_value = await tab.evaluate(CONST_SEAT_SNAPSHOT_SCRIPT)
     snapshot = parse_seat_snapshot(_decode_json_result(raw_value))
     if (
@@ -1610,7 +1620,7 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
 
 
 async def commit_seat(tab, snapshot, plan):
-    """Atomically clear, select or audit one reserved-seat intent."""
+    """以原子操作清除、選擇或稽核一筆劃位意圖。"""
     if (
         not isinstance(snapshot, SeatSnapshot)
         or not isinstance(plan, SeatActionPlan)
@@ -1741,7 +1751,7 @@ CONST_QUANTITY_SNAPSHOT_SCRIPT = r'''
 
 
 async def read_quantity_snapshot(tab):
-    """Read a supported quantity page in one browser call."""
+    """以單次瀏覽器呼叫讀取支援的票數頁面快照。"""
     raw_value = await tab.evaluate(CONST_QUANTITY_SNAPSHOT_SCRIPT)
     snapshot = parse_quantity_snapshot(_decode_json_result(raw_value))
     if isinstance(snapshot, QuantitySnapshot) and snapshot.ok:
@@ -1764,6 +1774,8 @@ async def read_quantity_snapshot(tab):
 
 
 def _quantity_plan_route_is_valid(plan):
+    """驗證票數計畫指定的頁面路由是否有效。"""
+
     if plan.page_type == "general_admission":
         return classify_utiki_page(plan.page_url) == PageKind.GENERAL_ADMISSION
     if plan.page_type != "server_assigned_quantity":
@@ -1777,6 +1789,8 @@ def _quantity_plan_route_is_valid(plan):
 
 
 def _valid_quantity_commit_input(snapshot, plan):
+    """驗證票數提交所需的快照與計畫。"""
+
     return bool(
         isinstance(snapshot, QuantitySnapshot)
         and isinstance(plan, QuantityPlan)
@@ -1975,7 +1989,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
 
 
 async def commit_quantity(tab, snapshot, plan):
-    """Atomically apply one audited quantity plan to the current document."""
+    """以原子操作將已稽核的票數計畫套用至目前文件。"""
     if not _valid_quantity_commit_input(snapshot, plan):
         return CommitResult.REJECTED
     plan_json = json.dumps({
@@ -2368,6 +2382,8 @@ CONST_SUBMIT_SCRIPT = r'''
 
 
 def _quantity_submit_payload(plan):
+    """建立票數選擇的送出資料。"""
+
     return {
         "pageUrl": plan.page_url,
         "documentId": plan.document_id,
@@ -2392,6 +2408,8 @@ def _quantity_submit_payload(plan):
 
 
 def _seat_submit_payload(plan):
+    """建立劃位選擇的送出資料。"""
+
     expected = (
         plan.target_seat_fingerprints
         if plan.action == "select"
@@ -2416,7 +2434,7 @@ def _seat_submit_payload(plan):
 
 
 async def dispatch_submit(tab, plan):
-    """Atomically revalidate one frozen purchase and dispatch add-to-cart."""
+    """重新驗證固定的購票意圖並送出加入購物車操作。"""
     if not isinstance(plan, SubmitPlan) or not submit_plan_is_valid(plan):
         return SubmitDispatchResult.REJECTED
     selection_plan = plan.selection_plan

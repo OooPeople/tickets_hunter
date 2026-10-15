@@ -111,7 +111,7 @@ _UTIKI_TAB_TOKEN_ATTR = "_tickets_hunter_utiki_tab_token"
 
 
 def _new_ctbc_tab_runtime():
-    """Return the single mutable runtime owned by one browser tab."""
+    """建立由單一瀏覽器分頁持有的可變執行期。"""
     return {
         "document": {
             "snapshot": None,
@@ -140,7 +140,7 @@ def _new_ctbc_tab_runtime():
 
 
 def _get_utiki_behavior(config_dict, key, default):
-    """Read canonical family behavior with one-release legacy fallback."""
+    """讀取標準租戶行為設定，並提供一期舊設定相容。"""
     canonical = config_dict.get("utiki")
     if isinstance(canonical, dict) and key in canonical:
         return canonical[key]
@@ -151,7 +151,7 @@ def _get_utiki_behavior(config_dict, key, default):
 
 
 def _ctbc_tab_identity(tab):
-    """Return a stable scalar identity without retaining the tab object."""
+    """取得不保留分頁物件參照的穩定純量識別。"""
     identity = str(getattr(tab, _UTIKI_TAB_TOKEN_ATTR, "") or "")
     if identity:
         return identity
@@ -170,6 +170,8 @@ def _ctbc_tab_identity(tab):
 
 
 def _ctbc_runtime_for_identity(identity):
+    """依分頁識別取得或建立 uTiki 執行期。"""
+
     runtime = _state["tabs"].get(identity)
     if runtime is None:
         runtime = _new_ctbc_tab_runtime()
@@ -178,11 +180,13 @@ def _ctbc_runtime_for_identity(identity):
 
 
 def _ctbc_tab_runtime(tab):
+    """取得目前瀏覽器分頁的 uTiki 執行期。"""
+
     return _ctbc_runtime_for_identity(_ctbc_tab_identity(tab))
 
 
 def _existing_utiki_tab_context(tab):
-    """Return an existing tab runtime without allocating or pinning identity."""
+    """取得既有分頁執行期，且不配置或固定新識別。"""
     identity = str(getattr(tab, _UTIKI_TAB_TOKEN_ATTR, "") or "")
     if not identity:
         target_id = str(
@@ -195,15 +199,21 @@ def _existing_utiki_tab_context(tab):
 
 
 def _ctbc_purchase_runtime(tab):
+    """取得目前分頁的購票流程狀態。"""
+
     return _ctbc_tab_runtime(tab)["purchase"]
 
 
 def _ctbc_tab_state_key(tab):
+    """建立目前分頁在相容狀態表中的索引鍵。"""
+
     identity = _ctbc_tab_identity(tab)
     return (identity, str(tab.target.url))
 
 
 def _pop_pending_navigation_if_nonce(identity, nonce):
+    """僅在 nonce 相符時移除待處理導覽。"""
+
     transition = _ctbc_runtime_for_identity(identity)["transition"]
     current = transition["pending_navigation"]
     if current and current.get("nonce") == nonce:
@@ -213,6 +223,8 @@ def _pop_pending_navigation_if_nonce(identity, nonce):
 
 
 def _ctbc_pending_navigation_is_current(identity, pending):
+    """判斷待處理導覽是否仍屬於目前分頁狀態。"""
+
     current = _ctbc_runtime_for_identity(identity)["transition"][
         "pending_navigation"
     ]
@@ -224,7 +236,7 @@ def _ctbc_pending_navigation_is_current(identity, pending):
 
 
 async def nodriver_ctbc_inject_cookies(tab, config_dict):
-    """Inject a copied CTBC cookie set; account/password remains the fallback."""
+    """注入複製的中信售票 Cookie，並保留帳號密碼備援。"""
     debug = util.create_debug_logger(config_dict)
     auth_profile = get_tenant_auth_profile(str(tab.target.url))
     if not auth_profile or not auth_profile.supports_cookie_login:
@@ -281,6 +293,8 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
 
 
 def _is_ctbc_url(url):
+    """判斷網址是否屬於支援的 uTiki 棒球售票站。"""
+
     return is_utiki_sports_url(url)
 
 
@@ -288,20 +302,28 @@ is_utk_sports_url = is_utiki_sports_url
 
 
 def _get_utk_sports_profile(url):
+    """取得網址所屬的 uTiki 棒球租戶設定。"""
+
     profile = get_utiki_tenant_profile(url)
     return profile.as_legacy_dict() if profile else None
 
 
 def _get_ctbc_page_type(url):
+    """判別網址所屬的中信相容售票頁面類型。"""
+
     page_kind = classify_utiki_page(url)
     return None if page_kind is PageKind.UNKNOWN else page_kind.value
 
 
 def _ctbc_unique_query(url):
+    """讀取沒有重複鍵的中信相容網址查詢參數。"""
+
     return unique_query(url)
 
 
 def _ctbc_area_action_payload(plan):
+    """將區域計畫轉成瀏覽器提交資料。"""
+
     if not isinstance(plan, AreaActionPlan):
         return None
     return {
@@ -316,6 +338,8 @@ def _ctbc_area_action_payload(plan):
 
 
 def _ctbc_date_target_payload(plan):
+    """將場次計畫轉成導覽目標資料。"""
+
     if not isinstance(plan, DateActionPlan) or not plan.target_url:
         return None
     return {
@@ -330,6 +354,8 @@ def _ctbc_date_target_payload(plan):
 
 
 def _build_ctbc_destination_url(area_url, target):
+    """依區域網址與目標建立可驗證的目的地網址。"""
+
     if _get_ctbc_page_type(area_url) != "area":
         return None
     source = urlsplit(area_url)
@@ -348,6 +374,8 @@ def _build_ctbc_destination_url(area_url, target):
 
 
 def _build_utiki_server_assignment_destination_url(area_url, target):
+    """建立 uTiki 電腦配位的票數頁目的地網址。"""
+
     if _get_ctbc_page_type(area_url) != "area":
         return None
     try:
@@ -381,11 +409,13 @@ def _build_utiki_server_assignment_destination_url(area_url, target):
 
 
 def _ctbc_same_origin(first, second):
+    """判斷兩個中信相容售票網址是否同源。"""
+
     return same_origin(first, second)
 
 
 def _ctbc_purchase_state_key(tab):
-    """Key submit state by purchase identity, not cosmetic URL details."""
+    """以購票身分而非外觀網址建立送出狀態索引鍵。"""
     identity = _ctbc_tab_identity(tab)
     current_url = str(tab.target.url)
     try:
@@ -434,7 +464,7 @@ def _ctbc_purchase_state_key(tab):
 
 
 def _ctbc_submit_reached_checkout(source_url, destination_url):
-    """Accept submit navigation only for the source tenant's checkout route."""
+    """僅接受導向來源租戶結帳路由的送出結果。"""
     try:
         source = urlsplit(source_url)
         destination = urlsplit(destination_url)
@@ -454,6 +484,8 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
 
 
 def _utk_refresh_context(tab):
+    """取得目前分頁的刷新執行期與背景工作集合。"""
+
     identity = _ctbc_tab_identity(tab)
     return (
         _ctbc_runtime_for_identity(identity),
@@ -462,7 +494,7 @@ def _utk_refresh_context(tab):
 
 
 def _utk_refresh_identity(tab):
-    """Return one stable, process-unique queue identity for this browser tab."""
+    """取得目前分頁穩定且程序內唯一的刷新佇列識別。"""
     return refresh_engine.build_refresh_identity(_ctbc_tab_identity(tab))
 
 
@@ -473,7 +505,7 @@ async def nodriver_utk_sports_cancel_refresh(
     wait=False,
     abandon_probe=False,
 ):
-    """Thin facade over the canonical uTiki refresh engine."""
+    """透過標準 uTiki 刷新引擎取消分頁刷新。"""
     runtime, refresh_identity = _utk_refresh_context(tab)
     return await refresh_engine.cancel_refresh(
         tab,
@@ -487,7 +519,7 @@ async def nodriver_utk_sports_cancel_refresh(
 
 
 async def nodriver_utk_sports_cleanup_tab(tab, reason=""):
-    """Detach and clean the exact existing runtime owned by one browser tab."""
+    """解除並清理單一分頁所持有的既有執行期。"""
     identity, runtime = _existing_utiki_tab_context(tab)
     if runtime is None or _state["tabs"].get(identity) is not runtime:
         return False
@@ -510,7 +542,7 @@ async def nodriver_utk_sports_cleanup_tab(tab, reason=""):
 
 
 async def nodriver_utk_sports_pause_refresh(tab, reason="paused"):
-    """Pause one tab's queued/reserved refresh intent without resetting it."""
+    """暫停分頁的佇列或預約刷新，且不重設意圖。"""
     runtime, refresh_identity = _utk_refresh_context(tab)
     return await refresh_engine.pause_refresh(
         tab,
@@ -522,7 +554,7 @@ async def nodriver_utk_sports_pause_refresh(tab, reason="paused"):
 
 
 def nodriver_utk_sports_consume_reload_event(tab):
-    """Tell the outer router that a same-URL reload needs fresh CF detection."""
+    """通知外層路由同網址刷新需要重新偵測 Cloudflare。"""
     return refresh_engine.consume_reload_event(_ctbc_tab_runtime(tab))
 
 
@@ -536,7 +568,7 @@ async def nodriver_utk_sports_reload(
     allow_blocked_recovery=False,
     dispatch_deadline=None,
 ):
-    """Thin facade over the canonical uTiki shared reload engine."""
+    """透過標準 uTiki 共用刷新引擎推進一次刷新。"""
     runtime, refresh_identity = _utk_refresh_context(tab)
     return await refresh_engine.reload(
         tab,
@@ -561,7 +593,7 @@ async def nodriver_utk_sports_reload_wait(
     allow_unknown_document=True,
     allow_blocked_recovery=True,
 ):
-    """Thin facade over the bounded uTiki shared reload waiter."""
+    """透過有界等待器完成一次 uTiki 共用刷新。"""
     runtime, refresh_identity = _utk_refresh_context(tab)
     return await refresh_engine.reload_wait(
         tab,
@@ -577,7 +609,7 @@ async def nodriver_utk_sports_reload_wait(
 
 
 async def nodriver_utk_sports_health_check(tab, url, config_dict):
-    """Run only rate-limit recovery, without selecting a ticket control."""
+    """僅執行限流復原，不選擇任何票券控制項。"""
     runtime, refresh_identity = _utk_refresh_context(tab)
     return await refresh_engine.health_check(
         tab,
@@ -590,6 +622,8 @@ async def nodriver_utk_sports_health_check(tab, url, config_dict):
 
 
 async def _reload_with_interval(tab, config_dict, reason):
+    """依設定的刷新間隔排程一次頁面刷新。"""
+
     return await nodriver_utk_sports_reload(
         tab,
         config_dict,
@@ -600,7 +634,7 @@ async def _reload_with_interval(tab, config_dict, reason):
 
 
 async def _poll_ctbc_quantity_reload(tab, config_dict):
-    """Continue one queued quantity recovery without resetting its interval."""
+    """延續既有票數頁刷新，且不重設等待間隔。"""
     request = _ctbc_tab_runtime(tab)["refresh"]["reload_request"]
     if not request or request.get("reason") != CTBC_QUANTITY_STALE_RELOAD_REASON:
         return False
@@ -611,7 +645,7 @@ async def _poll_ctbc_quantity_reload(tab, config_dict):
 
 
 async def _poll_ctbc_seat_reload(tab, config_dict):
-    """Continue one queued reserved-seat recovery without resetting its interval."""
+    """延續既有劃位頁刷新，且不重設等待間隔。"""
     request = _ctbc_tab_runtime(tab)["refresh"]["reload_request"]
     if not request or request.get("reason") != CTBC_SEAT_STALE_RELOAD_REASON:
         return False
@@ -620,6 +654,8 @@ async def _poll_ctbc_seat_reload(tab, config_dict):
 
 
 def _decode_ctbc_json_result(raw_value):
+    """將中信相容頁面的回傳值解碼為 JSON 資料。"""
+
     if isinstance(raw_value, str):
         try:
             return json.loads(raw_value)
@@ -629,6 +665,8 @@ def _decode_ctbc_json_result(raw_value):
 
 
 def _ctbc_selection_config_fingerprint(config_dict):
+    """建立影響選位結果之設定的穩定指紋。"""
+
     area_config = config_dict.get("area_auto_select", {})
     payload = {
         "ticket_number": config_dict.get("ticket_number", 1),
@@ -646,6 +684,8 @@ def _ctbc_selection_config_fingerprint(config_dict):
 
 
 def _ctbc_navigation_urls_match(first_url, second_url):
+    """判斷兩個導覽網址是否代表同一標準目的地。"""
+
     try:
         first = urlsplit(str(first_url or ""))
         second = urlsplit(str(second_url or ""))
@@ -667,6 +707,8 @@ def _ctbc_new_pending_navigation(
     tab, kind, source_url, area_url, target, config_dict,
     selection_mode="manual",
 ):
+    """建立跨文件追蹤用的待處理導覽紀錄。"""
+
     if selection_mode == "computer":
         destination_url = _build_utiki_server_assignment_destination_url(
             area_url, target
@@ -707,7 +749,7 @@ def _ctbc_new_pending_navigation(
 
 
 def _ctbc_new_date_native_pending(tab, snapshot, plan):
-    """Build one cross-document guard for an atomically committed date click."""
+    """為已原子提交的原生場次點擊建立跨文件防護。"""
     if not isinstance(snapshot, DateSnapshot) or not isinstance(plan, DateActionPlan):
         return None
     source_url = snapshot.page_url
@@ -748,6 +790,8 @@ def _ctbc_new_date_native_pending(tab, snapshot, plan):
 
 
 def _ctbc_date_native_area_matches(pending, current_url):
+    """判斷原生場次導覽是否到達預期區域頁。"""
+
     if not isinstance(pending, dict) or pending.get("kind") != "DATE_NATIVE":
         return False
     source_url = str(pending.get("source_url") or "")
@@ -782,6 +826,8 @@ def _ctbc_date_native_area_matches(pending, current_url):
 
 
 def _ctbc_pending_from_fast_marker(marker):
+    """從快速導覽標記還原待處理導覽。"""
+
     if (
         not isinstance(marker, dict)
         or type(marker.get("version")) is not int
@@ -853,6 +899,8 @@ def _ctbc_pending_from_fast_marker(marker):
 
 
 def _ctbc_fast_marker_matches_pending(marker_pending, pending):
+    """判斷快速標記與待處理導覽是否屬於同一意圖。"""
+
     if not marker_pending or not pending or pending.get("kind") != "FAST":
         return False
     if marker_pending.get("nonce") != pending.get("nonce"):
@@ -869,7 +917,7 @@ def _ctbc_fast_marker_matches_pending(marker_pending, pending):
 
 
 async def _ctbc_prefetch_area_snapshot(tab, date_target):
-    """Fetch one selected area's fresh HTML and exact map in the current browser session."""
+    """以目前瀏覽器工作階段預取區域頁 HTML 與精確地圖。"""
     area_url_json = json.dumps(date_target["url"])
     performance_json = json.dumps(date_target["performance_id"])
     product_json = json.dumps(date_target["product_id"])
@@ -963,6 +1011,8 @@ async def _ctbc_prefetch_area_snapshot(tab, date_target):
 
 
 async def _ctbc_read_fast_navigation_marker(tab):
+    """讀取頁面儲存的快速導覽標記。"""
+
     marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     try:
         raw_value = await tab.evaluate(f'''(() => {{
@@ -1000,6 +1050,8 @@ async def _ctbc_read_fast_navigation_marker(tab):
 
 
 async def _ctbc_delete_fast_navigation_marker(tab, nonce):
+    """刪除 nonce 相符的快速導覽標記。"""
+
     marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     nonce_json = json.dumps(nonce)
     try:
@@ -1022,6 +1074,8 @@ async def _ctbc_delete_fast_navigation_marker(tab, nonce):
 
 
 async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
+    """刪除仍與觀察值相同的格式錯誤快速標記。"""
+
     marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     expected_raw_json = json.dumps(expected_raw)
     try:
@@ -1044,7 +1098,7 @@ async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
 
 
 async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_plan):
-    """Use the attested normal-mode shortcut; False alone permits native fallback."""
+    """嘗試已驗證的快速區域導覽，失敗時允許原生流程接手。"""
     debug = util.create_debug_logger(config_dict)
     identity = _ctbc_tab_identity(tab)
     transition = _ctbc_runtime_for_identity(identity)["transition"]
@@ -1117,7 +1171,7 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_p
 
 
 async def _ctbc_commit_native_date(tab, snapshot, plan, debug):
-    """Install the cross-document intent before dispatching one native click."""
+    """先安裝跨文件意圖，再送出一次原生場次點擊。"""
     identity = _ctbc_tab_identity(tab)
     transition = _ctbc_runtime_for_identity(identity)["transition"]
     if transition["pending_navigation"]:
@@ -1150,6 +1204,8 @@ async def _ctbc_commit_native_date(tab, snapshot, plan, debug):
 
 
 async def nodriver_ctbc_date_auto_select(tab, config_dict):
+    """依設定自動選擇中信相容售票場次。"""
+
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
     if _get_ctbc_page_type(current_url) != "date":
@@ -1214,6 +1270,8 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
 
 
 async def nodriver_ctbc_area_auto_select(tab, config_dict):
+    """依設定自動選擇中信相容售票區域。"""
+
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
     if not await _ctbc_reconcile_area_navigation(
@@ -1315,6 +1373,8 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
 
 
 async def _fill_ctbc_inline_login(tab, config_dict):
+    """在支援的租戶頁面填入並送出登入資料。"""
+
     state_raw = await tab.evaluate('''
         (() => {
             const input = document.querySelector('#LOGIN_ID');
@@ -1371,6 +1431,8 @@ async def _fill_ctbc_inline_login(tab, config_dict):
 
 
 async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
+    """建立登入對話框與目前文件的識別指紋。"""
+
     if expected_dialog is not None and not isinstance(
         expected_dialog, DialogSnapshot
     ):
@@ -1439,7 +1501,7 @@ async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
 
 
 async def _get_ctbc_visible_dialog_text(tab):
-    """Compatibility wrapper for callers that still consume dialog text."""
+    """為舊呼叫端讀取目前可見對話框文字。"""
     snapshot = await read_dialog_snapshot(tab)
     if snapshot and snapshot.visible_count == 1:
         return snapshot.text
@@ -1447,12 +1509,14 @@ async def _get_ctbc_visible_dialog_text(tab):
 
 
 async def _ctbc_dialog_is_visible(tab):
-    """Fail closed when dialog observation is malformed or ambiguous."""
+    """以保守規則判斷對話框是否仍可見。"""
     snapshot = await read_dialog_snapshot(tab)
     return snapshot is None or snapshot.visible_count != 0
 
 
 async def _wait_ctbc_dialog_closed(tab, snapshot):
+    """等待指定對話框關閉或文件狀態改變。"""
+
     for _ in range(10):
         await tab.sleep(0.1)
         current = await read_dialog_snapshot(tab)
@@ -1471,7 +1535,7 @@ async def _wait_ctbc_dialog_closed(tab, snapshot):
 
 
 async def _dismiss_ctbc_dialog(tab, expected_text):
-    """Compatibility wrapper around the dialog snapshot/commit seam."""
+    """透過快照與提交邊界關閉指定對話框。"""
     snapshot = await read_dialog_snapshot(tab)
     if not (
         snapshot
@@ -1488,7 +1552,7 @@ def _ctbc_purchase_outcome(
     kind, *, text="", reason="", source_url="", source_document_id="",
     page_type="", nonce="", dom_document_id="", product_id="",
 ):
-    """Build one non-sensitive canonical purchase outcome record."""
+    """建立不含敏感資料的標準購票結果紀錄。"""
     normalized_text = " ".join(str(text or "").split())
     record = {
         "kind": str(kind or "unknown"),
@@ -1508,7 +1572,7 @@ def _ctbc_purchase_outcome(
 
 
 def _ctbc_source_document_id(context):
-    """Return the canonical workflow/DOM performance time-origin token."""
+    """取得流程與 DOM 共用的標準文件時間來源識別。"""
     if "source_document_id" in context:
         return str(context.get("source_document_id") or "")
     return str(context.get("document_id") or "")
@@ -1518,7 +1582,7 @@ def _ctbc_dialog_outcome_record(
     outcome, text, source_url, source_document_id, page_type, nonce,
     dom_document_id="", product_id="",
 ):
-    """Purely reduce a classified dialog to its canonical blocker record."""
+    """將已分類對話框純化為標準阻擋結果紀錄。"""
     kind = "unknown" if outcome == "rejected" else outcome
     reason = "dialog" if kind == "unknown" else ""
     record = _ctbc_purchase_outcome(
@@ -1552,7 +1616,7 @@ def _ctbc_dialog_outcome_record(
 
 
 def _ctbc_recent_submit_context(purchase, fallback_key=None):
-    """Resolve dialog ownership without guessing among historical outcomes."""
+    """在不猜測歷史結果的前提下判定對話框所屬送出操作。"""
     active = purchase.get("active_submit")
     if isinstance(active, dict) and active.get("purchase_key") is not None:
         return active.get("purchase_key"), active
@@ -1581,7 +1645,7 @@ def _ctbc_recent_submit_context(purchase, fallback_key=None):
 
 
 def _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=None):
-    """Apply one reduced result with identity-safe active-submit cleanup."""
+    """套用購票結果並安全清理相符的進行中送出狀態。"""
     if purchase_key is None or not isinstance(record, dict):
         return False
     current = purchase.get("active_submit")
@@ -1602,13 +1666,15 @@ def _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=None):
 
 
 def _ctbc_captcha_image_token(image_bytes):
-    """Return a non-sensitive identity token without retaining image bytes."""
+    """在不保留圖片位元組下建立驗證碼圖片識別。"""
     if not isinstance(image_bytes, (bytes, bytearray, memoryview)) or not image_bytes:
         return ""
     return hashlib.sha256(bytes(image_bytes)).hexdigest()
 
 
 async def _read_ctbc_captcha_image_token(tab, config_dict):
+    """讀取目前驗證碼圖片的非敏感識別。"""
+
     try:
         image_bytes = await _get_ctbc_captcha_image_bytes(tab, config_dict)
     except Exception:
@@ -1619,6 +1685,8 @@ async def _read_ctbc_captcha_image_token(tab, config_dict):
 def _ctbc_captcha_reset_is_current(
     tab, submit_key, outcome, source_document_id,
 ):
+    """判斷驗證碼重設工作是否仍屬於目前送出意圖。"""
+
     runtime = _ctbc_tab_runtime(tab)
     return bool(
         source_document_id
@@ -1631,6 +1699,8 @@ def _ctbc_captcha_reset_is_current(
 def _ctbc_captcha_phase_is_current(
     tab, submit_key, outcome, source_document_id, phase,
 ):
+    """判斷驗證碼工作是否仍處於指定階段。"""
+
     return bool(
         _ctbc_captcha_reset_is_current(
             tab, submit_key, outcome, source_document_id
@@ -1642,6 +1712,8 @@ def _ctbc_captcha_phase_is_current(
 def _release_ctbc_captcha_preflight(
     tab, submit_key, outcome,
 ):
+    """釋放驗證碼重設前置檢查所持有的狀態。"""
+
     if (
         _ctbc_outcome_is_current(tab, submit_key, outcome)
         and outcome.get("reset_phase") == "preflighting"
@@ -1653,6 +1725,8 @@ def _release_ctbc_captcha_preflight(
 async def _observe_ctbc_captcha_refresh(
     tab, config_dict, submit_key, outcome,
 ):
+    """觀察驗證碼刷新是否已產生新的圖片。"""
+
     current_document_id = _ctbc_tab_runtime(tab)["document"]["last_document"]
     source_document_id = str(outcome.get("reset_source_document_id") or "")
     if not _ctbc_outcome_is_current(tab, submit_key, outcome):
@@ -1683,6 +1757,8 @@ async def _observe_ctbc_captcha_refresh(
 async def _dispatch_ctbc_captcha_refresh(
     tab, config_dict, submit_key, outcome, source_document_id,
 ):
+    """送出驗證碼圖片刷新並登記觀察狀態。"""
+
     before_token = await _read_ctbc_captcha_image_token(tab, config_dict)
     if not _ctbc_captcha_phase_is_current(
         tab, submit_key, outcome, source_document_id, "preflighting"
@@ -1734,6 +1810,8 @@ async def _dispatch_ctbc_captcha_refresh(
 
 
 async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None, config_dict=None):
+    """重設驗證碼輸入，並視需要刷新圖片。"""
+
     config_dict = config_dict or {}
     runtime = _ctbc_tab_runtime(tab)
     purchase = runtime["purchase"]
@@ -1806,6 +1884,8 @@ async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None, config_dic
 
 
 def _ctbc_conflict_page_kind(page_type):
+    """將頁面類型轉成衝突清理所需的選擇種類。"""
+
     return {
         "seat": PageKind.RESERVED_SEAT,
         "general_admission": PageKind.GENERAL_ADMISSION,
@@ -1814,10 +1894,14 @@ def _ctbc_conflict_page_kind(page_type):
 
 
 def _ctbc_outcome_is_current(tab, submit_key, record):
+    """判斷購票結果是否仍屬於目前文件與送出意圖。"""
+
     return _ctbc_purchase_runtime(tab)["outcomes"].get(submit_key) is record
 
 
 def _ctbc_conflict_is_current(tab, submit_key, record):
+    """判斷座位或票數衝突是否仍可安全清理。"""
+
     return bool(
         _ctbc_outcome_is_current(tab, submit_key, record)
         and _ctbc_purchase_state_key(tab) == submit_key
@@ -1827,6 +1911,8 @@ def _ctbc_conflict_is_current(tab, submit_key, record):
 async def _clear_ctbc_conflict_selection(
     tab, config_dict, submit_key, record,
 ):
+    """清除目前送出衝突所對應的座位或票數選擇。"""
+
     if not _ctbc_conflict_is_current(tab, submit_key, record):
         return False
     clear_phase = record.get("clear_phase")
@@ -1861,6 +1947,8 @@ async def _clear_ctbc_conflict_selection(
 async def _apply_ctbc_dialog_effects(
     tab, config_dict, submit_key, outcome, record
 ):
+    """依對話框分類套用關閉、清理或重試效果。"""
+
     debug = util.create_debug_logger(config_dict)
     purchase = _ctbc_purchase_runtime(tab)
     if purchase["outcomes"].get(submit_key) is not record:
@@ -1902,6 +1990,8 @@ async def _apply_ctbc_dialog_effects(
 async def _handle_ctbc_submit_dialog(
     tab, config_dict, submit_key=None, source_url=None, dialog_snapshot=None
 ):
+    """分類並處理加入購物車後出現的售票對話框。"""
+
     debug = util.create_debug_logger(config_dict)
     runtime = _ctbc_tab_runtime(tab)
     purchase = runtime["purchase"]
@@ -1990,6 +2080,8 @@ async def _handle_ctbc_submit_dialog(
 
 
 async def _recover_ctbc_captcha_dialog(tab, config_dict):
+    """從驗證碼錯誤對話框恢復至可再次送出的狀態。"""
+
     submit_key = _ctbc_purchase_state_key(tab)
     purchase = _ctbc_purchase_runtime(tab)
     outcome = purchase["outcomes"].get(submit_key)
@@ -2014,6 +2106,8 @@ async def _recover_ctbc_captcha_dialog(tab, config_dict):
 
 
 async def _recover_ctbc_seat_conflict(tab, config_dict):
+    """從座位或票數衝突恢復至可重新選擇的狀態。"""
+
     submit_key = _ctbc_purchase_state_key(tab)
     runtime = _ctbc_tab_runtime(tab)
     outcomes = runtime["purchase"]["outcomes"]
@@ -2075,6 +2169,8 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
 
 
 def _ctbc_submit_dispatched_at(value):
+    """將送出時間轉成可比較的時間戳。"""
+
     if isinstance(value, dict):
         value = value.get("dispatched_at")
     try:
@@ -2084,7 +2180,7 @@ def _ctbc_submit_dispatched_at(value):
 
 
 def _ctbc_unknown_submit_outcome(active, reason):
-    """Purely convert one dispatched intent into a sticky unknown outcome."""
+    """將已送出意圖轉成需保留的未知結果。"""
     return _ctbc_purchase_outcome(
         "unknown",
         reason=reason,
@@ -2097,6 +2193,8 @@ def _ctbc_unknown_submit_outcome(active, reason):
 
 
 def _ctbc_finish_active_unknown(purchase, active, reason):
+    """以未知結果結束目前進行中的送出意圖。"""
+
     if purchase.get("active_submit") is not active:
         return False
     purchase_key = active.get("purchase_key")
@@ -2109,6 +2207,8 @@ def _ctbc_finish_active_unknown(purchase, active, reason):
 
 
 def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
+    """判斷登入失敗是否仍屬於目前文件與送出操作。"""
+
     runtime = _ctbc_tab_runtime(tab)
     outcomes = runtime["purchase"]["outcomes"]
     failure = outcomes.get(submit_key)
@@ -2134,12 +2234,12 @@ def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
 
 
 def _normalize_ctbc_captcha_answer(answer):
-    """Normalize ddddocr output to CTBC's four uppercase ASCII characters."""
+    """將 OCR 結果正規化為四個大寫 ASCII 字元。"""
     return re.sub(r"[^A-Za-z0-9]", "", str(answer or "")).upper()
 
 
 async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key):
-    """Reduce the first observable result after an add-to-cart dispatch."""
+    """歸納加入購物車送出後第一個可觀察結果。"""
     await tab.sleep(1.0)
     result = await _reconcile_utiki_purchase(
         tab, str(tab.target.url), _get_ctbc_page_type(str(tab.target.url)), config_dict
@@ -2148,7 +2248,7 @@ async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key)
 
 
 async def _reconcile_utiki_purchase(tab, current_url, page_type, config_dict):
-    """Observe delayed submit outcomes before any page-specific browser effect."""
+    """在執行頁面效果前協調延遲出現的送出結果。"""
     debug = util.create_debug_logger(config_dict)
     runtime = _ctbc_tab_runtime(tab)
     purchase = runtime["purchase"]
@@ -2218,7 +2318,7 @@ async def _reconcile_utiki_purchase(tab, current_url, page_type, config_dict):
 
 
 async def _get_ctbc_captcha_image_bytes(tab, config_dict):
-    """Capture CTBC's same-origin captcha at its native 90x25 resolution."""
+    """以原始 90×25 解析度擷取同源驗證碼圖片。"""
     debug = util.create_debug_logger(config_dict)
     try:
         data_url = await tab.evaluate('''
@@ -2254,6 +2354,8 @@ async def _get_ctbc_captcha_image_bytes(tab, config_dict):
 
 
 async def _ctbc_captcha(tab, config_dict, ocr):
+    """讀取並辨識目前頁面的中信相容驗證碼。"""
+
     debug = util.create_debug_logger(config_dict)
     if not ocr:
         debug.log("[CTBC CAPTCHA] OCR engine is unavailable")
@@ -2298,7 +2400,7 @@ async def _ctbc_captcha(tab, config_dict, ocr):
 
 
 async def _dispatch_ctbc_submit(tab, config_dict, submit_key, submit_plan):
-    """Dispatch once; the caller still has to observe a verified outcome."""
+    """送出一次加入購物車操作，並等待後續確認結果。"""
     debug = util.create_debug_logger(config_dict)
     runtime = _ctbc_tab_runtime(tab)
     purchase = runtime["purchase"]
@@ -2362,6 +2464,8 @@ async def _dispatch_ctbc_submit(tab, config_dict, submit_key, submit_plan):
 async def _ctbc_captcha_and_submit(
     tab, config_dict, ocr, *, submit_plan=None
 ):
+    """完成驗證碼辨識後送出已驗證的購票計畫。"""
+
     debug = util.create_debug_logger(config_dict)
     purchase = _ctbc_purchase_runtime(tab)
     current_url = str(tab.target.url)
@@ -2461,6 +2565,8 @@ async def _ctbc_captcha_and_submit(
 
 
 async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
+    """執行中信相容售票的劃位頁主要流程。"""
+
     if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
         return False
     if _get_utiki_behavior(
@@ -2549,7 +2655,7 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
 async def _reduce_utiki_seat_commit(
     tab, config_dict, plan, commit_result, debug
 ):
-    """Reduce one reserved-seat commit without entering submit prematurely."""
+    """歸納劃位提交結果，避免過早進入送出流程。"""
     if commit_result in {CommitResult.STALE, CommitResult.REJECTED}:
         outcome = commit_result.value
         debug.log(
@@ -2575,7 +2681,7 @@ async def _reduce_utiki_seat_commit(
 async def _reduce_utiki_quantity_commit(
     tab, config_dict, plan, commit_result, debug, label
 ):
-    """Reduce one quantity commit without entering the submit workflow."""
+    """歸納票數提交結果，避免過早進入送出流程。"""
     if commit_result is CommitResult.STALE:
         debug.log(
             f"[CTBC {label}] Quantity state changed during commit; "
@@ -2605,7 +2711,7 @@ async def _reduce_utiki_quantity_commit(
 async def _nodriver_utiki_quantity_main(
     tab, config_dict, ocr, page_type, expected_product_id=""
 ):
-    """Run the shared quantity-page workflow after route attestation."""
+    """在路由驗證後執行共用票數頁流程。"""
     debug = util.create_debug_logger(config_dict)
     label = (
         "SERVER ASSIGNMENT"
@@ -2689,7 +2795,7 @@ async def _nodriver_utiki_quantity_main(
 
 
 async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
-    """Select quantity on an unnumbered-seat UTK0202/UTK0203 page."""
+    """在不劃位的 UTK0202／UTK0203 頁面選擇票數。"""
     if not await _ctbc_attest_fast_destination(
         tab, "general_admission", config_dict
     ):
@@ -2704,6 +2810,8 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
 
 
 def _ctbc_server_assignment_pending_is_expected(pending):
+    """判斷待處理導覽是否為預期的電腦配位流程。"""
+
     return bool(
         pending
         and pending.get("kind") == "NATIVE"
@@ -2716,6 +2824,8 @@ def _ctbc_server_assignment_pending_is_expected(pending):
 
 
 def _ctbc_server_assignment_is_authorized(tab):
+    """判斷目前分頁是否獲准進入電腦配位票數頁。"""
+
     purchase_key = _ctbc_purchase_state_key(tab)
     transition = _ctbc_tab_runtime(tab)["transition"]
     authorized = transition["server_assignment_authorized"]
@@ -2736,7 +2846,7 @@ def _ctbc_server_assignment_is_authorized(tab):
 async def nodriver_utiki_server_assigned_quantity_main(
     tab, config_dict, ocr
 ):
-    """Select quantity after an attested native computer-area click."""
+    """在已驗證的原生電腦配位點擊後選擇票數。"""
     transition = _ctbc_tab_runtime(tab)["transition"]
     current_url = str(tab.target.url)
     profile = _get_utk_sports_profile(current_url)
@@ -2776,6 +2886,8 @@ async def nodriver_utiki_server_assigned_quantity_main(
 
 
 def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
+    """驗證快速導覽目的地的路由、網址與 DOM 身分。"""
+
     if not isinstance(expected, dict) or not isinstance(dom_ids, dict):
         return False
     route = expected.get("route")
@@ -2842,6 +2954,8 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
 
 
 def _ctbc_date_native_direct_pending(pending, page_type):
+    """判斷原生場次導覽是否直接到達票券頁。"""
+
     return bool(
         isinstance(pending, dict)
         and pending.get("kind") == "DATE_NATIVE"
@@ -2852,6 +2966,8 @@ def _ctbc_date_native_direct_pending(pending, page_type):
 
 
 def _ctbc_date_native_direct_state_is_valid(pending, page_type, state):
+    """驗證原生場次直接導覽的目的地文件狀態。"""
+
     if not isinstance(state, dict) or not state.get("ready"):
         return False
     source_url = str(pending.get("source_url") or "")
@@ -2904,6 +3020,8 @@ def _ctbc_date_native_direct_state_is_valid(pending, page_type, state):
 
 
 async def _ctbc_return_to_native_area(tab, expected, source_url):
+    """返回來源區域頁，讓原生導覽流程重新接手。"""
+
     area_url = str(expected.get("area_url") or "")
     if (
         _get_ctbc_page_type(area_url) != "area"
@@ -2928,6 +3046,8 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
 
 
 async def _ctbc_return_current_pending(tab, identity, pending, source_url):
+    """將目前待處理導覽保留至返回來源頁後繼續。"""
+
     if not _ctbc_pending_navigation_is_current(identity, pending):
         return False
     pending["phase"] = "RETURNING"
@@ -2936,6 +3056,8 @@ async def _ctbc_return_current_pending(tab, identity, pending, source_url):
 
 
 async def _ctbc_read_destination_state(tab, page_type):
+    """讀取目的地頁面的文件與商品身分狀態。"""
+
     marker_selectors = ["#TBL", ".ticket .checkNum"] if page_type == "seat" else [
         "#table_tickettype", "input.numbox[key]"
     ]
@@ -3007,6 +3129,8 @@ async def _ctbc_read_destination_state(tab, page_type):
 async def _ctbc_clear_source_navigation(
     tab, identity, pending, marker_present, marker_pending
 ):
+    """清除來源頁待處理導覽與相符快速標記。"""
+
     if not _ctbc_pending_navigation_is_current(identity, pending):
         return False
     if pending.get("kind") == "FAST" and marker_present:
@@ -3031,7 +3155,7 @@ def _ctbc_reduce_date_native_navigation(
     identity, pending, current_url, page_type, document_changed,
     exact_source, reload_requested_at, marker_present,
 ):
-    """Return None only when a DATE_NATIVE source still needs TTL recovery."""
+    """歸納原生場次來源狀態，判斷是否仍需期限內復原。"""
     if page_type == "area":
         if (
             document_changed
@@ -3058,6 +3182,8 @@ def _ctbc_reduce_date_native_navigation(
 async def _ctbc_reconcile_navigation_source(
     tab, current_url, page_type, config_dict
 ):
+    """協調目前網址與待處理導覽的來源狀態。"""
+
     identity = _ctbc_tab_identity(tab)
     runtime = _ctbc_runtime_for_identity(identity)
     transition = runtime["transition"]
@@ -3154,6 +3280,8 @@ async def _ctbc_reconcile_navigation_source(
 async def _ctbc_attest_pending_destination(
     tab, page_type, pending, debug, stale_marker_nonce=""
 ):
+    """驗證待處理導覽是否抵達可信任的目的地。"""
+
     identity = _ctbc_tab_identity(tab)
     runtime = _ctbc_runtime_for_identity(identity)
     try:
@@ -3203,6 +3331,8 @@ async def _ctbc_attest_pending_destination(
 async def _ctbc_attest_date_native_direct_destination(
     tab, page_type, pending, debug
 ):
+    """驗證原生場次導覽直接抵達的票券頁。"""
+
     if not _ctbc_date_native_direct_pending(pending, page_type):
         return None
     identity = _ctbc_tab_identity(tab)
@@ -3237,7 +3367,7 @@ async def _ctbc_attest_date_native_direct_destination(
 
 
 async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
-    """Reconcile FAST/NATIVE provenance before ticket-page automation."""
+    """在票券頁自動化前協調快速與原生導覽來源。"""
     identity = _ctbc_tab_identity(tab)
     runtime = _ctbc_runtime_for_identity(identity)
     transition = runtime["transition"]
@@ -3332,13 +3462,15 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
 
 
 async def _ctbc_reconcile_area_navigation(tab, current_url, config_dict=None):
-    """Block duplicate area actions until navigation reaches a new document."""
+    """在抵達新文件前阻止重複送出區域操作。"""
     return await _ctbc_reconcile_navigation_source(
         tab, current_url, "area", config_dict or {}
     )
 
 
 async def _handle_ctbc_checkout(tab, config_dict):
+    """處理中信相容售票的結帳頁狀態。"""
+
     purchase = _ctbc_purchase_runtime(tab)
     purchase_key, context = _ctbc_recent_submit_context(purchase)
     if (
@@ -3360,6 +3492,8 @@ async def _handle_ctbc_checkout(tab, config_dict):
 
 
 async def nodriver_ctbc_main(tab, url, config_dict, ocr):
+    """依頁面類型分派中信相容棒球售票自動化流程。"""
+
     page_type = _get_ctbc_page_type(url)
     if page_type != "server_assigned_quantity":
         _ctbc_tab_runtime(tab)["transition"][

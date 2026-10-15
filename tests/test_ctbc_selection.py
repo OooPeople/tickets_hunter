@@ -42,7 +42,8 @@ from platforms.ctbc import (  # noqa: E402
     CTBC_DATE_PURCHASE_CONTROL_SELECTOR,
     CTBC_DATE_ROW_SELECTOR,
     _ctbc_captcha_and_submit,
-    _ctbc_check_captcha_error,
+    _classify_ctbc_submit_dialog,
+    _handle_ctbc_submit_dialog,
     _ctbc_attest_fast_destination,
     _ctbc_general_quantity_audit_is_valid,
     _get_ctbc_captcha_image_bytes,
@@ -58,6 +59,7 @@ from platforms.ctbc import (  # noqa: E402
     _get_ctbc_page_type,
     _parse_keyword_groups,
     _normalize_ctbc_captcha_answer,
+    _recover_ctbc_seat_conflict,
     _parse_ctbc_date_target,
     _parse_ctbc_vip_date_action,
     _parse_ctbc_map_send,
@@ -72,7 +74,9 @@ from platforms.ctbc import (  # noqa: E402
     _state,
     nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
+    nodriver_ctbc_general_admission_main,
     nodriver_ctbc_main,
+    nodriver_ctbc_seat_main,
     nodriver_ctbc_ticket_type_auto_select,
     nodriver_utk_sports_cancel_refresh,
     nodriver_utk_sports_consume_reload_event,
@@ -200,6 +204,8 @@ class FakeElement:
         self._date_snapshot_fingerprint = None
         self.clicked = False
         self.click_count = 0
+        self.apply_count = 0
+        self.value = self.attrs.get("value", "")
 
     async def get_html(self):
         return self.html
@@ -211,6 +217,10 @@ class FakeElement:
         return self.child_lists.get(selector, [])
 
     async def apply(self, script):
+        self.apply_count += 1
+        if 'el.value = ""' in script:
+            self.value = ""
+            return None
         if "__ticketsHunterDateControlSnapshot" in script:
             aria_disabled = self.attrs.get("aria-disabled") == "true"
             actionable = (
@@ -327,11 +337,26 @@ class FakeTab:
 
 
 class FakeSubmitTab:
-    def __init__(self, captcha="ABCD", dialog="成功加入購物車"):
-        self.target = types.SimpleNamespace(url="https://tix.ctbcsports.com/BROTHERS/UTK0205_?P=1")
+    def __init__(
+        self,
+        captcha="ABCD",
+        dialog="成功加入購物車",
+        *,
+        dialogs=None,
+        url="https://tix.ctbcsports.com/BROTHERS/UTK0205_?P=1",
+    ):
+        self.target = types.SimpleNamespace(url=url)
         self.captcha = captcha
         self.dialog = dialog
+        self.dialogs = list(dialogs or [])
         self.button = FakeElement("<button id='addcart'>加入購物車</button>")
+        self.dialog_button = FakeElement("<button type='button'>OK</button>")
+        self.captcha_input = FakeElement(attrs={"value": captcha})
+        self.captcha_refresh = FakeElement("<button id='chang_pic'></button>")
+        self.dialog_visible = bool(dialog)
+        self.dismiss_allowed = True
+        self.dialog_closes_on_click = True
+        self.reload_count = 0
 
     async def evaluate(self, script):
         if "#LOGIN_ID" in script:
@@ -339,16 +364,45 @@ class FakeSubmitTab:
                 return '{"account":"user","password":"secret"}'
             return {"required": False}
         if "#CHK" in script:
-            return self.captcha
+            return self.captcha_input.value
         if "#dialog-message" in script:
-            return self.dialog
+            if "const expectedText" in script:
+                expected_literal = f"const expectedText = {json.dumps(self.dialog)};"
+                if (
+                    not self.dismiss_allowed
+                    or not self.dialog_visible
+                    or expected_literal not in script
+                    or "message.closest('.ui-dialog')" not in script
+                    or "message.textContent.trim() !== expectedText" not in script
+                    or "wrapper.getClientRects().length > 0" not in script
+                    or "wrapper.querySelector('.ui-dialog-buttonset button')" not in script
+                ):
+                    return False
+                await self.dialog_button.click()
+                if self.dialog_closes_on_click:
+                    self.dialog = ""
+                    self.dialog_visible = False
+                return True
+            if self.dialogs:
+                self.dialog = self.dialogs.pop(0)
+                self.dialog_visible = bool(self.dialog)
+            return self.dialog if self.dialog_visible else ""
         return None
 
     async def query_selector(self, selector):
-        return self.button if selector == "button#addcart" else None
+        if selector == "button#addcart":
+            return self.button
+        if selector == "#CHK":
+            return self.captcha_input
+        if selector == "#chang_pic":
+            return self.captcha_refresh
+        return None
 
     async def sleep(self, _seconds):
         return None
+
+    async def reload(self):
+        self.reload_count += 1
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
@@ -376,6 +430,22 @@ class CtbcPureSelectionTest(unittest.TestCase):
     def test_captcha_answer_is_ascii_only_and_uppercase(self):
         self.assertEqual("2CHH", _normalize_ctbc_captcha_answer(" 2C-HH\n"))
         self.assertEqual("WTYF", _normalize_ctbc_captcha_answer("wtyf"))
+
+    def test_submit_dialog_classifier_separates_retry_and_terminal_outcomes(self):
+        cases = {
+            "": None,
+            "成功加入購物車": "success",
+            "驗證碼錯誤": "captcha",
+            "帳號或密碼錯誤": "auth",
+            "有部分座位已被訂走, 請再重新選取座位 !": "seat_conflict",
+            "該位置已被選走": "seat_conflict",
+            "位置已被預訂": "seat_conflict",
+            "已超出可購買額度": "quota",
+            "系統忙碌，請稍後再試": "rejected",
+        }
+        for dialog_text, expected in cases.items():
+            with self.subTest(dialog_text=dialog_text):
+                self.assertEqual(expected, _classify_ctbc_submit_dialog(dialog_text))
 
     def test_ctbc_uses_official_ocr_instead_of_universal_model(self):
         fake_ocr = types.SimpleNamespace(set_ranges=lambda value: setattr(fake_ocr, "ranges", value))
@@ -1044,6 +1114,18 @@ class CtbcPureSelectionTest(unittest.TestCase):
 
 
 class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
+    def _track_submit_state(self, tab):
+        submit_key = _ctbc_tab_state_key(tab)
+        for state_name in (
+            "submitted",
+            "seat_conflict_pending",
+            "submit_blocked",
+            "auth_failure",
+            "captcha_reset",
+        ):
+            self.addCleanup(_state[state_name].pop, submit_key, None)
+        return submit_key
+
     async def test_explicit_ticket_type_keyword_overrides_global_exclusions(self):
         full_counter = FakeElement(attrs={"id": "FULL", "val": "內野全票-NT$800"})
         disability_counter = FakeElement(
@@ -1530,33 +1612,435 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(tab.button.clicked)
 
     async def test_captcha_submits_when_force_submit_is_on(self):
-        tab = FakeSubmitTab()
+        tab = FakeSubmitTab(dialog="", dialogs=["", "", "成功加入購物車"])
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
-        self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
-        self.assertTrue(tab.button.clicked)
-
-    async def test_captcha_error_clears_per_tab_submit_guard(self):
-        tab = FakeSubmitTab(dialog="驗證碼錯誤")
         submit_key = _ctbc_tab_state_key(tab)
-        _state["submitted"][submit_key] = 1.0
+        try:
+            self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+            self.assertTrue(tab.button.clicked)
+        finally:
+            _state["submitted"].pop(submit_key, None)
+            _state["submit_blocked"].pop(submit_key, None)
 
-        async def query_selector(_selector):
-            return None
+    async def test_delayed_seat_conflict_closes_and_clears_submit_guard(self):
+        conflict_text = "該位置已被選走"
+        tab = FakeSubmitTab(dialog="", dialogs=["", "", "", conflict_text])
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertEqual(1, tab.button.click_count)
+        self.assertIn(submit_key, _state["submitted"])
 
-        tab.query_selector = query_selector
-        self.assertTrue(await _ctbc_check_captcha_error(tab, config()))
+        with patch(
+            "platforms.ctbc._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page, patch(
+            "platforms.ctbc.nodriver_ctbc_ticket_type_auto_select",
+            AsyncMock(return_value=True),
+        ) as select_type, patch(
+            "platforms.ctbc._ctbc_captcha_and_submit",
+            AsyncMock(return_value=True),
+        ) as submit:
+            self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
+
+        self.assertEqual(1, tab.dialog_button.click_count)
         self.assertNotIn(submit_key, _state["submitted"])
+        self.assertIn(submit_key, _state["seat_conflict_pending"])
+        self.assertEqual("", tab.captcha_input.value)
+        reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
+        select_type.assert_not_awaited()
+        submit.assert_not_awaited()
+
+    async def test_submit_outcome_timeout_never_clicks_twice(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+
+        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertEqual(1, tab.button.click_count)
+        self.assertIn(submit_key, _state["submitted"])
+
+        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(1, tab.button.click_count)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+
+    async def test_late_conflict_replaces_unknown_submit_outcome(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+
+        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        tab.dialog = "該位置已被選走"
+        tab.dialog_visible = True
+        self.assertEqual("seat_conflict", await _handle_ctbc_submit_dialog(tab, cfg))
+        self.assertNotIn(submit_key, _state["submit_blocked"])
+        self.assertIn(submit_key, _state["seat_conflict_pending"])
+
+    async def test_late_captcha_error_replaces_unknown_submit_outcome(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+
+        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        tab.dialog = "驗證碼錯誤"
+        tab.dialog_visible = True
+        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+        self.assertNotIn(submit_key, _state["submit_blocked"])
+        self.assertEqual("", tab.captcha_input.value)
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+
+    async def test_late_auth_error_replaces_unknown_submit_outcome(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+
+        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        tab.dialog = "帳號或密碼錯誤"
+        tab.dialog_visible = True
+        self.assertEqual("auth", await _handle_ctbc_submit_dialog(tab, cfg))
+        self.assertNotIn(submit_key, _state["submit_blocked"])
+        self.assertIn(submit_key, _state["auth_failure"])
+
+    async def test_auth_error_without_credentials_blocks_until_new_document(self):
+        tab = FakeSubmitTab(dialog="帳號或密碼錯誤")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": False}
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-1"
+
+        with patch(
+            "platforms.ctbc._ctbc_login_fingerprint",
+            AsyncMock(return_value=""),
+        ), patch(
+            "platforms.ctbc._fill_ctbc_inline_login",
+            AsyncMock(return_value=True),
+        ):
+            self.assertEqual("auth", await _handle_ctbc_submit_dialog(tab, cfg))
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+            self.assertEqual(0, tab.button.click_count)
+
+            _state["last_document"][identity] = "document-2"
+            self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertNotIn(submit_key, _state["auth_failure"])
+        self.assertEqual(0, tab.button.click_count)
+
+    async def test_click_exception_after_dispatch_blocks_second_submit(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+
+        async def click_then_raise():
+            tab.button.clicked = True
+            tab.button.click_count += 1
+            raise RuntimeError("CDP result unavailable")
+
+        tab.button.click = click_then_raise
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(1, tab.button.click_count)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+
+    async def test_conflict_waits_for_new_document_before_resubmitting(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-1"
+        _state["seat_conflict_pending"][submit_key] = {
+            "source_document_id": "document-1",
+            "dialog_dismissed": True,
+            "reload_dispatched": False,
+        }
+
+        with patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(side_effect=[False, True]),
+        ) as reload_page:
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertEqual(2, reload_page.await_count)
+
+            _state["last_document"][identity] = "document-2"
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        self.assertNotIn(submit_key, _state["seat_conflict_pending"])
+
+    async def test_conflict_dismiss_failure_blocks_reload(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        tab.dismiss_allowed = False
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+
+        with patch(
+            "platforms.ctbc._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page, patch(
+            "platforms.ctbc.nodriver_ctbc_ticket_type_auto_select",
+            AsyncMock(return_value=True),
+        ) as select_type:
+            self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
+
+        self.assertFalse(
+            _state["seat_conflict_pending"][submit_key]["dialog_dismissed"]
+        )
+        reload_page.assert_not_awaited()
+        select_type.assert_not_awaited()
+
+    async def test_conflict_click_without_close_blocks_reload(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        tab.dialog_closes_on_click = False
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+
+        with patch(
+            "platforms.ctbc._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page:
+            self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
+
+        self.assertEqual(1, tab.dialog_button.click_count)
+        self.assertFalse(
+            _state["seat_conflict_pending"][submit_key]["dialog_dismissed"]
+        )
+        reload_page.assert_not_awaited()
+
+    async def test_conflict_dismiss_race_recovers_after_dialog_disappears(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        tab.dismiss_allowed = False
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-1"
+
+        self.assertEqual("seat_conflict", await _handle_ctbc_submit_dialog(tab, cfg))
+        tab.dialog = ""
+        tab.dialog_visible = False
+
+        with patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page:
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        self.assertTrue(
+            _state["seat_conflict_pending"][submit_key]["dialog_dismissed"]
+        )
+        reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
+
+    async def test_conflict_pending_clears_when_document_changes(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-2"
+        _state["seat_conflict_pending"][submit_key] = {
+            "source_document_id": "document-1",
+            "page_type": "seat",
+            "dialog_dismissed": False,
+            "reload_dispatched": False,
+        }
+
+        with patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page:
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        self.assertNotIn(submit_key, _state["seat_conflict_pending"])
+        reload_page.assert_not_awaited()
+
+    async def test_general_conflict_uses_same_reload_recovery(self):
+        tab = FakeSubmitTab(
+            dialog="",
+            url="https://tix.ctbcsports.com/BROTHERS/UTK0203_?PERFORMANCE_ID=P1",
+        )
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-1"
+        _state["seat_conflict_pending"][submit_key] = {
+            "source_document_id": "document-1",
+            "page_type": "general_admission",
+            "dialog_dismissed": True,
+            "reload_dispatched": False,
+        }
+
+        with patch(
+            "platforms.ctbc._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page:
+            self.assertFalse(
+                await nodriver_ctbc_general_admission_main(tab, cfg, ocr=None)
+            )
+
+        reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
+
+    async def test_visible_conflict_blocks_click_immediately_before_submit(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(0, tab.button.click_count)
+        self.assertIn(submit_key, _state["seat_conflict_pending"])
+        self.assertEqual(1, tab.dialog_button.click_count)
+
+    async def test_quota_dialog_blocks_only_current_purchase(self):
+        original_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1"
+        )
+        tab = FakeSubmitTab(dialog="已超出可購買額度", url=original_url)
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        original_key = self._track_submit_state(tab)
+        _state["submitted"][original_key] = time.monotonic()
+        self.assertEqual("quota", await _handle_ctbc_submit_dialog(tab, cfg))
+        self.assertEqual(1, tab.dialog_button.click_count)
+        self.assertNotIn(original_key, _state["submitted"])
+        self.assertEqual("quota", _state["submit_blocked"][original_key])
+
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertEqual(0, tab.button.click_count)
+
+        tab.target.url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P2"
+        )
+        new_key = self._track_submit_state(tab)
+        self.assertNotIn(new_key, _state["submit_blocked"])
+
+    async def test_quota_state_survives_dialog_dismiss_race(self):
+        tab = FakeSubmitTab(dialog="已超出可購買額度")
+        tab.dismiss_allowed = False
+        submit_key = self._track_submit_state(tab)
+        _state["submitted"][submit_key] = time.monotonic()
+
+        self.assertEqual("quota", await _handle_ctbc_submit_dialog(tab, config()))
+
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("quota", _state["submit_blocked"][submit_key])
+        self.assertEqual(0, tab.dialog_button.click_count)
+
+    async def test_captcha_dismiss_failure_defers_reset_without_resubmit(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        tab.dismiss_allowed = False
+        submit_key = self._track_submit_state(tab)
+        _state["submitted"][submit_key] = 1.0
+        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, config()))
+        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, config()))
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual(0, tab.dialog_button.click_count)
+        self.assertEqual("captcha_pending", _state["submit_blocked"][submit_key])
+        self.assertEqual("ABCD", tab.captcha_input.value)
+        self.assertEqual(0, tab.captcha_refresh.click_count)
+
+        tab.dialog = ""
+        tab.dialog_visible = False
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(0, tab.button.click_count)
+        self.assertEqual("", tab.captcha_input.value)
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertNotIn(submit_key, _state["submit_blocked"])
+
+    async def test_captcha_refresh_exception_never_clicks_refresh_twice(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-1"
+
+        async def refresh_then_raise():
+            tab.captcha_refresh.clicked = True
+            tab.captcha_refresh.click_count += 1
+            raise RuntimeError("CDP result unavailable")
+
+        tab.captcha_refresh.click = refresh_then_raise
+        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(0, tab.button.click_count)
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertEqual(1, tab.captcha_input.apply_count)
+        self.assertEqual("unknown", _state["captcha_reset"][submit_key]["phase"])
+        self.assertEqual("captcha_pending", _state["submit_blocked"][submit_key])
+
+        async def refresh_success():
+            tab.captcha_refresh.clicked = True
+            tab.captcha_refresh.click_count += 1
+
+        tab.captcha_refresh.click = refresh_success
+        _state["last_document"][identity] = "document-2"
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(2, tab.captcha_refresh.click_count)
+        self.assertEqual(2, tab.captcha_input.apply_count)
+        self.assertNotIn(submit_key, _state["captcha_reset"])
+        self.assertNotIn(submit_key, _state["submit_blocked"])
 
     async def test_auth_error_blocks_retry_until_credentials_change(self):
         tab = FakeSubmitTab(dialog="帳號或密碼錯誤")
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
-        self.assertEqual(1, tab.button.click_count)
-
+        self.assertEqual(0, tab.button.click_count)
+        self.assertEqual(1, tab.dialog_button.click_count)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertIn(submit_key, _state["auth_failure"])
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
-        self.assertEqual(1, tab.button.click_count)
+        self.assertEqual(0, tab.button.click_count)
 
 
 class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
@@ -1832,6 +2316,56 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(["reserve", "preflight", "commit", "reload"], events)
         finally:
             _state["reload_request"].pop(identity, None)
+            _state["reload_event"].discard(identity)
+
+    async def test_local_interval_delays_reload_until_configured_deadline(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["advanced"]["auto_reload_page_interval"] = 7.25
+        identity = _ctbc_tab_identity(tab)
+        snapshot = {
+            "classification": "normal",
+            "document_id": str(tab.target.url) + "|100",
+            "url": str(tab.target.url),
+        }
+        clock = {"now": 100.0}
+        decision = types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="interval-permit", is_recovery_probe=False, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+
+        async def reload_once():
+            return await nodriver_utk_sports_reload(
+                tab, cfg, "seat conflict", apply_local_interval=True
+            )
+
+        try:
+            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.ctbc._utk_document_guard", AsyncMock(
+                        return_value=("normal", snapshot))), \
+                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(
+                        return_value=snapshot)), \
+                    patch("platforms.ctbc.get_shared_refresh_coordinator",
+                          return_value=coordinator), \
+                    patch(
+                "platforms.ctbc.time",
+                types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
+            ):
+                self.assertFalse(await reload_once())
+                request = _state["reload_request"][identity]
+                self.assertEqual(107.25, request["eligible_at"])
+                clock["now"] = request["eligible_at"] - 0.001
+                self.assertFalse(await reload_once())
+                clock["now"] = request["eligible_at"]
+                self.assertTrue(await reload_once())
+
+            self.assertEqual(1, tab.reload_count)
+            self.assertEqual(1, coordinator.reserve_refresh.await_count)
+            self.assertEqual(1, coordinator.commit_refresh.await_count)
+        finally:
+            _state["reload_request"].pop(identity, None)
+            _state["recovery_probe"].pop(identity, None)
             _state["reload_event"].discard(identity)
 
     async def test_incident_during_preflight_revokes_reload_at_commit(self):

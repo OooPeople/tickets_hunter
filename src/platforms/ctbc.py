@@ -72,6 +72,7 @@ CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
 )
 CTBC_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
 CTBC_FAST_PATH_TTL_SECONDS = 1.5
+CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
@@ -82,9 +83,12 @@ UTK_EMERGENCY_MARKER_SECONDS = 6.0
 UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
 _state = {
     "submitted": {},
+    "seat_conflict_pending": {},
+    "submit_blocked": {},
     "checkout_notified": set(),
     "ticket_type": {},
     "auth_failure": {},
+    "captcha_reset": {},
     "fast_target": {},
     "reload_request": {},
     "rate_limit_observation": {},
@@ -2583,45 +2587,266 @@ def _is_ctbc_auth_error(dialog_text):
     )
 
 
-async def _ctbc_check_captcha_error(tab, config_dict):
-    debug = util.create_debug_logger(config_dict)
+def _classify_ctbc_submit_dialog(dialog_text):
+    text = str(dialog_text or "").strip()
+    if not text:
+        return None
+    if _is_ctbc_auth_error(text):
+        return "auth"
+    if "驗證碼" in text and any(marker in text for marker in ("錯誤", "失敗", "不正確")):
+        return "captcha"
+    seat_conflict = "請再重新選取座位" in text or (
+        any(subject in text for subject in ("座位", "位置"))
+        and any(
+            marker in text
+            for marker in ("已被選走", "已被選取", "已被訂走", "已被預訂")
+        )
+    )
+    if seat_conflict:
+        return "seat_conflict"
+    quota_exceeded = (
+        "限購" in text and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
+    ) or (
+        "購買額度" in text and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
+    )
+    if quota_exceeded:
+        return "quota"
+    if "成功" in text and "加入購物車" in text:
+        return "success"
+    return "rejected"
+
+
+async def _get_ctbc_visible_dialog_text(tab):
     dialog_raw = await tab.evaluate('''
         (() => {
-            const dialog = document.querySelector('#dialog-message');
-            if (!dialog) return '';
-            const style = getComputedStyle(dialog);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden' && dialog.offsetParent !== null;
-            return visible ? dialog.textContent.trim() : '';
+            const message = document.querySelector('#dialog-message');
+            const wrapper = message ? message.closest('.ui-dialog') : null;
+            if (!message || !wrapper) return '';
+            const style = getComputedStyle(wrapper);
+            const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
+                wrapper.getClientRects().length > 0;
+            return visible ? message.textContent.trim() : '';
         })()
     ''')
-    dialog_text = dialog_raw if isinstance(dialog_raw, str) else ""
-    if _is_ctbc_auth_error(dialog_text):
-        submit_key = _ctbc_tab_state_key(tab)
-        login_fingerprint = await _ctbc_login_fingerprint(tab)
-        if login_fingerprint:
-            _state["auth_failure"][submit_key] = login_fingerprint
-        _state["submitted"].pop(submit_key, None)
-        debug.log("[CTBC LOGIN] Authentication rejected; waiting for credentials to change")
-        button = await tab.query_selector('.ui-dialog-buttonset button')
-        if button:
-            await button.click()
-        return "auth"
+    return dialog_raw if isinstance(dialog_raw, str) else ""
 
-    if "驗證碼" not in dialog_text or "錯誤" not in dialog_text:
-        return None
 
-    _state["submitted"].pop(_ctbc_tab_state_key(tab), None)
-    debug.log(f"[CTBC CAPTCHA] Server rejected captcha: {dialog_text}")
-    button = await tab.query_selector('.ui-dialog-buttonset button')
-    if button:
-        await button.click()
+async def _dismiss_ctbc_dialog(tab, expected_text):
+    clicked = bool(await tab.evaluate(f'''
+        (() => {{
+            const expectedText = {json.dumps(expected_text)};
+            const message = document.querySelector('#dialog-message');
+            const wrapper = message ? message.closest('.ui-dialog') : null;
+            if (!message || !wrapper || message.textContent.trim() !== expectedText) return false;
+            const style = getComputedStyle(wrapper);
+            const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
+                wrapper.getClientRects().length > 0;
+            if (!visible) return false;
+            const button = wrapper.querySelector('.ui-dialog-buttonset button');
+            if (!button) return false;
+            button.click();
+            return true;
+        }})()
+    '''))
+    if not clicked:
+        return False
+    for _ in range(10):
+        await tab.sleep(0.1)
+        visible_text = await _get_ctbc_visible_dialog_text(tab)
+        if not visible_text:
+            return True
+        if visible_text != expected_text:
+            return False
+    return False
+
+
+async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
+    reset_source_document_id = ""
+    if refresh_image and submit_key is not None:
+        identity = _ctbc_tab_identity(tab)
+        current_document_id = _state["last_document"].get(identity, "")
+        reset = _state["captcha_reset"].get(submit_key)
+        if isinstance(reset, dict):
+            phase = reset.get("phase")
+            source_document_id = str(reset.get("source_document_id") or "")
+            if phase == "done":
+                return True
+            if phase in ("dispatching", "unknown"):
+                if not current_document_id or current_document_id == source_document_id:
+                    return False
+                _state["captcha_reset"].pop(submit_key, None)
+        reset_source_document_id = current_document_id
+
     captcha_input = await tab.query_selector('#CHK')
     if captcha_input:
         await captcha_input.apply('function(el) { el.value = ""; }')
-    refresh = await tab.query_selector('#chang_pic')
-    if refresh:
-        await refresh.click()
-    return "captcha"
+    if refresh_image:
+        refresh = await tab.query_selector('#chang_pic')
+        if refresh:
+            if submit_key is not None:
+                _state["captcha_reset"][submit_key] = {
+                    "phase": "dispatching",
+                    "source_document_id": reset_source_document_id,
+                }
+            try:
+                await refresh.click()
+            except Exception:
+                if submit_key is not None:
+                    _state["captcha_reset"][submit_key]["phase"] = "unknown"
+                return False
+            if submit_key is not None:
+                _state["captcha_reset"][submit_key]["phase"] = "done"
+    return True
+
+
+async def _handle_ctbc_submit_dialog(tab, config_dict):
+    debug = util.create_debug_logger(config_dict)
+    dialog_text = await _get_ctbc_visible_dialog_text(tab)
+    outcome = _classify_ctbc_submit_dialog(dialog_text)
+    if outcome is None:
+        return None
+
+    submit_key = _ctbc_tab_state_key(tab)
+    _state["submitted"].pop(submit_key, None)
+    if _state["submit_blocked"].get(submit_key) in ("unknown", "captcha_pending"):
+        _state["submit_blocked"].pop(submit_key, None)
+    if outcome == "success":
+        if submit_key not in _state["submit_blocked"]:
+            debug.log("[CTBC] Cart accepted; same-page resubmit is blocked")
+        _state["submit_blocked"][submit_key] = "success"
+        return outcome
+
+    if outcome == "seat_conflict":
+        identity = _ctbc_tab_identity(tab)
+        page_type = _get_ctbc_page_type(str(tab.target.url))
+        _state["seat_conflict_pending"].setdefault(
+            submit_key,
+            {
+                "source_document_id": _state["last_document"].get(identity, ""),
+                "page_type": page_type,
+                "dialog_dismissed": False,
+                "reload_dispatched": False,
+            },
+        )
+    elif outcome == "auth":
+        login_fingerprint = await _ctbc_login_fingerprint(tab)
+        identity = _ctbc_tab_identity(tab)
+        _state["auth_failure"][submit_key] = {
+            "fingerprint": login_fingerprint,
+            "source_document_id": _state["last_document"].get(identity, ""),
+        }
+    elif outcome == "captcha":
+        _state["submit_blocked"][submit_key] = "captcha_pending"
+    elif outcome in ("quota", "rejected"):
+        _state["submit_blocked"][submit_key] = outcome
+
+    if not await _dismiss_ctbc_dialog(tab, dialog_text):
+        debug.log(f"[CTBC] Visible dialog changed before it could be dismissed: {dialog_text}")
+        return outcome
+
+    if outcome == "auth":
+        debug.log("[CTBC LOGIN] Authentication rejected; waiting for credentials to change")
+    elif outcome == "captcha":
+        reset_complete = await _reset_ctbc_captcha(
+            tab, refresh_image=True, submit_key=submit_key
+        )
+        if reset_complete and _state["submit_blocked"].get(submit_key) == "captcha_pending":
+            _state["submit_blocked"].pop(submit_key, None)
+            _state["captcha_reset"].pop(submit_key, None)
+        debug.log(f"[CTBC CAPTCHA] Server rejected captcha: {dialog_text}")
+    elif outcome == "seat_conflict":
+        _state["seat_conflict_pending"][submit_key]["dialog_dismissed"] = True
+        debug.log(f"[CTBC SEAT] Selected seats were rejected: {dialog_text}")
+        pending = _state["seat_conflict_pending"][submit_key]
+        if pending.get("page_type") == "seat" and not await _clear_ctbc_selected_seats(
+            tab, config_dict
+        ):
+            debug.log("[CTBC SEAT] Local seat reset failed; reload remains pending")
+        await _reset_ctbc_captcha(tab, refresh_image=False, submit_key=submit_key)
+    else:
+        debug.log(f"[CTBC] Submit blocked after {outcome}: {dialog_text}")
+    return outcome
+
+
+async def _recover_ctbc_captcha_dialog(tab, config_dict):
+    submit_key = _ctbc_tab_state_key(tab)
+    if _state["submit_blocked"].get(submit_key) != "captcha_pending":
+        return False
+    if await _get_ctbc_visible_dialog_text(tab):
+        return True
+    reset_complete = await _reset_ctbc_captcha(
+        tab, refresh_image=True, submit_key=submit_key
+    )
+    if reset_complete and _state["submit_blocked"].get(submit_key) == "captcha_pending":
+        _state["submit_blocked"].pop(submit_key, None)
+        _state["captcha_reset"].pop(submit_key, None)
+    debug = util.create_debug_logger(config_dict)
+    if reset_complete:
+        debug.log("[CTBC CAPTCHA] Dialog disappeared; captcha was reset before retry")
+    else:
+        debug.log("[CTBC CAPTCHA] Captcha refresh outcome is unknown; retry remains blocked")
+    return True
+
+
+async def _recover_ctbc_seat_conflict(tab, config_dict):
+    submit_key = _ctbc_tab_state_key(tab)
+    pending = _state["seat_conflict_pending"].get(submit_key)
+    if not pending:
+        return False
+
+    identity = _ctbc_tab_identity(tab)
+    current_document_id = _state["last_document"].get(identity, "")
+    if current_document_id and current_document_id != pending["source_document_id"]:
+        _state["seat_conflict_pending"].pop(submit_key, None)
+        return False
+
+    if not pending.get("dialog_dismissed", False):
+        if await _get_ctbc_visible_dialog_text(tab):
+            return True
+        pending["dialog_dismissed"] = True
+
+    if pending["reload_dispatched"]:
+        return True
+
+    if await _reload_with_interval(tab, config_dict, "selected seats were taken"):
+        pending["source_document_id"] = _state["last_document"].get(identity, "")
+        pending["reload_dispatched"] = True
+    return True
+
+
+def _ctbc_submit_dispatched_at(value):
+    if isinstance(value, dict):
+        value = value.get("dispatched_at")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
+    failure = _state["auth_failure"].get(submit_key)
+    if not failure:
+        return False
+    if not isinstance(failure, dict):
+        if failure == login_fingerprint:
+            return True
+        _state["auth_failure"].pop(submit_key, None)
+        return False
+
+    failed_fingerprint = str(failure.get("fingerprint") or "")
+    if failed_fingerprint:
+        if failed_fingerprint == login_fingerprint:
+            return True
+        _state["auth_failure"].pop(submit_key, None)
+        return False
+
+    identity = _ctbc_tab_identity(tab)
+    current_document_id = _state["last_document"].get(identity, "")
+    source_document_id = str(failure.get("source_document_id") or "")
+    if current_document_id and current_document_id != source_document_id:
+        _state["auth_failure"].pop(submit_key, None)
+        return False
+    return True
 
 
 def _normalize_ctbc_captcha_answer(answer):
@@ -2711,20 +2936,41 @@ async def _ctbc_captcha(tab, config_dict, ocr):
 
 async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
     debug = util.create_debug_logger(config_dict)
+    current_url = str(tab.target.url)
+    submit_key = _ctbc_tab_state_key(tab)
+
+    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
+    if dialog_outcome is not None:
+        return dialog_outcome == "success"
+    if await _recover_ctbc_captcha_dialog(tab, config_dict):
+        return False
+    if (
+        submit_key in _state["submit_blocked"]
+        or submit_key in _state["seat_conflict_pending"]
+    ):
+        return False
+
+    submitted = _state["submitted"]
+    dispatched_at = _ctbc_submit_dispatched_at(submitted.get(submit_key))
+    if submit_key in submitted:
+        if (
+            not dispatched_at
+            or time.monotonic() - dispatched_at >= CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS
+        ):
+            submitted.pop(submit_key, None)
+            _state["submit_blocked"][submit_key] = "unknown"
+            debug.log("[CTBC] Submit outcome is unknown; automatic resubmit is blocked")
+        return False
+
     login_ready = await _fill_ctbc_inline_login(tab, config_dict)
     if not login_ready:
         debug.log("[CTBC LOGIN] Waiting for login or CTBC account settings")
         return False
 
-    current_url = str(tab.target.url)
-    submit_key = _ctbc_tab_state_key(tab)
     login_fingerprint = await _ctbc_login_fingerprint(tab)
-    failed_fingerprint = _state["auth_failure"].get(submit_key)
-    if failed_fingerprint and failed_fingerprint == login_fingerprint:
+    if _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
         debug.log("[CTBC LOGIN] Previous authentication failure; waiting for credentials to change")
         return False
-    if failed_fingerprint and failed_fingerprint != login_fingerprint:
-        _state["auth_failure"].pop(submit_key, None)
 
     captcha_value = await tab.evaluate('''
         (() => {
@@ -2747,48 +2993,57 @@ async def _ctbc_captcha_and_submit(tab, config_dict, ocr):
     if not ocr_config.get("enable", False) or not ocr_config.get("force_submit", False):
         return True
 
-    submitted = _state["submitted"]
-    submitted_at = submitted.get(submit_key)
-    if submitted_at and time.monotonic() - submitted_at < 10.0:
+    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
+    if dialog_outcome is not None:
+        return dialog_outcome == "success"
+    if (
+        submit_key in _state["submit_blocked"]
+        or submit_key in _state["seat_conflict_pending"]
+    ):
         return False
 
     button = await tab.query_selector('button#addcart')
     if not button:
         return False
-    await button.click()
-    submitted[submit_key] = time.monotonic()
+    dispatched_at = time.monotonic()
+    submitted[submit_key] = {
+        "dispatched_at": dispatched_at,
+        "phase": "dispatching",
+    }
+    try:
+        await button.click()
+    except Exception as exc:
+        submitted.pop(submit_key, None)
+        _state["submit_blocked"][submit_key] = "unknown"
+        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
+        return False
+    submitted[submit_key] = {
+        "dispatched_at": dispatched_at,
+        "phase": "awaiting_result",
+    }
     debug.log("[CTBC] Add-to-cart submitted")
 
     await tab.sleep(1.0)
     if str(tab.target.url) != current_url:
+        submitted.pop(submit_key, None)
         return True
 
-    dialog_raw = await tab.evaluate('''
-        (() => {
-            const dialog = document.querySelector('#dialog-message');
-            if (!dialog) return '';
-            const style = getComputedStyle(dialog);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden' && dialog.offsetParent !== null;
-            return visible ? dialog.textContent.trim() : '';
-        })()
-    ''')
-    dialog_text = dialog_raw if isinstance(dialog_raw, str) else ""
-    is_auth_error = _is_ctbc_auth_error(dialog_text)
-    if is_auth_error:
-        _state["auth_failure"][submit_key] = login_fingerprint
-        submitted.pop(submit_key, None)
-        debug.log("[CTBC LOGIN] Authentication rejected; automatic retry is blocked")
-    elif "驗證碼" in dialog_text and any(marker in dialog_text for marker in ("錯誤", "失敗", "不正確")):
-        submitted.pop(submit_key, None)
-    elif dialog_text and "加入購物車" not in dialog_text:
-        debug.log(f"[CTBC] Submit rejected: {dialog_text}")
-    return "加入購物車" in dialog_text
+    return await _handle_ctbc_submit_dialog(tab, config_dict) == "success"
 
 
 async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
         return False
-    if await _ctbc_check_captcha_error(tab, config_dict) == "auth":
+
+    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
+    submit_key = _ctbc_tab_state_key(tab)
+    if await _recover_ctbc_captcha_dialog(tab, config_dict):
+        return False
+    if submit_key in _state["submit_blocked"]:
+        return False
+    if await _recover_ctbc_seat_conflict(tab, config_dict):
+        return False
+    if dialog_outcome is not None:
         return False
 
     selected_titles = await _get_ctbc_selected_seat_titles(tab)
@@ -2816,7 +3071,15 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
     debug = util.create_debug_logger(config_dict)
     if not await _ctbc_attest_fast_destination(tab, "general_admission", config_dict):
         return False
-    if await _ctbc_check_captcha_error(tab, config_dict) == "auth":
+    dialog_outcome = await _handle_ctbc_submit_dialog(tab, config_dict)
+    submit_key = _ctbc_tab_state_key(tab)
+    if await _recover_ctbc_captcha_dialog(tab, config_dict):
+        return False
+    if submit_key in _state["submit_blocked"]:
+        return False
+    if await _recover_ctbc_seat_conflict(tab, config_dict):
+        return False
+    if dialog_outcome is not None:
         return False
 
     current_url = str(tab.target.url).lower()

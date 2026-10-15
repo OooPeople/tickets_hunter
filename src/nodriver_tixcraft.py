@@ -18,12 +18,31 @@ import warnings
 import webbrowser
 from datetime import datetime
 
-# 強制使用 UTF-8 編碼輸出（解決 Windows CP950 編碼問題）
-# 適用於所有輸出環境（終端、IDE、重定向、管道）
-if sys.platform == 'win32':
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+def _configure_windows_utf8_output():
+    """Configure CLI streams without replacing caller-owned wrappers."""
+    if sys.platform != "win32":
+        return
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(
+                encoding="utf-8",
+                errors="replace",
+                line_buffering=True,
+            )
+        except (AttributeError, TypeError, ValueError, OSError):
+            # Embedded and redirected environments may not own a configurable
+            # text stream. Keep their existing stream rather than its buffer.
+            continue
+
+
+# Configure output before third-party imports only when this file is the real
+# CLI entrypoint. Importers such as IDEs and test runners retain stream ownership.
+if __name__ == "__main__":
+    _configure_windows_utf8_output()
 
 import zendriver as uc
 from zendriver import cdp

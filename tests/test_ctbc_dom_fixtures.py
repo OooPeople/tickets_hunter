@@ -1,6 +1,9 @@
 import asyncio
 import os
 import tempfile
+import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -9,9 +12,12 @@ import zendriver as uc
 
 from tests.ctbc_support import config
 
-from platforms.ctbc import (
+from platforms.utiki.workflow import (
     _classify_ctbc_submit_dialog,
+    _ctbc_commit_fast_navigation,
+    _ctbc_delete_fast_navigation_marker,
     _ctbc_general_quantity_audit_is_valid,
+    _ctbc_read_fast_navigation_marker,
     _dismiss_ctbc_dialog,
     _get_ctbc_visible_dialog_text,
     _state,
@@ -59,6 +65,7 @@ async def _run_browser_fixtures():
             _assert_seat_fixture,
             _assert_quantity_fixture,
             _assert_dialog_fixture,
+            _assert_fast_marker_fixture,
         ):
             await assertion(browser)
             _clear_ctbc_test_state()
@@ -110,7 +117,19 @@ async def _assert_area_fixture(browser):
     )
     cfg = config(area_keyword='"109區前排"')
 
-    assert await nodriver_ctbc_area_auto_select(tab, cfg)
+    fixture_pending = {
+        "kind": "NATIVE",
+        "phase": "PREPARED",
+        "nonce": "f" * 32,
+        "source_url": str(tab.target.url),
+        "area_url": str(tab.target.url),
+        "created_at": 0.0,
+    }
+    with patch(
+        "platforms.utiki.workflow._ctbc_new_pending_navigation",
+        return_value=fixture_pending,
+    ):
+        assert await nodriver_ctbc_area_auto_select(tab, cfg)
     assert await tab.evaluate("document.body.dataset.selectedArea || ''") == "PRICE_FRONT"
     assert await tab.evaluate("Number(document.body.dataset.areaClicks || 0)") == 1
 
@@ -138,7 +157,10 @@ async def _assert_quantity_fixture(browser):
     tab = await _open_fixture(
         browser,
         "UTK0203_quantity.html",
-        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+        (
+            "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        ),
     )
     cfg = config()
     events = []
@@ -154,14 +176,17 @@ async def _assert_quantity_fixture(browser):
     submit_gate = AsyncMock(side_effect=submit_effect)
     attestation = AsyncMock(return_value=True)
     with patch(
-        "platforms.ctbc._ctbc_general_quantity_audit_is_valid",
+        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
         side_effect=audit_spy,
     ) as audit, patch(
-        "platforms.ctbc._ctbc_captcha_and_submit",
+        "platforms.utiki.workflow._ctbc_captcha_and_submit",
         submit_gate,
     ), patch(
-        "platforms.ctbc._ctbc_attest_fast_destination",
+        "platforms.utiki.workflow._ctbc_attest_fast_destination",
         attestation,
+    ), patch(
+        "platforms.utiki.workflow._ctbc_purchase_state_key",
+        return_value=("fixture-purchase",),
     ):
         assert await nodriver_ctbc_general_admission_main(tab, cfg, ocr=None)
 
@@ -175,21 +200,27 @@ async def _assert_quantity_fixture(browser):
     race_tab = await _open_fixture(
         browser,
         "UTK0203_quantity.html",
-        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE&RACE=1",
+        (
+            "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&RACE=1"
+        ),
     )
     await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
     race_cfg = config()
     race_gate = AsyncMock(return_value=True)
     race_attestation = AsyncMock(return_value=True)
     with patch(
-        "platforms.ctbc._ctbc_general_quantity_audit_is_valid",
+        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
         wraps=_ctbc_general_quantity_audit_is_valid,
     ) as race_audit, patch(
-        "platforms.ctbc._ctbc_captcha_and_submit",
+        "platforms.utiki.workflow._ctbc_captcha_and_submit",
         race_gate,
     ), patch(
-        "platforms.ctbc._ctbc_attest_fast_destination",
+        "platforms.utiki.workflow._ctbc_attest_fast_destination",
         race_attestation,
+    ), patch(
+        "platforms.utiki.workflow._ctbc_purchase_state_key",
+        return_value=("fixture-race-purchase",),
     ):
         assert not await nodriver_ctbc_general_admission_main(
             race_tab, race_cfg, ocr=None
@@ -224,3 +255,63 @@ async def _assert_dialog_fixture(browser):
     assert await tab.evaluate(
         "Number(document.body.dataset.dialogClicks || 0)"
     ) == 1
+
+
+async def _assert_fast_marker_fixture(browser):
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
+
+    handler = partial(QuietHandler, directory=str(FIXTURE_ROOT))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        source_url = f"{base_url}/UTK0201_date.html?PRODUCT_ID=PRODUCT_FIXTURE"
+        destination_url = (
+            f"{base_url}/UTK0205_seat.html?PERFORMANCE_ID=P16D0B8Z&"
+            "GROUP_ID=GROUP_FRONT&PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        tab = await browser.get(source_url)
+        for _ in range(50):
+            if await tab.evaluate("document.readyState === 'complete'"):
+                break
+            await tab.sleep(0.02)
+
+        nonce = "a" * 32
+        pending = {
+            "source_url": source_url,
+            "destination_url": destination_url,
+            "nonce": nonce,
+        }
+        try:
+            await _ctbc_commit_fast_navigation(
+                tab, pending, "selectFixtureDate('DATE_FRONT')"
+            )
+        except Exception:
+            # A real navigation may destroy the source execution context before
+            # DevTools returns even though the marker and navigation committed.
+            pass
+
+        for _ in range(100):
+            if str(tab.target.url) == destination_url:
+                marker_state = await _ctbc_read_fast_navigation_marker(tab)
+                if marker_state.get("present"):
+                    break
+            await tab.sleep(0.02)
+        else:
+            raise AssertionError("fast marker fixture did not reach destination")
+
+        marker = marker_state["marker"]
+        assert marker["nonce"] == nonce
+        assert marker["source"] == source_url
+        assert marker["destination"] == destination_url
+        assert not await _ctbc_delete_fast_navigation_marker(tab, "b" * 32)
+        assert (await _ctbc_read_fast_navigation_marker(tab))["marker"] == marker
+        assert await _ctbc_delete_fast_navigation_marker(tab, nonce)
+        assert not (await _ctbc_read_fast_navigation_marker(tab))["present"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

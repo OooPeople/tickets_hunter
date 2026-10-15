@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -155,6 +156,15 @@ URL_CHROME_DRIVER = 'https://chromedriver.chromium.org/'
 URL_FIREFOX_DRIVER = 'https://github.com/mozilla/geckodriver/releases'
 URL_EDGE_DRIVER = 'https://developer.microsoft.com/zh-tw/microsoft-edge/tools/webdriver/'
 
+UTIKI_BEHAVIOR_KEYS = ("ticket_type_keyword", "seat_sorting")
+UTIKI_SEAT_SORTINGS = (
+    "display",
+    "row_seat",
+    "row_asc_aisle",
+    "row_asc_seat_desc",
+    "row_desc_seat_asc",
+)
+
 
 def get_default_config():
     config_dict={}
@@ -190,9 +200,13 @@ def get_default_config():
     config_dict["kktix"]["auto_fill_ticket_number"] = True
     config_dict["kktix"]["max_dwell_time"] = 90
 
-    config_dict['ctbc']={}
-    config_dict["ctbc"]["ticket_type_keyword"] = "全票"
-    config_dict["ctbc"]["seat_sorting"] = "row_seat"
+    config_dict['utiki']={}
+    config_dict["utiki"]["ticket_type_keyword"] = "全票"
+    config_dict["utiki"]["seat_sorting"] = "row_seat"
+
+    # Keep a non-sensitive compatibility mirror while older releases still
+    # read the CTBC-specific section.
+    config_dict['ctbc'] = dict(config_dict["utiki"])
 
     config_dict['cityline']={}
 
@@ -334,6 +348,18 @@ def migrate_config(config_dict):
     if config_dict is None:
         return config_dict
 
+    # uTiki family behavior is canonical. Copy legacy values only when each
+    # canonical key is absent; an explicit empty value must remain authoritative.
+    legacy_utiki = config_dict.get("ctbc")
+    canonical_utiki = config_dict.get("utiki")
+    if not isinstance(canonical_utiki, dict):
+        canonical_utiki = {}
+    if isinstance(legacy_utiki, dict):
+        for key in UTIKI_BEHAVIOR_KEYS:
+            if key not in canonical_utiki and key in legacy_utiki:
+                canonical_utiki[key] = legacy_utiki[key]
+    config_dict["utiki"] = canonical_utiki
+
     # Migrate ocr_model_path from advanced to ocr_captcha.path
     if "advanced" in config_dict and "ocr_model_path" in config_dict["advanced"]:
         if "ocr_captcha" not in config_dict:
@@ -366,7 +392,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "ctbc", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
+    for section in ["advanced", "kktix", "tixcraft", "utiki", "ctbc", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -375,14 +401,12 @@ def migrate_config(config_dict):
                     if key not in config_dict[section]:
                         config_dict[section][key] = value
 
-    if config_dict["ctbc"].get("seat_sorting") not in (
-        "display",
-        "row_seat",
-        "row_asc_aisle",
-        "row_asc_seat_desc",
-        "row_desc_seat_asc",
-    ):
-        config_dict["ctbc"]["seat_sorting"] = default["ctbc"]["seat_sorting"]
+    if config_dict["utiki"].get("seat_sorting") not in UTIKI_SEAT_SORTINGS:
+        config_dict["utiki"]["seat_sorting"] = default["utiki"]["seat_sorting"]
+
+    # Mirror only the compatibility allowlist; credentials stay in accounts.
+    for key in UTIKI_BEHAVIOR_KEYS:
+        config_dict["ctbc"][key] = config_dict["utiki"][key]
 
     # Top-level scalar fields (auto-fill any missing non-section keys)
     dict_sections = {k for k, v in default.items() if isinstance(v, dict)}
@@ -412,16 +436,40 @@ def load_json(profile_name=""):
 
     return config_filepath, config_dict
 
+
+def save_profile_config(config_dict, target_path):
+    """Atomically replace one complete profile configuration."""
+    target_path = os.path.abspath(target_path)
+    target_dir = os.path.dirname(target_path)
+    os.makedirs(target_dir, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target_dir,
+            prefix=".profile_settings_",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = temp_file.name
+            json.dump(config_dict, temp_file, ensure_ascii=False, indent=4)
+            temp_file.write("\n")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, target_path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 def reset_json():
     app_root = util.get_app_root()
     config_filepath = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
-    if os.path.exists(str(config_filepath)):
-        try:
-            os.unlink(str(config_filepath))
-        except Exception as exc:
-            print(exc)
-            pass
-
     config_dict = get_default_config()
     return config_filepath, config_dict
 
@@ -752,7 +800,12 @@ class ResetJsonHandler(tornado.web.RequestHandler):
             self.write({"error": "reset only supports the default profile"})
             return
         config_filepath, config_dict = reset_json()
-        util.save_json(config_dict, config_filepath)
+        try:
+            save_profile_config(config_dict, config_filepath)
+        except OSError:
+            self.set_status(500)
+            self.write({"error": "failed to save profile settings"})
+            return
         self.write(config_dict)
 
 class SaveJsonHandler(tornado.web.RequestHandler):
@@ -781,7 +834,7 @@ class SaveJsonHandler(tornado.web.RequestHandler):
         if is_pass_check:
             config_filepath = get_profile_filepath(profile_name)
             os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
-            config_dict = _body
+            config_dict = migrate_config(_body)
 
             if config_dict["kktix"]["max_dwell_time"] > 0:
                 if config_dict["kktix"]["max_dwell_time"] < 15:
@@ -797,7 +850,16 @@ class SaveJsonHandler(tornado.web.RequestHandler):
             if ".cityline.com" in config_dict["homepage"]:
                 config_dict["webdriver_type"] = CONST_WEBDRIVER_TYPE_NODRIVER
 
-            util.save_json(config_dict, config_filepath)
+            try:
+                save_profile_config(config_dict, config_filepath)
+            except OSError:
+                self.set_status(500)
+                self.write(dict(error=dict(
+                    message="failed to save profile settings", code=1004
+                )))
+                return
+
+            self.write(config_dict)
 
         if not is_pass_check:
             self.set_status(401)
@@ -849,8 +911,12 @@ class ProfilesHandler(tornado.web.RequestHandler):
             _, config_dict = load_json()
         config_dict = migrate_config(config_dict)
 
-        os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
-        util.save_json(config_dict, config_filepath)
+        try:
+            save_profile_config(config_dict, config_filepath)
+        except OSError:
+            self.set_status(500)
+            self.write({"success": False, "error": "failed to save profile settings"})
+            return
         self.write({"success": True, "profile": profile_name})
 
     def delete(self):

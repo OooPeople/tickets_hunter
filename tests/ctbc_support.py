@@ -1,6 +1,8 @@
 import sys
 import types
 import json
+import re
+import time
 from pathlib import Path
 
 
@@ -52,10 +54,12 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
         "area_keyword": area_keyword,
         "mode": "from top to bottom",
     })
-    config_dict["ctbc"].update({
+    utiki_behavior = {
         "ticket_type_keyword": "全票",
         "seat_sorting": "row_seat",
-    })
+    }
+    config_dict["utiki"].update(utiki_behavior)
+    config_dict["ctbc"].update(utiki_behavior)
     config_dict["ocr_captcha"].update({
         "enable": False,
         "force_submit": False,
@@ -268,8 +272,36 @@ class FakeElement:
         self.click_count += 1
 
 
+def _script_json_constant(script, name):
+    match = re.search(rf"const {re.escape(name)} = (.+?);", script)
+    return json.loads(match.group(1)) if match else None
+
+
 class FakeTab:
-    def __init__(self, selector, elements, map_area=None, url="", evaluate_results=None):
+    def __init__(
+        self,
+        selector,
+        elements,
+        map_area=None,
+        url="",
+        evaluate_results=None,
+        *,
+        semantic_navigation=False,
+        fast_commit_outcome="dispatched",
+        native_commit_outcome=True,
+        native_clears_marker=True,
+        native_destination="",
+        marker=None,
+        marker_raw=None,
+        marker_delete_allowed=True,
+        storage_available=True,
+        dom_ids=None,
+        on_fast_commit=None,
+        on_marker_read=None,
+        on_destination_state=None,
+        on_native_commit=None,
+        on_raw_marker_delete=None,
+    ):
         self.selector = selector
         self.elements = elements
         self.map_area = map_area
@@ -279,6 +311,32 @@ class FakeTab:
         self.evaluate_count = 0
         self.last_selector = None
         self.reloaded = False
+        self.semantic_navigation = semantic_navigation
+        self.fast_commit_outcome = fast_commit_outcome
+        self.native_commit_outcome = native_commit_outcome
+        self.native_clears_marker = native_clears_marker
+        self.native_destination = native_destination
+        self.session_marker = marker
+        self.session_marker_raw = marker_raw
+        self.marker_delete_allowed = marker_delete_allowed
+        self.storage_available = storage_available
+        self.dom_ids = dom_ids or {}
+        self.on_fast_commit = on_fast_commit
+        self.on_marker_read = on_marker_read
+        self.on_destination_state = on_destination_state
+        self.on_native_commit = on_native_commit
+        self.on_raw_marker_delete = on_raw_marker_delete
+
+    def _marker_raw(self):
+        if self.session_marker_raw is not None:
+            return self.session_marker_raw
+        if self.session_marker is not None:
+            return json.dumps(self.session_marker, separators=(",", ":"))
+        return None
+
+    def _clear_marker(self):
+        self.session_marker = None
+        self.session_marker_raw = None
 
     async def query_selector_all(self, selector):
         self.last_selector = selector
@@ -289,18 +347,117 @@ class FakeTab:
             return self.map_area
         return None
 
-    async def evaluate(self, _script, **_kwargs):
-        self.evaluate_scripts.append(_script)
+    async def evaluate(self, script, **_kwargs):
+        self.evaluate_scripts.append(script)
+        if self.semantic_navigation or "CtbcFastMarker" in script or (
+            "CtbcMalformedMarker" in script
+        ):
+            result = await self._evaluate_navigation(script)
+            if result is not NotImplemented:
+                return result
         self.evaluate_count += 1
         return self.evaluate_results.pop(0) if self.evaluate_results else None
+
+    async def _evaluate_navigation(self, script):
+        if "__ticketsHunterCtbcFastCommit" in script:
+            if self.on_fast_commit:
+                self.on_fast_commit()
+            if not self.storage_available or self.fast_commit_outcome == "rejected":
+                return "rejected"
+            if self.fast_commit_outcome == "pending" or (
+                isinstance(self.session_marker, dict)
+                and self.session_marker.get("expires_at", 0) > time.time() * 1000
+            ):
+                return "pending"
+            self.session_marker = {
+                "version": 1,
+                "nonce": _script_json_constant(script, "navigationNonce"),
+                "source": _script_json_constant(script, "sourceUrl"),
+                "destination": _script_json_constant(script, "destinationUrl"),
+                "expires_at": time.time() * 1000 + 15000,
+            }
+            self.session_marker_raw = None
+            self.target.url = self.session_marker["destination"]
+            if self.fast_commit_outcome == "throw_after_dispatch":
+                raise RuntimeError("execution context destroyed")
+            return "dispatched"
+        if "__ticketsHunterCtbcFastMarkerRead" in script:
+            if self.on_marker_read:
+                self.on_marker_read()
+            if not self.storage_available:
+                return json.dumps({
+                    "available": False,
+                    "present": False,
+                    "marker": None,
+                    "page_url": self.target.url,
+                })
+            raw = self._marker_raw()
+            marker = None
+            if raw is not None:
+                try:
+                    marker = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    marker = None
+            return json.dumps({
+                "available": True,
+                "present": raw is not None,
+                "marker": marker,
+                "raw": raw,
+                "page_url": self.target.url,
+            })
+        if "__ticketsHunterCtbcFastMarkerDelete" in script:
+            if not self.storage_available or not self.marker_delete_allowed:
+                return False
+            nonce = _script_json_constant(script, "expectedNonce")
+            raw = self._marker_raw()
+            if raw is None:
+                return True
+            try:
+                marker = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
+            if isinstance(marker, dict) and marker.get("nonce") == nonce:
+                self._clear_marker()
+                return True
+            return False
+        if "__ticketsHunterCtbcMalformedMarkerDelete" in script:
+            expected_raw = _script_json_constant(script, "expectedRaw")
+            if self.on_raw_marker_delete:
+                self.on_raw_marker_delete()
+            if self._marker_raw() != expected_raw:
+                return False
+            self._clear_marker()
+            return True
+        if "__ticketsHunterCtbcDestinationState" in script:
+            result = {
+                "ready": True, "page_url": self.target.url, **self.dom_ids,
+            }
+            if self.on_destination_state:
+                self.on_destination_state()
+            return json.dumps(result)
+        if "__ticketsHunterCtbcReturn" in script:
+            source_url = _script_json_constant(script, "sourceUrl")
+            if self.target.url != source_url:
+                return False
+            self.target.url = _script_json_constant(script, "areaUrl")
+            return True
+        if "__ticketsHunterCtbcNativeAreaCommit" in script:
+            if self.on_native_commit:
+                self.on_native_commit()
+            if self.native_clears_marker:
+                self._clear_marker()
+            if self.native_destination:
+                self.target.url = self.native_destination
+            if self.native_commit_outcome == "throw_after_dispatch":
+                raise RuntimeError("execution context destroyed")
+            return self.native_commit_outcome
+        return NotImplemented
 
     async def sleep(self, _seconds):
         return None
 
     async def reload(self):
         self.reloaded = True
-
-
 class FakeSubmitTab:
     def __init__(
         self,
@@ -308,7 +465,10 @@ class FakeSubmitTab:
         dialog="",
         *,
         dialogs=None,
-        url="https://tix.ctbcsports.com/BROTHERS/UTK0205_?P=1",
+        url=(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        ),
     ):
         self.target = types.SimpleNamespace(url=url)
         self.captcha = captcha

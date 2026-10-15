@@ -70,7 +70,16 @@ from platforms.kktix import *
 from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
-from platforms.ctbc import *
+from platforms.utiki import (
+    is_utk_sports_url,
+    nodriver_ctbc_inject_cookies,
+    nodriver_utiki_main,
+    nodriver_utk_sports_cancel_refresh,
+    nodriver_utk_sports_consume_reload_event,
+    nodriver_utk_sports_health_check,
+    nodriver_utk_sports_reload,
+    nodriver_utk_sports_reload_wait,
+)
 from platforms.hkticketing import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
@@ -88,6 +97,15 @@ warnings.simplefilter('ignore',InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
 logging.basicConfig()
 logger = logging.getLogger('logger')
+
+
+def _should_inject_ctbc_cookies(homepage):
+    """Limit CTBC account cookies to the exact configured CTBC origin."""
+    try:
+        host = (urllib.parse.urlsplit(str(homepage or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "tix.ctbcsports.com" and is_utk_sports_url(homepage)
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -357,7 +375,7 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
-    if is_utk_sports_url(homepage) and 'tix.ctbcsports.com' in homepage.lower():
+    if _should_inject_ctbc_cookies(homepage):
         if await nodriver_ctbc_inject_cookies(tab, config_dict):
             try:
                 reloaded = await nodriver_utk_sports_reload_wait(
@@ -714,12 +732,12 @@ async def reload_config(config_dict, last_mtime, config_filepath):
         if current_mtime > last_mtime:
             await asyncio.sleep(0.1)
             with open(config_filepath, 'r', encoding='utf-8') as json_data:
-                new_config = json.load(json_data)
+                new_config = settings.migrate_config(json.load(json_data))
 
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
-                    "ocr_captcha", "tixcraft", "kktix", "ctbc", "cityline",
+                    "ocr_captcha", "tixcraft", "kktix", "utiki", "ctbc", "cityline",
                     "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:
@@ -1211,7 +1229,7 @@ async def main(args):
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
 
         if is_utk_sports_url(url):
-            tab = await nodriver_ctbc_main(tab, url, config_dict, ocr)
+            tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
 
         kham_family = False
         if 'kham.com.tw' in url:

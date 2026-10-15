@@ -1,5 +1,8 @@
+import subprocess
+import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.ctbc_support import (
@@ -8,8 +11,21 @@ from tests.ctbc_support import (
     make_ctbc_area_snapshot,
 )
 
+import platforms.ctbc as legacy_ctbc
+import platforms.utiki as utiki
+from platforms.utiki import workflow
+from platforms.utiki.auth import (
+    cookie_domain_is_in_scope,
+    get_tenant_auth_profile,
+)
+from platforms.utiki.profiles import (
+    PageKind,
+    classify_utiki_page,
+    get_utiki_tenant_profile,
+    is_utiki_sports_url,
+)
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
-from platforms.ctbc import (
+from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
     _choose_candidate_index,
     _classify_ctbc_date_action,
@@ -19,6 +35,7 @@ from platforms.ctbc import (
     _ctbc_general_quantity_audit_is_valid,
     _ctbc_seat_audit_is_valid,
     _get_ctbc_page_type,
+    _get_utiki_behavior,
     _normalize_ctbc_captcha_answer,
     _parse_ctbc_date_target,
     _parse_ctbc_map_send,
@@ -35,15 +52,43 @@ from settings import get_default_config, migrate_config
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
+    def test_legacy_facade_shares_the_canonical_workflow(self):
+        for name in legacy_ctbc.__all__:
+            with self.subTest(name=name):
+                self.assertIs(getattr(legacy_ctbc, name), getattr(workflow, name))
+        self.assertIs(utiki.nodriver_utiki_main, workflow.nodriver_ctbc_main)
+        self.assertFalse(hasattr(legacy_ctbc, "_state"))
+
+    def test_legacy_and_canonical_import_orders_do_not_cycle(self):
+        source_root = str(Path(__file__).resolve().parents[1] / "src")
+        orders = (
+            "import platforms.ctbc; import platforms.utiki",
+            "import platforms.utiki; import platforms.ctbc",
+        )
+        for imports in orders:
+            script = (
+                f"import sys; sys.path.insert(0, {source_root!r}); "
+                f"{imports}; import nodriver_tixcraft"
+            )
+            with self.subTest(imports=imports):
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
     def test_seat_sorting_setting_defaults_and_migrates_to_number_order(self):
         default = get_default_config()
+        self.assertEqual("row_seat", default["utiki"]["seat_sorting"])
         self.assertEqual("row_seat", default["ctbc"]["seat_sorting"])
 
         old_config = {"ctbc": {"ticket_type_keyword": "全票"}}
         migrated = migrate_config(old_config)
         self.assertEqual("row_seat", migrated["ctbc"]["seat_sorting"])
 
-        migrated["ctbc"]["seat_sorting"] = "unsupported"
+        migrated["utiki"]["seat_sorting"] = "unsupported"
         self.assertEqual("row_seat", migrate_config(migrated)["ctbc"]["seat_sorting"])
 
         for seat_sorting in (
@@ -55,6 +100,18 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 seat_sorting,
                 migrate_config(configured)["ctbc"]["seat_sorting"],
             )
+
+    def test_utiki_behavior_accessor_prefers_canonical_by_key(self):
+        configured = {
+            "utiki": {"ticket_type_keyword": ""},
+            "ctbc": {"ticket_type_keyword": "舊票種", "seat_sorting": "display"},
+        }
+        self.assertEqual(
+            "", _get_utiki_behavior(configured, "ticket_type_keyword", "全票")
+        )
+        self.assertEqual(
+            "display", _get_utiki_behavior(configured, "seat_sorting", "row_seat")
+        )
 
     def test_config_builder_returns_fresh_complete_configs(self):
         first = config()
@@ -124,11 +181,40 @@ class CtbcPureSelectionTest(unittest.TestCase):
             parse_ctbc_cookie_string(raw),
         )
 
+    def test_tenant_auth_capabilities_keep_ctbc_credentials_scoped(self):
+        ctbc = get_tenant_auth_profile(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1"
+        )
+        dragons = get_tenant_auth_profile(
+            "https://tix.wdragons.com/UTK0205_?PERFORMANCE_ID=P1"
+        )
+
+        self.assertTrue(ctbc.supports_cookie_login)
+        self.assertTrue(ctbc.supports_inline_login)
+        self.assertEqual("ctbc_account", ctbc.account_key)
+        self.assertEqual("ctbc_password", ctbc.password_key)
+        self.assertTrue(cookie_domain_is_in_scope(ctbc, ".ctbcsports.com"))
+        self.assertTrue(cookie_domain_is_in_scope(ctbc, "login.ctbcsports.com"))
+        self.assertFalse(cookie_domain_is_in_scope(ctbc, "evilctbcsports.com"))
+        self.assertFalse(cookie_domain_is_in_scope(ctbc, "ctbcsports.com.evil.test"))
+
+        self.assertFalse(dragons.supports_cookie_login)
+        self.assertFalse(dragons.supports_inline_login)
+        self.assertEqual("", dragons.account_key)
+        self.assertEqual("", dragons.password_key)
+
     def test_page_routing(self):
         base = "https://tix.ctbcsports.com/BROTHERS/"
         self.assertEqual("date", _get_ctbc_page_type(base + "UTK0201_?PRODUCT_ID=P1"))
+        self.assertEqual(
+            "date",
+            _get_ctbc_page_type(
+                base + "UTK0201_?PRODUCT_ID=P1&STARTDATE=2026/09/18"
+            ),
+        )
         self.assertEqual("area", _get_ctbc_page_type(base + "UTK0204_?PERFORMANCE_ID=P1"))
         self.assertEqual("seat", _get_ctbc_page_type(base + "UTK0205_?PERFORMANCE_ID=P1"))
+        self.assertEqual("general_admission", _get_ctbc_page_type(base + "UTK0202_?PERFORMANCE_ID=P1"))
         self.assertEqual("general_admission", _get_ctbc_page_type(base + "UTK0203_?PERFORMANCE_ID=P1"))
         self.assertEqual("checkout", _get_ctbc_page_type(base + "UTK0206_"))
         self.assertIsNone(_get_ctbc_page_type("https://ticket.ibon.com.tw/UTK0201_?PRODUCT_ID=P1"))
@@ -138,6 +224,96 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual("date", _get_ctbc_page_type(dragons + "UTK0201_?PRODUCT_ID=P1"))
         self.assertEqual("area", _get_ctbc_page_type(dragons + "UTK0204_?PERFORMANCE_ID=P1"))
         self.assertEqual("seat", _get_ctbc_page_type(dragons + "UTK0205_?PERFORMANCE_ID=P1"))
+        self.assertEqual(
+            "general_admission",
+            _get_ctbc_page_type(dragons + "UTK0203_?PERFORMANCE_ID=P1"),
+        )
+        self.assertEqual("checkout", _get_ctbc_page_type(dragons + "UTK0206_"))
+
+    def test_family_profiles_and_page_kind_contract(self):
+        ctbc_root = "https://tix.ctbcsports.com/BROTHERS/"
+        dragons_root = "https://tix.wdragons.com/"
+        cases = (
+            (ctbc_root + "UTK0201_?PRODUCT_ID=P1", PageKind.DATE),
+            (ctbc_root + "UTK0204_?PERFORMANCE_ID=P1", PageKind.AREA),
+            (ctbc_root + "UTK0205_?PERFORMANCE_ID=P1", PageKind.RESERVED_SEAT),
+            (ctbc_root + "UTK0202_?PERFORMANCE_ID=P1", PageKind.GENERAL_ADMISSION),
+            (ctbc_root + "UTK0206_", PageKind.CHECKOUT),
+            (dragons_root + "UTK0201_?PRODUCT_ID=P1", PageKind.DATE),
+            (dragons_root + "UTK0204_?PERFORMANCE_ID=P1", PageKind.AREA),
+            (dragons_root + "UTK0205_?PERFORMANCE_ID=P1", PageKind.RESERVED_SEAT),
+            (dragons_root + "UTK0203_?PERFORMANCE_ID=P1", PageKind.GENERAL_ADMISSION),
+            (dragons_root + "UTK0206_", PageKind.CHECKOUT),
+        )
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertEqual(expected, classify_utiki_page(url))
+                self.assertEqual(expected.value, _get_ctbc_page_type(url))
+
+        ctbc = get_utiki_tenant_profile(ctbc_root)
+        dragons = get_utiki_tenant_profile(dragons_root)
+        self.assertEqual("ctbc_brothers", ctbc.key)
+        self.assertEqual("/BROTHERS", ctbc.tenant_path)
+        self.assertEqual("CTBC_SPORTS", ctbc.map_namespace)
+        self.assertTrue(ctbc.fast_area_prefetch)
+        self.assertFalse(ctbc.supports_server_assignment)
+        self.assertEqual("wei_chuan_dragons", dragons.key)
+        self.assertEqual("", dragons.tenant_path)
+        self.assertEqual("WDRAGONS", dragons.map_namespace)
+        self.assertFalse(dragons.fast_area_prefetch)
+        self.assertFalse(dragons.supports_server_assignment)
+
+    def test_family_membership_is_independent_from_actionable_routes(self):
+        homepage = "https://tix.ctbcsports.com/BROTHERS/"
+        unknown_page = homepage + "account/profile"
+        self.assertTrue(is_utiki_sports_url(homepage))
+        self.assertTrue(is_utiki_sports_url(unknown_page))
+        self.assertEqual(PageKind.UNKNOWN, classify_utiki_page(homepage))
+        self.assertEqual(PageKind.UNKNOWN, classify_utiki_page(unknown_page))
+        self.assertIsNone(_get_ctbc_page_type(unknown_page))
+
+    def test_utk_origin_rejects_insecure_or_ambiguous_authorities(self):
+        valid_urls = (
+            "https://tix.ctbcsports.com/BROTHERS/",
+            "https://tix.ctbcsports.com:443/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1",
+        )
+        rejected_urls = (
+            "http://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://@tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://user@tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://user:pass@tix.wdragons.com/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com:444/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com:notaport/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.wdragons.com:8443/UTK0201_?PRODUCT_ID=P1",
+        )
+        for url in valid_urls:
+            with self.subTest(url=url):
+                self.assertTrue(is_utk_sports_url(url))
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertFalse(is_utk_sports_url(url))
+                self.assertIsNone(_get_ctbc_page_type(url))
+
+    def test_page_routing_rejects_noncanonical_paths_and_query_keys(self):
+        rejected_urls = (
+            "https://tix.ctbcsports.com/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/nested/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_extra?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_/child?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/%42ROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1#fragment",
+            "https://tix.wdragons.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.wdragons.com/nested/UTK0204_?PERFORMANCE_ID=P1",
+            "https://tix.wdragons.com/UTK0205_suffix?PERFORMANCE_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?NEXT=PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?NEXT=PERFORMANCE_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1&PRODUCT_ID=P2",
+            "https://tix.wdragons.com/UTK0203_?PERFORMANCE_ID=P1&PERFORMANCE_ID=P2",
+        )
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertIsNone(_get_ctbc_page_type(url))
 
     def test_keyword_priority_and_strict_no_match(self):
         candidates = [
@@ -231,6 +407,16 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 target,
             ),
         )
+        self.assertIsNone(_build_ctbc_destination_url(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_suffix?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            target,
+        ))
+        self.assertIsNone(_build_ctbc_destination_url(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=OTHER&PRODUCT_ID=P16ANF0L",
+            target,
+        ))
         self.assertIsNone(_parse_ctbc_map_send(href + ";alert(1)", "P16D0B8Z"))
         self.assertIsNone(_parse_ctbc_map_send(href, "OTHER"))
         general = _parse_ctbc_map_send(
@@ -422,12 +608,22 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertTrue(_ctbc_fast_destination_is_valid(expected, "seat", url, ids))
         self.assertFalse(_ctbc_fast_destination_is_valid(expected, "seat", url, dict(ids, group_id="99")))
         self.assertFalse(_ctbc_fast_destination_is_valid(expected, "general_admission", url, ids))
+        self.assertFalse(_ctbc_fast_destination_is_valid(
+            dict(expected, route="9999"),
+            None,
+            url.replace("UTK0205_", "UTK9999_"),
+            ids,
+        ))
 
         general_expected = dict(expected, route="0202", group_id="", price_area_id="P16D12ZY")
         general_url = "https://tix.ctbcsports.com/BROTHERS/UTK0203_?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&PERFORMANCE_PRICE_AREA_ID=P16D12ZY"
         general_ids = dict(ids, group_id="", price_area_id="P16D12ZY")
         self.assertTrue(_ctbc_fast_destination_is_valid(
             general_expected, "general_admission", general_url, general_ids
+        ))
+        general_direct_url = general_url.replace("UTK0203_", "UTK0202_")
+        self.assertTrue(_ctbc_fast_destination_is_valid(
+            general_expected, "general_admission", general_direct_url, general_ids
         ))
 
         dragons_expected = dict(
@@ -449,6 +645,62 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertFalse(_ctbc_fast_destination_is_valid(
             dragons_expected, "seat", url, dragons_ids
         ))
+
+    def test_fast_destination_rejects_noncanonical_origin_route_and_query(self):
+        expected = {
+            "route": "0205", "performance_id": "P16D0B8Z",
+            "product_id": "P16ANF0L", "group_id": "35",
+            "price_area_id": "P16D12YO",
+            "area_url": (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+                "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
+            ),
+        }
+        ids = {
+            "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
+            "group_id": "35", "price_area_id": "P16D12YO",
+        }
+        query = (
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&"
+            "PERFORMANCE_PRICE_AREA_ID=P16D12YO"
+        )
+        rejected_urls = (
+            f"http://tix.ctbcsports.com/BROTHERS/UTK0205_?{query}",
+            f"https://user@tix.ctbcsports.com/BROTHERS/UTK0205_?{query}",
+            f"https://tix.ctbcsports.com:444/BROTHERS/UTK0205_?{query}",
+            f"https://tix.ctbcsports.com/BROTHERS/nested/UTK0205_?{query}",
+            f"https://tix.ctbcsports.com/BROTHERS/UTK0205_suffix?{query}",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "NEXT=PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&"
+            "PERFORMANCE_PRICE_AREA_ID=P16D12YO",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&PERFORMANCE_ID=OTHER&GROUP_ID=35&"
+            "PERFORMANCE_PRICE_AREA_ID=P16D12YO",
+        )
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertFalse(
+                    _ctbc_fast_destination_is_valid(expected, "seat", url, ids)
+                )
+
+        invalid_area_urls = (
+            "https://tix.ctbcsports.com/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            "https://user@tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_suffix?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=OTHER&PRODUCT_ID=P16ANF0L",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L&PRODUCT_ID=OTHER",
+        )
+        valid_url = f"https://tix.ctbcsports.com/BROTHERS/UTK0205_?{query}"
+        for area_url in invalid_area_urls:
+            with self.subTest(area_url=area_url):
+                self.assertFalse(_ctbc_fast_destination_is_valid(
+                    dict(expected, area_url=area_url), "seat", valid_url, ids
+                ))
 
     def test_adjacent_seat_selection_uses_cell_indexes(self):
         seats = [

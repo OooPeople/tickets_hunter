@@ -1,6 +1,6 @@
 **文件說明**：Tickets Hunter 的程式碼邊界規範，定義模組職責、依賴方向、命名慣例與禁止模式。提交 PR 前請先閱讀。
 
-**最後更新**：2026-09-16
+**最後更新**：2026-10-15
 
 ---
 
@@ -14,7 +14,8 @@
 
 - **`nodriver_tixcraft.py`** — 主迴圈與路由：URL 分派、瀏覽器啟動、設定熱重載。平台邏輯已全數拆至 `platforms/`。禁止：通用 DOM 工具（屬 `nodriver_common.py`）、設定 CRUD（屬 `settings.py`）。
 - **`nodriver_common.py`** — 共用瀏覽器基礎設施：DOM 操作、暫停機制、Cloudflare、瀏覽器初始化、OCR 工廠、通知。禁止：平台業務邏輯、import `platforms/*` 或 `nodriver_tixcraft`。
-- **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔（家族平台同檔，如 tixcraft + ticketmaster）。狀態用模組層級 `_state = {}`；平台常數定義在各自模組。禁止：跨平台 import、import `nodriver_tixcraft`。
+- **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔；legacy facade 只可明示轉接到同一家族 package，不得持有狀態或流程邏輯。禁止：跨平台 import、import `nodriver_tixcraft`。
+- **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是瀏覽器副作用與模組 `_state` 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。不得只因網站外觀相似就納入同一家族。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
 - **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
 - **`global_settings.py`** — 跨 profile 的全域設定驗證與原子化檔案存取。僅允許 import `util`。
@@ -25,8 +26,13 @@
 ## 2. 依賴方向（嚴格 DAG）
 
 ```
-nodriver_tixcraft  -->  nodriver_common, platforms/*, util, settings
+nodriver_tixcraft  -->  nodriver_common, platforms/*, platforms/{family}, util, settings
 platforms/*        -->  nodriver_common, global_settings, refresh_coordinator, util
+platforms/{family}/workflow
+                   -->  同 package 葉節點, nodriver_common,
+                        global_settings, refresh_coordinator, util
+platforms/{family}/葉節點
+                   -->  同 package 更底層葉節點, Python 標準函式庫
 nodriver_common    -->  util, settings
 settings           -->  global_settings, util
 global_settings    -->  util
@@ -34,7 +40,8 @@ refresh_coordinator --> util
 util               -->  (無專案內部匯入)
 ```
 
-禁止反向依賴。`platforms/*` 之間禁止互相 import。
+禁止反向依賴。不同平台／家族之間禁止互相 import；legacy facade 只能單向 import
+其 canonical family package。package 內不得 import legacy facade。
 
 ---
 
@@ -64,7 +71,8 @@ util               -->  (無專案內部匯入)
 | 位置 | 建議 | 上限 |
 |------|------|------|
 | `util.py` 工具函式 | <= 30 行 | 50 行 |
-| `platforms/*.py` 平台動作 | <= 50 行 | 100 行 |
+| `platforms/*.py`、family workflow 平台動作 | <= 50 行 | 100 行 |
+| family package 純函式 | <= 30 行 | 50 行 |
 | `nodriver_common.py` 共用工具 | <= 40 行 | 60 行 |
 | `settings.py` 處理器方法 | <= 40 行 | 60 行 |
 
@@ -74,7 +82,8 @@ util               -->  (無專案內部匯入)
 
 ## 5. 平台模組狀態管理
 
-各平台使用模組層級 `_state = {}` dict 管理跨迴圈狀態：
+各平台使用模組層級 `_state = {}` dict 管理跨迴圈狀態。家族 package 只能由
+workflow 模組持有一份 `_state`；facade 與葉節點不得複製：
 
 ```python
 # platforms/xxx.py
@@ -92,6 +101,7 @@ async def nodriver_xxx_main(tab, url, config_dict):
 - `global xxx_dict; if not 'xxx_dict' in globals(): ...`（不可跨模組）
 - 散落的 `global some_bool`（難追蹤、不可測試）
 - 主迴圈預初始化平台 dict（平台自己管理自己的狀態）
+- family workflow、facade 各自建立一份 state 或同時執行 handler
 
 ---
 
@@ -104,6 +114,7 @@ async def nodriver_xxx_main(tab, url, config_dict):
 - `settings.py` 匯入 `nodriver_tixcraft.py`（循環依賴；僅可匯入 `global_settings` 與 `util`）
 - `platforms/*.py` 匯入 `nodriver_tixcraft`（循環依賴）
 - `platforms/*.py` 之間互相匯入（跨平台依賴）
+- family package 匯入自己的 legacy facade，或 profile/auth 葉節點反向匯入 workflow
 - `nodriver_common.py` 匯入 `platforms/*`（反向依賴）
 
 ---

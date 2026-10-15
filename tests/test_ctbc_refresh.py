@@ -12,7 +12,7 @@ from tests.ctbc_support import (
     config,
 )
 
-from platforms.ctbc import (
+from platforms.utiki.workflow import (
     CTBC_DATE_ROW_SELECTOR,
     _classify_utk_document_state,
     _ctbc_tab_identity,
@@ -42,9 +42,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 "max_cooldown_seconds": 240,
             }
         }
-        marker_patch = patch("platforms.ctbc._mark_utk_emergency_window")
+        marker_patch = patch("platforms.utiki.workflow._mark_utk_emergency_window")
         remaining_patch = patch(
-            "platforms.ctbc._utk_emergency_remaining", return_value=0.0
+            "platforms.utiki.workflow._utk_emergency_remaining", return_value=0.0
         )
         marker_patch.start()
         remaining_patch.start()
@@ -149,10 +149,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         )
         identity = _ctbc_tab_identity(tab)
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator), \
-                    patch("platforms.ctbc.nodriver_ctbc_date_auto_select", AsyncMock()) as select:
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator), \
+                    patch("platforms.utiki.workflow.nodriver_ctbc_date_auto_select", AsyncMock()) as select:
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
             select.assert_not_awaited()
@@ -190,9 +190,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         )
         identity = _ctbc_tab_identity(tab)
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
             self.assertTrue(tab.reloaded)
             self.assertEqual(
@@ -224,9 +224,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         coordinator = self.coordinator_for(decision)
         identity = _ctbc_tab_identity(tab)
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 reloaded = await nodriver_utk_sports_reload(
                     tab,
                     config(),
@@ -295,10 +295,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         )
         identity = _ctbc_tab_identity(tab)
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(side_effect=inspect)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(side_effect=inspect)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 self.assertTrue(await nodriver_utk_sports_reload(
                     tab, config(), "ordered reload", apply_local_interval=False
                 ))
@@ -330,15 +330,15 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )
 
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._utk_document_guard", AsyncMock(
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._utk_document_guard", AsyncMock(
                         return_value=("normal", snapshot))), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(
                         return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator",
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator",
                           return_value=coordinator), \
                     patch(
-                "platforms.ctbc.time",
+                "platforms.utiki.workflow.time",
                 types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
             ):
                 self.assertFalse(await reload_once())
@@ -386,10 +386,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         )
         identity = _ctbc_tab_identity(tab)
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "revoked reload", apply_local_interval=False
                 ))
@@ -420,10 +420,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         )
         identity = _ctbc_tab_identity(tab)
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(side_effect=asyncio.CancelledError)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(side_effect=asyncio.CancelledError)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 with self.assertRaises(asyncio.CancelledError):
                     await nodriver_utk_sports_reload(
                         tab, config(), "cancelled preflight", apply_local_interval=False
@@ -452,12 +452,12 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
         inner_reload = AsyncMock(return_value=True)
-        with patch("platforms.ctbc.UTK_RELOAD_WAIT_MAX_SECONDS", 0.0), \
-                patch("platforms.ctbc.time.monotonic", return_value=100.0), \
-                patch("platforms.ctbc.nodriver_utk_sports_reload", inner_reload), \
-                patch("platforms.ctbc.nodriver_utk_sports_cancel_refresh", AsyncMock(return_value=True)) as cancel, \
-                patch("platforms.ctbc.check_and_handle_pause", AsyncMock(return_value=False)), \
-                patch("platforms.ctbc.check_and_handle_quit", AsyncMock(return_value=False)):
+        with patch("platforms.utiki.workflow.UTK_RELOAD_WAIT_MAX_SECONDS", 0.0), \
+                patch("platforms.utiki.workflow.time.monotonic", return_value=100.0), \
+                patch("platforms.utiki.workflow.nodriver_utk_sports_reload", inner_reload), \
+                patch("platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh", AsyncMock(return_value=True)) as cancel, \
+                patch("platforms.utiki.workflow.check_and_handle_pause", AsyncMock(return_value=False)), \
+                patch("platforms.utiki.workflow.check_and_handle_quit", AsyncMock(return_value=False)):
             self.assertFalse(await nodriver_utk_sports_reload_wait(
                 tab, config(), "bounded startup reload"
             ))
@@ -485,9 +485,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )
         )
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 reloaded = await nodriver_utk_sports_reload(
                     tab,
                     config(),
@@ -533,9 +533,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             ),
         )
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
             self.assertEqual(
                 "probe-1",
@@ -566,8 +566,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             renew_recovery_probe=AsyncMock(return_value=True),
         )
         try:
-            with patch("platforms.ctbc.time.monotonic", return_value=106.0), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+            with patch("platforms.utiki.workflow.time.monotonic", return_value=106.0), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator):
                 self.assertFalse(
                     await _finish_utk_recovery_probe(tab, config(), snapshot)
                 )
@@ -596,7 +596,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )),
         )
         with patch(
-            "platforms.ctbc.get_shared_refresh_coordinator",
+            "platforms.utiki.workflow.get_shared_refresh_coordinator",
             return_value=coordinator,
         ):
             self.assertTrue(
@@ -617,13 +617,13 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
         disabled = {"utk_sports": dict(self.global_settings["utk_sports"], enabled=False)}
         with patch(
-            "platforms.ctbc.load_global_settings",
+            "platforms.utiki.workflow.load_global_settings",
             side_effect=[disabled, self.global_settings],
         ), patch(
-            "platforms.ctbc.check_and_handle_pause",
+            "platforms.utiki.workflow.check_and_handle_pause",
             AsyncMock(return_value=False),
         ), patch(
-            "platforms.ctbc.check_and_handle_quit",
+            "platforms.utiki.workflow.check_and_handle_quit",
             AsyncMock(return_value=False),
         ):
             self.assertFalse(
@@ -657,9 +657,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ]
 
         with patch(
-            "platforms.ctbc.load_global_settings", return_value=disabled
+            "platforms.utiki.workflow.load_global_settings", return_value=disabled
         ), patch(
-            "platforms.ctbc._inspect_utk_document",
+            "platforms.utiki.workflow._inspect_utk_document",
             AsyncMock(side_effect=snapshots),
         ):
             first, first_snapshot = await _utk_document_guard(tab, config(), source)
@@ -692,10 +692,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )),
         )
         try:
-            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator), \
-                    patch("platforms.ctbc.time.monotonic", side_effect=[100.0, 100.0, 111.0, 111.0, 111.0]):
+            with patch("platforms.utiki.workflow.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.utiki.workflow._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.workflow.get_shared_refresh_coordinator", return_value=coordinator), \
+                    patch("platforms.utiki.workflow.time.monotonic", side_effect=[100.0, 100.0, 111.0, 111.0, 111.0]):
                 first, _ = await _utk_document_guard(tab, config(), source)
                 second, _ = await _utk_document_guard(tab, config(), source)
             self.assertEqual("unknown", first)

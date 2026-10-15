@@ -70,7 +70,16 @@ from platforms.kktix import *
 from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
-from platforms.ctbc import *
+from platforms.utiki import (
+    is_utk_sports_url,
+    nodriver_ctbc_inject_cookies,
+    nodriver_utiki_main,
+    nodriver_utk_sports_cancel_refresh,
+    nodriver_utk_sports_consume_reload_event,
+    nodriver_utk_sports_health_check,
+    nodriver_utk_sports_reload,
+    nodriver_utk_sports_reload_wait,
+)
 from platforms.hkticketing import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
@@ -1220,7 +1229,7 @@ async def main(args):
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
 
         if is_utk_sports_url(url):
-            tab = await nodriver_ctbc_main(tab, url, config_dict, ocr)
+            tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
 
         kham_family = False
         if 'kham.com.tw' in url:

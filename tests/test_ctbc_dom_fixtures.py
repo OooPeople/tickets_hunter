@@ -12,7 +12,7 @@ import zendriver as uc
 
 from tests.ctbc_support import config
 
-from platforms.ctbc import (
+from platforms.utiki.workflow import (
     _classify_ctbc_submit_dialog,
     _ctbc_commit_fast_navigation,
     _ctbc_delete_fast_navigation_marker,
@@ -126,7 +126,7 @@ async def _assert_area_fixture(browser):
         "created_at": 0.0,
     }
     with patch(
-        "platforms.ctbc._ctbc_new_pending_navigation",
+        "platforms.utiki.workflow._ctbc_new_pending_navigation",
         return_value=fixture_pending,
     ):
         assert await nodriver_ctbc_area_auto_select(tab, cfg)
@@ -176,16 +176,16 @@ async def _assert_quantity_fixture(browser):
     submit_gate = AsyncMock(side_effect=submit_effect)
     attestation = AsyncMock(return_value=True)
     with patch(
-        "platforms.ctbc._ctbc_general_quantity_audit_is_valid",
+        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
         side_effect=audit_spy,
     ) as audit, patch(
-        "platforms.ctbc._ctbc_captcha_and_submit",
+        "platforms.utiki.workflow._ctbc_captcha_and_submit",
         submit_gate,
     ), patch(
-        "platforms.ctbc._ctbc_attest_fast_destination",
+        "platforms.utiki.workflow._ctbc_attest_fast_destination",
         attestation,
     ), patch(
-        "platforms.ctbc._ctbc_purchase_state_key",
+        "platforms.utiki.workflow._ctbc_purchase_state_key",
         return_value=("fixture-purchase",),
     ):
         assert await nodriver_ctbc_general_admission_main(tab, cfg, ocr=None)
@@ -210,16 +210,16 @@ async def _assert_quantity_fixture(browser):
     race_gate = AsyncMock(return_value=True)
     race_attestation = AsyncMock(return_value=True)
     with patch(
-        "platforms.ctbc._ctbc_general_quantity_audit_is_valid",
+        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
         wraps=_ctbc_general_quantity_audit_is_valid,
     ) as race_audit, patch(
-        "platforms.ctbc._ctbc_captcha_and_submit",
+        "platforms.utiki.workflow._ctbc_captcha_and_submit",
         race_gate,
     ), patch(
-        "platforms.ctbc._ctbc_attest_fast_destination",
+        "platforms.utiki.workflow._ctbc_attest_fast_destination",
         race_attestation,
     ), patch(
-        "platforms.ctbc._ctbc_purchase_state_key",
+        "platforms.utiki.workflow._ctbc_purchase_state_key",
         return_value=("fixture-race-purchase",),
     ):
         assert not await nodriver_ctbc_general_admission_main(

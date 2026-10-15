@@ -1,5 +1,8 @@
+import subprocess
+import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.ctbc_support import (
@@ -8,8 +11,11 @@ from tests.ctbc_support import (
     make_ctbc_area_snapshot,
 )
 
+import platforms.ctbc as legacy_ctbc
+import platforms.utiki as utiki
+from platforms.utiki import workflow
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
-from platforms.ctbc import (
+from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
     _choose_candidate_index,
     _classify_ctbc_date_action,
@@ -35,6 +41,33 @@ from settings import get_default_config, migrate_config
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
+    def test_legacy_facade_shares_the_canonical_workflow(self):
+        for name in legacy_ctbc.__all__:
+            with self.subTest(name=name):
+                self.assertIs(getattr(legacy_ctbc, name), getattr(workflow, name))
+        self.assertIs(utiki.nodriver_utiki_main, workflow.nodriver_ctbc_main)
+        self.assertFalse(hasattr(legacy_ctbc, "_state"))
+
+    def test_legacy_and_canonical_import_orders_do_not_cycle(self):
+        source_root = str(Path(__file__).resolve().parents[1] / "src")
+        orders = (
+            "import platforms.ctbc; import platforms.utiki",
+            "import platforms.utiki; import platforms.ctbc",
+        )
+        for imports in orders:
+            script = (
+                f"import sys; sys.path.insert(0, {source_root!r}); "
+                f"{imports}; import nodriver_tixcraft"
+            )
+            with self.subTest(imports=imports):
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
     def test_seat_sorting_setting_defaults_and_migrates_to_number_order(self):
         default = get_default_config()
         self.assertEqual("row_seat", default["ctbc"]["seat_sorting"])

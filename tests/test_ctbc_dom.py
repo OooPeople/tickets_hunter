@@ -15,7 +15,7 @@ from tests.ctbc_support import (
     make_ctbc_area_snapshot,
 )
 
-from platforms.ctbc import (
+from platforms.utiki.workflow import (
     CTBC_AREA_ROW_SELECTOR,
     CTBC_DATE_PURCHASE_CONTROL_SELECTOR,
     CTBC_DATE_ROW_SELECTOR,
@@ -82,10 +82,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["accounts"]["ctbc_cookie"] = "CTBC_IMPORTED|BROTHERS|_1=session"
 
         with patch(
-            "platforms.ctbc.cdp.network.delete_cookies",
+            "platforms.utiki.workflow.cdp.network.delete_cookies",
             side_effect=lambda **kwargs: ("delete", kwargs),
         ), patch(
-            "platforms.ctbc.cdp.network.set_cookie",
+            "platforms.utiki.workflow.cdp.network.set_cookie",
             side_effect=lambda **kwargs: ("set", kwargs),
         ):
             self.assertTrue(await nodriver_ctbc_inject_cookies(tab, cfg))
@@ -154,22 +154,22 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             return result
 
         with patch(
-            "platforms.ctbc._ctbc_attest_fast_destination",
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(side_effect=record_effect("attest")),
         ), patch(
-            "platforms.ctbc.nodriver_ctbc_ticket_type_auto_select",
+            "platforms.utiki.workflow.nodriver_ctbc_ticket_type_auto_select",
             AsyncMock(side_effect=record_effect("ticket_type")),
         ), patch(
-            "platforms.ctbc._validate_ctbc_seat_selection",
+            "platforms.utiki.workflow._validate_ctbc_seat_selection",
             AsyncMock(side_effect=audit),
         ), patch(
-            "platforms.ctbc.nodriver_ctbc_seat_auto_select",
+            "platforms.utiki.workflow.nodriver_ctbc_seat_auto_select",
             AsyncMock(side_effect=record_effect("seat")),
         ), patch(
-            "platforms.ctbc.nodriver_utk_sports_cancel_refresh",
+            "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
             AsyncMock(side_effect=record_effect("cancel")),
         ), patch(
-            "platforms.ctbc._ctbc_captcha_and_submit",
+            "platforms.utiki.workflow._ctbc_captcha_and_submit",
             AsyncMock(side_effect=record_effect("submit")),
         ) as submit:
             self.assertTrue(await nodriver_ctbc_seat_main(tab, config(), ocr=None))
@@ -185,7 +185,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         data_url = "data:image/png;base64," + base64.b64encode(expected).decode("ascii")
         tab = types.SimpleNamespace(evaluate=AsyncMock(return_value=data_url))
         with patch(
-            "platforms.ctbc.nodriver_get_captcha_image_from_dom_snapshot",
+            "platforms.utiki.workflow.nodriver_get_captcha_image_from_dom_snapshot",
             new=AsyncMock(return_value=b"fallback"),
         ) as fallback:
             self.assertEqual(expected, await _get_ctbc_captcha_image_bytes(tab, config()))
@@ -194,7 +194,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_captcha_capture_falls_back_when_canvas_is_unavailable(self):
         tab = types.SimpleNamespace(evaluate=AsyncMock(return_value=""))
         with patch(
-            "platforms.ctbc.nodriver_get_captcha_image_from_dom_snapshot",
+            "platforms.utiki.workflow.nodriver_get_captcha_image_from_dom_snapshot",
             new=AsyncMock(return_value=b"fallback"),
         ) as fallback:
             self.assertEqual(b"fallback", await _get_ctbc_captcha_image_bytes(tab, config()))
@@ -400,7 +400,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         _state["pending_navigation"][identity]["created_at"] -= 30
 
         with patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(side_effect=[False, True]),
         ) as reload_page:
             self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
@@ -594,7 +594,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.session_marker["expires_at"] = time.time() * 1000 - 1
         _state["pending_navigation"][identity]["created_at"] -= 30
         with patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page:
             self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
@@ -816,7 +816,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         pending["created_at"] -= 30
         with patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page:
             self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
@@ -1326,16 +1326,16 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertIn(submit_key, _state["submitted"])
 
         with patch(
-            "platforms.ctbc._ctbc_attest_fast_destination",
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ), patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=False),
         ) as reload_page, patch(
-            "platforms.ctbc.nodriver_ctbc_ticket_type_auto_select",
+            "platforms.utiki.workflow.nodriver_ctbc_ticket_type_auto_select",
             AsyncMock(return_value=True),
         ) as select_type, patch(
-            "platforms.ctbc._ctbc_captcha_and_submit",
+            "platforms.utiki.workflow._ctbc_captcha_and_submit",
             AsyncMock(return_value=True),
         ) as submit:
             self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
@@ -1354,12 +1354,12 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = self._track_submit_state(tab)
 
-        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(1, tab.button.click_count)
         self.assertIn(submit_key, _state["submitted"])
 
-        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         self.assertEqual(1, tab.button.click_count)
@@ -1412,7 +1412,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     tab.target.url = target
 
                 tab.button.click = click_and_change_url
-                with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+                with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
                     self.assertFalse(
                         await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
                     )
@@ -1423,7 +1423,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     )
                 else:
                     self.assertIn(submit_key, _state["submitted"])
-                with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+                with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
                     self.assertFalse(
                         await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
                     )
@@ -1487,7 +1487,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     tab.target.url = target
 
                 tab.button.click = click_and_navigate
-                with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+                with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
                     self.assertEqual(
                         expected,
                         await _ctbc_captcha_and_submit(tab, cfg, ocr=None),
@@ -1517,7 +1517,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         waiting_key = _ctbc_purchase_state_key(waiting_tab)
         checkout_key = _ctbc_purchase_state_key(checkout_tab)
 
-        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(
                 await _ctbc_captcha_and_submit(waiting_tab, cfg, ocr=None)
             )
@@ -1648,11 +1648,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         unknown_tab = FakeSubmitTab(dialog="", url=source_url)
         unknown_key = _ctbc_purchase_state_key(unknown_tab)
-        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(
                 await _ctbc_captcha_and_submit(unknown_tab, cfg, ocr=None)
             )
-        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
             self.assertFalse(
                 await _ctbc_captcha_and_submit(unknown_tab, cfg, ocr=None)
             )
@@ -1722,9 +1722,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = self._track_submit_state(tab)
 
-        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
-        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         tab.dialog = "該位置已被選走"
@@ -1739,9 +1739,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = self._track_submit_state(tab)
 
-        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
-        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         tab.dialog = "驗證碼錯誤"
@@ -1757,9 +1757,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = self._track_submit_state(tab)
 
-        with patch("platforms.ctbc.time.monotonic", return_value=100.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
-        with patch("platforms.ctbc.time.monotonic", return_value=111.0):
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         tab.dialog = "帳號或密碼錯誤"
@@ -1778,10 +1778,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         _state["last_document"][identity] = "document-1"
 
         with patch(
-            "platforms.ctbc._ctbc_login_fingerprint",
+            "platforms.utiki.workflow._ctbc_login_fingerprint",
             AsyncMock(return_value=""),
         ), patch(
-            "platforms.ctbc._fill_ctbc_inline_login",
+            "platforms.utiki.workflow._fill_ctbc_inline_login",
             AsyncMock(return_value=True),
         ):
             self.assertEqual("auth", await _handle_ctbc_submit_dialog(tab, cfg))
@@ -1827,7 +1827,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         }
 
         with patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(side_effect=[False, True]),
         ) as reload_page:
             self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
@@ -1847,13 +1847,13 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
 
         with patch(
-            "platforms.ctbc._ctbc_attest_fast_destination",
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ), patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page, patch(
-            "platforms.ctbc.nodriver_ctbc_ticket_type_auto_select",
+            "platforms.utiki.workflow.nodriver_ctbc_ticket_type_auto_select",
             AsyncMock(return_value=True),
         ) as select_type:
             self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
@@ -1871,10 +1871,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
 
         with patch(
-            "platforms.ctbc._ctbc_attest_fast_destination",
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ), patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page:
             self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
@@ -1899,7 +1899,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.dialog_visible = False
 
         with patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=False),
         ) as reload_page:
             self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
@@ -1924,7 +1924,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         }
 
         with patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page:
             self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
@@ -1953,10 +1953,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         }
 
         with patch(
-            "platforms.ctbc._ctbc_attest_fast_destination",
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ), patch(
-            "platforms.ctbc._reload_with_interval",
+            "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page:
             self.assertFalse(

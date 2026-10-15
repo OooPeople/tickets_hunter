@@ -57,6 +57,8 @@ a = Analysis(
         'platforms.kham',
         'platforms.hkticketing',
         'platforms.ctbc',
+        'platforms.utiki',
+        'platforms.utiki.workflow',
         # Chrome downloader dependencies
         'requests',
         # Image processing

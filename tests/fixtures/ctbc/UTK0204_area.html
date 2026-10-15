@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>CTBC area fixture</title>
+</head>
+<body data-area-clicks="0">
+  <!-- Page kind: area. Fixture date: 2026-10-15. Synthetic/deidentified. -->
+  <div class="seats">
+    <table class="f1">
+      <tbody>
+        <tr class="saleTr" rel="front">
+          <td data-title="票區">109區前排</td>
+          <td data-title="票價">1600</td>
+          <td data-title="空位">40</td>
+        </tr>
+        <tr class="saleTr" rel="back">
+          <td data-title="票區">109區後排</td>
+          <td data-title="票價">1300</td>
+          <td data-title="空位">熱賣中</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <img alt="fixture seating map" usemap="#mapdata"
+       src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+  <map id="mapdata" name="mapdata">
+    <area id="front" shape="rect" coords="0,0,10,10"
+          href="javascript:Send('0205','P16D0B8Z','PRICE_FRONT','GROUP_FRONT','45')"
+          title="票區:109區前排 票價：1600 尚餘：45" alt="109區前排">
+    <area id="back" shape="rect" coords="11,0,20,10"
+          href="javascript:SendA('0205','P16D0B8Z','GROUP_BACK','PRICE_BACK','AREA_GROUP','back','熱賣中')"
+          title="票區:109區後排 票價：1300 尚餘：熱賣中" alt="109區後排">
+  </map>
+  <script>
+    window.mainMap = {front: true, back: true};
+    function Send(_page, _performanceId, priceAreaId) {
+      document.body.dataset.selectedArea = priceAreaId;
+      document.body.dataset.areaClicks = String(
+        Number(document.body.dataset.areaClicks || 0) + 1
+      );
+    }
+    function SendA(_page, _performanceId, _groupId, priceAreaId) {
+      document.body.dataset.selectedArea = priceAreaId;
+      document.body.dataset.areaClicks = String(
+        Number(document.body.dataset.areaClicks || 0) + 1
+      );
+    }
+  </script>
+</body>
+</html>

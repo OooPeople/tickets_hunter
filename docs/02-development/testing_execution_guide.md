@@ -24,6 +24,7 @@ tests/
   ctbc_support.py
   test_ctbc_pure.py
   test_ctbc_dom.py
+  test_ctbc_dom_fixtures.py
   test_ctbc_refresh.py
   test_global_settings.py
   test_ibon_date_selection.py
@@ -118,6 +119,30 @@ python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 pytest 可以執行現有 `unittest.TestCase`。日後若新增 pytest 原生函式或 fixture 測試，unittest 不會收集它們；屆時兩個 runner 的測試數不同是預期結果，不得把 unittest 當成完整 suite。
+
+CTBC 的脫敏瀏覽器 fixture 位於 `tests/fixtures/ctbc/`，runner 是
+`tests/test_ctbc_dom_fixtures.py`。它只開啟本機 `file://` HTML，不連線真實售票網站，
+並同時受 `browser` marker 與 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1` 環境變數保護；
+因此預設 pytest 會 deselect；unittest discover 不會收集 pytest-only runner，也不會
+啟動瀏覽器。執行前需在本機安裝
+Chrome、Chromium、Edge 或 Brave 等 zendriver 支援的瀏覽器。
+
+macOS／Linux 明確執行命令：
+
+```bash
+TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+```
+
+Windows PowerShell 明確執行命令：
+
+```powershell
+$env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES = "1"
+python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+Remove-Item Env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
+```
+
+runner 每次建立暫存 browser profile，並只在 `finally` 停止該次測試自行啟動的
+browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程序。
 
 需要觀察覆蓋範圍時：
 

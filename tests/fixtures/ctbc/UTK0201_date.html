@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>CTBC date fixture</title>
+  <style>
+    button { display: inline-block; width: 7rem; height: 2rem; }
+  </style>
+</head>
+<body data-date-clicks="0">
+  <!-- Page kind: date. Fixture date: 2026-10-15. Synthetic/deidentified. -->
+  <div id="PerformanceListTable">
+    <table>
+      <tbody>
+        <tr>
+          <td>2026/09/10（四）18:35</td>
+          <td>測試場次</td>
+          <td>
+            <button id="buy_btn" type="button"
+                    onclick="selectFixtureDate('DATE_FRONT')">購買</button>
+          </td>
+        </tr>
+        <tr>
+          <td>2026/09/11（五）18:35</td>
+          <td>測試場次</td>
+          <td><button id="buy_btn" type="button" disabled>已售完</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <script>
+    function selectFixtureDate(value) {
+      document.body.dataset.selectedDate = value;
+      document.body.dataset.dateClicks = String(
+        Number(document.body.dataset.dateClicks || 0) + 1
+      );
+    }
+  </script>
+</body>
+</html>

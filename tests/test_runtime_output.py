@@ -24,6 +24,23 @@ class RecordingStream:
 
 
 class RuntimeOutputTest(unittest.TestCase):
+    def test_ctbc_cookie_injection_requires_exact_secure_origin(self):
+        from nodriver_tixcraft import _should_inject_ctbc_cookies
+
+        self.assertTrue(_should_inject_ctbc_cookies(
+            "https://tix.ctbcsports.com/BROTHERS/"
+        ))
+        rejected_urls = (
+            "https://tix.wdragons.com/?next=tix.ctbcsports.com",
+            "https://tix.wdragons.com/tix.ctbcsports.com",
+            "http://tix.ctbcsports.com/BROTHERS/",
+            "https://@tix.ctbcsports.com/BROTHERS/",
+            "https://tix.ctbcsports.com:444/BROTHERS/",
+        )
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertFalse(_should_inject_ctbc_cookies(url))
+
     def test_windows_configuration_reuses_existing_streams(self):
         from nodriver_tixcraft import _configure_windows_utf8_output
 

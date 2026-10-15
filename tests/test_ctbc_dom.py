@@ -30,6 +30,7 @@ from platforms.ctbc import (
     nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
+    nodriver_ctbc_inject_cookies,
     nodriver_ctbc_seat_main,
     nodriver_ctbc_ticket_type_auto_select,
 )
@@ -49,6 +50,50 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         ):
             self.addCleanup(_state[state_name].pop, submit_key, None)
         return submit_key
+
+    async def test_cookie_cleanup_requires_ctbc_dns_label_boundary(self):
+        cookies = [
+            types.SimpleNamespace(
+                name="CTBC_SESSION", domain=".ctbcsports.com", path="/"
+            ),
+            types.SimpleNamespace(
+                name="CTBC_SUBDOMAIN", domain="login.ctbcsports.com", path="/"
+            ),
+            types.SimpleNamespace(
+                name="CTBC_EVIL", domain="evilctbcsports.com", path="/"
+            ),
+            types.SimpleNamespace(
+                name="CTBC_SUFFIX", domain="ctbcsports.com.evil.test", path="/"
+            ),
+        ]
+        tab = types.SimpleNamespace(
+            browser=types.SimpleNamespace(
+                cookies=types.SimpleNamespace(
+                    get_all=AsyncMock(return_value=cookies)
+                )
+            ),
+            send=AsyncMock(return_value=True),
+        )
+        cfg = config()
+        cfg["accounts"]["ctbc_cookie"] = "CTBC_IMPORTED|BROTHERS|_1=session"
+
+        with patch(
+            "platforms.ctbc.cdp.network.delete_cookies",
+            side_effect=lambda **kwargs: ("delete", kwargs),
+        ), patch(
+            "platforms.ctbc.cdp.network.set_cookie",
+            side_effect=lambda **kwargs: ("set", kwargs),
+        ):
+            self.assertTrue(await nodriver_ctbc_inject_cookies(tab, cfg))
+
+        commands = [call.args[0] for call in tab.send.await_args_list]
+        deleted_domains = [
+            command[1]["domain"] for command in commands if command[0] == "delete"
+        ]
+        self.assertEqual(
+            [".ctbcsports.com", "login.ctbcsports.com"], deleted_domains
+        )
+        self.assertEqual(1, sum(command[0] == "set" for command in commands))
 
     async def test_explicit_ticket_type_keyword_overrides_global_exclusions(self):
         full_counter = FakeElement(attrs={"id": "FULL", "val": "內野全票-NT$800"})

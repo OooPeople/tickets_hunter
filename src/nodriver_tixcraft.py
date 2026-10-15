@@ -90,6 +90,15 @@ logging.basicConfig()
 logger = logging.getLogger('logger')
 
 
+def _should_inject_ctbc_cookies(homepage):
+    """Limit CTBC account cookies to the exact configured CTBC origin."""
+    try:
+        host = (urllib.parse.urlsplit(str(homepage or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "tix.ctbcsports.com" and is_utk_sports_url(homepage)
+
+
 async def nodriver_goto_homepage(driver, config_dict):
     debug = util.create_debug_logger(config_dict)
     tab = None
@@ -357,7 +366,7 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
-    if is_utk_sports_url(homepage) and 'tix.ctbcsports.com' in homepage.lower():
+    if _should_inject_ctbc_cookies(homepage):
         if await nodriver_ctbc_inject_cookies(tab, config_dict):
             try:
                 reloaded = await nodriver_utk_sports_reload_wait(

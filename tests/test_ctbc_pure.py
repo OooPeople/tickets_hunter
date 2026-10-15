@@ -127,8 +127,15 @@ class CtbcPureSelectionTest(unittest.TestCase):
     def test_page_routing(self):
         base = "https://tix.ctbcsports.com/BROTHERS/"
         self.assertEqual("date", _get_ctbc_page_type(base + "UTK0201_?PRODUCT_ID=P1"))
+        self.assertEqual(
+            "date",
+            _get_ctbc_page_type(
+                base + "UTK0201_?PRODUCT_ID=P1&STARTDATE=2026/09/18"
+            ),
+        )
         self.assertEqual("area", _get_ctbc_page_type(base + "UTK0204_?PERFORMANCE_ID=P1"))
         self.assertEqual("seat", _get_ctbc_page_type(base + "UTK0205_?PERFORMANCE_ID=P1"))
+        self.assertEqual("general_admission", _get_ctbc_page_type(base + "UTK0202_?PERFORMANCE_ID=P1"))
         self.assertEqual("general_admission", _get_ctbc_page_type(base + "UTK0203_?PERFORMANCE_ID=P1"))
         self.assertEqual("checkout", _get_ctbc_page_type(base + "UTK0206_"))
         self.assertIsNone(_get_ctbc_page_type("https://ticket.ibon.com.tw/UTK0201_?PRODUCT_ID=P1"))
@@ -138,6 +145,54 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual("date", _get_ctbc_page_type(dragons + "UTK0201_?PRODUCT_ID=P1"))
         self.assertEqual("area", _get_ctbc_page_type(dragons + "UTK0204_?PERFORMANCE_ID=P1"))
         self.assertEqual("seat", _get_ctbc_page_type(dragons + "UTK0205_?PERFORMANCE_ID=P1"))
+        self.assertEqual(
+            "general_admission",
+            _get_ctbc_page_type(dragons + "UTK0203_?PERFORMANCE_ID=P1"),
+        )
+        self.assertEqual("checkout", _get_ctbc_page_type(dragons + "UTK0206_"))
+
+    def test_utk_origin_rejects_insecure_or_ambiguous_authorities(self):
+        valid_urls = (
+            "https://tix.ctbcsports.com/BROTHERS/",
+            "https://tix.ctbcsports.com:443/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1",
+        )
+        rejected_urls = (
+            "http://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://@tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://user@tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://user:pass@tix.wdragons.com/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com:444/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com:notaport/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.wdragons.com:8443/UTK0201_?PRODUCT_ID=P1",
+        )
+        for url in valid_urls:
+            with self.subTest(url=url):
+                self.assertTrue(is_utk_sports_url(url))
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertFalse(is_utk_sports_url(url))
+                self.assertIsNone(_get_ctbc_page_type(url))
+
+    def test_page_routing_rejects_noncanonical_paths_and_query_keys(self):
+        rejected_urls = (
+            "https://tix.ctbcsports.com/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/nested/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_extra?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_/child?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/%42ROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1#fragment",
+            "https://tix.wdragons.com/BROTHERS/UTK0201_?PRODUCT_ID=P1",
+            "https://tix.wdragons.com/nested/UTK0204_?PERFORMANCE_ID=P1",
+            "https://tix.wdragons.com/UTK0205_suffix?PERFORMANCE_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?NEXT=PRODUCT_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?NEXT=PERFORMANCE_ID=P1",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1&PRODUCT_ID=P2",
+            "https://tix.wdragons.com/UTK0203_?PERFORMANCE_ID=P1&PERFORMANCE_ID=P2",
+        )
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertIsNone(_get_ctbc_page_type(url))
 
     def test_keyword_priority_and_strict_no_match(self):
         candidates = [
@@ -231,6 +286,16 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 target,
             ),
         )
+        self.assertIsNone(_build_ctbc_destination_url(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_suffix?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            target,
+        ))
+        self.assertIsNone(_build_ctbc_destination_url(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=OTHER&PRODUCT_ID=P16ANF0L",
+            target,
+        ))
         self.assertIsNone(_parse_ctbc_map_send(href + ";alert(1)", "P16D0B8Z"))
         self.assertIsNone(_parse_ctbc_map_send(href, "OTHER"))
         general = _parse_ctbc_map_send(
@@ -422,12 +487,22 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertTrue(_ctbc_fast_destination_is_valid(expected, "seat", url, ids))
         self.assertFalse(_ctbc_fast_destination_is_valid(expected, "seat", url, dict(ids, group_id="99")))
         self.assertFalse(_ctbc_fast_destination_is_valid(expected, "general_admission", url, ids))
+        self.assertFalse(_ctbc_fast_destination_is_valid(
+            dict(expected, route="9999"),
+            None,
+            url.replace("UTK0205_", "UTK9999_"),
+            ids,
+        ))
 
         general_expected = dict(expected, route="0202", group_id="", price_area_id="P16D12ZY")
         general_url = "https://tix.ctbcsports.com/BROTHERS/UTK0203_?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&PERFORMANCE_PRICE_AREA_ID=P16D12ZY"
         general_ids = dict(ids, group_id="", price_area_id="P16D12ZY")
         self.assertTrue(_ctbc_fast_destination_is_valid(
             general_expected, "general_admission", general_url, general_ids
+        ))
+        general_direct_url = general_url.replace("UTK0203_", "UTK0202_")
+        self.assertTrue(_ctbc_fast_destination_is_valid(
+            general_expected, "general_admission", general_direct_url, general_ids
         ))
 
         dragons_expected = dict(
@@ -449,6 +524,62 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertFalse(_ctbc_fast_destination_is_valid(
             dragons_expected, "seat", url, dragons_ids
         ))
+
+    def test_fast_destination_rejects_noncanonical_origin_route_and_query(self):
+        expected = {
+            "route": "0205", "performance_id": "P16D0B8Z",
+            "product_id": "P16ANF0L", "group_id": "35",
+            "price_area_id": "P16D12YO",
+            "area_url": (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+                "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
+            ),
+        }
+        ids = {
+            "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
+            "group_id": "35", "price_area_id": "P16D12YO",
+        }
+        query = (
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&"
+            "PERFORMANCE_PRICE_AREA_ID=P16D12YO"
+        )
+        rejected_urls = (
+            f"http://tix.ctbcsports.com/BROTHERS/UTK0205_?{query}",
+            f"https://user@tix.ctbcsports.com/BROTHERS/UTK0205_?{query}",
+            f"https://tix.ctbcsports.com:444/BROTHERS/UTK0205_?{query}",
+            f"https://tix.ctbcsports.com/BROTHERS/nested/UTK0205_?{query}",
+            f"https://tix.ctbcsports.com/BROTHERS/UTK0205_suffix?{query}",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "NEXT=PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&"
+            "PERFORMANCE_PRICE_AREA_ID=P16D12YO",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&PERFORMANCE_ID=OTHER&GROUP_ID=35&"
+            "PERFORMANCE_PRICE_AREA_ID=P16D12YO",
+        )
+        for url in rejected_urls:
+            with self.subTest(url=url):
+                self.assertFalse(
+                    _ctbc_fast_destination_is_valid(expected, "seat", url, ids)
+                )
+
+        invalid_area_urls = (
+            "https://tix.ctbcsports.com/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            "https://user@tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_suffix?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=OTHER&PRODUCT_ID=P16ANF0L",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L&PRODUCT_ID=OTHER",
+        )
+        valid_url = f"https://tix.ctbcsports.com/BROTHERS/UTK0205_?{query}"
+        for area_url in invalid_area_urls:
+            with self.subTest(area_url=area_url):
+                self.assertFalse(_ctbc_fast_destination_is_valid(
+                    dict(expected, area_url=area_url), "seat", valid_url, ids
+                ))
 
     def test_adjacent_seat_selection_uses_cell_indexes(self):
         seats = [

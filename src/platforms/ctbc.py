@@ -55,6 +55,7 @@ UTK_SPORTS_PROFILES = {
         "name": "CTBC Sports",
         "map_namespace": "CTBC_SPORTS",
         "fast_area_prefetch": True,
+        "tenant_path": "/BROTHERS",
     },
     "tix.wdragons.com": {
         "name": "Wei Chuan Dragons",
@@ -63,6 +64,7 @@ UTK_SPORTS_PROFILES = {
         # display a confirmation.  Keep the optimized native map flow instead
         # of bypassing that server-side notice check.
         "fast_area_prefetch": False,
+        "tenant_path": "",
     },
 }
 CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
@@ -189,7 +191,12 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
     try:
         existing_cookies = await tab.browser.cookies.get_all()
         for cookie in existing_cookies:
-            if cookie.name.startswith("CTBC_") and cookie.domain.lstrip(".").endswith("ctbcsports.com"):
+            cookie_domain = str(cookie.domain or "").lstrip(".").lower()
+            is_ctbc_domain = (
+                cookie_domain == "ctbcsports.com"
+                or cookie_domain.endswith(".ctbcsports.com")
+            )
+            if cookie.name.startswith("CTBC_") and is_ctbc_domain:
                 try:
                     await tab.send(cdp.network.delete_cookies(
                         name=cookie.name,
@@ -225,10 +232,7 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
 
 
 def _is_ctbc_url(url):
-    try:
-        return (urlsplit(str(url or "")).hostname or "").lower() in UTK_SPORTS_PROFILES
-    except ValueError:
-        return False
+    return _get_utk_sports_profile(url) is not None
 
 
 def is_utk_sports_url(url):
@@ -237,7 +241,15 @@ def is_utk_sports_url(url):
 
 def _get_utk_sports_profile(url):
     try:
-        host = (urlsplit(str(url or "")).hostname or "").lower()
+        parsed = urlsplit(str(url or ""))
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            return None
     except ValueError:
         return None
     profile = UTK_SPORTS_PROFILES.get(host)
@@ -245,20 +257,35 @@ def _get_utk_sports_profile(url):
 
 
 def _get_ctbc_page_type(url):
-    lower_url = (url or "").lower()
-    if not _is_ctbc_url(lower_url):
+    profile = _get_utk_sports_profile(url)
+    if not profile:
         return None
-    if "/utk0201_" in lower_url and "product_id=" in lower_url:
-        return "date"
-    if "/utk0204_" in lower_url and "performance_id=" in lower_url:
-        return "area"
-    if "/utk0205_" in lower_url and "performance_id=" in lower_url:
-        return "seat"
-    if any(path in lower_url for path in ("/utk0202_", "/utk0203_")) and "performance_id=" in lower_url:
-        return "general_admission"
-    if "/utk0206_" in lower_url:
-        return "checkout"
-    return None
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return None
+    if parsed.fragment:
+        return None
+
+    tenant_path = profile["tenant_path"]
+    route_specs = {
+        f"{tenant_path}/UTK0201_": ("date", "PRODUCT_ID"),
+        f"{tenant_path}/UTK0202_": ("general_admission", "PERFORMANCE_ID"),
+        f"{tenant_path}/UTK0203_": ("general_admission", "PERFORMANCE_ID"),
+        f"{tenant_path}/UTK0204_": ("area", "PERFORMANCE_ID"),
+        f"{tenant_path}/UTK0205_": ("seat", "PERFORMANCE_ID"),
+        f"{tenant_path}/UTK0206_": ("checkout", None),
+    }
+    route = route_specs.get(parsed.path)
+    query = _ctbc_unique_query(url)
+    if route is None or query is None:
+        return None
+    page_type, required_key = route
+    if required_key and not re.fullmatch(
+        r"[A-Za-z0-9_-]+", str(query.get(required_key) or "")
+    ):
+        return None
+    return page_type
 
 
 def _parse_keyword_groups(keyword_string):
@@ -351,6 +378,8 @@ def _ctbc_same_origin(first, second):
 
 def _parse_ctbc_date_target(onclick, current_url):
     """Strictly parse the site's ordinary date-button navigation target."""
+    if _get_ctbc_page_type(current_url) != "date":
+        return None
     match = re.fullmatch(
         r"\s*location\.href\s*=\s*(?P<quote>['\"])(?P<url>[^'\"]+)(?P=quote)\s*;?\s*",
         str(onclick or ""),
@@ -368,6 +397,7 @@ def _parse_ctbc_date_target(onclick, current_url):
         or target.hostname != profile["host"]
         or not _ctbc_same_origin(current, target)
         or target.fragment
+        or _get_ctbc_page_type(target_url) != "area"
     ):
         return None
     current_tenant = current.path.rsplit("/", 1)[0]
@@ -713,10 +743,13 @@ def _ctbc_map_title_matches_available_row(map_title, area_text, price_text, tick
 
 
 def _build_ctbc_destination_url(area_url, target):
-    source = urlsplit(area_url)
-    if source.scheme != "https" or not _get_utk_sports_profile(area_url):
+    if _get_ctbc_page_type(area_url) != "area":
         return None
+    source = urlsplit(area_url)
     if target.get("route") not in {"0202", "0205"}:
+        return None
+    area_query = _ctbc_unique_query(area_url)
+    if (area_query or {}).get("PERFORMANCE_ID") != target.get("performance_id"):
         return None
     path = f"{source.path.rsplit('/', 1)[0]}/UTK{target['route']}_"
     query = urlencode({
@@ -3209,22 +3242,29 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
         return False
     route = expected.get("route")
     expected_page_type = "seat" if route == "0205" else "general_admission" if route == "0202" else None
-    if page_type != expected_page_type:
+    if expected_page_type is None or page_type != expected_page_type:
         return False
-    current = urlsplit(current_url)
-    area = urlsplit(expected.get("area_url", ""))
+    area_url = str(expected.get("area_url") or "")
     if (
-        current.scheme != "https"
-        or current.hostname != area.hostname
-        or not _get_utk_sports_profile(current_url)
-        or current.fragment
+        _get_ctbc_page_type(current_url) != expected_page_type
+        or _get_ctbc_page_type(area_url) != "area"
     ):
         return False
-    tenant_path = area.path.rsplit('/', 1)[0]
-    allowed_paths = {f"{tenant_path}/UTK{route}_"}
-    if route == "0202":
-        allowed_paths.add(f"{tenant_path}/UTK0203_")
-    if current.path not in allowed_paths:
+    current = urlsplit(current_url)
+    area = urlsplit(area_url)
+    if not _ctbc_same_origin(current, area):
+        return False
+    if route == "0202" and current.path.rsplit("/", 1)[-1] not in {
+        "UTK0202_", "UTK0203_"
+    }:
+        return False
+    area_query = _ctbc_unique_query(area_url)
+    if area_query is None or set(area_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}:
+        return False
+    if (
+        area_query.get("PERFORMANCE_ID") != expected.get("performance_id")
+        or area_query.get("PRODUCT_ID") != expected.get("product_id")
+    ):
         return False
     query = _ctbc_unique_query(current_url)
     if query is None or set(query) != {"PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"}:
@@ -3246,8 +3286,7 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
 
 async def _ctbc_return_to_native_area(tab, expected):
     area_url = str(expected.get("area_url") or "")
-    parsed = urlsplit(area_url)
-    if parsed.scheme != "https" or not _get_utk_sports_profile(area_url) or "/UTK0204_" not in parsed.path:
+    if _get_ctbc_page_type(area_url) != "area":
         return
     area_url_json = json.dumps(area_url)
     try:

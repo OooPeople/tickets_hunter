@@ -125,7 +125,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             evaluate_results=[json.dumps({
                 "ready": True,
                 "body_text": "429 - 請求頻率過高 HTTP 429 - Too Many Requests",
-                "document_id": source + "|123",
+                "document_id": "123",
                 "url": source,
                 "ready_state": "complete",
                 "has_normal_root": False,
@@ -134,7 +134,114 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         runtime = ctbc_identity_runtime(_ctbc_tab_identity(tab))
         snapshot = await _inspect_utk_document(tab, runtime)
         self.assertEqual("blocked", snapshot["classification"])
-        self.assertEqual(source + "|123", snapshot["document_id"])
+        self.assertEqual("123", snapshot["document_id"])
+
+    async def test_document_token_is_stable_across_history_url_drift(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tracked = source + "&utm_source=test#fragment"
+        snapshots = [
+            {
+                "ready": True, "body_text": "正常售票頁",
+                "document_id": "123.5", "url": source,
+                "ready_state": "complete", "has_normal_root": True,
+            },
+            {
+                "ready": True, "body_text": "正常售票頁",
+                "document_id": "123.5", "url": tracked,
+                "ready_state": "complete", "has_normal_root": True,
+            },
+        ]
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [], url=source,
+            evaluate_results=[json.dumps(item) for item in snapshots],
+        )
+        identity = _ctbc_tab_identity(tab)
+        runtime = ctbc_identity_runtime(identity)
+        refresh_identity = build_refresh_identity(identity)
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ):
+            first_state, first = await _utk_document_guard(
+                tab, runtime, refresh_identity, _state["cancel_tasks"],
+                config(), source,
+            )
+            tab.target.url = tracked
+            second_state, second = await _utk_document_guard(
+                tab, runtime, refresh_identity, _state["cancel_tasks"],
+                config(), tracked,
+            )
+
+        self.assertEqual("normal", first_state)
+        self.assertEqual("normal", second_state)
+        self.assertEqual("123.5", first["document_id"])
+        self.assertEqual(first["document_id"], second["document_id"])
+        self.assertNotEqual(first["url"], second["url"])
+        self.assertEqual("123.5", runtime["document"]["last_document"])
+        self.assertFalse(runtime["refresh"]["reload_event"])
+
+    async def test_missing_document_token_cannot_signal_document_change(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [], url=source,
+            evaluate_results=[json.dumps({
+                "ready": True, "body_text": "正常售票頁",
+                "document_id": "0", "url": source,
+                "ready_state": "complete", "has_normal_root": True,
+            })],
+        )
+        identity = _ctbc_tab_identity(tab)
+        runtime = ctbc_identity_runtime(identity)
+        runtime["document"]["last_document"] = "123"
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ):
+            state, snapshot = await _utk_document_guard(
+                tab, runtime, build_refresh_identity(identity),
+                _state["cancel_tasks"], config(), source,
+            )
+
+        self.assertEqual("unknown", state)
+        self.assertEqual("", snapshot["document_id"])
+        self.assertEqual("123", runtime["document"]["last_document"])
+        self.assertFalse(runtime["refresh"]["reload_event"])
+
+        runtime["document"]["snapshot"] = None
+        tab.evaluate_results.append(json.dumps({
+            "ready": True, "body_text": "正常售票頁",
+            "document_id": "", "url": source,
+            "ready_state": "complete", "has_normal_root": True,
+        }))
+        disabled = {
+            "utk_sports": dict(
+                self.global_settings["utk_sports"], enabled=False
+            )
+        }
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=disabled,
+        ):
+            disabled_state, _ = await _utk_document_guard(
+                tab, runtime, build_refresh_identity(identity),
+                _state["cancel_tasks"], config(), source,
+            )
+        self.assertEqual("unknown", disabled_state)
+        self.assertEqual("123", runtime["document"]["last_document"])
+
+    async def test_document_evaluate_failure_does_not_use_url_as_token(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        tab.evaluate = AsyncMock(side_effect=RuntimeError("execution failed"))
+        runtime = ctbc_identity_runtime(_ctbc_tab_identity(tab))
+
+        snapshot = await _inspect_utk_document(tab, runtime, force=True)
+
+        self.assertEqual("unknown", snapshot["classification"])
+        self.assertEqual("", snapshot["document_id"])
+        self.assertEqual(source, snapshot["url"])
 
     async def test_429_guard_runs_before_date_dispatch_and_reports_once(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"

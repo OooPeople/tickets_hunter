@@ -112,7 +112,7 @@ def _new_ctbc_tab_runtime():
     return {
         "document": {
             "snapshot": None,
-            "last_document": "",
+            "last_document": "",  # Canonical non-zero performance time origin.
             "unknown_document": None,
         },
         "action": {},
@@ -1457,7 +1457,7 @@ def _ctbc_purchase_outcome(
 
 
 def _ctbc_source_document_id(context):
-    """Keep workflow document tokens separate from DOM timeOrigin ids."""
+    """Return the canonical workflow/DOM performance time-origin token."""
     if "source_document_id" in context:
         return str(context.get("source_document_id") or "")
     return str(context.get("document_id") or "")
@@ -2886,6 +2886,11 @@ async def _ctbc_read_destination_state(tab, page_type):
                 if (poller) clearInterval(poller);
                 resolve(JSON.stringify(value));
             }};
+            const documentToken = () => {{
+                const value = Number(performance.timeOrigin ||
+                    (performance.timing && performance.timing.navigationStart) || 0);
+                return Number.isFinite(value) && value > 0 ? String(value) : '';
+            }};
             const read = () => {{
                 const markers = {marker_json};
                 const markerReady = markers.every(selector => document.querySelector(selector));
@@ -2901,12 +2906,11 @@ async def _ctbc_read_destination_state(tab, page_type):
                 const priceAreaInput = exactInput({price_area_selector_json});
                 const groupReady = {group_required_json} ?
                     groupInputs.length === 1 : groupInputs.length <= 1;
-                if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
+                const documentId = documentToken();
+                if (!documentId || !markerReady || !performanceInput ||
+                    !productInput || !groupReady || !priceAreaInput) return false;
                 finish({{ready: true, page_url: location.href,
-                    document_id: `${{location.href}}|${{Number(
-                        performance.timeOrigin ||
-                        (performance.timing && performance.timing.navigationStart) || 0
-                    )}}`,
+                    document_id: documentId,
                     performance_id: performanceInput.value || '',
                     product_id: productInput.value || '',
                     group_id: groupInput ? (groupInput.value || '') : '',
@@ -2919,10 +2923,7 @@ async def _ctbc_read_destination_state(tab, page_type):
             poller = setInterval(read, 25);
             timer = setTimeout(() => finish({{
                 ready: false, page_url: location.href,
-                document_id: `${{location.href}}|${{Number(
-                    performance.timeOrigin ||
-                    (performance.timing && performance.timing.navigationStart) || 0
-                )}}`, document_ready: document.readyState
+                document_id: documentToken(), document_ready: document.readyState
             }}), 2500);
         }}))()
     ''', await_promise=True)

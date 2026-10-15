@@ -42,6 +42,10 @@ from platforms.utiki.selection import (
     select_seat_snapshot,
 )
 from platforms.utiki.profiles import PageKind
+from platforms.utiki.refresh import (
+    _utk_document_guard,
+    build_refresh_identity,
+)
 from platforms.utiki.workflow import (
     CTBC_SEAT_STALE_RELOAD_REASON,
     _ctbc_captcha_and_submit,
@@ -54,6 +58,7 @@ from platforms.utiki.workflow import (
     _dismiss_ctbc_dialog,
     _state,
     nodriver_ctbc_general_admission_main,
+    nodriver_utk_sports_consume_reload_event,
 )
 
 
@@ -87,6 +92,7 @@ async def _run_browser_fixtures():
             ],
         )
         for assertion in (
+            _assert_refresh_document_token_fixture,
             _assert_date_fixture,
             _assert_area_fixture,
             _assert_seat_fixture,
@@ -194,6 +200,100 @@ async def _open_fixture_url(browser, url):
             return tab
         await tab.sleep(0.02)
     raise AssertionError(f"fixture did not finish loading: {url}")
+
+
+async def _assert_refresh_document_token_fixture(browser):
+    tab = await _open_fixture(
+        browser,
+        "UTK0201_date.html",
+        "?PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    runtime = ctbc_tab_runtime(tab)
+    runtime["document"]["snapshot"] = None
+    identity = _ctbc_tab_identity(tab)
+    refresh_identity = build_refresh_identity(identity)
+    refresh_settings = {"utk_sports": {"enabled": True}}
+
+    async def browser_document_token():
+        return await tab.evaluate('''(() => {
+            const value = Number(performance.timeOrigin ||
+                (performance.timing && performance.timing.navigationStart) || 0);
+            return Number.isFinite(value) && value > 0 ? String(value) : '';
+        })()''')
+
+    with (
+        patch(
+            "platforms.utiki.refresh.classify_utiki_page",
+            return_value=PageKind.DATE,
+        ),
+        patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=refresh_settings,
+        ),
+    ):
+        initial_url = await tab.evaluate("location.href")
+        initial_token = await browser_document_token()
+        initial_state, initial = await _utk_document_guard(
+            tab, runtime, refresh_identity, _state["cancel_tasks"],
+            config(), initial_url,
+        )
+        assert initial_state == "normal"
+        assert initial["document_id"] == initial_token
+        assert runtime["document"]["last_document"] == initial_token
+        assert not runtime["refresh"]["reload_event"]
+
+        await tab.evaluate(
+            "history.replaceState({}, '', location.pathname + "
+            "'?PRODUCT_ID=PRODUCT_FIXTURE&utm_source=test#fragment')"
+        )
+        reload_url = await tab.evaluate("location.href")
+        history_token = await browser_document_token()
+        history_state, history_snapshot = await _utk_document_guard(
+            tab, runtime, refresh_identity, _state["cancel_tasks"],
+            config(), reload_url,
+        )
+        assert history_state == "normal"
+        assert history_snapshot["url"] != initial["url"]
+        assert history_snapshot["document_id"] == history_token == initial_token
+        assert runtime["document"]["last_document"] == initial_token
+        assert not runtime["refresh"]["reload_event"]
+
+        await tab.reload()
+        runtime["document"]["snapshot"] = None
+        deadline = asyncio.get_running_loop().time() + 5.0
+        reloaded_token = ""
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                current_url = await tab.evaluate("location.href")
+                reloaded_token = await browser_document_token()
+                ready = await tab.evaluate(
+                    "document.readyState === 'complete' && "
+                    "!!document.querySelector('#PerformanceListTable')"
+                )
+                if (
+                    current_url == reload_url
+                    and reloaded_token
+                    and reloaded_token != initial_token
+                    and ready
+                ):
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError(
+                "same-URL reload did not expose a new document token"
+            )
+
+        reload_state, reload_snapshot = await _utk_document_guard(
+            tab, runtime, refresh_identity, _state["cancel_tasks"],
+            config(), reload_url,
+        )
+        assert reload_state == "normal"
+        assert reload_snapshot["document_id"] == reloaded_token
+        assert runtime["document"]["last_document"] == reloaded_token
+        assert nodriver_utk_sports_consume_reload_event(tab)
+        assert not nodriver_utk_sports_consume_reload_event(tab)
 
 
 async def _assert_date_fixture(browser):
@@ -1320,9 +1420,7 @@ async def _assert_quantity_fixture(browser):
     )
     assert destination_state["ready"]
     assert destination_state["page_url"] == destination_url
-    assert destination_state["document_id"] == (
-        f"{destination_url}|{time_origin_text}"
-    )
+    assert destination_state["document_id"] == time_origin_text
     await destination_tab.evaluate('''document.body.appendChild(
         document.querySelector('#PRODUCT_ID').cloneNode(true)
     )''')

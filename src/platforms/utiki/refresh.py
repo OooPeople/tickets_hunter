@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import glob
 import json
+import math
 import os
 import re
 import time
@@ -114,6 +115,16 @@ def _decode_json_result(raw_value):
     return util.parse_nodriver_result(raw_value)
 
 
+def _canonical_document_token(value):
+    """Return one non-zero performance time-origin token or fail closed."""
+    token = str(value or "").strip()
+    try:
+        numeric = float(token)
+    except (TypeError, ValueError):
+        return ""
+    return token if math.isfinite(numeric) and numeric > 0 else ""
+
+
 async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
     """Classify the current document without mistaking loading for HTTP 429."""
     current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
@@ -148,10 +159,12 @@ async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
                 const normalRoot = {selector_expression};
                 const timeOrigin = Number(performance.timeOrigin ||
                     (performance.timing && performance.timing.navigationStart) || 0);
+                const documentToken = Number.isFinite(timeOrigin) && timeOrigin > 0
+                    ? String(timeOrigin) : '';
                 return JSON.stringify({{
                     ready,
                     body_text: bodyText,
-                    document_id: `${{location.href}}|${{timeOrigin}}`,
+                    document_id: documentToken,
                     document_started_at: timeOrigin > 0 ? timeOrigin / 1000 : 0,
                     url: location.href,
                     ready_state: document.readyState,
@@ -165,13 +178,14 @@ async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
         snapshot = None
     if not isinstance(snapshot, dict):
         return {
-            "classification": "unknown", "document_id": current_url,
+            "classification": "unknown", "document_id": "",
             "document_started_at": 0.0, "url": current_url,
             "ready_state": "", "has_normal_root": False,
             "requires_normal_root": bool(normal_selector),
         }
-    snapshot["classification"] = _classify_utk_document_state(snapshot)
-    snapshot["document_id"] = str(snapshot.get("document_id") or current_url)
+    snapshot["document_id"] = _canonical_document_token(
+        snapshot.get("document_id")
+    )
     try:
         snapshot["document_started_at"] = max(
             float(snapshot.get("document_started_at") or 0.0), 0.0
@@ -179,6 +193,10 @@ async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
     except (TypeError, ValueError):
         snapshot["document_started_at"] = 0.0
     snapshot["url"] = str(snapshot.get("url") or current_url)
+    snapshot["classification"] = (
+        _classify_utk_document_state(snapshot)
+        if snapshot["document_id"] else "unknown"
+    )
     document["snapshot"] = {
         "url": snapshot["url"], "checked_at": time.monotonic(),
         "snapshot": dict(snapshot),
@@ -373,9 +391,12 @@ async def _utk_document_guard(
     refresh = runtime["refresh"]
     document_id = snapshot.get("document_id")
     previous_document_id = document["last_document"]
-    if previous_document_id and previous_document_id != document_id:
-        refresh["reload_event"] = True
-    document["last_document"] = document_id
+    if document_id:
+        if previous_document_id and previous_document_id != document_id:
+            refresh["reload_event"] = True
+        document["last_document"] = document_id
+    else:
+        return "unknown", snapshot
     if not settings.get("enabled", True):
         return "disabled", snapshot
     probe_handled = await _finish_utk_recovery_probe(

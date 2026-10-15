@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
+    CTBC_TEST_SEAT_URL,
     CtbcStateIsolationMixin,
     FakeElement,
     FakeSubmitTab,
@@ -18,11 +19,16 @@ from tests.ctbc_support import (
     ctbc_tab_runtime,
     config,
     make_ctbc_area_snapshot,
+    make_ctbc_seat_snapshot,
     make_ctbc_submit_plan,
 )
 
-from platforms.utiki.dom import SubmitDispatchResult
-from platforms.utiki.selection import QuantityPlan, build_submit_plan
+from platforms.utiki.dom import CommitResult, SubmitDispatchResult
+from platforms.utiki.selection import (
+    QuantityPlan,
+    build_submit_plan,
+    parse_seat_snapshot,
+)
 
 from platforms.utiki.workflow import (
     CTBC_AREA_ROW_SELECTOR,
@@ -33,6 +39,7 @@ from platforms.utiki.workflow import (
     _ctbc_pending_from_fast_marker,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
+    _reconcile_utiki_purchase,
     _ctbc_selection_config_fingerprint,
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
@@ -45,6 +52,7 @@ from platforms.utiki.workflow import (
     nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
     nodriver_ctbc_inject_cookies,
+    nodriver_ctbc_main,
     nodriver_ctbc_seat_main,
 )
 
@@ -87,15 +95,33 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     def _track_submit_state(self, tab):
         submit_key = _ctbc_purchase_state_key(tab)
         purchase = ctbc_tab_runtime(tab)["purchase"]
-        for state_name in (
-            "submitted",
-            "seat_conflict_pending",
-            "submit_blocked",
-            "auth_failure",
-            "captcha_reset",
-        ):
-            self.addCleanup(purchase[state_name].pop, submit_key, None)
+        def cleanup():
+            active = purchase.get("active_submit")
+            if isinstance(active, dict) and active.get("purchase_key") == submit_key:
+                purchase["active_submit"] = None
+            purchase["outcomes"].pop(submit_key, None)
+            pointer = purchase.get("last_submit")
+            if isinstance(pointer, dict) and pointer.get("purchase_key") == submit_key:
+                purchase["last_submit"] = None
+        self.addCleanup(cleanup)
         return submit_key
+
+    def _set_active_submit(self, tab, submit_key, value):
+        active = value if isinstance(value, dict) else {"dispatched_at": value}
+        active.setdefault("purchase_key", submit_key)
+        active.setdefault("nonce", "f" * 32)
+        active.setdefault("source_url", str(tab.target.url))
+        ctbc_tab_runtime(tab)["purchase"]["active_submit"] = active
+        return active
+
+    def _active_submit_for(self, tab, submit_key):
+        active = ctbc_tab_runtime(tab)["purchase"].get("active_submit")
+        if isinstance(active, dict) and active.get("purchase_key") == submit_key:
+            return active
+        return None
+
+    def _outcome_for(self, tab, submit_key):
+        return ctbc_tab_runtime(tab)["purchase"]["outcomes"].get(submit_key)
 
     def test_tab_runtime_isolates_two_tabs(self):
         first = FakeTab("", [], url=CTBC_TEST_AREA_URL)
@@ -1529,8 +1555,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             ))
         dispatch.assert_not_awaited()
         self.assertFalse(tab.button.clicked)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertIsNone(self._outcome_for(tab, submit_key))
 
     async def test_captcha_submits_when_force_submit_is_on(self):
         tab = FakeSubmitTab(dialog="", dialogs=["", "", "成功加入購物車"])
@@ -1544,8 +1570,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.assertTrue(tab.button.clicked)
             self.assertEqual(1, tab.button.click_count)
         finally:
-            ctbc_tab_runtime(tab)["purchase"]["submitted"].pop(submit_key, None)
-            ctbc_tab_runtime(tab)["purchase"]["submit_blocked"].pop(submit_key, None)
+            ctbc_tab_runtime(tab)["purchase"]["active_submit"] = None
+            ctbc_tab_runtime(tab)["purchase"]["outcomes"].pop(submit_key, None)
 
     async def test_delayed_success_does_not_submit_twice(self):
         tab = FakeSubmitTab(dialog="")
@@ -1555,14 +1581,465 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(1, tab.button.click_count)
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+        self.assertIsNotNone(self._active_submit_for(tab, submit_key))
 
         tab.dialog = "成功加入購物車"
         tab.dialog_visible = True
         self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(1, tab.button.click_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("success", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("success", self._outcome_for(tab, submit_key)["kind"])
+        self.assertEqual(1, tab.dialog_button.click_count)
+
+    async def test_delayed_checkout_completes_the_source_submit(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        source_url = str(tab.target.url)
+        submit_key = self._track_submit_state(tab)
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": time.monotonic(),
+            "phase": "awaiting_result",
+            "source_url": source_url,
+            "document_id": tab.document_id,
+        })
+        checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        tab.target.url = checkout_url
+
+        result = await _reconcile_utiki_purchase(
+            tab, checkout_url, "checkout", cfg
+        )
+
+        self.assertEqual("success", result)
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("success", self._outcome_for(tab, submit_key)["kind"])
+
+    async def test_delayed_negative_dialog_overrides_checkout_success(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": time.monotonic(),
+            "phase": "awaiting_result",
+            "source_url": str(tab.target.url),
+            "document_id": tab.document_id,
+        })
+        checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        tab.target.url = checkout_url
+        self.assertEqual(
+            "success",
+            await _reconcile_utiki_purchase(tab, checkout_url, "checkout", cfg),
+        )
+
+        tab.dialog = "已超出可購買額度"
+        tab.dialog_visible = True
+        result = await _reconcile_utiki_purchase(
+            tab, checkout_url, "checkout", cfg
+        )
+
+        self.assertEqual("blocked", result)
+        self.assertEqual("quota", self._outcome_for(tab, submit_key)["kind"])
+        self.assertEqual(1, tab.dialog_button.click_count)
+
+    async def test_outer_router_checkout_success_and_quota_priority(self):
+        cfg = config()
+        checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="unverified"),
+        ), patch(
+            "platforms.utiki.workflow._handle_ctbc_checkout",
+            AsyncMock(),
+        ) as checkout:
+            success_tab = FakeSubmitTab(dialog="")
+            success_key = self._track_submit_state(success_tab)
+            self._set_active_submit(success_tab, success_key, {
+                "dispatched_at": time.monotonic(),
+                "source_url": str(success_tab.target.url),
+                "document_id": success_tab.document_id,
+            })
+            success_tab.target.url = checkout_url
+            await nodriver_ctbc_main(success_tab, checkout_url, cfg, ocr=None)
+            checkout.assert_awaited_once_with(success_tab, cfg)
+            self.assertEqual(
+                "success", self._outcome_for(success_tab, success_key)["kind"]
+            )
+
+            checkout.reset_mock()
+            quota_tab = FakeSubmitTab(dialog="已超出可購買額度")
+            quota_key = self._track_submit_state(quota_tab)
+            self._set_active_submit(quota_tab, quota_key, {
+                "dispatched_at": time.monotonic(),
+                "source_url": str(quota_tab.target.url),
+                "document_id": quota_tab.document_id,
+            })
+            quota_tab.target.url = checkout_url
+            await nodriver_ctbc_main(quota_tab, checkout_url, cfg, ocr=None)
+            checkout.assert_not_awaited()
+            self.assertEqual(
+                "quota", self._outcome_for(quota_tab, quota_key)["kind"]
+            )
+
+    async def test_outer_router_reaches_seat_conflict_recovery(self):
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
+            "kind": "seat_conflict", "source_url": CTBC_TEST_SEAT_URL,
+            "source_document_id": "source-document", "nonce": "a" * 32,
+            "page_type": "seat", "dialog_dismissed": True,
+            "reload_dispatched": False, "recovery_document_id": "",
+        }
+
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="normal"),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page:
+            await nodriver_ctbc_main(
+                tab, CTBC_TEST_SEAT_URL, cfg, ocr=None
+            )
+
+        reload_page.assert_awaited_once_with(
+            tab, cfg, "selected seats were taken"
+        )
+
+    async def test_outer_router_reaches_captcha_dismiss_race_recovery(self):
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
+            "kind": "captcha", "source_url": CTBC_TEST_SEAT_URL,
+            "source_document_id": "source-document", "nonce": "a" * 32,
+            "reset_phase": "", "reset_source_document_id": "",
+        }
+
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="normal"),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ):
+            await nodriver_ctbc_main(
+                tab, CTBC_TEST_SEAT_URL, cfg, ocr=None
+            )
+
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_outer_router_auth_uses_workflow_document_token(self):
+        tab = FakeSubmitTab(dialog="帳號或密碼錯誤", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        source_document = f"{CTBC_TEST_SEAT_URL}|481522.125"
+        runtime["document"]["last_document"] = source_document
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": time.monotonic(),
+            "source_url": CTBC_TEST_SEAT_URL,
+            "source_document_id": source_document,
+            "document_id": "481522.125",
+        })
+        snapshot = parse_seat_snapshot(make_ctbc_seat_snapshot())
+
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="normal"),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.utiki.workflow.read_seat_snapshot",
+            AsyncMock(return_value=snapshot),
+        ), patch(
+            "platforms.utiki.workflow.commit_seat",
+            AsyncMock(return_value=CommitResult.COMMITTED),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+            AsyncMock(),
+        ), patch(
+            "platforms.utiki.workflow._fill_ctbc_inline_login",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_login_fingerprint",
+            AsyncMock(side_effect=(
+                RuntimeError("fingerprint failed"),
+                "current-credentials",
+                "current-credentials",
+            )),
+        ):
+            await nodriver_ctbc_main(
+                tab, CTBC_TEST_SEAT_URL, cfg, ocr=None
+            )
+            outcome = self._outcome_for(tab, submit_key)
+            self.assertEqual("auth", outcome["kind"])
+            self.assertEqual(source_document, outcome["source_document_id"])
+
+            await nodriver_ctbc_main(
+                tab, CTBC_TEST_SEAT_URL, cfg, ocr=None
+            )
+            self.assertIs(outcome, self._outcome_for(tab, submit_key))
+
+            runtime["document"]["last_document"] = (
+                f"{CTBC_TEST_SEAT_URL}|481523.250"
+            )
+            await nodriver_ctbc_main(
+                tab, CTBC_TEST_SEAT_URL, cfg, ocr=None
+            )
+
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_active_submit_blocks_a_different_purchase(self):
+        first_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        second_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P2&GROUP_ID=G2&PERFORMANCE_PRICE_AREA_ID=A2"
+        )
+        tab = FakeSubmitTab(dialog="", url=first_url)
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        first_key = self._track_submit_state(tab)
+        active = self._set_active_submit(tab, first_key, time.monotonic())
+        tab.target.url = second_url
+        second_key = _ctbc_purchase_state_key(tab)
+
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertIs(active, ctbc_tab_runtime(tab)["purchase"]["active_submit"])
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(0, tab.button.click_count)
+
+    async def test_different_purchase_waits_then_ignores_source_unknown(self):
+        first_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        second_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P2&GROUP_ID=G2&PERFORMANCE_PRICE_AREA_ID=A2"
+        )
+        tab = FakeSubmitTab(dialog="", url=first_url)
+        cfg = config()
+        first_key = self._track_submit_state(tab)
+        active = self._set_active_submit(tab, first_key, 100.0)
+        tab.target.url = second_url
+
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=105.0):
+            self.assertEqual(
+                "pending",
+                await _reconcile_utiki_purchase(tab, second_url, "seat", cfg),
+            )
+        self.assertIs(active, ctbc_tab_runtime(tab)["purchase"]["active_submit"])
+
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
+            self.assertEqual(
+                "blocked",
+                await _reconcile_utiki_purchase(tab, second_url, "seat", cfg),
+            )
+        self.assertIsNone(ctbc_tab_runtime(tab)["purchase"]["active_submit"])
+        self.assertEqual("unknown", self._outcome_for(tab, first_key)["kind"])
+        self.assertIsNone(
+            await _reconcile_utiki_purchase(tab, second_url, "seat", cfg)
+        )
+
+    async def test_late_dialog_on_new_purchase_still_uses_source_pointer(self):
+        first_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        second_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P2&GROUP_ID=G2&PERFORMANCE_PRICE_AREA_ID=A2"
+        )
+        tab = FakeSubmitTab(dialog="", url=first_url)
+        cfg = config()
+        first_key = self._track_submit_state(tab)
+        self._set_active_submit(tab, first_key, 100.0)
+        tab.target.url = second_url
+        second_key = _ctbc_purchase_state_key(tab)
+        with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
+            self.assertEqual(
+                "blocked",
+                await _reconcile_utiki_purchase(tab, second_url, "seat", cfg),
+            )
+
+        tab.dialog = "該位置已被選走"
+        tab.dialog_visible = True
+        self.assertEqual(
+            "blocked",
+            await _reconcile_utiki_purchase(tab, second_url, "seat", cfg),
+        )
+
+        self.assertEqual("seat_conflict", self._outcome_for(tab, first_key)["kind"])
+        self.assertIsNone(self._outcome_for(tab, second_key))
+
+    async def test_unknown_dialog_preserves_text_without_dismissal(self):
+        tab = FakeSubmitTab(dialog="  系統  稍後再試  ")
+        submit_key = self._track_submit_state(tab)
+        self._set_active_submit(tab, submit_key, time.monotonic())
+
+        self.assertEqual(
+            "rejected", await _handle_ctbc_submit_dialog(tab, config())
+        )
+
+        outcome = self._outcome_for(tab, submit_key)
+        self.assertEqual("unknown", outcome["kind"])
+        self.assertEqual("系統 稍後再試", outcome["text"])
+        self.assertEqual(0, tab.dialog_button.click_count)
+
+    async def test_success_dismiss_failure_remains_blocked(self):
+        tab = FakeSubmitTab(dialog="成功加入購物車")
+        submit_key = self._track_submit_state(tab)
+        self._set_active_submit(tab, submit_key, time.monotonic())
+
+        with patch(
+            "platforms.utiki.workflow.dismiss_dialog",
+            AsyncMock(return_value=CommitResult.REJECTED),
+        ) as dismiss:
+            self.assertEqual(
+                "rejected", await _handle_ctbc_submit_dialog(tab, config())
+            )
+
+        dismiss.assert_awaited_once()
+        tab.dialog = ""
+        tab.dialog_visible = False
+        with patch(
+            "platforms.utiki.workflow.dispatch_submit",
+            AsyncMock(),
+        ) as dispatch:
+            self.assertFalse(
+                await _ctbc_captcha_and_submit(tab, config(), ocr=None)
+            )
+
+        dispatch.assert_not_awaited()
+        self.assertEqual("success", self._outcome_for(tab, submit_key)["kind"])
+        self.assertEqual(0, tab.dialog_button.click_count)
+        self.assertEqual(0, tab.button.click_count)
+
+    async def test_dialog_attribution_collision_preserves_both_blockers(self):
+        first_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        second_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P2&GROUP_ID=G2&PERFORMANCE_PRICE_AREA_ID=A2"
+        )
+        tab = FakeSubmitTab(dialog="驗證碼錯誤", url=first_url)
+        first_key = _ctbc_purchase_state_key(tab)
+        tab.target.url = second_url
+        second_key = _ctbc_purchase_state_key(tab)
+        purchase = ctbc_tab_runtime(tab)["purchase"]
+        purchase["outcomes"][first_key] = {
+            "kind": "unknown", "reason": "submit_outcome",
+            "source_url": first_url, "source_document_id": "source-a",
+            "nonce": "a" * 32,
+        }
+        purchase["outcomes"][second_key] = {
+            "kind": "quota", "reason": "", "source_url": second_url,
+            "source_document_id": "source-b", "nonce": "b" * 32,
+        }
+        purchase["last_submit"] = {
+            "purchase_key": first_key, "nonce": "a" * 32,
+        }
+
+        self.assertEqual(
+            "rejected", await _handle_ctbc_submit_dialog(tab, config())
+        )
+
+        self.assertEqual("unknown", self._outcome_for(tab, first_key)["kind"])
+        self.assertEqual("quota", self._outcome_for(tab, second_key)["kind"])
+        self.assertEqual(0, tab.dialog_button.click_count)
+        self.assertEqual(0, tab.captcha_refresh.click_count)
+
+    async def test_rejected_new_submit_preserves_prior_dialog_provenance(self):
+        first_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        )
+        second_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P2&GROUP_ID=G2&PERFORMANCE_PRICE_AREA_ID=A2"
+        )
+        tab = FakeSubmitTab(dialog="", url=first_url)
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        first_key = _ctbc_purchase_state_key(tab)
+        purchase = ctbc_tab_runtime(tab)["purchase"]
+        purchase["outcomes"][first_key] = {
+            "kind": "unknown", "reason": "submit_outcome",
+            "source_url": first_url, "source_document_id": "source-a",
+            "nonce": "a" * 32,
+        }
+        purchase["last_submit"] = {
+            "purchase_key": first_key, "nonce": "a" * 32,
+        }
+        tab.target.url = second_url
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_submit",
+            AsyncMock(return_value=SubmitDispatchResult.STALE),
+        ), patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=False),
+        ):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+
+        self.assertEqual(first_key, purchase["last_submit"]["purchase_key"])
+        tab.dialog = "已超出可購買額度"
+        tab.dialog_visible = True
+        self.assertEqual("quota", await _handle_ctbc_submit_dialog(tab, cfg))
+        self.assertEqual("quota", self._outcome_for(tab, first_key)["kind"])
+
+    async def test_delayed_auth_keeps_source_document_on_fingerprint_failure(self):
+        source_url = str(FakeSubmitTab().target.url)
+        tab = FakeSubmitTab(
+            dialog="帳號或密碼錯誤",
+            url="https://tix.ctbcsports.com/BROTHERS/UTK0206_",
+        )
+        tab.target.url = source_url
+        source_key = _ctbc_purchase_state_key(tab)
+        tab.target.url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        purchase = ctbc_tab_runtime(tab)["purchase"]
+        purchase["outcomes"][source_key] = {
+            "kind": "unknown", "reason": "submit_outcome",
+            "source_url": source_url, "source_document_id": "source-document",
+            "nonce": "a" * 32,
+        }
+        purchase["last_submit"] = {
+            "purchase_key": source_key, "nonce": "a" * 32,
+        }
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "checkout-document"
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_login_fingerprint",
+            AsyncMock(side_effect=RuntimeError("fingerprint failed")),
+        ):
+            self.assertEqual("auth", await _handle_ctbc_submit_dialog(tab, config()))
+
+        outcome = self._outcome_for(tab, source_key)
+        self.assertEqual("auth", outcome["kind"])
+        self.assertEqual("source-document", outcome["source_document_id"])
 
     async def test_delayed_seat_conflict_closes_and_clears_submit_guard(self):
         conflict_text = "該位置已被選走"
@@ -1572,7 +2049,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(1, tab.button.click_count)
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+        self.assertIsNotNone(self._active_submit_for(tab, submit_key))
 
         with patch(
             "platforms.utiki.workflow._ctbc_attest_fast_destination",
@@ -1590,8 +2067,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
 
         self.assertEqual(1, tab.dialog_button.click_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("seat_conflict", self._outcome_for(tab, submit_key)["kind"])
         self.assertEqual("", tab.captcha_input.value)
         reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
         read_seat.assert_not_awaited()
@@ -1602,18 +2079,23 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = self._track_submit_state(tab)
+        workflow_document = f"{tab.target.url}|481522.125"
+        ctbc_tab_runtime(tab)["document"]["last_document"] = workflow_document
 
         with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(1, tab.button.click_count)
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+        active = self._active_submit_for(tab, submit_key)
+        self.assertIsNotNone(active)
+        self.assertEqual(workflow_document, active["source_document_id"])
+        self.assertEqual("document-1", active["document_id"])
 
         with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         self.assertEqual(1, tab.button.click_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("unknown", self._outcome_for(tab, submit_key)["kind"])
 
     async def test_cosmetic_purchase_url_changes_never_submit_twice(self):
         cases = []
@@ -1683,24 +2165,25 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                             submit_plan=build_submit_plan(quantity_plan),
                         )
                     )
-                if label.endswith("fragment"):
-                    self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-                    self.assertEqual(
-                        "unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key]
-                    )
-                else:
-                    self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+                self.assertIsNotNone(self._active_submit_for(tab, submit_key))
                 with patch("platforms.utiki.workflow.time.monotonic", return_value=111.0):
-                    self.assertFalse(
-                        await _ctbc_captcha_and_submit(
-                            tab, cfg, ocr=None,
-                            submit_plan=build_submit_plan(quantity_plan),
-                        )
+                    self.assertEqual(
+                        "blocked",
+                        await _reconcile_utiki_purchase(
+                            tab,
+                            cosmetic_url,
+                            (
+                                "general_admission"
+                                if label.startswith("general")
+                                else "seat"
+                            ),
+                            cfg,
+                        ),
                     )
 
                 self.assertEqual(submit_key, _ctbc_purchase_state_key(tab))
                 self.assertEqual(1, tab.button.click_count)
-                self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+                self.assertEqual("unknown", self._outcome_for(tab, submit_key)["kind"])
 
     async def test_submit_navigation_requires_same_tenant_checkout(self):
         reserved_url = (
@@ -1782,9 +2265,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     )
                 self.assertEqual(1, tab.button.click_count)
                 if expected:
-                    self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+                    self.assertIsNone(self._active_submit_for(tab, submit_key))
                     self.assertEqual(
-                        "success", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key]
+                        "success", self._outcome_for(tab, submit_key)["kind"]
                     )
                     tab.target.url = source_url
                     self.assertFalse(
@@ -1796,9 +2279,20 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     self.assertEqual(1, tab.button.click_count)
                     continue
 
-                self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+                self.assertIsNotNone(self._active_submit_for(tab, submit_key))
+                with patch(
+                    "platforms.utiki.workflow.time.monotonic",
+                    return_value=111.0,
+                ):
+                    self.assertEqual(
+                        "blocked",
+                        await _reconcile_utiki_purchase(
+                            tab, destination, "unknown", cfg
+                        ),
+                    )
+                self.assertIsNone(self._active_submit_for(tab, submit_key))
                 self.assertEqual(1, tab.button.click_count)
-                self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+                self.assertEqual("unknown", self._outcome_for(tab, submit_key)["kind"])
 
     async def test_checkout_only_completes_its_own_tab_submit(self):
         cfg = config()
@@ -1825,14 +2319,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 await _ctbc_captcha_and_submit(checkout_tab, cfg, ocr=None)
             )
 
-        self.assertIn(
-            waiting_key,
-            ctbc_tab_runtime(waiting_tab)["purchase"]["submitted"],
-        )
+        self.assertIsNotNone(self._active_submit_for(waiting_tab, waiting_key))
         checkout_purchase = ctbc_tab_runtime(checkout_tab)["purchase"]
-        self.assertNotIn(checkout_key, checkout_purchase["submitted"])
+        self.assertIsNone(checkout_purchase["active_submit"])
         self.assertEqual(
-            "success", checkout_purchase["submit_blocked"][checkout_key]
+            "success", checkout_purchase["outcomes"][checkout_key]["kind"]
         )
 
     async def test_submit_dialog_after_unverified_navigation_uses_source_purchase(self):
@@ -1852,17 +2343,17 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.button.click = click_and_leave_purchase
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("quota", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("quota", self._outcome_for(tab, submit_key)["kind"])
         self.assertEqual(1, tab.button.click_count)
 
     async def test_negative_dialog_takes_priority_over_checkout_navigation(self):
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
 
-        for label, dialog, state_name, expected in (
-            ("quota", "已超出可購買額度", "submit_blocked", "quota"),
-            ("seat-conflict", "該位置已被選走", "seat_conflict_pending", None),
+        for label, dialog, expected in (
+            ("quota", "已超出可購買額度", "quota"),
+            ("seat-conflict", "該位置已被選走", "seat_conflict"),
         ):
             with self.subTest(label=label):
                 tab = FakeSubmitTab(dialog="", dialogs=["", "", dialog])
@@ -1880,16 +2371,14 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
                 )
 
-                self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-                self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"][state_name])
-                if expected is not None:
-                    self.assertEqual(expected, ctbc_tab_runtime(tab)["purchase"][state_name][submit_key])
-                if state_name == "seat_conflict_pending":
+                self.assertIsNone(self._active_submit_for(tab, submit_key))
+                self.assertEqual(expected, self._outcome_for(tab, submit_key)["kind"])
+                if expected == "seat_conflict":
                     self.assertEqual(
-                        "seat", ctbc_tab_runtime(tab)["purchase"][state_name][submit_key]["page_type"]
+                        "seat", self._outcome_for(tab, submit_key)["page_type"]
                     )
                 self.assertNotEqual(
-                    "success", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"].get(submit_key)
+                    "success", self._outcome_for(tab, submit_key)["kind"]
                 )
                 self.assertEqual(1, tab.dialog_button.click_count)
 
@@ -1917,7 +2406,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
                 )
                 self.assertEqual(0, tab.button.click_count)
-                self.assertNotIn(None, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+                self.assertIsNone(ctbc_tab_runtime(tab)["purchase"]["active_submit"])
 
     async def test_submit_blockers_survive_cosmetic_url_variants(self):
         source_url = (
@@ -1943,9 +2432,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(0, quota_tab.button.click_count)
         self.assertEqual(
             "quota",
-            ctbc_tab_runtime(quota_tab)["purchase"]["submit_blocked"][
-                quota_key
-            ],
+            self._outcome_for(quota_tab, quota_key)["kind"],
         )
 
         unknown_tab = FakeSubmitTab(dialog="", url=source_url)
@@ -1964,9 +2451,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(1, unknown_tab.button.click_count)
         self.assertEqual(
             "unknown",
-            ctbc_tab_runtime(unknown_tab)["purchase"]["submit_blocked"][
-                unknown_key
-            ],
+            self._outcome_for(unknown_tab, unknown_key)["kind"],
         )
 
     async def test_submit_state_isolated_by_purchase_identity(self):
@@ -2034,8 +2519,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     ))
 
                 self.assertEqual(1, tab.button.click_count)
-                self.assertEqual("quota", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][first_key])
-                self.assertIn(second_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+                self.assertEqual("quota", self._outcome_for(tab, first_key)["kind"])
+                self.assertIsNotNone(self._active_submit_for(tab, second_key))
 
     async def test_late_conflict_replaces_unknown_submit_outcome(self):
         tab = FakeSubmitTab(dialog="")
@@ -2051,8 +2536,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.dialog = "該位置已被選走"
         tab.dialog_visible = True
         self.assertEqual("seat_conflict", await _handle_ctbc_submit_dialog(tab, cfg))
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"])
+        self.assertEqual("seat_conflict", self._outcome_for(tab, submit_key)["kind"])
 
     async def test_late_captcha_error_replaces_unknown_submit_outcome(self):
         tab = FakeSubmitTab(dialog="")
@@ -2068,7 +2552,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.dialog = "驗證碼錯誤"
         tab.dialog_visible = True
         self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
+        self.assertIsNone(self._outcome_for(tab, submit_key))
         self.assertEqual("", tab.captcha_input.value)
         self.assertEqual(1, tab.captcha_refresh.click_count)
 
@@ -2086,8 +2570,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.dialog = "帳號或密碼錯誤"
         tab.dialog_visible = True
         self.assertEqual("auth", await _handle_ctbc_submit_dialog(tab, cfg))
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["auth_failure"])
+        self.assertEqual("auth", self._outcome_for(tab, submit_key)["kind"])
 
     async def test_auth_error_without_credentials_blocks_until_new_document(self):
         tab = FakeSubmitTab(dialog="帳號或密碼錯誤")
@@ -2111,7 +2594,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             ctbc_identity_runtime(identity)["document"]["last_document"] = "document-2"
             self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["auth_failure"])
+        self.assertIsNone(self._outcome_for(tab, submit_key))
         self.assertEqual(0, tab.button.click_count)
 
     async def test_auth_fingerprint_failure_keeps_document_blocker(self):
@@ -2121,7 +2604,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
         identity = _ctbc_tab_identity(tab)
         ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
-        ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = 1.0
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+            "document_id": "time-origin-1",
+        })
 
         with patch(
             "platforms.utiki.workflow._ctbc_login_fingerprint",
@@ -2136,11 +2623,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(str(tab.target.url), expected_dialog.page_url)
         self.assertEqual(tab.document_id, expected_dialog.document_id)
         self.assertEqual("帳號或密碼錯誤", expected_dialog.text)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual({
-            "fingerprint": "",
-            "source_document_id": "document-1",
-        }, ctbc_tab_runtime(tab)["purchase"]["auth_failure"][submit_key])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        auth_outcome = self._outcome_for(tab, submit_key)
+        self.assertEqual("auth", auth_outcome["kind"])
+        self.assertEqual("", auth_outcome["fingerprint"])
+        self.assertEqual("document-1", auth_outcome["source_document_id"])
 
         with patch(
             "platforms.utiki.workflow._fill_ctbc_inline_login",
@@ -2173,8 +2660,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         self.assertEqual(1, tab.button.click_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("unknown", self._outcome_for(tab, submit_key)["kind"])
 
     async def test_conflict_waits_for_new_document_before_resubmitting(self):
         tab = FakeSubmitTab(dialog="")
@@ -2182,10 +2669,12 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
         identity = _ctbc_tab_identity(tab)
         ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
-        ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"][submit_key] = {
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
+            "kind": "seat_conflict",
             "source_document_id": "document-1",
             "dialog_dismissed": True,
             "reload_dispatched": False,
+            "recovery_document_id": "",
         }
 
         with patch(
@@ -2200,7 +2689,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             ctbc_identity_runtime(identity)["document"]["last_document"] = "document-2"
             self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
 
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"])
+        self.assertIsNone(self._outcome_for(tab, submit_key))
 
     async def test_conflict_dismiss_failure_blocks_reload(self):
         tab = FakeSubmitTab(dialog="該位置已被選走")
@@ -2221,7 +2710,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
 
         self.assertFalse(
-            ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"][submit_key]["dialog_dismissed"]
+            self._outcome_for(tab, submit_key)["dialog_dismissed"]
         )
         reload_page.assert_not_awaited()
         read_seat.assert_not_awaited()
@@ -2243,7 +2732,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         self.assertEqual(1, tab.dialog_button.click_count)
         self.assertFalse(
-            ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"][submit_key]["dialog_dismissed"]
+            self._outcome_for(tab, submit_key)["dialog_dismissed"]
         )
         reload_page.assert_not_awaited()
 
@@ -2266,31 +2755,39 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
 
         self.assertTrue(
-            ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"][submit_key]["dialog_dismissed"]
+            self._outcome_for(tab, submit_key)["dialog_dismissed"]
         )
         reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
 
-    async def test_conflict_pending_clears_when_document_changes(self):
+    async def test_conflict_survives_spontaneous_change_until_recovery_document(self):
         tab = FakeSubmitTab(dialog="")
         cfg = config()
         submit_key = self._track_submit_state(tab)
         identity = _ctbc_tab_identity(tab)
         ctbc_identity_runtime(identity)["document"]["last_document"] = "document-2"
-        ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"][submit_key] = {
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
+            "kind": "seat_conflict",
             "source_document_id": "document-1",
             "page_type": "seat",
             "dialog_dismissed": False,
             "reload_dispatched": False,
+            "recovery_document_id": "",
         }
 
         with patch(
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page:
-            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
 
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"])
-        reload_page.assert_not_awaited()
+        pending = self._outcome_for(tab, submit_key)
+        self.assertEqual("seat_conflict", pending["kind"])
+        self.assertEqual("document-2", pending["recovery_document_id"])
+        reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
+
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "document-3"
+        self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+        self.assertIsNone(self._outcome_for(tab, submit_key))
 
     async def test_general_conflict_uses_same_reload_recovery(self):
         tab = FakeSubmitTab(
@@ -2304,11 +2801,13 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
         identity = _ctbc_tab_identity(tab)
         ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
-        ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"][submit_key] = {
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
+            "kind": "seat_conflict",
             "source_document_id": "document-1",
             "page_type": "general_admission",
             "dialog_dismissed": True,
             "reload_dispatched": False,
+            "recovery_document_id": "",
         }
 
         with patch(
@@ -2333,7 +2832,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         self.assertEqual(0, tab.button.click_count)
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["seat_conflict_pending"])
+        self.assertEqual("seat_conflict", self._outcome_for(tab, submit_key)["kind"])
         self.assertEqual(1, tab.dialog_button.click_count)
 
     async def test_quota_dialog_blocks_only_current_purchase(self):
@@ -2345,11 +2844,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         original_key = self._track_submit_state(tab)
-        ctbc_tab_runtime(tab)["purchase"]["submitted"][original_key] = time.monotonic()
+        self._set_active_submit(tab, original_key, time.monotonic())
         self.assertEqual("quota", await _handle_ctbc_submit_dialog(tab, cfg))
         self.assertEqual(1, tab.dialog_button.click_count)
-        self.assertNotIn(original_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("quota", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][original_key])
+        self.assertIsNone(self._active_submit_for(tab, original_key))
+        self.assertEqual("quota", self._outcome_for(tab, original_key)["kind"])
 
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
@@ -2360,30 +2859,30 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PERFORMANCE_ID=P2&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
         )
         new_key = self._track_submit_state(tab)
-        self.assertNotIn(new_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
+        self.assertIsNone(self._outcome_for(tab, new_key))
 
     async def test_quota_state_survives_dialog_dismiss_race(self):
         tab = FakeSubmitTab(dialog="已超出可購買額度")
         tab.dismiss_allowed = False
         submit_key = self._track_submit_state(tab)
-        ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = time.monotonic()
+        self._set_active_submit(tab, submit_key, time.monotonic())
 
         self.assertEqual("quota", await _handle_ctbc_submit_dialog(tab, config()))
 
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("quota", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("quota", self._outcome_for(tab, submit_key)["kind"])
         self.assertEqual(0, tab.dialog_button.click_count)
 
     async def test_captcha_dismiss_failure_defers_reset_without_resubmit(self):
         tab = FakeSubmitTab(dialog="驗證碼錯誤")
         tab.dismiss_allowed = False
         submit_key = self._track_submit_state(tab)
-        ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = 1.0
+        self._set_active_submit(tab, submit_key, 1.0)
         self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, config()))
         self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, config()))
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
         self.assertEqual(0, tab.dialog_button.click_count)
-        self.assertEqual("captcha_pending", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertEqual("captcha", self._outcome_for(tab, submit_key)["kind"])
         self.assertEqual("ABCD", tab.captcha_input.value)
         self.assertEqual(0, tab.captcha_refresh.click_count)
 
@@ -2396,7 +2895,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(0, tab.button.click_count)
         self.assertEqual("", tab.captcha_input.value)
         self.assertEqual(1, tab.captcha_refresh.click_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
+        self.assertIsNone(self._outcome_for(tab, submit_key))
 
     async def test_captcha_refresh_exception_never_clicks_refresh_twice(self):
         tab = FakeSubmitTab(dialog="驗證碼錯誤")
@@ -2418,8 +2917,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(0, tab.button.click_count)
         self.assertEqual(1, tab.captcha_refresh.click_count)
         self.assertEqual(1, tab.captcha_input.apply_count)
-        self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["captcha_reset"][submit_key]["phase"])
-        self.assertEqual("captcha_pending", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertEqual("unknown", self._outcome_for(tab, submit_key)["reset_phase"])
+        self.assertEqual("captcha", self._outcome_for(tab, submit_key)["kind"])
 
         async def refresh_success():
             tab.captcha_refresh.clicked = True
@@ -2431,8 +2930,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         self.assertEqual(2, tab.captcha_refresh.click_count)
         self.assertEqual(2, tab.captcha_input.apply_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["captcha_reset"])
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
+        self.assertIsNone(self._outcome_for(tab, submit_key))
 
     async def test_auth_error_blocks_retry_until_credentials_change(self):
         tab = FakeSubmitTab(dialog="帳號或密碼錯誤")
@@ -2442,7 +2940,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(0, tab.button.click_count)
         self.assertEqual(1, tab.dialog_button.click_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["auth_failure"])
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertEqual("auth", self._outcome_for(tab, submit_key)["kind"])
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertEqual(0, tab.button.click_count)

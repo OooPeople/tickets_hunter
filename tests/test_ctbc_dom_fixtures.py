@@ -1292,11 +1292,9 @@ async def _assert_quantity_fixture(browser):
     assert await flow_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 1
-    assert ctbc_tab_runtime(flow_tab)["purchase"]["submitted"][
-        ("fixture-purchase",)
-    ]["phase"] == (
-        "awaiting_result"
-    )
+    active_submit = ctbc_tab_runtime(flow_tab)["purchase"]["active_submit"]
+    assert active_submit["purchase_key"] == ("fixture-purchase",)
+    assert active_submit["phase"] == "awaiting_result"
     assert await _read_fixture_quantities(flow_tab) == {
         "FULL": "2", "OTHER": "0"
     }
@@ -1578,9 +1576,7 @@ async def _assert_quantity_fixture(browser):
         assert await wait_tab.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
         ) == 0
-        assert (f"fixture-wait-{mutation}",) not in (
-            ctbc_tab_runtime(wait_tab)["purchase"]["submitted"]
-        )
+        assert ctbc_tab_runtime(wait_tab)["purchase"]["active_submit"] is None
 
     race_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
     await race_tab.evaluate("document.body.dataset.reboundOther = '1'")

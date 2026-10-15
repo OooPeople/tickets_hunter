@@ -64,7 +64,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
     async def test_ambiguous_visible_dialog_blocks_without_dismiss(self):
         tab = FakeSubmitTab(dialog="")
         submit_key = _ctbc_purchase_state_key(tab)
-        ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = {
+        ctbc_tab_runtime(tab)["purchase"]["active_submit"] = {
+            "purchase_key": submit_key,
+            "nonce": "a" * 32,
             "dispatched_at": 1.0,
             "phase": "awaiting_result",
             "source_url": str(tab.target.url),
@@ -88,8 +90,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 )
             )
         dismiss.assert_not_awaited()
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("rejected", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(ctbc_tab_runtime(tab)["purchase"]["active_submit"])
+        outcome = ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key]
+        self.assertEqual("unknown", outcome["kind"])
+        self.assertEqual("", outcome["text"])
 
         with patch(
             "platforms.utiki.workflow.read_dialog_snapshot",
@@ -806,7 +810,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         self.assertEqual(0, tab.button.click_count)
         observe.assert_awaited_once()
         self.assertEqual(
-            "awaiting_result", ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key]["phase"]
+            "awaiting_result",
+            ctbc_tab_runtime(tab)["purchase"]["active_submit"]["phase"],
         )
 
     async def test_reserved_seat_clear_commit_never_submits_or_reloads(self):
@@ -1501,9 +1506,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             dom_port.events[:2],
         )
         self.assertEqual(
-            "awaiting_result", ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key]["phase"]
+            "awaiting_result",
+            ctbc_tab_runtime(tab)["purchase"]["active_submit"]["phase"],
         )
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
+        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["outcomes"])
 
     async def test_server_quantity_plan_reaches_shared_submit_dispatch(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
@@ -1557,8 +1563,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ))
 
         self.assertEqual(1, dispatch.await_count)
-        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
-        self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
+        self.assertIsNone(ctbc_tab_runtime(tab)["purchase"]["active_submit"])
+        self.assertEqual(
+            "unknown",
+            ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key]["kind"],
+        )
 
     async def test_late_stale_dispatch_cannot_reload_after_losing_guard(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
@@ -1576,7 +1585,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         }
 
         async def lose_guard(*_args):
-            ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = replacement
+            replacement["purchase_key"] = submit_key
+            ctbc_tab_runtime(tab)["purchase"]["active_submit"] = replacement
             return SubmitDispatchResult.STALE
 
         with patch(
@@ -1591,7 +1601,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ))
 
         reload_page.assert_not_awaited()
-        self.assertIs(ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key], replacement)
+        self.assertIs(ctbc_tab_runtime(tab)["purchase"]["active_submit"], replacement)
 
     async def test_captcha_rejection_allows_one_new_quantity_dispatch(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())

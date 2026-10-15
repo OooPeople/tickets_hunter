@@ -1,785 +1,138 @@
-# Tickets Hunter 打包部署指南
+# Tickets Hunter PyInstaller 打包與驗證指南
 
-**文件說明**：Tickets Hunter 打包部署完整指南，涵蓋 GitHub Actions 自動化打包、本地測試打包、PyInstaller 技術細節與疑難排解。
-**最後更新**：2025-11-24
+**最後更新**：2026-10-15
 
----
+本文件說明目前 repository 實際使用的兩個 PyInstaller bundle、本機 smoke gate 與 GitHub Release 流程。若文件與程式不一致，以下列檔案為準：
 
-## 📋 目錄
-1. [快速開始](#快速開始)
-2. [打包流程概覽](#打包流程概覽)
-3. [GitHub Actions 自動化打包](#github-actions-自動化打包)
-4. [本地測試打包](#本地測試打包)
-5. [PyInstaller 配置說明](#pyinstaller-配置說明)
-6. [疑難排解](#疑難排解)
-7. [進階主題](#進階主題)
-
----
+- `build_scripts/build_local.py`：跨平台本機建置與 smoke gate。
+- `build_scripts/nodriver_tixcraft.spec`：主程式 bundle。
+- `build_scripts/settings.spec`：設定介面 bundle。
+- `.github/workflows/build-release.yml`：Windows 與 Apple Silicon macOS 發佈建置。
 
 ## 快速開始
 
-### 🎯 你想做什麼？
+在已安裝 runtime dependencies 與 PyInstaller 的開發環境中，從專案根目錄執行：
 
-| 目標 | 使用方法 | 時間 | 說明 |
-|------|---------|------|------|
-| **本地測試打包** | `build_scripts\build_and_test.bat` | 10-20 分鐘 | 開發階段驗證打包結果 |
-| **正式發布版本** | 推送 Git tag (`v2026.03.09`) | 15-25 分鐘 | GitHub Actions 自動打包並行布 |
-| **了解技術細節** | 閱讀本文件 | 30 分鐘 | 深入理解 PyInstaller 配置 |
-
-### ⚡ 最快方式
-
-**本地測試打包**（開發階段）：
-```batch
-cd build_scripts
-build_and_test.bat
-```
-
-**正式發布**（生產環境）：
 ```bash
-# 1. 更新 src/nodriver_tixcraft.py 與 src/settings.py 的 CONST_APP_VERSION
-
-# 2. 更新 CHANGELOG.md
-
-# 3. 提交並推送 tag
-git commit -am "chore(release): update version to 2026.03.09"
-git tag v2026.03.09
-git push origin main v2026.03.09
-
-# 4. GitHub Actions 自動執行（15-25 分鐘）
-# 前往 GitHub → Actions → Build and Release 查看進度
-
-# 5. 驗證 Release
-# 前往 GitHub → Releases → 下載並測試 ZIP
+.venv/bin/python build_scripts/build_local.py --keep
 ```
 
-> 📖 **詳細流程請參閱** → [`build_scripts/QUICK_START.md`](../../build_scripts/QUICK_START.md)
+Windows PowerShell 可改用：
 
----
-
-## 打包流程概覽
-
-### 🏗️ 打包架構
-
-Tickets Hunter 使用 **雙軌打包策略**：
-
-```
-開發階段（本地）          生產階段（GitHub Actions）
-    ↓                           ↓
-build_and_test.bat         .github/workflows/build-release.yml
-    ↓                           ↓
-PyInstaller 打包            PyInstaller 打包
-    ↓                           ↓
-自動化測試                   建立 ZIP
-    ↓                           ↓
-生成測試報告                 發布 GitHub Release
+```powershell
+.venv\Scripts\python.exe build_scripts\build_local.py --keep
 ```
 
-### 📦 打包產物
+`--keep` 會保留 `build/` 供查看 PyInstaller warning；不需要時可省略。若已經建置並組裝完 `dist/tickets_hunter/`，可以只重跑驗證：
 
-**輸出結構**：
-```
-dist/
-├── tickets_hunter/                    # 統一目錄（3 個 exe 共用依賴）
-│   ├── nodriver_tixcraft.exe         # ZenDriver 版本主程式
-│   ├── settings.exe                   # 網頁設定介面
-│   ├── config_launcher.exe            # 多設定檔管理器
-│   ├── _internal/                     # 共用依賴（Python runtime + 模組）
-│   │   ├── python310.dll
-│   │   ├── ddddocr/
-│   │   ├── zendriver/
-│   │   └── ... (其他依賴)
-│   ├── webdriver/                     # 瀏覽器擴充套件
-│   │   ├── Maxbotplus_1.0.0/
-│   │   └── Maxblockplus_1.0.0/
-│   ├── assets/                        # 資源檔案（音效等）
-│   ├── www/                           # 網頁介面資源
-│   ├── README_Release.txt             # 使用者說明
-│   └── CHANGELOG.md                   # 更新記錄
-└── release/
-    └── tickets_hunter_v{VERSION}.zip  # 發布 ZIP（含上述所有內容）
+```bash
+.venv/bin/python build_scripts/build_local.py --skip-build --keep
 ```
 
-### 🎯 設計理念
+Windows 仍保留 `build_scripts/build_and_test.bat` 作為完整 ZIP 建置工具；開發中的快速可執行 gate 以 `build_local.py` 為準。
 
-1. **統一依賴目錄**：3 個 exe 共用 `_internal/`，減少總大小
-2. **自動生成設定**：不打包 `settings.json`，由程式自動生成
-3. **自動下載驅動**：不打包 `chromedriver.exe`，由 `settings.exe` 自動下載
-4. **資源分離**：靜態資源（webdriver, assets, www）與 Python 依賴分離
+## 建置產物
 
----
+目前只有兩個可執行程式：
 
-## GitHub Actions 自動化打包
+| Spec | 產物 | 用途 |
+|---|---|---|
+| `nodriver_tixcraft.spec` | `nodriver_tixcraft` / `.exe` | Zendriver 搜票主程式 |
+| `settings.spec` | `settings` / `.exe` | Tornado 網頁設定介面 |
 
-### 🤖 自動化流程
+組裝後的核心目錄：
 
-**觸發條件**：推送 Git tag（格式：`v*`，例如 `v2025.11.24`）
-
-**執行步驟**：
-1. **環境準備**：設定 Python 3.10.11 環境
-2. **安裝依賴**：安裝 `requirement.txt` + PyInstaller
-3. **打包 3 個 exe**：
-   - `nodriver_tixcraft.exe`（NoDriver 版本，最大）
-   - `settings.exe`（網頁設定介面）
-   - `config_launcher.exe`（多設定檔管理器）
-4. **整合統一目錄**：
-   - 複製 3 個 exe 到 `dist/tickets_hunter/`
-   - 合併 3 個 `_internal/` 目錄（共用依賴）
-   - 複製資源目錄（webdriver, assets, www）
-   - 複製文件（README_Release.txt, CHANGELOG.md）
-5. **建立 ZIP**：壓縮統一目錄為 `tickets_hunter_v{VERSION}.zip`
-6. **發布 Release**：
-   - 自動提取 CHANGELOG.md 對應版本的更新內容
-   - 建立 Draft Release（需手動 Publish）
-   - 上傳 ZIP 檔案
-
-### 📋 設定檔案
-
-**位置**：`.github/workflows/build-release.yml`
-
-**關鍵配置**：
-```yaml
-on:
-  push:
-    tags:
-      - 'v*'  # 觸發條件：推送 v 開頭的 tag
-
-jobs:
-  build-windows:
-    runs-on: windows-latest
-
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10.11'  # 固定 Python 版本
-
-      - name: Build executables with PyInstaller
-        run: |
-          python -m PyInstaller build_scripts/nodriver_tixcraft.spec --clean --noconfirm
-          python -m PyInstaller build_scripts/settings.spec --clean --noconfirm
-          python -m PyInstaller build_scripts/config_launcher.spec --clean --noconfirm
-
-      - name: Create unified directory structure
-        # 整合 4 個 exe 與 _internal/ 依賴
-
-      - name: Extract CHANGELOG for release notes
-        # 自動提取 CHANGELOG.md 對應版本的更新內容
+```text
+dist/tickets_hunter/
+├── nodriver_tixcraft[.exe]
+├── settings[.exe]
+├── _internal/
+├── assets/
+└── www/
 ```
 
-### 🔍 監控與驗證
+macOS 建置會另複製 `build_scripts/macos/` 內的使用者 launcher。`settings.json` 不打包，由程式首次執行時產生；不得將本機設定檔、Cookie 或帳密放入發佈物。
 
-**檢視打包進度**：
-1. 前往 GitHub 儲存庫
-2. 點擊 **Actions** 標籤
-3. 選擇 **Build and Release** workflow
-4. 檢視執行狀態（約 15-25 分鐘）
+## 本機 gate 會驗證什麼
 
-**驗證 Release**：
-1. 前往 GitHub 儲存庫
-2. 點擊 **Releases** 標籤
-3. 下載最新版本的 ZIP 檔案
-4. 在乾淨環境（Windows Sandbox 或虛擬機器）測試所有 exe
+`build_local.py` 完成以下檢查：
 
----
+1. Python 版本與 PyInstaller 可用，核心 runtime modules 可 import。
+2. 以兩個 spec 從乾淨的 `build/` / `dist/` 重建 bundle。
+3. 合併兩個 `_internal/`，並複製 `assets/` 與 `www/`。
+4. 驗證兩個可執行檔、web UI 與 ddddocr ONNX model 存在。
+5. 驗證 `torch`、`matplotlib` 與 `IPython` 沒有意外被打包。
+6. 執行 frozen bot `--help`，確認全部 platform import chain 可載入。
+7. 執行 frozen bot `--self-test`，確認 OCR model 實際可讀取測試圖片。
 
-## 本地測試打包
+Phase 驗收時必須保留命令結果。只看 PyInstaller exit code、只檢查檔案存在，或只在已安裝 Python 的開發機手動點開，都不能取代上述 smoke gate。
 
-### 🧪 測試目的
+## Spec 與 hidden imports
 
-在推送 tag 觸發 GitHub Actions **之前**，先在本地驗證打包結果，避免浪費 CI/CD 時間。
+`nodriver_tixcraft.spec` 以 `src/` 為 import root，明確列出專案內的 platform modules。uTiki2 family 至少應包含：
 
-### ⚙️ 測試腳本
-
-**位置**：`build_scripts/build_and_test.bat`
-
-**功能特點**：
-- ✅ 自動安裝依賴（`requirement.txt` + PyInstaller）
-- ✅ 打包 4 個 exe（與 GitHub Actions 相同流程）
-- ✅ 整合統一目錄（與 GitHub Actions 相同結構）
-- ✅ 自動化測試（13 項檢查）
-- ✅ 生成測試報告（`test_report_{VERSION}.txt`）
-- ✅ 生成發布 ZIP（`tickets_hunter_v{VERSION}.zip`）
-
-### 🚀 執行方式
-
-**方法 A：從 `build_scripts/` 執行**（推薦）
-```batch
-cd build_scripts
-build_and_test.bat
-```
-
-**方法 B：從專案根目錄執行**
-```batch
-build_scripts\build_and_test.bat
-```
-
-### 📊 測試項目
-
-腳本會自動執行以下測試：
-
-**結構測試**（Test 1-10）：
-1. 檢查 3 個 exe 是否存在
-2. 檢查 `_internal/` 目錄是否存在
-3. 檢查 `python310.dll` 是否存在
-4. 檢查 `ddddocr` 模組是否存在
-5. 檢查 `onnxruntime` 模組是否存在
-6. 檢查 `webdriver/` 目錄是否存在
-7. 檢查 `assets/` 目錄是否存在
-8. 檢查 `www/` 目錄是否存在
-9. 檢查 `settings.json` 是否被排除（應該不存在）
-10. 檢查 ZIP 檔案是否生成
-
-**啟動測試**（Test 12-13）：
-12. 測試 `config_launcher.exe` 是否可啟動（3 秒自動關閉）
-13. 測試 `settings.exe` 是否可啟動（3 秒自動關閉）
-
-### 📄 測試報告
-
-**位置**：`dist/release/test_report_{VERSION}.txt`
-
-**報告內容**：
-- 測試日期與環境資訊（Python 版本）
-- 測試結果摘要（通過/失敗數量）
-- 詳細測試結果（逐項列出）
-- 打包產物資訊（ZIP 大小、exe 大小）
-- 下一步建議（成功則建議推送 tag，失敗則建議修復）
-
-### 🖥️ 進階測試
-
-**Windows Sandbox 測試**（推薦）：
-```batch
-# 1. 啟動 Windows Sandbox
-# 2. 複製 ZIP 到 Sandbox 桌面
-# 3. 解壓縮並測試 4 個 exe
-# 4. 驗證是否缺少 DLL 或模組
-```
-
-**虛擬機器測試**：
-- 使用乾淨的 Windows 10/11 虛擬機器（無 Python 環境）
-- 安裝 [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-- 測試所有功能是否正常
-
----
-
-## PyInstaller 配置說明
-
-### 📋 .spec 設定檔案
-
-Tickets Hunter 使用 **3 個獨立的 .spec 設定檔**，每個對應一個 exe：
-
-| 設定檔 | 對應程式 | 說明 |
-|--------|---------|------|
-| `nodriver_tixcraft.spec` | `nodriver_tixcraft.exe` | ZenDriver 版本主程式（最大） |
-| `settings.spec` | `settings.exe` | 網頁設定介面 |
-| `config_launcher.spec` | `config_launcher.exe` | 多設定檔管理器 |
-
-### 🔧 配置結構
-
-**以 `nodriver_tixcraft.spec` 為例**：
-
-```python
-# -*- mode: python ; coding: utf-8 -*-
-
-# =============================================================================
-# Tickets Hunter - ZenDriver Version Build Specification
-# =============================================================================
-
-from PyInstaller.utils.hooks import collect_data_files
-
-block_cipher = None
-
-# 收集 ddddocr 資料檔案（ONNX 模型、字體等）
-datas = collect_data_files('ddddocr')
-
-a = Analysis(
-    ['../src/nodriver_tixcraft.py'],  # 主程式入口
-    pathex=[],
-    binaries=[],
-    datas=datas,  # 資料檔案
-    hiddenimports=[
-        # ZenDriver 相關
-        'zendriver',
-        'zendriver.cdp',
-        'zendriver.core.config',
-        # 驗證碼辨識
-        'ddddocr',
-        'onnxruntime',
-        'onnxruntime.capi.onnxruntime_pybind11_state',
-        # 影像處理
-        'cv2',
-        'PIL',
-        # 網路
-        'urllib3',
-        'websockets',
-    ],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[
-        # 排除不需要的大型套件
-        'matplotlib',
-        'numpy.distutils',
-        'tkinter',
-        'test',
-        'unittest',
-    ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
-    noarchive=False,
-)
-
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],  # 資料夾模式：不包含 binaries
-    exclude_binaries=True,  # 啟用資料夾模式
-    name='nodriver_tixcraft',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,  # 使用 UPX 壓縮
-    console=True,  # 保留命令列視窗
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='nodriver_tixcraft',
-)
-```
-
-### 🎯 關鍵配置項
-
-#### 1. `datas` - 資料檔案
-
-**目的**：打包非 Python 程式碼的資源檔案
-
-**Tickets Hunter 策略**：
-- ✅ 打包 `ddddocr` 資料檔案（使用 `collect_data_files()`）
-- ❌ **不打包** `webdriver/`, `assets/`, `www/`（改用 xcopy 複製）
-- ❌ **不打包** `settings.json`（由程式自動生成）
-
-**原因**：
-- PyInstaller 的 `datas` 會將檔案壓縮到 `_internal/`
-- 直接複製目錄更可靠，使用者也可自行修改
-
-#### 2. `hiddenimports` - 隱藏匯入
-
-**目的**：明確指定動態匯入的模組（PyInstaller 無法自動偵測）
-
-**Tickets Hunter 必要模組**：
 ```python
 hiddenimports=[
-    # ZenDriver（反偵測 WebDriver）
-    'zendriver',
-    'zendriver.cdp',
-    'zendriver.core.config',
-
-    # 驗證碼辨識（ddddocr + ONNX Runtime）
-    'ddddocr',
-    'onnxruntime',
-    'onnxruntime.capi.onnxruntime_pybind11_state',  # 重要！缺少會導致 ddddocr 無法使用
-
-    # 影像處理
-    'cv2',  # OpenCV
-    'PIL',  # Pillow
-
-    # 網路
-    'urllib3',
-    'websockets',
+    'platforms.ctbc',       # 舊公開名稱相容 facade
+    'platforms.utiki',
+    'platforms.utiki.auth',
+    'platforms.utiki.profiles',
+    'platforms.utiki.workflow',
 ]
 ```
 
-#### 3. `excludes` - 排除模組
+新增 family submodule 時，要在同一 Phase 評估 hidden import，並重跑本機建置。不要把 pytest、coverage 或其他開發工具加入 runtime `requirement.txt` 或 spec；測試依賴屬於 `requirements-dev.txt`。
 
-**目的**：減少打包大小，排除不需要的大型套件
+兩個 spec 都使用 onedir（`exclude_binaries=True`）與 `upx=False`：
 
-**Tickets Hunter 排除清單**：
-```python
-excludes=[
-    'matplotlib',      # 繪圖庫（不需要）
-    'numpy.distutils', # NumPy 編譯工具（不需要）
-    'tkinter',         # GUI 框架（不需要，我們使用網頁介面）
-    'test',            # 測試模組
-    'unittest',        # 單元測試模組
-]
-```
+- onedir 可直接檢查 native dependencies，也避免 onefile 每次啟動解壓。
+- 發佈流程將兩個 `_internal/` 合併到同一目錄以減少重複。
+- `ddddocr` 的 data files 由 `collect_data_files('ddddocr')` 收集。
+- OCR trainer 可能讓開發 venv 內存在大型套件，spec 明確排除 `torch`、`torchvision`、`matplotlib`、`IPython` 與 `tkinter`。
 
-#### 4. `exclude_binaries=True` - 資料夾模式
+## GitHub Release 流程
 
-**目的**：將依賴檔案放到 `_internal/` 目錄，而非打包成單一 exe
+推送 `v*` tag 會觸發 `.github/workflows/build-release.yml`：
 
-**優點**：
-- ✅ 啟動速度快（無需解壓縮）
-- ✅ 易於除錯（可直接檢視依賴檔案）
-- ✅ 支援多個 exe 共用依賴（節省空間）
+1. Windows 使用 Python 3.11.9 與 PyInstaller 6.22.3 建置兩個 `.exe`。
+2. 組裝 `dist/tickets_hunter/` 後以 `build_local.py --skip-build --keep` 執行 layout、import 與 OCR smoke。
+3. 產生 ZIP，並建立 draft GitHub Release。
+4. Apple Silicon macOS job 在 Windows job 完成後建置及驗證對應 bundle，再上傳到同一個 draft release。
 
-**缺點**：
-- ❌ 需要分發整個資料夾（不過我們會打包成 ZIP）
+PyInstaller 不能跨平台編譯。macOS 本機成功只證明 macOS 產物；Windows 發布前仍需 Windows job 通過。一般測試 workflow 也不取代 release build。
 
-#### 5. `console=True` - 保留命令列視窗
+建立 tag 前必須先：
 
-**目的**：顯示執行記錄，方便使用者檢視進度
+1. 將同一版本號同步到 `src/settings.py`、`src/nodriver_common.py`、`src/www/settings.html` 與 `src/www/settings.js`。目前 workflow 不會把 tag 自動注入這些顯示值。
+2. 在 `CHANGELOG.md` 新增對應版本 heading 與內容；workflow 會以它產生 Release notes。
+3. 提交上述變更，並再跑測試與本機打包 gate。
 
-**Tickets Hunter 策略**：
-- ✅ `nodriver_tixcraft.exe` - 保留 console（檢視搶票記錄）
-- ✅ `settings.exe` - 保留 console（檢視伺服器記錄）
-- ❌ `config_launcher.exe` - 隱藏 console（GUI 程式）
+確認後才建立並推送 tag：
 
-### 🔍 常見問題
-
-#### Q1: 為什麼不使用 `--onefile` 單一檔案模式？
-
-**原因**：
-1. **啟動慢**：單一 exe 需要先解壓縮到暫存目錄（5-10 秒）
-2. **檔案大**：無法共用依賴，每個 exe 都包含完整 runtime（總大小 1GB+）
-3. **不易除錯**：無法直接檢視依賴檔案
-
-**Tickets Hunter 選擇**：
-- 使用資料夾模式（`exclude_binaries=True`）
-- 4 個 exe 共用 `_internal/` 依賴
-- 最終打包成 ZIP 分發（兼顧方便性與效能）
-
-#### Q2: 為什麼 `onnxruntime.capi.onnxruntime_pybind11_state` 必須加入 `hiddenimports`？
-
-**原因**：
-- `ddddocr` 依賴 ONNX Runtime 進行模型推論
-- ONNX Runtime 使用動態匯入載入 C++ 擴充套件
-- PyInstaller 無法自動偵測，必須明確指定
-
-**症狀**：
-- 缺少此模組會導致 `ddddocr` 初始化失敗
-- 錯誤訊息：`ModuleNotFoundError: No module named 'onnxruntime.capi.onnxruntime_pybind11_state'`
-
-#### Q3: 為什麼不打包 `webdriver/`, `assets/`, `www/` 目錄？
-
-**原因**：
-1. **可靠性**：PyInstaller `datas` 壓縮後路徑可能改變，導致程式找不到檔案
-2. **可修改性**：使用者可直接修改這些目錄（例如替換音效檔案）
-3. **簡潔性**：避免重複打包（4 個 exe 會重複包含相同檔案）
-
-**Tickets Hunter 策略**：
-- 使用 `xcopy` 直接複製目錄到 `dist/tickets_hunter/`
-- 程式使用相對路徑讀取（例如 `./webdriver/`）
-
----
-
-## 疑難排解
-
-### 🐛 常見錯誤
-
-#### 錯誤 1: `ModuleNotFoundError: No module named 'xxx'`
-
-**原因**：PyInstaller 未偵測到該模組
-
-**解決方案**：
-1. 在對應的 `.spec` 檔案中加入 `hiddenimports`：
-   ```python
-   hiddenimports=[
-       'xxx',  # 加入缺少的模組
-   ],
-   ```
-2. 重新打包：
-   ```bash
-   python -m PyInstaller build_scripts/nodriver_tixcraft.spec --clean --noconfirm
-   ```
-
-#### 錯誤 2: `FileNotFoundError: [Errno 2] No such file or directory: 'xxx.dll'`
-
-**原因**：缺少 Microsoft Visual C++ Redistributable
-
-**解決方案**：
-- 下載並安裝 [VC++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-- 或在發布 ZIP 中包含安裝程式
-
-#### 錯誤 3: `ddddocr` 初始化失敗
-
-**症狀**：
-```
-Error: ddddocr initialization failed
-ModuleNotFoundError: No module named 'onnxruntime.capi.onnxruntime_pybind11_state'
-```
-
-**解決方案**：
-1. 確認 `.spec` 中包含：
-   ```python
-   hiddenimports=[
-       'ddddocr',
-       'onnxruntime',
-       'onnxruntime.capi.onnxruntime_pybind11_state',
-   ],
-   ```
-2. 確認使用 `collect_data_files('ddddocr')` 收集資料檔案：
-   ```python
-   from PyInstaller.utils.hooks import collect_data_files
-   datas = collect_data_files('ddddocr')
-   ```
-
-#### 錯誤 4: 程式找不到 `webdriver/`, `assets/`, `www/` 目錄
-
-**原因**：這些目錄未正確複製到 `dist/tickets_hunter/`
-
-**解決方案**：
-1. **GitHub Actions**：檢查 `.github/workflows/build-release.yml` 中的複製步驟
-2. **本地測試**：檢查 `build_scripts/build_and_test.bat` 中的複製步驟
-3. 手動複製：
-   ```batch
-   xcopy /E /I /Y src\webdriver\Maxbotplus_1.0.0 dist\tickets_hunter\webdriver\Maxbotplus_1.0.0
-   xcopy /E /I /Y src\webdriver\Maxblockplus_1.0.0 dist\tickets_hunter\webdriver\Maxblockplus_1.0.0
-   xcopy /E /I /Y src\assets dist\tickets_hunter\assets
-   xcopy /E /I /Y src\www dist\tickets_hunter\www
-   ```
-
-#### 錯誤 5: Windows Defender 或防毒軟體誤判
-
-**原因**：PyInstaller 打包的 exe 可能被誤判為病毒
-
-**解決方案**：
-1. **短期**：加入防毒軟體白名單
-2. **長期**：數位簽章（需購買 Code Signing Certificate）
-
-#### 錯誤 6: `settings.json` 被打包進去了
-
-**症狀**：發布 ZIP 中包含開發者的 `settings.json`
-
-**解決方案**：
-1. 確認 `.spec` 中 **沒有** 包含 `settings.json`：
-   ```python
-   datas=[
-       # ❌ 錯誤：('settings.json', '.'),
-   ],
-   ```
-2. 確認程式有自動生成邏輯：
-   ```python
-   if not os.path.exists('settings.json'):
-       # 生成預設 settings.json
-   ```
-
-### 🔧 除錯技巧
-
-#### 1. 檢視打包記錄
-
-**PyInstaller 會生成詳細記錄**：
 ```bash
-python -m PyInstaller build_scripts/nodriver_tixcraft.spec --clean --noconfirm --log-level DEBUG
+git tag vYYYY.MM.DD
+git push origin vYYYY.MM.DD
 ```
 
-#### 2. 檢查 `_internal/` 目錄
+建置後請下載 ZIP，在未安裝開發環境的 Windows Sandbox／VM 與實體 Apple Silicon Mac 驗證。Release 預設為 draft，未完成手動驗證前不發佈。
 
-**手動檢查依賴是否完整**：
-```bash
-cd dist/tickets_hunter/_internal
-dir | findstr /I "ddddocr"
-dir | findstr /I "zendriver"
-dir | findstr /I "onnxruntime"
-```
+## 常見問題
 
-#### 3. 使用 `--debug` 模式
+### `ModuleNotFoundError`
 
-**在 `.spec` 中啟用除錯**：
-```python
-exe = EXE(
-    # ...
-    debug=True,  # 啟用除錯模式
-    console=True,  # 保留 console 查看日誌
-)
-```
+1. 先確認 source mode 中的 import 成功。
+2. 查看 `build/<spec-name>/warn-<spec-name>.txt`。
+3. 若屬動態 import，在對應 spec 加入精確 hidden import，不要廣泛 collect 整個無關 package。
+4. 重跑 `build_local.py`，並確認 frozen `--help` 真正通過。
 
-#### 4. 在乾淨環境測試
+### OCR source mode 成功、frozen mode 失敗
 
-**Windows Sandbox**（推薦）：
-- 無需安裝虛擬機器
-- 啟動快速（30 秒）
-- 關閉後自動清理
+確認 spec 同時包含 `ddddocr`、`onnxruntime.capi.onnxruntime_pybind11_state` 與 `collect_data_files('ddddocr')`，再檢查 `dist/tickets_hunter/_internal/` 下是否有 `.onnx` 檔。以 `--self-test` 結果為準。
 
-**虛擬機器**：
-- 使用 VirtualBox 或 VMware
-- 安裝乾淨的 Windows 10/11
-- 不安裝 Python 或任何開發工具
+### Bundle 異常過大
 
----
+先檢查建置 venv 是否安裝 OCR trainer 依賴，再查看 `_internal/` 是否意外出現 `torch`、notebook 或 plotting stack。不要為了縮小產物刪除 runtime 實際使用的 native module。
 
-## 進階主題
+### macOS 無法開啟
 
-### 🚀 最佳化打包大小
-
-#### 1. 排除不需要的套件
-
-**在 `.spec` 中加入 `excludes`**：
-```python
-excludes=[
-    'matplotlib',
-    'pandas',
-    'scipy',
-    'numpy.distutils',
-    'tkinter',
-    'test',
-    'unittest',
-    'email',
-    'html',
-    'http',
-    'xml',
-    'pydoc',
-],
-```
-
-#### 2. 使用 UPX 壓縮
-
-**UPX（Ultimate Packer for eXecutables）**：
-- 下載：https://github.com/upx/upx/releases
-- 解壓到 PATH（例如 `C:\Windows\System32`）
-
-**在 `.spec` 中啟用**：
-```python
-exe = EXE(
-    # ...
-    upx=True,  # 啟用 UPX 壓縮
-    upx_exclude=[
-        'vcruntime140.dll',  # 不壓縮 VC++ Runtime（可能導致無法執行）
-    ],
-)
-```
-
-**效果**：節省 30-40% 空間
-
-#### 3. 清理 Python 快取
-
-**打包前清理**：
-```bash
-# Git Bash
-find . -type d -name __pycache__ -exec rm -rf {} +
-find . -type f -name "*.pyc" -delete
-
-# Windows CMD
-for /d /r . %d in (__pycache__) do @if exist "%d" rd /s /q "%d"
-del /s /q *.pyc
-```
-
-### ⚡ 最佳化啟動速度
-
-#### 1. 使用資料夾模式
-
-**已採用**：Tickets Hunter 使用 `exclude_binaries=True`
-
-#### 2. 延遲匯入大型模組
-
-**修改程式碼**：
-```python
-# ❌ 全域導入（啟動時載入）
-import zendriver as uc
-
-# ✅ 延遲導入（使用時才載入）
-def main():
-    import zendriver as uc
-    # ...
-```
-
-#### 3. 關閉除錯模式
-
-**在 `.spec` 中**：
-```python
-exe = EXE(
-    # ...
-    debug=False,  # 關閉除錯（提升啟動速度）
-)
-```
-
-### 🔒 增強安全性
-
-#### 1. 程式碼混淆
-
-**使用 PyArmor**：
-```bash
-pip install pyarmor
-pyarmor obfuscate src/nodriver_tixcraft.py
-```
-
-**注意**：可能影響效能與相容性
-
-#### 2. 數位簽章
-
-**購買 Code Signing Certificate**（約 $100-$300/年）：
-- Sectigo
-- DigiCert
-- GlobalSign
-
-**簽署 exe**：
-```bash
-signtool sign /f certificate.pfx /p password /t http://timestamp.digicert.com dist/tickets_hunter/nodriver_tixcraft.exe
-```
-
-**效果**：
-- 避免 Windows SmartScreen 警告
-- 增強使用者信任
-
-### 🎯 替代方案：Nuitka
-
-**Nuitka**：將 Python 編譯為 C++，而非打包
-
-**優點**：
-- 執行速度更快（接近原生）
-- 檔案大小更小（100-150MB vs 200-300MB）
-
-**缺點**：
-- 打包時間更長（5-10 分鐘）
-- 相容性較差（某些套件不支援）
-
-**安裝**：
-```bash
-pip install nuitka
-pip install ordered-set
-```
-
-**編譯**：
-```bash
-nuitka --standalone ^
-    --onefile ^
-    --windows-console-mode=force ^
-    --include-data-dir=webdriver=webdriver ^
-    --include-data-file=settings.json=settings.json ^
-    --output-dir=dist_nuitka ^
-    --output-filename=nodriver_tixcraft.exe ^
-    src/nodriver_tixcraft.py
-```
-
-**Tickets Hunter 策略**：
-- 目前使用 PyInstaller（成熟、相容性好）
-- Nuitka 作為未來最佳化選項
-
----
-
-## 參考資源
-
-### 官方文件
-- [PyInstaller 官方文件](https://pyinstaller.org/en/stable/)
-- [Nuitka 官方文件](https://nuitka.net/doc/)
-- [UPX 壓縮工具](https://upx.github.io/)
-
-### 專案內部文件
-- [`build_scripts/QUICK_START.md`](../../build_scripts/QUICK_START.md) - 快速開始指南
-- [`.github/workflows/build-release.yml`](../../.github/workflows/build-release.yml) - GitHub Actions 配置
-- [`build_scripts/build_and_test.bat`](../../build_scripts/build_and_test.bat) - 本地測試打包腳本
-
-### 疑難排解
-- [PyInstaller GitHub Issues](https://github.com/pyinstaller/pyinstaller/issues)
-- [Stack Overflow](https://stackoverflow.com/questions/tagged/pyinstaller)
-
----
-
-**文件版本**: 2.1
-**最後更新**: 2026-03-09
-**適用專案**: Tickets Hunter
-**測試環境**: Windows 10/11, Python 3.10.11
+本機建置成功後 `build_local.py` 會嘗試移除 quarantine attribute。目前 release workflow 會產生 build provenance attestation，但未進行 Apple Developer ID 簽署或 notarization，因此下載產物仍可能被 Gatekeeper 阻擋。不要為此關閉系統整體安全機制；正式對外發布前應另行評估簽署與 notarization。

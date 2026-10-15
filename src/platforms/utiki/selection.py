@@ -59,6 +59,14 @@ class QuantityPlan:
     ticket_number: int
 
 
+@dataclass(frozen=True)
+class DialogSnapshot:
+    page_url: str
+    document_id: str
+    visible_count: int
+    text: str
+
+
 def parse_area_snapshot(raw_snapshot):
     """Freeze an area reader result before it crosses into decision code."""
     if isinstance(raw_snapshot, AreaSnapshot):
@@ -149,6 +157,38 @@ def parse_quantity_snapshot(raw_snapshot):
             )
             for row in rows
         ),
+    )
+
+
+def parse_dialog_snapshot(raw_snapshot):
+    """Freeze one side-effect-free observation of the visible submit dialog."""
+    if isinstance(raw_snapshot, DialogSnapshot):
+        return raw_snapshot
+    if not isinstance(raw_snapshot, dict):
+        return None
+    visible_count = raw_snapshot.get("visible_count")
+    if (
+        not isinstance(visible_count, int)
+        or isinstance(visible_count, bool)
+        or visible_count < 0
+    ):
+        return None
+    page_url = raw_snapshot.get("page_url")
+    document_id = raw_snapshot.get("document_id")
+    text = raw_snapshot.get("text")
+    if not all(isinstance(value, str) for value in (
+        page_url, document_id, text
+    )):
+        return None
+    if not page_url or not document_id:
+        return None
+    if visible_count == 0 and text:
+        return None
+    return DialogSnapshot(
+        page_url=page_url,
+        document_id=document_id,
+        visible_count=visible_count,
+        text=text,
     )
 
 

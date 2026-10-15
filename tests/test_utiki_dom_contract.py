@@ -21,6 +21,7 @@ from platforms.utiki.dom import (
     dispatch_quantity_submit,
 )
 from platforms.utiki.selection import (
+    DialogSnapshot,
     parse_area_snapshot,
     parse_quantity_snapshot,
     select_area_snapshot,
@@ -28,6 +29,7 @@ from platforms.utiki.selection import (
 )
 from platforms.utiki.workflow import (
     _ctbc_captcha_and_submit,
+    _handle_ctbc_submit_dialog,
     _ctbc_purchase_state_key,
     _ctbc_tab_identity,
     _state,
@@ -39,6 +41,53 @@ from platforms.utiki.workflow import (
 class UtikiDomContractTest(CtbcStateIsolationMixin,
                            unittest.IsolatedAsyncioTestCase):
     ctbc_state = _state
+
+    async def test_ambiguous_visible_dialog_blocks_without_dismiss(self):
+        tab = FakeSubmitTab(dialog="")
+        submit_key = _ctbc_purchase_state_key(tab)
+        _state["submitted"][submit_key] = {
+            "dispatched_at": 1.0,
+            "phase": "awaiting_result",
+            "source_url": str(tab.target.url),
+        }
+        snapshot = DialogSnapshot(
+            page_url=str(tab.target.url),
+            document_id="document-1",
+            visible_count=2,
+            text="",
+        )
+        with patch(
+            "platforms.utiki.workflow.read_dialog_snapshot",
+            AsyncMock(return_value=snapshot),
+        ), patch(
+            "platforms.utiki.workflow.dismiss_dialog",
+            AsyncMock(),
+        ) as dismiss:
+            self.assertEqual(
+                "rejected", await _handle_ctbc_submit_dialog(
+                    tab, config()
+                )
+            )
+        dismiss.assert_not_awaited()
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("rejected", _state["submit_blocked"][submit_key])
+
+        with patch(
+            "platforms.utiki.workflow.read_dialog_snapshot",
+            AsyncMock(return_value=DialogSnapshot(
+                page_url=str(tab.target.url),
+                document_id="document-1",
+                visible_count=0,
+                text="",
+            )),
+        ), patch(
+            "platforms.utiki.workflow._dispatch_ctbc_submit",
+            AsyncMock(),
+        ) as dispatch:
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, config(), ocr=None
+            ))
+        dispatch.assert_not_awaited()
 
     async def test_area_workflow_commits_once_for_one_document_intent(self):
         snapshot = parse_area_snapshot(

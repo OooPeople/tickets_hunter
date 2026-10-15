@@ -556,6 +556,7 @@ class FakeSubmitTab:
         self.dialog_visible = bool(dialog)
         self.dismiss_allowed = True
         self.dialog_closes_on_click = True
+        self.document_id = "fake-dialog-document"
         self.reload_count = 0
 
     async def evaluate(self, script):
@@ -565,28 +566,32 @@ class FakeSubmitTab:
             return {"required": False}
         if "#CHK" in script:
             return self.captcha_input.value
-        if "#dialog-message" in script:
-            if "const expectedText" in script:
-                expected_literal = f"const expectedText = {json.dumps(self.dialog)};"
-                if (
-                    not self.dismiss_allowed
-                    or not self.dialog_visible
-                    or expected_literal not in script
-                    or "message.closest('.ui-dialog')" not in script
-                    or "message.textContent.trim() !== expectedText" not in script
-                    or "wrapper.getClientRects().length > 0" not in script
-                    or "wrapper.querySelector('.ui-dialog-buttonset button')" not in script
-                ):
-                    return False
-                await self.dialog_button.click()
-                if self.dialog_closes_on_click:
-                    self.dialog = ""
-                    self.dialog_visible = False
-                return True
+        if "__ticketsHunterUtikiDialogSnapshot" in script:
             if self.dialogs:
                 self.dialog = self.dialogs.pop(0)
                 self.dialog_visible = bool(self.dialog)
-            return self.dialog if self.dialog_visible else ""
+            return json.dumps({
+                "page_url": self.target.url,
+                "document_id": self.document_id,
+                "visible_count": int(self.dialog_visible),
+                "text": self.dialog if self.dialog_visible else "",
+            })
+        if "__ticketsHunterUtikiDialogDismiss" in script:
+            snapshot = _script_json_constant(script, "snapshot") or {}
+            if (
+                snapshot.get("pageUrl") != self.target.url
+                or snapshot.get("documentId") != self.document_id
+                or not self.dialog_visible
+                or snapshot.get("text") != self.dialog
+            ):
+                return "stale"
+            if not self.dismiss_allowed:
+                return "rejected"
+            await self.dialog_button.click()
+            if self.dialog_closes_on_click:
+                self.dialog = ""
+                self.dialog_visible = False
+            return "committed"
         return None
 
     async def query_selector(self, selector):

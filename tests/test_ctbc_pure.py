@@ -30,6 +30,7 @@ from platforms.utiki.selection import (
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     parse_area_send_action as _parse_ctbc_map_send,
     parse_area_send_a_action as _parse_ctbc_map_send_a,
+    parse_dialog_snapshot,
     parse_keyword_groups as _parse_keyword_groups,
     parse_map_title as _parse_ctbc_map_title,
     parse_quantity_snapshot,
@@ -146,6 +147,28 @@ class CtbcPureSelectionTest(unittest.TestCase):
         for dialog_text, expected in cases.items():
             with self.subTest(dialog_text=dialog_text):
                 self.assertEqual(expected, _classify_ctbc_submit_dialog(dialog_text))
+
+    def test_dialog_snapshot_parser_preserves_visible_ambiguity(self):
+        snapshot = parse_dialog_snapshot({
+            "page_url": "https://tix.ctbcsports.com/BROTHERS/UTK0205_",
+            "document_id": "document-1",
+            "visible_count": 2,
+            "text": "",
+        })
+        self.assertEqual(2, snapshot.visible_count)
+        self.assertEqual("", snapshot.text)
+        self.assertIsNone(parse_dialog_snapshot({
+            "page_url": "https://tix.ctbcsports.com/BROTHERS/UTK0205_",
+            "document_id": "document-1",
+            "visible_count": 0,
+            "text": "unexpected",
+        }))
+        self.assertIsNone(parse_dialog_snapshot({
+            "page_url": "",
+            "document_id": "",
+            "visible_count": 0,
+            "text": "",
+        }))
 
     def test_ctbc_uses_official_ocr_instead_of_universal_model(self):
         fake_ocr = types.SimpleNamespace(set_ranges=lambda value: setattr(fake_ocr, "ranges", value))

@@ -43,8 +43,10 @@ from .dom import (
     SubmitDispatchResult,
     commit_area,
     commit_quantity,
+    dismiss_dialog,
     dispatch_quantity_submit,
     read_area_snapshot,
+    read_dialog_snapshot,
     read_quantity_snapshot,
 )
 from .profiles import (
@@ -2577,47 +2579,49 @@ async def _ctbc_login_fingerprint(tab):
 
 
 async def _get_ctbc_visible_dialog_text(tab):
-    dialog_raw = await tab.evaluate('''
-        (() => {
-            const message = document.querySelector('#dialog-message');
-            const wrapper = message ? message.closest('.ui-dialog') : null;
-            if (!message || !wrapper) return '';
-            const style = getComputedStyle(wrapper);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
-                wrapper.getClientRects().length > 0;
-            return visible ? message.textContent.trim() : '';
-        })()
-    ''')
-    return dialog_raw if isinstance(dialog_raw, str) else ""
+    """Compatibility wrapper for callers that still consume dialog text."""
+    snapshot = await read_dialog_snapshot(tab)
+    if snapshot and snapshot.visible_count == 1:
+        return snapshot.text
+    return ""
+
+
+async def _ctbc_dialog_is_visible(tab):
+    """Fail closed when dialog observation is malformed or ambiguous."""
+    snapshot = await read_dialog_snapshot(tab)
+    return snapshot is None or snapshot.visible_count != 0
+
+
+async def _wait_ctbc_dialog_closed(tab, snapshot):
+    for _ in range(10):
+        await tab.sleep(0.1)
+        current = await read_dialog_snapshot(tab)
+        if current is None:
+            return False
+        if (
+            current.page_url != snapshot.page_url
+            or current.document_id != snapshot.document_id
+        ):
+            return False
+        if current.visible_count == 0:
+            return True
+        if current.visible_count != 1 or current.text != snapshot.text:
+            return False
+    return False
 
 
 async def _dismiss_ctbc_dialog(tab, expected_text):
-    clicked = bool(await tab.evaluate(f'''
-        (() => {{
-            const expectedText = {json.dumps(expected_text)};
-            const message = document.querySelector('#dialog-message');
-            const wrapper = message ? message.closest('.ui-dialog') : null;
-            if (!message || !wrapper || message.textContent.trim() !== expectedText) return false;
-            const style = getComputedStyle(wrapper);
-            const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
-                wrapper.getClientRects().length > 0;
-            if (!visible) return false;
-            const button = wrapper.querySelector('.ui-dialog-buttonset button');
-            if (!button) return false;
-            button.click();
-            return true;
-        }})()
-    '''))
-    if not clicked:
+    """Compatibility wrapper around the dialog snapshot/commit seam."""
+    snapshot = await read_dialog_snapshot(tab)
+    if not (
+        snapshot
+        and snapshot.visible_count == 1
+        and snapshot.text == expected_text
+    ):
         return False
-    for _ in range(10):
-        await tab.sleep(0.1)
-        visible_text = await _get_ctbc_visible_dialog_text(tab)
-        if not visible_text:
-            return True
-        if visible_text != expected_text:
-            return False
-    return False
+    if await dismiss_dialog(tab, snapshot) is not CommitResult.COMMITTED:
+        return False
+    return await _wait_ctbc_dialog_closed(tab, snapshot)
 
 
 async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
@@ -2663,7 +2667,24 @@ async def _handle_ctbc_submit_dialog(
     tab, config_dict, submit_key=None, source_url=None
 ):
     debug = util.create_debug_logger(config_dict)
-    dialog_text = await _get_ctbc_visible_dialog_text(tab)
+    dialog_snapshot = await read_dialog_snapshot(tab)
+    if dialog_snapshot is None:
+        debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
+        return "rejected"
+    if dialog_snapshot.visible_count == 0:
+        return None
+    if dialog_snapshot.visible_count != 1 or not dialog_snapshot.text:
+        if submit_key is None:
+            submit_key = _ctbc_purchase_state_key(tab)
+        if submit_key is not None:
+            _state["submitted"].pop(submit_key, None)
+            if _state["submit_blocked"].get(submit_key) not in (
+                "success", "quota"
+            ):
+                _state["submit_blocked"][submit_key] = "rejected"
+        debug.log("[CTBC] Submit dialog is ambiguous; action blocked")
+        return "rejected"
+    dialog_text = dialog_snapshot.text
     outcome = _classify_ctbc_submit_dialog(dialog_text)
     if outcome is None:
         return None
@@ -2706,7 +2727,11 @@ async def _handle_ctbc_submit_dialog(
     elif outcome in ("quota", "rejected"):
         _state["submit_blocked"][submit_key] = outcome
 
-    if not await _dismiss_ctbc_dialog(tab, dialog_text):
+    dismiss_result = await dismiss_dialog(tab, dialog_snapshot)
+    if (
+        dismiss_result is not CommitResult.COMMITTED
+        or not await _wait_ctbc_dialog_closed(tab, dialog_snapshot)
+    ):
         debug.log(f"[CTBC] Visible dialog changed before it could be dismissed: {dialog_text}")
         return outcome
 
@@ -2738,7 +2763,7 @@ async def _recover_ctbc_captcha_dialog(tab, config_dict):
     submit_key = _ctbc_purchase_state_key(tab)
     if _state["submit_blocked"].get(submit_key) != "captcha_pending":
         return False
-    if await _get_ctbc_visible_dialog_text(tab):
+    if await _ctbc_dialog_is_visible(tab):
         return True
     reset_complete = await _reset_ctbc_captcha(
         tab, refresh_image=True, submit_key=submit_key
@@ -2767,7 +2792,7 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
         return False
 
     if not pending.get("dialog_dismissed", False):
-        if await _get_ctbc_visible_dialog_text(tab):
+        if await _ctbc_dialog_is_visible(tab):
             return True
         pending["dialog_dismissed"] = True
 

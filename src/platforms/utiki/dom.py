@@ -9,9 +9,11 @@ import util
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
+    DialogSnapshot,
     QuantityPlan,
     QuantitySnapshot,
     parse_area_snapshot,
+    parse_dialog_snapshot,
     parse_quantity_snapshot,
 )
 
@@ -35,6 +37,97 @@ def _decode_json_result(raw_value):
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
     return util.parse_nodriver_result(raw_value)
+
+
+async def read_dialog_snapshot(tab):
+    """Read all visible uTiki dialog messages without changing the page."""
+    raw_value = await tab.evaluate('''
+        (() => {
+            // __ticketsHunterUtikiDialogSnapshot
+            const visible = element => {
+                if (!element || !element.isConnected || element.hidden ||
+                    element.getAttribute('aria-hidden') === 'true') return false;
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            };
+            const dialogs = Array.from(
+                document.querySelectorAll('#dialog-message'))
+                .map(message => ({
+                    message,
+                    wrapper: message.closest('.ui-dialog')
+                }))
+                .filter(item =>
+                    visible(item.wrapper) && visible(item.message));
+            return JSON.stringify({
+                page_url: location.href,
+                document_id: String(performance.timeOrigin),
+                visible_count: dialogs.length,
+                text: dialogs.length === 1 ?
+                    (dialogs[0].message.textContent || '').trim() : ''
+            });
+        })()
+    ''')
+    return parse_dialog_snapshot(_decode_json_result(raw_value))
+
+
+async def dismiss_dialog(tab, snapshot):
+    """Revalidate and click the only action for one observed dialog."""
+    if not (
+        isinstance(snapshot, DialogSnapshot)
+        and snapshot.page_url
+        and snapshot.document_id
+        and snapshot.visible_count == 1
+        and snapshot.text
+    ):
+        return CommitResult.REJECTED
+    snapshot_json = json.dumps({
+        "pageUrl": snapshot.page_url,
+        "documentId": snapshot.document_id,
+        "text": snapshot.text,
+    }, ensure_ascii=False)
+    raw_result = await tab.evaluate(fr'''
+        (() => {{
+            // __ticketsHunterUtikiDialogDismiss
+            const snapshot = {snapshot_json};
+            if (location.href !== snapshot.pageUrl ||
+                String(performance.timeOrigin) !== snapshot.documentId) {{
+                return 'stale';
+            }}
+            const visible = element => {{
+                if (!element || !element.isConnected || element.hidden ||
+                    element.getAttribute('aria-hidden') === 'true') return false;
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            }};
+            const dialogs = Array.from(
+                document.querySelectorAll('#dialog-message'))
+                .map(message => ({{
+                    message,
+                    wrapper: message.closest('.ui-dialog')
+                }}))
+                .filter(item =>
+                    visible(item.wrapper) && visible(item.message));
+            if (dialogs.length !== 1 ||
+                (dialogs[0].message.textContent || '').trim() !==
+                    snapshot.text) return 'stale';
+            const buttons = Array.from(dialogs[0].wrapper.querySelectorAll(
+                '.ui-dialog-buttonset button')).filter(visible);
+            if (buttons.length !== 1 || buttons[0].disabled ||
+                buttons[0].getAttribute('aria-disabled') === 'true') {{
+                return 'rejected';
+            }}
+            buttons[0].click();
+            return 'committed';
+        }})()
+    ''')
+    try:
+        return CommitResult(raw_result)
+    except (TypeError, ValueError):
+        raise RuntimeError("dialog dismiss outcome is unknown")
 
 
 async def read_area_snapshot(tab):
@@ -598,8 +691,12 @@ async def dispatch_quantity_submit(tab, plan):
             }};
             const dialogs = Array.from(
                 document.querySelectorAll('#dialog-message'))
-                .map(message => message.closest('.ui-dialog'))
-                .filter(visible);
+                .map(message => ({{
+                    message,
+                    wrapper: message.closest('.ui-dialog')
+                }}))
+                .filter(item =>
+                    visible(item.wrapper) && visible(item.message));
             if (dialogs.length) return 'rejected';
             const loginIds = Array.from(
                 document.querySelectorAll('#LOGIN_ID')).filter(visible);

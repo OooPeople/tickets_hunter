@@ -18,8 +18,10 @@ from platforms.utiki.dom import (
     SubmitDispatchResult,
     commit_area,
     commit_quantity,
+    dismiss_dialog,
     dispatch_quantity_submit,
     read_area_snapshot,
+    read_dialog_snapshot,
     read_quantity_snapshot,
 )
 from platforms.utiki.selection import (
@@ -35,7 +37,6 @@ from platforms.utiki.workflow import (
     _ctbc_read_fast_navigation_marker,
     _ctbc_tab_identity,
     _dismiss_ctbc_dialog,
-    _get_ctbc_visible_dialog_text,
     _state,
     _validate_ctbc_seat_selection,
     nodriver_ctbc_date_auto_select,
@@ -656,12 +657,98 @@ async def _read_fixture_quantities(tab):
 
 async def _assert_dialog_fixture(browser):
     tab = await _open_fixture(browser, "UTK0205_dialog.html")
-    dialog_text = await _get_ctbc_visible_dialog_text(tab)
-    assert dialog_text == "該位置已被選走"
-    assert _classify_ctbc_submit_dialog(dialog_text) == "seat_conflict"
-    assert await _dismiss_ctbc_dialog(tab, dialog_text)
-    assert await _get_ctbc_visible_dialog_text(tab) == ""
+    await tab.evaluate('''
+        (() => {
+            const visibleWrapper = document.querySelector('.ui-dialog');
+            const hidden = visibleWrapper.cloneNode(true);
+            hidden.style.display = 'none';
+            hidden.querySelector('#dialog-message').textContent = '舊警告';
+            document.body.prepend(hidden);
+            const hiddenMessage = document.createElement('div');
+            hiddenMessage.id = 'dialog-message';
+            hiddenMessage.style.display = 'none';
+            hiddenMessage.textContent = '同一容器內的舊警告';
+            visibleWrapper.prepend(hiddenMessage);
+        })()
+    ''')
+    before_html = await tab.evaluate("document.body.innerHTML")
+    snapshot = await read_dialog_snapshot(tab)
+    repeated = await read_dialog_snapshot(tab)
+    assert snapshot == repeated
+    assert snapshot.visible_count == 1
+    assert snapshot.text == "該位置已被選走"
+    assert _classify_ctbc_submit_dialog(snapshot.text) == "seat_conflict"
+    assert await tab.evaluate("document.body.innerHTML") == before_html
     assert await tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+    assert await dismiss_dialog(tab, snapshot) is CommitResult.COMMITTED
+    assert (await read_dialog_snapshot(tab)).visible_count == 0
+    assert await tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 1
+
+    stale_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    stale_snapshot = await read_dialog_snapshot(stale_tab)
+    await stale_tab.evaluate(
+        "document.querySelector('#dialog-message').textContent = '另一個警告'"
+    )
+    assert await dismiss_dialog(
+        stale_tab, stale_snapshot
+    ) is CommitResult.STALE
+    assert await stale_tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+
+    identity_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    identity_snapshot = await read_dialog_snapshot(identity_tab)
+    assert await dismiss_dialog(
+        identity_tab,
+        replace(identity_snapshot, document_id="different-document"),
+    ) is CommitResult.STALE
+    assert await identity_tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+
+    rejected_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    rejected_snapshot = await read_dialog_snapshot(rejected_tab)
+    await rejected_tab.evaluate(
+        "document.querySelector('.ui-dialog-buttonset button').disabled = true"
+    )
+    assert await dismiss_dialog(
+        rejected_tab, rejected_snapshot
+    ) is CommitResult.REJECTED
+    assert await rejected_tab.evaluate(
+        "Number(document.body.dataset.dialogClicks || 0)"
+    ) == 0
+
+    ambiguous_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    await ambiguous_tab.evaluate('''
+        (() => {
+            const duplicate = document.querySelector('.ui-dialog')
+                .cloneNode(true);
+            duplicate.querySelector('#dialog-message').textContent = '另一個警告';
+            document.body.append(duplicate);
+        })()
+    ''')
+    ambiguous = await read_dialog_snapshot(ambiguous_tab)
+    assert ambiguous.visible_count == 2
+    assert ambiguous.text == ""
+
+    delayed_tab = await _open_fixture(browser, "UTK0205_dialog.html")
+    await delayed_tab.evaluate('''
+        document.querySelector('.ui-dialog-buttonset button').onclick =
+            function() {
+                document.body.dataset.dialogClicks = String(
+                    Number(document.body.dataset.dialogClicks || 0) + 1);
+                const wrapper = this.closest('.ui-dialog');
+                setTimeout(() => { wrapper.style.display = 'none'; }, 30);
+            };
+    ''')
+    assert await _dismiss_ctbc_dialog(
+        delayed_tab, "該位置已被選走"
+    )
+    assert await delayed_tab.evaluate(
         "Number(document.body.dataset.dialogClicks || 0)"
     ) == 1
 

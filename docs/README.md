@@ -1,6 +1,6 @@
 **文件說明**：Tickets Hunter 公開技術文件導覽與索引
 
-**最後更新**：2026-09-16
+**最後更新**：2026-10-15
 
 ---
 
@@ -29,7 +29,9 @@ docs/
 │
 ├── 02-development/                                    <- 開發指南
 │   ├── code-boundaries.md                             <- 程式碼邊界（模組職責、依賴 DAG、命名）
+│   ├── engineering-review.md                          <- 工程審查嚴重度、範圍與輸出格式
 │   ├── ticket_automation_standard.md                  <- 標準功能定義 (12 階段)
+│   ├── utiki-refactor-plan.md                         <- uTiki2 家族重構提案（待核准）
 │   ├── structure.md                                   <- 程式架構與函數索引
 │   ├── development_guide.md                           <- 開發規範與檢查清單
 │   ├── coding_templates.md                            <- 程式寫法範本
@@ -98,6 +100,8 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
    - **CDP 協定 (深入)** → [cdp_protocol_reference.md](06-api-reference/cdp_protocol_reference.md)
 4. 遵循 [development_guide.md](02-development/development_guide.md) 的規範
 5. 參考 [coding_templates.md](02-development/coding_templates.md) 的程式範本
+6. 依 [testing_execution_guide.md](02-development/testing_execution_guide.md) 驗證，並以
+   [engineering-review.md](02-development/engineering-review.md) 完成審查
 
 ### 情境 2：我想了解專案架構
 
@@ -118,6 +122,10 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 | 文件 | 用途 | 適用對象 |
 |------|------|----------|
 | [ticket_automation_standard.md](02-development/ticket_automation_standard.md) | 標準功能定義 (12 階段) | 開發者 |
+| [code-boundaries.md](02-development/code-boundaries.md) | 模組責任與依賴邊界 | 開發者／審查者 |
+| [testing_execution_guide.md](02-development/testing_execution_guide.md) | 實際驗證命令與結果陳述 | 開發者／審查者 |
+| [engineering-review.md](02-development/engineering-review.md) | findings-first 工程審查 | 審查者 |
+| [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | uTiki2 家族分階段重構提案 | 維護者 |
 | [structure.md](02-development/structure.md) | 程式架構索引與完成度評分 | 所有人 |
 | [zendriver_api_guide.md](06-api-reference/zendriver_api_guide.md) | Zendriver API 指南（主要參考） | 開發者 |
 | [cdp_protocol_reference.md](06-api-reference/cdp_protocol_reference.md) | CDP 協定完整參考 | Zendriver 開發者 |
@@ -149,8 +157,10 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 
 ## 文件維護
 
-每份文件的檔頭標註「文件說明」與「最後更新」。修改程式碼行為時，一併更新對應的機制文件，讓文件與程式碼保持同步。
+根目錄的 `AGENTS.md` 是代理起手規則；穩定架構、測試與審查規則分別由本目錄的專責文件維護，
+不在多份文件複製完整規範。每份文件的檔頭標註「文件說明」與「最後更新」。修改程式碼行為時，
+一併更新對應的機制文件，讓文件與程式碼保持同步。
 
 ---
 
-**最後更新：** 2026-06-14
+**最後更新：** 2026-10-15

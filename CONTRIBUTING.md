@@ -11,10 +11,13 @@
 
 ## 開發策略
 
-本專案使用 **zendriver**（nodriver 的活躍 fork，支援 Chrome 145+）作為唯一搶票引擎。平台邏輯已拆分至 `src/platforms/` 目錄，各平台一個模組。
+本專案使用 **zendriver**（nodriver 的活躍 fork，支援 Chrome 145+）作為唯一搶票引擎。平台邏輯位於 `src/platforms/`。
 
-送出 PR 前請先閱讀 [`docs/02-development/code-boundaries.md`](docs/02-development/code-boundaries.md)，
-其中定義了模組職責、依賴方向、命名慣例與禁止模式；另見根目錄的 [`CLAUDE.md`](CLAUDE.md)（AI 編碼工具的專案指南）。
+送出 PR 前請先閱讀根目錄的 [`AGENTS.md`](AGENTS.md) 與
+[`docs/02-development/code-boundaries.md`](docs/02-development/code-boundaries.md)。前者是所有 AI 編碼工具的權威入口，
+後者定義模組職責、依賴方向、命名慣例與禁止模式；測試與審查分別依
+[`testing_execution_guide.md`](docs/02-development/testing_execution_guide.md) 及
+[`engineering-review.md`](docs/02-development/engineering-review.md)。
 
 ## 貢獻流程
 
@@ -168,11 +171,17 @@ git push origin fix/123-ticketplus-date-list
 ## 測試
 
 ```bash
-cd src
-python nodriver_tixcraft.py --input settings.json
+python -m pip install -r requirements-dev.txt
+python -m pytest
+python -m unittest discover -s tests -p 'test_*.py'
+git diff --check
 ```
 
-確認：瀏覽器正常啟動、Console 無錯誤。
+pytest 是主要測試入口；保留 unittest 命令是為了在測試遷移期間核對既有 suite 的收集與執行結果。
+
+Python、瀏覽器流程與打包驗證的分級及完整命令見
+[`docs/02-development/testing_execution_guide.md`](docs/02-development/testing_execution_guide.md)。
+實機煙霧測試必須記錄平台、走到的頁面與刷新間隔，且不能把單元測試通過描述成完整網站流程已驗證。
 
 ## 問題回報
 

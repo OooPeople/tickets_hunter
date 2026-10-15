@@ -1,813 +1,296 @@
-**文件說明**：標準化的測試執行指南，涵蓋快速測試流程、測試輸出檢查、驗證重點與除錯方法。
+# 測試與驗證執行指南
 
-**最後更新**：2026-09-16
+**文件說明**：定義目前 repository 可執行的驗證層級、命令與結果陳述方式。
 
----
+**最後更新**：2026-10-15
 
-# 測試執行指南
+## 1. 原則
 
-## 測試層級
+- 驗證強度要與風險相稱：先跑最相關的測試，再擴大範圍。
+- 任何新測試必須實際執行；不能只建立測試檔就宣告完成。
+- 平台流程可以拆成純邏輯、DOM 契約與瀏覽器流程測試，不應一概視為「無法測試」。
+- 單元測試通過不代表真實網站流程通過；實機測試也不能取代可重複的自動測試。
+- 測試不得提交或輸出 Cookie、帳號、驗證碼、付款資料、webhook URL 或完整頁面個資。
+- 不得用廣泛的程序終止指令關閉所有 Python 或 Chrome；只停止本次測試啟動的程序。
+- 實機測試的刷新頻率必須使用使用者設定，不得為加速測試而私自縮短。沒有明確設定時，人工調查預設至少間隔 5 秒。
 
-平台自動化邏輯（`src/platforms/*`）繫結即時瀏覽器狀態，無法單元測試。
-以下定義哪些可以測試、如何測試：
+## 2. 目前測試基線
 
-| 層級 | 範圍 | 執行方式 |
-|------|------|---------|
-| 1 - 單元測試 | `util.py` 純函式（無 I/O、無 mock） | `pytest tests/unit/` |
-| 2 - 整合測試 | 平台 DOM 選擇器（以 HTML fixture 驗證） | `pytest tests/integration/` |
-| 3 - 平台邏輯 | 平台純函式邏輯（票數計算、佇列判斷等） | `pytest tests/platform_logic/` |
-| 4 - 煙霧測試 | 程式啟動 + 瀏覽器開啟 | 見下方「快速參考」 |
-| 5 - 手動驗證 | 平台流程、CAPTCHA、結帳 | 人工執行 |
+本專案以 pytest 作為主要測試入口，並保留既有 `unittest.TestCase` 測試的相容性。測試目前位於：
 
-### 目錄結構
-
-```
+```text
 tests/
-    conftest.py
-    fixtures/          HTML / 圖片 fixtures（取自真實頁面快照）
-    unit/              util.py 純函式
-    integration/       平台選擇器測試
-    platform_logic/    平台純函式邏輯
-    stages/            跨平台階段測試
+  test_cloudflare_handling.py
+  ctbc_support.py
+  test_ctbc_pure.py
+  test_ctbc_dom.py
+  test_ctbc_dom_fixtures.py
+  test_ctbc_refresh.py
+  test_global_settings.py
+  test_ibon_date_selection.py
+  test_refresh_coordinator.py
+  test_runtime_output.py
 ```
 
-命名：`test_<module>_<concern>.py`，一個檔案一個關注點。
-pytest 相依宣告於 `requirements-dev.txt`（不可加入 `requirement.txt`），
-設定位於 `pyproject.toml` 的 `[tool.pytest.ini_options]`。
+Phase 1 導入時的基線是 pytest 收集並通過 155 個測試（其中 CTBC 94 個）；這是用來偵測遷移差異的起始快照，不是永久數量門檻。`pytest.ini` 定義預設收集與 marker，`requirements-dev.txt` 固定直接使用的測試工具版本。
 
-### 測試時機
-
-| 情境 | 執行 |
-|------|------|
-| 修改 `util.py` / `settings.py` | `pytest tests/unit/` |
-| 修改 `nodriver_tixcraft.py` | 煙霧測試 |
-| 發布前 | 煙霧測試 + `pytest tests/` |
-| AI 生成新程式碼後 | 立即執行相關單元測試 |
-
-### 禁止模式
-
-- `.py` 中禁止 emoji
-- 禁止 `if verbose: print()`，一律使用 `DebugLogger`
-- 測試禁止寫入 `src/`，請用 `tmp_path`
-- 禁止寫死絕對路徑
-- AI 生成的測試必須立即執行驗證，不可暫存不跑
-- **禁止循環驗證**：fixture 不得由程式自身產生再拿來驗證同一段程式，
-  必須取自真實頁面快照並交叉驗證選擇器
-
----
-
-> **目標**：定義除錯時的標準測試執行方法，確保測試流程一致且高效
-
-## 快速參考
-
-### 完整測試流程（一次執行）
-
-**推薦方式（使用 timeout 自動終止）**：
+安裝開發相依套件：
 
 ```bash
-# ZenDriver 版本（30秒自動終止，Git Bash）
-rm -rf src/__pycache__ && rm -f MAXBOT_INT28_IDLE.txt src/MAXBOT_INT28_IDLE.txt && echo "" > .temp/test_output.txt && timeout 30 python -u src/nodriver_tixcraft.py --input src/settings.json > .temp/test_output.txt 2>&1
+python -m pip install -r requirements-dev.txt
 ```
 
-> **重要**：每次執行測試前必須清除 `__pycache__`，確保 Python 載入最新修改的程式碼。
-
-**重要修正**：檔案路徑必須加上 `src/` 開頭
-- ✅ 正確：`python -u src/nodriver_tixcraft.py --input src/settings.json`
-- ❌ 錯誤：`python -u nodriver_tixcraft.py --input settings.json`（檔案實際在 src/ 目錄下）
-
-**說明**：
-- `timeout 30` 會在 30 秒後自動傳送終止訊號給 Python 程式
-- 使用正斜線 `/` 路徑格式，在 Git Bash、Windows CMD 和 PowerShell 中都能正常運作
-
-**備用方式（Windows CMD，需手動終止）**：
+若既有專案 `.venv` 沒有內建 pip，但本機已安裝 uv，可使用：
 
 ```bash
-# ZenDriver 版本（Windows CMD）
-rmdir /S /Q src\__pycache__ 2>nul && del /Q MAXBOT_INT28_IDLE.txt src\MAXBOT_INT28_IDLE.txt 2>nul && echo. > .temp\test_output.txt && start /B python -u src\nodriver_tixcraft.py --input src\settings.json > .temp\test_output.txt 2>&1 && timeout /t 30 /nobreak >nul && taskkill //F //IM python.exe //IM chrome.exe
+uv pip install --python .venv/bin/python -r requirements-dev.txt
 ```
 
-### 檢查測試結果（驗證程式邏輯）
+Windows 的既有 `.venv` 對應命令為：
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
+```
+
+## 3. 驗證層級
+
+先啟用已安裝 `requirement.txt` 的專案虛擬環境，並確認 active interpreter 符合專案 Python 版本。
+下列命令的 `python` 一律指該 interpreter，不是未安裝相依套件的系統 Python。
+
+| 層級 | 目的 | 典型命令／方式 |
+|------|------|----------------|
+| A. 靜態檢查 | 發現語法、空白與文件問題 | `py_compile`、`git diff --check`、連結檢查 |
+| B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m pytest tests/test_<module>.py` |
+| C. 完整單元套件 | 發現跨模組回歸 | `python -m pytest` |
+| D. 建置驗證 | 驗證 import、相依套件與 PyInstaller | `python build_scripts/build_local.py` |
+| E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
+
+## 4. 常用命令
+
+所有命令從 repository 根目錄執行。
+
+### 4.1 文件或一般變更
 
 ```bash
-# 查看完整輸出
-cat .temp/test_output.txt
-
-# 1. 檢查日期選擇邏輯
-grep "\[DATE KEYWORD\]\|\[DATE SELECT\]" .temp/test_output.txt
-
-# 2. 檢查區域選擇邏輯
-grep "\[AREA KEYWORD\]" .temp/test_output.txt
-
-# 3. 檢查關鍵流程節點
-grep "Match Summary\|Selected target\|Successfully clicked\|navigat" .temp/test_output.txt
-
-# 4. 快速檢查異常（輔助，但程式可能沒有寫入這些標籤）
-grep -i "ERROR\|WARNING\|failed" .temp/test_output.txt
+git diff --check
 ```
 
-**驗證重點**：
-- 日期比對數量是否符合預期（`Total dates matched`）
-- 區域比對數量是否符合預期（`Total areas matched`）
-- 選擇策略是否正確執行（`auto_select_mode`）
-- AND 邏輯/回退機制是否觸發（`AND logic failed` → 回退到下一組）
+文件變更另需確認：
 
----
+- 相對連結指向存在的檔案。
+- 文件描述的命令、檔名、設定鍵與目錄確實存在。
+- 沒有把未執行的驗證寫成已通過。
 
-## 標準測試執行指令
+### 4.2 Python 語法
 
-### 基本執行（前台測試）
-
-**ZenDriver 版本**：
-```bash
-cd tickets_hunter/src
-python nodriver_tixcraft.py --input settings.json
-```
-
-### 命令列參數說明
-
-**常用參數（除錯測試）**：
-
-| 參數 | 說明 | 範例 |
-|-----|------|------|
-| `--input` | 設定檔路徑（必要） | `--input settings.json` |
-| `--date_keyword` | 覆寫日期關鍵字 ⭐ | `--date_keyword "12/25"` |
-| `--date_auto_select_mode` | 覆寫日期選擇模式 ⭐ | `--date_auto_select_mode "from top to bottom"` |
-| `--area_keyword` | 覆寫區域關鍵字 (ZenDriver) ⭐ | `--area_keyword "搖滾區"` |
-| `--area_auto_select_mode` | 覆寫區域選擇模式 (ZenDriver) ⭐ | `--area_auto_select_mode "from bottom to top"` |
-| `--ticket_number` | 覆寫票數設定 | `--ticket_number 2` |
-
-**進階參數（少用，僅特殊需求）**：
-
-| 參數 | 說明 | 範例 |
-|-----|------|------|
-| `--headless` | 無頭模式 | `--headless true` |
-| `--homepage` | 覆寫首頁網址 | `--homepage https://tixcraft.com/...` |
-| `--browser` | 覆寫瀏覽器選擇 | `--browser chrome` |
-| `--window_size` | 視窗大小 | `--window_size 1920x1080` |
-| `--proxy_server` | 代理伺服器 | `--proxy_server 127.0.0.1:8080` |
-
-### 參數組合範例
-
-**覆寫多個參數測試**：
-```bash
-cd tickets_hunter/src
-python nodriver_tixcraft.py --input settings.json --ticket_number 2
-```
-
-**使用代理伺服器測試**：
-```bash
-cd tickets_hunter/src
-python nodriver_tixcraft.py --input settings.json --proxy_server 127.0.0.1:8080
-```
-
-**除錯區域選擇（覆寫設定檔）**：
-```bash
-cd tickets_hunter/src
-# 測試特定關鍵字匹配
-python nodriver_tixcraft.py --input settings.json --area_keyword "搖滾區"
-
-# 測試不同選擇模式
-python nodriver_tixcraft.py --input settings.json --area_auto_select_mode "from bottom to top"
-
-# 組合測試：指定日期與區域
-python nodriver_tixcraft.py --input settings.json --date_keyword "12/25" --area_keyword "VIP"
-```
-
----
-
-## 背景測試流程
-
-### 步驟 1：清空測試輸出檔案與暫停檔案
-
-**重要**：每次測試前必須清空，避免混淆新舊輸出或程式啟動即暫停
+只檢查本次修改過的 Python 檔案，例如：
 
 ```bash
-# Windows - 清空測試輸出檔案
-echo. > .temp\test_output.txt
-
-# 刪除 idle 暫停檔案（如果存在）
-del /Q MAXBOT_INT28_IDLE.txt 2>nul
-del /Q src\MAXBOT_INT28_IDLE.txt 2>nul
-
-# 或使用一行指令完成（推薦）
-echo. > .temp\test_output.txt && del /Q MAXBOT_INT28_IDLE.txt 2>nul && del /Q src\MAXBOT_INT28_IDLE.txt 2>nul
+python -m py_compile src/platforms/ctbc.py tests/ctbc_support.py tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py
 ```
 
-**說明**：
-- `MAXBOT_INT28_IDLE.txt` 是暫停機制建立的檔案
-- 如果此檔案存在，程式啟動後會立即進入暫停狀態
-- 測試前必須刪除，確保程式正常執行
-- `2>nul` 用於隱藏「檔案不存在」的錯誤訊息
+`py_compile` 只證明語法與匯入前編譯階段可通過，不證明行為正確。
 
-### 步驟 2：背景執行測試
-
-**基本背景執行**（無自動中斷）：
-```bash
-# ZenDriver 版本
-python -u src/nodriver_tixcraft.py --input src/settings.json > .temp/test_output.txt 2>&1
-```
-
-**參數說明**：
-- `-u`: Unbuffered 模式，確保輸出即時寫入檔案
-- `> .temp\test_output.txt`: 重新導向標準輸出
-- `2>&1`: 同時重新導向標準錯誤輸出
-
-### 步驟 3：30秒強制中斷測試
-
-**方法 1：使用 timeout + taskkill（推薦）**：
+### 4.3 聚焦測試
 
 ```bash
-# ZenDriver 版本
-start /B python -u src/nodriver_tixcraft.py --input src/settings.json > .temp\test_output.txt 2>&1 && timeout /t 30 /nobreak >nul && taskkill //F //IM python.exe //IM chrome.exe
+python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py
+python -m pytest tests/test_refresh_coordinator.py
 ```
 
-**參數說明**：
-- `start /B`: 背景執行（不開新視窗）
-- `timeout /t 30 /nobreak`: 等待 30 秒（不可中斷）
-- `>nul`: 隱藏 timeout 的輸出訊息
-- `taskkill //F //IM python.exe`: 強制終止所有 Python 程式
-- `taskkill //F //IM chrome.exe`: 強制終止所有 Chrome 程式
-
-**方法 2：使用 PowerShell（更可靠）**：
+也可以執行單一 test class 或 method：
 
 ```bash
-# ZenDriver 版本（PowerShell）
-powershell -Command "Start-Process python -ArgumentList '-u','src/nodriver_tixcraft.py','--input','src/settings.json' -RedirectStandardOutput .temp\test_output.txt -RedirectStandardError .temp\test_output.txt -NoNewWindow; Start-Sleep 30; Stop-Process -Name python -Force; Stop-Process -Name chrome -Force"
+python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest
+python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 ```
 
-### 步驟 4：手動中斷測試（緊急使用）
-
-**立即終止所有測試**：
-```bash
-# 終止所有 Python 程序
-taskkill //F //IM python.exe
-
-# 終止所有 Chrome 程序
-taskkill //F //IM chrome.exe
-
-# 一次終止兩者
-taskkill //F //IM python.exe //IM chrome.exe
-```
-
-**檢查程式是否還在執行**：
-```bash
-# 檢查 Python 程序
-tasklist | findstr python
-
-# 檢查 Chrome 程序
-tasklist | findstr chrome
-```
-
----
-
-## 輸出檢查方法
-
-### 檢視完整輸出
+### 4.4 完整測試
 
 ```bash
-# 方法 1：直接查看
-type .temp\test_output.txt
-
-# 方法 2：分頁查看（若輸出很長）
-more .temp\test_output.txt
-
-# 方法 3：查看最後 N 行
-powershell Get-Content .temp\test_output.txt -Tail 50
+python -m pytest
 ```
 
-### 功能邏輯驗證（主要方法）
-
-> **重要**：程式使用記錄標籤系統記錄執行邏輯，而非傳統的 ERROR/WARNING 訊息。
-> 測試驗證應該基於功能邏輯是否符合預期，而非只檢查錯誤關鍵字。
-
-#### 1. 日期選擇邏輯驗證
+需要核對收集範圍或遷移相容性時：
 
 ```bash
-# 查看完整日期選擇流程（關鍵字匹配 + 點擊）
-type .temp\test_output.txt | findstr /C:"[DATE KEYWORD]" /C:"[DATE SELECT]"
-
-# 只看匹配摘要
-type .temp\test_output.txt | findstr /C:"Match Summary" /C:"Total dates matched"
-
-# 檢查 AND 邏輯執行情況
-type .temp\test_output.txt | findstr /C:"AND logic" /C:"All AND keywords matched"
+python -m pytest --collect-only -q
+python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-**預期輸出範例**：
-```
-[DATE KEYWORD] Total dates matched: 3
-[DATE SELECT] Auto-select mode: from top to bottom
-[DATE SELECT] Successfully clicked via button[data-href]
-```
+pytest 可以執行現有 `unittest.TestCase`。日後若新增 pytest 原生函式或 fixture 測試，unittest 不會收集它們；屆時兩個 runner 的測試數不同是預期結果，不得把 unittest 當成完整 suite。
 
-#### 2. 區域選擇邏輯驗證
+CTBC 的脫敏瀏覽器 fixture 位於 `tests/fixtures/ctbc/`，runner 是
+`tests/test_ctbc_dom_fixtures.py`。它只開啟本機 `file://` HTML，不連線真實售票網站，
+並同時受 `browser` marker 與 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1` 環境變數保護；
+因此預設 pytest 會 deselect；unittest discover 不會收集 pytest-only runner，也不會
+啟動瀏覽器。執行前需在本機安裝
+Chrome、Chromium、Edge 或 Brave 等 zendriver 支援的瀏覽器。
+
+macOS／Linux 明確執行命令：
 
 ```bash
-# 查看完整區域選擇流程
-type .temp\test_output.txt | findstr /C:"[AREA KEYWORD]"
-
-# 只看匹配摘要
-type .temp\test_output.txt | findstr /C:"Total areas matched" /C:"Selected target index"
+TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
 ```
 
-**預期輸出範例**：
-```
-[AREA KEYWORD] Total areas matched: 2
-[AREA KEYWORD] Selected target index: 0
+Windows PowerShell 明確執行命令：
+
+```powershell
+$env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES = "1"
+python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+Remove-Item Env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
 ```
 
-#### 3. 頁面跳轉驗證
+runner 每次建立暫存 browser profile，並只在 `finally` 停止該次測試自行啟動的
+browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程序。
+
+需要觀察覆蓋範圍時：
 
 ```bash
-# 檢查點擊與導航
-type .temp\test_output.txt | findstr /C:"Successfully clicked" /C:"URL changed" /C:"navigat"
+python -m pytest --cov=src --cov-report=term-missing
 ```
 
-#### 4. 特定平台功能
+導入時在 macOS／Python 3.11 的當次整體 coverage 是 15%，僅作為技術債與後續補測的觀察值，目前不設失敗門檻。
 
-**KKTIX**：
-```bash
-type .temp\test_output.txt | findstr /C:"[KKTIX]" /C:"[KKTIX AREA]"
-```
+依本專案測試約定，所有會啟動瀏覽器或連線真實售票網站的測試都必須分別標記 `browser` 或 `live`；預設 pytest 命令排除這兩個 marker。本機、非真站的瀏覽器測試使用 `python -m pytest -m "browser and not live"`，避免同時選中雙重標記的 live 案例。`live` 測試必須另有明確授權與就緒環境才能執行。Marker 在 collection 後才篩選，因此測試模組匯入本身不得產生瀏覽器、網路或其他外部副作用。
 
-**Cloudflare**：
-```bash
-type .temp\test_output.txt | findstr /C:"[CLOUDFLARE]"
-```
+若完整套件因環境相依而失敗，要保存第一個可處理的失敗訊息，區分：
 
-**驗證碼處理**：
-```bash
-type .temp\test_output.txt | findstr /C:"[CAPTCHA OCR]" /C:"[IBON CAPTCHA]"
-```
+- 本次修改造成的回歸。
+- 本機缺少相依套件或瀏覽器。
+- 測試本身依賴未提供的私人設定。
+- 與本次修改無關、原本已存在的失敗。
 
-**售罄偵測**：
-```bash
-type .temp\test_output.txt | findstr /C:"[SOLD OUT]"
-```
+不得只寫「環境問題」而省略證據。
 
-**票種選擇**：
-```bash
-type .temp\test_output.txt | findstr /C:"[TICKET]"
-```
+### 4.5 建置驗證
 
-### 輔助檢查（限制：程式可能沒有寫入這些訊息）
+在以下情況執行：
 
-> **注意**：以下檢查僅供輔助參考，因為程式設計上並未系統性寫入 ERROR/WARNING 標籤。
-> 主要驗證應該基於上方的「功能邏輯驗證」。
-
-**異常關鍵字檢查**：
-```bash
-# 檢查可能的異常訊息（不保證有）
-type .temp\test_output.txt | findstr /C:"ERROR" /C:"Exception" /C:"Traceback"
-
-# 檢查可能的警告（不保證有）
-type .temp\test_output.txt | findstr /C:"WARNING" /C:"failed"
-```
-
-**設定檔讀取確認**：
-```bash
-type .temp\test_output.txt | findstr /C:"config_dict" /C:"settings.json" /C:"webdriver_type"
-```
-
----
-
-## 測試邏輯驗證指南
-
-### 如何判斷測試是否成功
-
-測試驗證應該基於**功能邏輯是否符合預期**，而非只看有無錯誤訊息。
-
-#### 日期選擇功能
-
-**測試目標**：驗證日期關鍵字比對與選擇邏輯
-
-**檢查步驟**：
-1. 檢視記錄：`type .temp\test_output.txt | findstr /C:"[DATE KEYWORD]"`
-2. 檢查比對摘要：
-   ```
-   [DATE KEYWORD] Total dates matched: X
-   ```
-3. 驗證選擇策略：
-   ```
-   [DATE SELECT] Auto-select mode: from top to bottom
-   [DATE SELECT] Selected target: #1/3
-   ```
-4. 確認點擊成功：
-   ```
-   [DATE SELECT] Successfully clicked via button[data-href]
-   ```
-
-**成功標準**：
-- `Total dates matched > 0`（如果設定了關鍵字）
-- `Selected target` 顯示正確的索引
-- `Successfully clicked` 出現
-
-**失敗情況**：
-- `Total dates matched: 0` 且設定了關鍵字 → 關鍵字比對失敗
-- `No target selected` → 沒有找到可選擇的日期
-- `All click methods failed` → 點擊失敗
-
-#### 區域選擇功能
-
-**測試目標**：驗證區域關鍵字比對與選擇邏輯
-
-**檢查步驟**：
-1. 檢視記錄：`type .temp\test_output.txt | findstr /C:"[AREA KEYWORD]"`
-2. 檢查比對摘要：
-   ```
-   [AREA KEYWORD] Total areas matched: X
-   ```
-3. 檢查座位數量驗證：
-   ```
-   [AREA KEYWORD]   Sufficient seats available
-   ```
-
-**成功標準**：
-- `Total areas matched > 0`（如果設定了關鍵字）
-- `Sufficient seats available`（如果檢查座位數）
-- `Selected target index: X` 出現
-
-**失敗情況**：
-- `Total areas matched: 0` 且設定了關鍵字 → 關鍵字比對失敗
-- `Insufficient seats` → 座位數不足
-- `No areas matched` → 沒有找到比對的區域
-
-#### AND 邏輯驗證
-
-**測試目標**：驗證多關鍵字 AND 邏輯是否正確執行
-
-**檢查步驟**：
-1. 檢視 AND 邏輯執行：
-   ```bash
-   type .temp\test_output.txt | findstr /C:"AND logic"
-   ```
-2. 確認比對結果：
-   ```
-   [DATE KEYWORD]   All AND keywords matched
-   ```
-   或
-   ```
-   [DATE KEYWORD]   AND logic failed (not all matched)
-   ```
-
-**成功標準**：
-- 所有關鍵字都比對時：`All AND keywords matched`
-- 部分關鍵字不比對時：`AND logic failed` → 應該回退到下一組關鍵字
-
-#### 回退機制驗證
-
-**測試目標**：驗證關鍵字失敗時是否正確回退到自動選擇模式
-
-**檢查步驟**：
-1. 如果關鍵字比對失敗（`Total dates matched: 0`）
-2. 檢查是否執行自動選擇模式：
-   ```
-   [DATE SELECT] Auto-select mode: from top to bottom
-   ```
-
-**成功標準**：
-- 關鍵字失敗時，仍能看到 `[DATE SELECT]` 記錄
-- `auto_select_mode` 設定正確應用
-
-### 常見測試情境
-
-#### 情境 1：測試特定日期關鍵字
-
-**設定**：`date_keyword: "12/25"`
-
-**預期記錄**：
-```
-[DATE KEYWORD] Raw input: '12/25'
-[DATE KEYWORD] Checking 5 available dates...
-[DATE KEYWORD]   Matched keyword: '12/25'
-[DATE KEYWORD] Total dates matched: 1
-[DATE SELECT] Selected target: #1/1
-[DATE SELECT] Successfully clicked via button[data-href]
-```
-
-#### 情境 2：測試 AND 邏輯
-
-**設定**：`date_keyword: "週六+晚上"`
-
-**預期記錄**：
-```
-[DATE KEYWORD] Checking AND logic: 週六+晚上
-[DATE KEYWORD]     [MATCH] '週六': True
-[DATE KEYWORD]     [MATCH] '晚上': True
-[DATE KEYWORD]   All AND keywords matched
-[DATE KEYWORD] Total dates matched: 1
-```
-
-#### 情境 3：測試回退機制
-
-**設定**：`date_keyword: "不存在的日期"`, `date_auto_select_mode: "from top to bottom"`
-
-**預期記錄**：
-```
-[DATE KEYWORD] Total dates matched: 0
-[DATE KEYWORD]   No dates matched any keywords
-[DATE SELECT] Auto-select mode: from top to bottom
-[DATE SELECT] Target selected from 0 matched dates
-```
-
-**注意**：即使 `matched_blocks` 為空，程式應該回退到選擇所有可用日期
-
-#### 情境 4：測試區域座位數驗證
-
-**設定**：`ticket_number: 2`, `area_keyword: "搖滾區"`
-
-**預期記錄**：
-```
-[AREA KEYWORD]   Matching AND keywords: ['搖滾區']
-[AREA KEYWORD]     [MATCH] '搖滾區': True
-[AREA KEYWORD]   Checking seats: 5
-[AREA KEYWORD]   Sufficient seats available
-[AREA KEYWORD] Total areas matched: 1
-```
-
-### 快速驗證檢查清單
-
-測試完成後，使用此檢查清單快速驗證：
-
-```markdown
-□ 日期匹配數量符合預期（`Total dates matched`）
-□ 區域匹配數量符合預期（`Total areas matched`）
-□ AND 邏輯正確執行（所有關鍵字都匹配）
-□ 回退機制正確觸發（關鍵字失敗時使用 auto_select_mode）
-□ 點擊成功（`Successfully clicked`）
-□ 頁面跳轉（`URL changed` 或下一階段日誌出現）
-□ 座位數驗證正確（如適用）
-```
-
----
-
-## 常見問題處理
-
-### 問題 1：瀏覽器視窗彈出
-
-**現象**：即使設定 headless 模式，瀏覽器視窗仍會彈出
-
-**原因**：
-- Chrome/ZenDriver 在某些情況下會忽略 headless 設定
-- 某些平台的驗證機制需要可見視窗
-
-**解決方案**：
-1. **接受視窗彈出**：測試時將視窗最小化
-2. **自動關閉**：使用 30秒強制中斷機制自動終止
-3. **調整 headless 設定**：
-   ```json
-   "advanced": {
-       "headless": true
-   }
-   ```
-
-### 問題 2：測試輸出檔案找不到
-
-**現象**：執行 `type .temp\test_output.txt` 時顯示檔案不存在
-
-**原因**：`.temp` 目錄不存在
-
-**解決方案**：
-```bash
-# 建立 .temp 目錄
-mkdir .temp
-```
-
-### 問題 3：程式無法終止
-
-**現象**：執行 `taskkill` 後程式仍在執行
-
-**原因**：程式被鎖定或有多個相關程式
-
-**解決方案**：
-```bash
-# 方法 1：使用 /F 強制終止
-taskkill //F //IM python.exe
-taskkill //F //IM chrome.exe
-
-# 方法 2：根據 PID 終止（更精確）
-tasklist | findstr python
-taskkill //F //PID <程序ID>
-
-# 方法 3：使用 PowerShell
-powershell Stop-Process -Name python -Force
-powershell Stop-Process -Name chrome -Force
-```
-
-### 問題 4：輸出檔案為空
-
-**現象**：`.temp\test_output.txt` 存在但內容為空
-
-**原因**：
-- 程式啟動失敗（語法錯誤）
-- 輸出緩衝未刷新
-- 路徑錯誤
-
-**診斷步驟**：
-1. **檢查語法**：
-   ```bash
-   cd tickets_hunter/src
-   python -m py_compile nodriver_tixcraft.py
-   ```
-
-2. **前台執行確認**（檢視即時輸出）：
-   ```bash
-   cd tickets_hunter/src
-   python nodriver_tixcraft.py --input settings.json
-   ```
-
-3. **使用 -u 確保 unbuffered**：
-   ```bash
-   python -u nodriver_tixcraft.py --input settings.json > .temp\test_output.txt 2>&1
-   ```
-
-### 問題 5：編碼錯誤（Emoji 相關）
-
-**現象**：輸出檔案包含亂碼或程式崩潰
-
-**原因**：Windows cp950 編碼不支援 Emoji 字元
-
-**解決方案**：
-- 確保程式碼中沒有 Emoji 字元
-- 檢查 print() 輸出訊息
-- 程式碼中一律不使用 Emoji：Windows 主控台預設 cp950，遇到 Emoji 會直接編碼失敗
-
----
-
-## 測試自動化腳本
-
-### 完整測試腳本（Chrome 版本）
-
-建立 `test_chrome.bat`：
-```batch
-@echo off
-cd /d "%~dp0"
-
-echo [TEST] Clearing test output and idle files...
-del /Q MAXBOT_INT28_IDLE.txt 2>nul
-del /Q src\MAXBOT_INT28_IDLE.txt 2>nul
-echo. > .temp\test_output.txt
-
-echo [TEST] Starting Chrome version test...
-start /B python -u src\nodriver_tixcraft.py --input src\settings.json > .temp\test_output.txt 2>&1
-
-echo [TEST] Waiting 30 seconds...
-timeout /t 30 /nobreak >nul
-
-echo [TEST] Terminating processes...
-taskkill //F //IM python.exe //IM chrome.exe >nul 2>&1
-
-echo [TEST] Test completed. Checking results...
-echo.
-echo === DATE SELECTION LOGIC ===
-type .temp\test_output.txt | findstr /C:"[DATE KEYWORD]" /C:"Total dates matched"
-echo.
-echo === DATE CLICK RESULT ===
-type .temp\test_output.txt | findstr /C:"[DATE SELECT]" /C:"Successfully clicked"
-echo.
-echo [TEST] Full output saved to .temp\test_output.txt
-pause
-```
-
-### 完整測試腳本（ZenDriver 版本）
-
-建立 `test_nodriver.bat`：
-```batch
-@echo off
-cd /d "%~dp0"
-
-echo [TEST] Clearing test output and idle files...
-del /Q MAXBOT_INT28_IDLE.txt 2>nul
-del /Q src\MAXBOT_INT28_IDLE.txt 2>nul
-echo. > .temp\test_output.txt
-
-echo [TEST] Starting ZenDriver version test...
-start /B python -u src\nodriver_tixcraft.py --input src\settings.json > .temp\test_output.txt 2>&1
-
-echo [TEST] Waiting 30 seconds...
-timeout /t 30 /nobreak >nul
-
-echo [TEST] Terminating processes...
-taskkill //F //IM python.exe //IM chrome.exe >nul 2>&1
-
-echo [TEST] Test completed. Checking results...
-echo.
-echo === DATE SELECTION LOGIC ===
-type .temp\test_output.txt | findstr /C:"[DATE KEYWORD]" /C:"Total dates matched"
-echo.
-echo === AREA SELECTION LOGIC ===
-type .temp\test_output.txt | findstr /C:"[AREA KEYWORD]" /C:"Total areas matched"
-echo.
-echo === CLICK RESULTS ===
-type .temp\test_output.txt | findstr /C:"Successfully clicked"
-echo.
-echo [TEST] Full output saved to .temp\test_output.txt
-pause
-```
-
----
-
-## 進階技巧
-
-### 並行測試多個設定檔
-
-```batch
-@echo off
-echo [TEST] Running parallel tests...
-
-start /B python -u src\nodriver_tixcraft.py --input src\settings1.json > .temp\test1_output.txt 2>&1
-start /B python -u src\nodriver_tixcraft.py --input src\settings2.json > .temp\test2_output.txt 2>&1
-
-timeout /t 30 /nobreak >nul
-taskkill //F //IM python.exe //IM chrome.exe >nul 2>&1
-
-echo [TEST] Results:
-echo === Settings 1 - Date Selection ===
-type .temp\test1_output.txt | findstr /C:"Total dates matched"
-echo.
-echo === Settings 2 - Date Selection ===
-type .temp\test2_output.txt | findstr /C:"Total dates matched"
-```
-
-### 測試結果自動分析
+- 新增或移除 import。
+- 修改 `requirement.txt`。
+- 修改 `build_scripts/*.spec` 或打包腳本。
+- 新增平台模組或 package。
+- 準備發行。
 
 ```bash
-# 建立測試報告（擷取關鍵日誌標籤）
-powershell -Command "Get-Content .temp\test_output.txt | Select-String '\[DATE KEYWORD\]','\[AREA KEYWORD\]','Total.*matched','Successfully clicked' | Out-File .temp\test_summary.txt"
-
-# 查看摘要
-type .temp\test_summary.txt
+python build_scripts/build_local.py
 ```
 
-### 長時間測試監控
+本地建置成功不等同 GitHub Actions 的 Windows 與 macOS release job 都已成功；兩者要分開陳述。
 
-```bash
-# 每 10 秒檢查一次輸出
-:loop
-timeout /t 10 /nobreak >nul
-powershell Get-Content .temp\test_output.txt -Tail 20
-goto loop
+`.github/workflows/tests.yml` 會在 Ubuntu 與 Windows 的 Python 3.11.9 執行預設 pytest suite 與 coverage 報告；依上述 marker 約定排除 browser/live 測試。只有 workflow 實際完成後才可宣稱這兩個平台的 CI 通過。
+
+## 5. 依變更類型選擇驗證
+
+| 變更 | 最低要求 |
+|------|----------|
+| 純文件 | `git diff --check`、連結與現況核對 |
+| 純函式／選擇演算法 | 語法、相關測試、完整單元套件 |
+| 平台 DOM reader 或 selector | 上述項目、脫敏 fixture／契約測試；可用時加實機煙霧測試 |
+| 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例、實機煙霧測試 |
+| 刷新／429 協調 | 聚焦協調器測試、完整套件、多實例或時間控制測試 |
+| 設定 schema／遷移 | default、舊設定遷移、儲存回讀、UI 顯示、相關流程測試 |
+| import／相依／spec | 語法、完整套件、本地建置 |
+
+## 6. 測試設計準則
+
+### 6.1 純邏輯測試
+
+適合驗證：
+
+- 設定正規化與遷移。
+- URL 與頁型分類。
+- 關鍵字優先順序、排除與 fallback。
+- 座位排序、連座選擇、票數 audit。
+- 彈窗分類與狀態轉換。
+
+輸入與輸出應明確，不讀真實瀏覽器、時間或全域狀態。
+
+### 6.2 瀏覽器契約測試
+
+fake 應表達操作語意，例如 `read_snapshot()`、`commit_selection()`，並確認呼叫順序與參數。
+不要靠搜尋 production JavaScript 字串中的 marker 來假裝執行 DOM；那只能證明字串存在，不能證明瀏覽器會正確執行。
+
+最低要覆蓋：
+
+- inspect → decide → commit 的順序。
+- URL、document 或元素身分在 commit 前改變時 fail closed。
+- 50 ms 重複 tick 不會重複 click、reload 或 submit。
+- commit 失敗後不會把狀態標記成成功。
+
+### 6.3 DOM fixture 測試
+
+fixture 應來自脫敏後的真實頁面片段，並由 production reader 在真正 DOM 環境中解析。
+不得由待測程式產生 fixture 再驗證自己。
+
+目前 repository 尚未提供 DOM fixture runner，因此本節是新 runner 的驗收要求，不是現行可宣稱已通過的測試。
+引入 runner 的變更必須同時記錄目錄、啟動／skip 規則、精確命令與環境需求；瀏覽器測試不得在一般 unittest discover 中無提示啟動。
+
+fixture 必須：
+
+- 移除 Cookie、token、帳號、姓名、電話、訂單與座位識別資料。
+- 記錄來源頁型與擷取日期，不保存完整私人頁面。
+- 用同一份 fixture 加 DOM mutation 覆蓋常見負例，避免大量近似檔案。
+
+### 6.4 狀態隔離
+
+- 每個測試建立自己的設定與狀態；不得依賴執行順序。
+- 修改模組 `_state` 的測試必須在 tear down 還原。
+- 時間、亂數、檔案與網路邊界使用可控制的 seam。
+- fake 的回傳值要和操作名稱綁定，不要用容易因多一次呼叫就錯位的匿名 FIFO。
+
+## 7. 實機煙霧測試
+
+實機測試只在有合法活動、使用者授權且風險可控時執行。使用既有私人設定與瀏覽器 profile，不把內容複製到命令輸出或文件。
+
+建議流程：
+
+1. 記錄 branch、commit、平台、活動與預計走到的頁面。
+2. 確認票數、關鍵字、登入方式與「自動刷新頁面間隔」。
+3. 啟動 `python -u src/nodriver_tixcraft.py --input src/settings.json`。
+4. 只觀察本次修改涉及的階段；到達付款頁面前停止自動流程。
+5. 用 `Ctrl-C` 或程式自身停止機制終止本次程序，不關閉其他 Python／Chrome 工作。
+6. 記錄實際結果、彈窗文字、URL 類型、刷新間隔與未走到的分支。
+
+對有副作用的流程，至少確認：
+
+- 點擊後狀態真的改變。
+- 欄位填值 audit 通過後才送出。
+- 同一 document 不會重複送出。
+- 衝突或額度彈窗可正確分類；未知彈窗不會被當成可忽略錯誤。
+- 重新整理經過刷新協調器並遵守設定間隔。
+- 進入 checkout 後只通知，不自動付款。
+
+## 8. 如何回報結果
+
+使用精確層級，不把局部驗證誇大成完整驗證。
+
+正確範例：
+
+```text
+- `git diff --check`：通過。
+- `python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py`：94 tests passed（此數字是當次輸出，不是永久門檻）。
+- 完整 pytest：未執行，原因是本次只修改文件。
+- 實機：未執行；售票入口已關閉，因此 dialog recovery 仍待下一次可用活動驗證。
 ```
 
----
+不正確範例：
 
-## 除錯流程建議
+```text
+- 全部測試完成。（實際只跑了 py_compile）
+- 功能正常。（實際只閱讀程式碼）
+- CI 通過。（實際只在本機執行 unittest）
+```
 
-### 標準除錯流程
+## 9. 失敗處理
 
-1. **清空輸出與暫停檔案**：
-   ```bash
-   echo. > .temp\test_output.txt && del /Q MAXBOT_INT28_IDLE.txt src\MAXBOT_INT28_IDLE.txt 2>nul
-   ```
+測試失敗時：
 
-2. **執行測試**（30秒）：
-   ```bash
-   # 使用本文開頭「快速參考」的完整指令
-   ```
+1. 保留第一個完整 traceback 與執行命令。
+2. 以最小案例重跑，確認是否穩定重現。
+3. 判斷是 production regression、測試耦合、fixture 過期或環境問題。
+4. 修正後先跑失敗案例，再跑受影響模組，最後視風險跑完整套件。
+5. 若無法安全修正，停止擴張修改範圍並在交付說明未解問題。
 
-3. **驗證功能邏輯**（根據測試功能選擇）：
-
-   **日期選擇測試**：
-   ```bash
-   # 查看日期匹配摘要
-   type .temp\test_output.txt | findstr /C:"[DATE KEYWORD]" /C:"Total dates matched"
-
-   # 查看日期選擇執行
-   type .temp\test_output.txt | findstr /C:"[DATE SELECT]" /C:"Successfully clicked"
-   ```
-
-   **區域選擇測試**：
-   ```bash
-   # 查看區域匹配摘要
-   type .temp\test_output.txt | findstr /C:"[AREA KEYWORD]" /C:"Total areas matched"
-   ```
-
-   **其他功能**：
-   ```bash
-   # 根據測試功能查看對應的日誌標籤
-   # 參考「測試邏輯驗證指南」區塊
-   ```
-
-4. **分析測試結果**：
-   - 檢查比對數量是否符合預期
-   - 確認選擇策略正確執行
-   - 驗證 AND 邏輯與回退機制
-   - 參考「測試邏輯驗證指南」中的成功標準
-
-5. **必要時前台執行**（檢視完整行為）：
-   ```bash
-   cd tickets_hunter/src
-   python nodriver_tixcraft.py --input settings.json
-   ```
-
-### 疑難排解優先順序
-
-1. **語法錯誤** → 前台執行確認
-2. **設定檔錯誤** → 檢查 settings.json 格式
-3. **元素定位失敗** → 檢視 [Zendriver API 指南](../06-api-reference/zendriver_api_guide.md)
-4. **邏輯錯誤** → 檢視 structure.md 函式流程
-
----
-
-**更新日期**: 2026-09-16
-**相關文件**: [Zendriver API 指南](../06-api-reference/zendriver_api_guide.md) | [程式結構](structure.md)
+工程審查的嚴重度與輸出格式見 [engineering-review.md](engineering-review.md)。

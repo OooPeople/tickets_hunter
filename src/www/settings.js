@@ -113,13 +113,14 @@ const language_selector = document.querySelector('#language_selector');
 
 var settings = null;
 var globalSettings = null;
+var globalSettingsRevision = null;
 let profileLoadGeneration = 0;
 run_button.disabled = true;
 save_button.disabled = true;
 
 function update_settings_action_state()
 {
-    const ready = !!settings && !!globalSettings;
+    const ready = !!settings && !!globalSettings && !!globalSettingsRevision;
     run_button.disabled = !ready;
     save_button.disabled = !ready;
 }
@@ -844,6 +845,8 @@ function uiText(key, extra = '') {
         'invalid_utk_cooldown': { 'zh-TW': '提示：429 冷卻時間必須是大於 0 的整數，且最大冷卻不得小於初始冷卻。', en: '429 cooldowns must be positive integers, and the maximum cannot be lower than the initial cooldown.' },
         'global_settings_not_ready': { 'zh-TW': '全域刷新設定仍在載入，請稍候再試。', en: 'Global refresh settings are still loading. Please try again shortly.' },
         'global_settings_load_failed': { 'zh-TW': '全域刷新設定載入失敗；儲存與啟動已停用。請重新整理頁面再試。', en: 'Global refresh settings failed to load. Save and Run are disabled; reload the page to try again.' },
+        'global_settings_conflict': { 'zh-TW': '另一個設定頁已更新職棒共用刷新設定；目前輸入內容尚未覆寫，請確認後再儲存一次。', en: 'Another settings tab updated the shared baseball refresh settings. Your current input was not overwritten; review it and save again.' },
+        'profile_save_failed_after_global': { 'zh-TW': `職棒共用刷新設定已儲存，但目前 profile 儲存失敗：${extra}`, en: `Shared baseball refresh settings were saved, but the current profile failed to save: ${extra}` },
         'profile_load_failed': { 'zh-TW': '設定檔載入失敗；儲存與啟動已停用。請重新選擇或整理頁面。', en: 'The profile failed to load. Save and Run are disabled; select it again or reload the page.' },
         'status_paused': { 'zh-TW': '已暫停', en: 'Paused' },
         'status_running': { 'zh-TW': '已啟動', en: 'Running' },
@@ -1436,24 +1439,28 @@ function maxbot_load_api()
     });
 }
 
-function load_global_settings_to_form(value)
+function load_global_settings_to_form(value, revision)
 {
     const utk = value && value.utk_sports ? value.utk_sports : null;
-    if (!utk) return;
+    if (!utk || !revision) return false;
     globalSettings = value;
+    globalSettingsRevision = revision;
     utk_shared_reload_throttle_enabled.checked = utk.enabled === true;
     utk_shared_reload_min_interval.value = utk.min_interval_seconds;
     utk_rate_limit_initial_cooldown.value = utk.initial_cooldown_seconds;
     utk_rate_limit_max_cooldown.value = utk.max_cooldown_seconds;
     check_global_unsaved_fields();
     update_settings_action_state();
+    return true;
 }
 
 function load_global_settings_api()
 {
     $.get('/global-settings')
     .done(function(data) {
-        load_global_settings_to_form(data);
+        if (!load_global_settings_to_form(data && data.settings, data && data.revision)) {
+            run_message(uiText('global_settings_load_failed'));
+        }
     })
     .fail(function(xhr, status) {
         console.error('[MaxBot] Global settings load failed:', status, xhr.responseText);
@@ -1512,6 +1519,17 @@ function check_global_unsaved_fields()
     utk_rate_limit_max_cooldown.classList.toggle(
         'is-invalid', current.utk_sports.max_cooldown_seconds !== saved.max_cooldown_seconds
     );
+}
+
+function global_settings_are_equal(left, right)
+{
+    const a = left && left.utk_sports;
+    const b = right && right.utk_sports;
+    return !!a && !!b
+        && a.enabled === b.enabled
+        && a.min_interval_seconds === b.min_interval_seconds
+        && a.initial_cooldown_seconds === b.initial_cooldown_seconds
+        && a.max_cooldown_seconds === b.max_cooldown_seconds;
 }
 
 function maxbot_reset_api()
@@ -1807,35 +1825,53 @@ function maxbot_save_api(callback, targetProfile = current_profile)
     let api_url = "/save" + profile_query(targetProfile);
     const globalSettingsValue = collect_global_settings_from_form(true);
     if(settings && globalSettingsValue) {
-        $.post( api_url, JSON.stringify(settings), function() {
-            //alert( "success" );
-        })
-        .done(function() {
-            $.ajax({
-                url: '/global-settings',
-                method: 'POST',
-                contentType: 'application/json',
-                data: JSON.stringify(globalSettingsValue)
-            })
-            .done(function(data) {
-                globalSettings = data && data.settings ? data.settings : globalSettingsValue;
-                console.log("[MaxBot] Profile and global settings saved");
+        const saveProfile = function(globalWasSaved) {
+            $.post(api_url, JSON.stringify(settings))
+            .done(function() {
+                console.log("[MaxBot] Settings saved");
                 check_unsaved_fields();
                 if(callback) callback();
             })
             .fail(function(xhr, status, error) {
-                console.error("[MaxBot] Global settings save error:", status, error);
+                console.error("[MaxBot] Profile save error:", status, error);
                 console.error("[MaxBot] Response content:", xhr.responseText);
-                run_message(uiText('save_failed', status));
+                run_message(uiText(
+                    globalWasSaved ? 'profile_save_failed_after_global' : 'save_failed',
+                    status
+                ));
             });
+        };
+
+        if (global_settings_are_equal(globalSettingsValue, globalSettings)) {
+            saveProfile(false);
+            return;
+        }
+
+        $.ajax({
+            url: '/global-settings',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                settings: globalSettingsValue,
+                revision: globalSettingsRevision,
+            })
+        })
+        .done(function(data) {
+            globalSettings = data.settings;
+            globalSettingsRevision = data.revision;
+            saveProfile(true);
         })
         .fail(function(xhr, status, error) {
-            console.error("[MaxBot] Save API error:", status, error);
+            console.error("[MaxBot] Global settings save error:", status, error);
             console.error("[MaxBot] Response content:", xhr.responseText);
+            if (xhr.status === 409 && xhr.responseJSON) {
+                globalSettings = xhr.responseJSON.settings;
+                globalSettingsRevision = xhr.responseJSON.revision;
+                check_global_unsaved_fields();
+                run_message(uiText('global_settings_conflict'));
+                return;
+            }
             run_message(uiText('save_failed', status));
-        })
-        .always(function() {
-            //alert( "finished" );
         });
     }
 }

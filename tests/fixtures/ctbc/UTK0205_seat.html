@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>CTBC seat fixture</title>
+  <style>
+    #TBL td[title] { width: 2rem; height: 2rem; border: 1px solid #333; }
+  </style>
+</head>
+<body>
+  <!-- Page kind: seat. Fixture date: 2026-10-15. Synthetic/deidentified. -->
+  <input id="QUANTITY_LIMIT" value="2">
+  <div class="ticket">
+    <button type="button" onclick="setType('FULL')">
+      全票 <span class="checkNum" id="FULL" val="全票">0</span>
+    </button>
+    <button type="button" onclick="setType('OTHER')">
+      其他票 <span class="checkNum" id="OTHER" val="其他票">0</span>
+    </button>
+  </div>
+  <table id="TBL">
+    <tbody>
+      <tr>
+        <td title="A區-1排-1號" data-seat-id="S1"
+            style="cursor: pointer; background-image: url('seat-empty-fixture.png')"
+            onclick="toggleSeat(this, 'S1')"></td>
+        <td title="A區-1排-2號" data-seat-id="S2"
+            style="cursor: pointer; background-image: url('seat-empty-fixture.png')"
+            onclick="toggleSeat(this, 'S2')"></td>
+        <td title="A區-1排-3號" data-seat-id="S3"
+            style="cursor: default; background-image: none"></td>
+      </tr>
+    </tbody>
+  </table>
+  <script>
+    window.seats = {};
+    function setType(value) {
+      document.body.dataset.ticketType = value;
+    }
+    function toggleSeat(cell, seatId) {
+      const selected = cell.dataset.selected === '1';
+      if (selected) {
+        cell.dataset.selected = '0';
+        cell.style.backgroundImage = "url('seat-empty-fixture.png')";
+        delete window.seats[seatId];
+      } else {
+        cell.dataset.selected = '1';
+        cell.style.backgroundImage = "url('icon_chair_select_fixture.png')";
+        window.seats[seatId] = {A: 'S', Y: 'FULL', Z: '全票'};
+      }
+      document.getElementById('FULL').textContent = String(
+        Object.values(window.seats).filter(seat => seat.A === 'S').length
+      );
+    }
+  </script>
+</body>
+</html>

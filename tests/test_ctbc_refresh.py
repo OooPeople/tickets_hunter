@@ -886,56 +886,72 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 runtime = ctbc_tab_runtime(tab)
                 lease_started = asyncio.Event()
                 lease_finalizing = asyncio.Event()
-                wait_forever = asyncio.Event()
+                initial_wait = asyncio.Event()
+                finalize_release = asyncio.Event()
 
                 async def lease_worker():
                     lease_started.set()
                     try:
-                        await wait_forever.wait()
+                        await initial_wait.wait()
                     except asyncio.CancelledError:
                         lease_finalizing.set()
-                        await wait_forever.wait()
+                        await finalize_release.wait()
                         raise
 
                 lease_task = asyncio.create_task(lease_worker())
                 _state["cancel_tasks"].add(lease_task)
                 lease_task.add_done_callback(_state["cancel_tasks"].discard)
-                await asyncio.wait_for(lease_started.wait(), timeout=1.0)
-                probe = {
-                    "permit_id": f"{cleanup_kind}-probe",
-                    "lease_task": lease_task,
-                }
-                runtime["refresh"]["recovery_probe"] = probe
-                coordinator = types.SimpleNamespace(
-                    complete_recovery_probe=AsyncMock(return_value=
-                        types.SimpleNamespace(accepted=True, error="")
-                    ),
-                )
-                if cleanup_kind == "completed":
-                    cleanup = _clear_completed_recovery_probe(
-                        runtime, _state["cancel_tasks"], probe
+                cleanup_task = None
+                try:
+                    await asyncio.wait_for(lease_started.wait(), timeout=1.0)
+                    probe = {
+                        "permit_id": f"{cleanup_kind}-probe",
+                        "lease_task": lease_task,
+                    }
+                    runtime["refresh"]["recovery_probe"] = probe
+                    coordinator = types.SimpleNamespace(
+                        complete_recovery_probe=AsyncMock(return_value=
+                            types.SimpleNamespace(accepted=True, error="")
+                        ),
                     )
-                else:
-                    cleanup = _abandon_recovery_probe(
-                        runtime, "identity", _state["cancel_tasks"],
-                        coordinator, probe,
+                    if cleanup_kind == "completed":
+                        cleanup = _clear_completed_recovery_probe(
+                            runtime, _state["cancel_tasks"], probe
+                        )
+                    else:
+                        cleanup = _abandon_recovery_probe(
+                            runtime, "identity", _state["cancel_tasks"],
+                            coordinator, probe,
+                        )
+                    cleanup_task = asyncio.create_task(cleanup)
+                    await asyncio.wait_for(
+                        lease_finalizing.wait(), timeout=1.0
                     )
-                cleanup_task = asyncio.create_task(cleanup)
-                await asyncio.wait_for(lease_finalizing.wait(), timeout=1.0)
-                expected_probe = probe
-                if cleanup_kind == "abandon":
-                    expected_probe = {"permit_id": "replacement"}
-                    runtime["refresh"]["recovery_probe"] = expected_probe
-                cleanup_task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await cleanup_task
+                    expected_probe = probe
+                    if cleanup_kind == "abandon":
+                        expected_probe = {"permit_id": "replacement"}
+                        runtime["refresh"]["recovery_probe"] = expected_probe
+                    cleanup_task.cancel()
+                    finalize_release.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(cleanup_task, timeout=1.0)
 
-                self.assertIs(
-                    expected_probe, runtime["refresh"]["recovery_probe"]
-                )
-                coordinator.complete_recovery_probe.assert_not_awaited()
-                await asyncio.gather(lease_task, return_exceptions=True)
-                runtime["refresh"]["recovery_probe"] = None
+                    self.assertIs(
+                        expected_probe, runtime["refresh"]["recovery_probe"]
+                    )
+                    coordinator.complete_recovery_probe.assert_not_awaited()
+                finally:
+                    finalize_release.set()
+                    cleanup_tasks = [lease_task]
+                    if cleanup_task is not None:
+                        cleanup_tasks.append(cleanup_task)
+                    for task in cleanup_tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.wait_for(asyncio.gather(
+                        *cleanup_tasks, return_exceptions=True
+                    ), timeout=1.0)
+                    runtime["refresh"]["recovery_probe"] = None
 
     async def test_paused_workflow_uses_pause_facade_before_health_or_dispatch(self):
         tab = FakeSubmitTab(dialog="")

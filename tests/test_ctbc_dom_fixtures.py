@@ -18,6 +18,7 @@ from tests.ctbc_support import ctbc_identity_runtime, ctbc_tab_runtime, config
 from platforms.utiki.dom import (
     CommitResult,
     SubmitDispatchResult,
+    clear_conflict_selection,
     commit_area,
     commit_date_action,
     commit_server_assigned_area,
@@ -145,9 +146,15 @@ async def _run_browser_fixtures():
                 ):
                     await assertion(browser)
             elif assertion is _assert_server_assigned_quantity_fixture:
-                with patch(
-                    "platforms.utiki.selection.classify_utiki_page",
-                    return_value=PageKind.SERVER_ASSIGNED_QUANTITY,
+                with (
+                    patch(
+                        "platforms.utiki.dom.classify_utiki_page",
+                        return_value=PageKind.SERVER_ASSIGNED_QUANTITY,
+                    ),
+                    patch(
+                        "platforms.utiki.selection.classify_utiki_page",
+                        return_value=PageKind.SERVER_ASSIGNED_QUANTITY,
+                    ),
                 ):
                     await assertion(browser)
             else:
@@ -943,6 +950,81 @@ async def _assert_seat_fixture(browser):
         clean_plan.ticket_type_name,
     )
 
+    conflict_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    conflict_snapshot, conflict_plan = await read_plan(conflict_tab)
+    assert await commit_seat(
+        conflict_tab, conflict_snapshot, conflict_plan
+    ) is CommitResult.COMMITTED
+    assert await clear_conflict_selection(
+        conflict_tab,
+        PageKind.RESERVED_SEAT,
+        conflict_snapshot.page_url,
+        conflict_snapshot.document_id,
+        conflict_snapshot.product_id,
+    ) is CommitResult.COMMITTED
+    assert await conflict_tab.evaluate("Object.keys(window.seats).length") == 0
+    assert await conflict_tab.evaluate(
+        "document.querySelector('#FULL').textContent"
+    ) == "0"
+
+    route_conflict_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    route_conflict_snapshot, route_conflict_plan = await read_plan(
+        route_conflict_tab
+    )
+    assert await commit_seat(
+        route_conflict_tab, route_conflict_snapshot, route_conflict_plan
+    ) is CommitResult.COMMITTED
+    await route_conflict_tab.evaluate('''(() => {
+        const url = new URL(location.href);
+        url.searchParams.set('PERFORMANCE_ID', 'OTHER');
+        history.replaceState({}, '', url.href);
+    })()''')
+    assert await clear_conflict_selection(
+        route_conflict_tab,
+        PageKind.RESERVED_SEAT,
+        route_conflict_snapshot.page_url,
+        route_conflict_snapshot.document_id,
+        route_conflict_snapshot.product_id,
+    ) is CommitResult.STALE
+    assert await route_conflict_tab.evaluate(
+        "Object.keys(window.seats).length"
+    ) == 2
+    assert await route_conflict_tab.evaluate('''Array.from(
+        document.querySelectorAll('#TBL td[title]')
+    ).filter(seat => (seat.getAttribute('style') || '')
+        .includes('icon_chair_select')).length''') == 2
+
+    stale_conflict_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    stale_snapshot, stale_plan = await read_plan(stale_conflict_tab)
+    assert await commit_seat(
+        stale_conflict_tab, stale_snapshot, stale_plan
+    ) is CommitResult.COMMITTED
+    assert await clear_conflict_selection(
+        stale_conflict_tab,
+        PageKind.RESERVED_SEAT,
+        stale_snapshot.page_url,
+        f"{stale_snapshot.document_id}-old",
+        stale_snapshot.product_id,
+    ) is CommitResult.STALE
+    await stale_conflict_tab.evaluate(
+        "document.querySelector('#PRODUCT_ID').value = 'OTHER_PRODUCT'"
+    )
+    assert await clear_conflict_selection(
+        stale_conflict_tab,
+        PageKind.RESERVED_SEAT,
+        stale_snapshot.page_url,
+        stale_snapshot.document_id,
+        stale_snapshot.product_id,
+    ) is CommitResult.STALE
+    stale_live = await read_seat_snapshot(stale_conflict_tab)
+    assert len(stale_live.submitted_seats) == 2
+
     route_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
     route_snapshot, route_plan = await read_plan(route_tab)
     await route_tab.evaluate('''(() => {
@@ -1172,6 +1254,46 @@ async def _assert_quantity_fixture(browser):
     )
     cfg = config()
 
+    conflict_tab = await _open_fixture(
+        browser, "UTK0202_quantity.html", query
+    )
+    conflict_snapshot = await read_quantity_snapshot(conflict_tab)
+    assert await clear_conflict_selection(
+        conflict_tab,
+        PageKind.GENERAL_ADMISSION,
+        conflict_snapshot.page_url,
+        conflict_snapshot.document_id,
+        conflict_snapshot.product_id,
+    ) is CommitResult.COMMITTED
+    assert await _read_fixture_quantities(conflict_tab) == {
+        "OTHER": "0", "FULL": "0"
+    }
+    assert await conflict_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 6
+
+    rerender_tab = await _open_fixture(
+        browser, "UTK0202_quantity.html", query
+    )
+    rerender_snapshot = await read_quantity_snapshot(rerender_tab)
+    await rerender_tab.evaluate('''(() => {
+        const first = document.querySelector('input.numbox[key]');
+        first.addEventListener('input', () => {
+            const injected = document.createElement('input');
+            injected.className = 'numbox';
+            injected.setAttribute('key', 'INJECTED');
+            injected.value = '1';
+            document.body.appendChild(injected);
+        }, {once: true});
+    })()''')
+    assert await clear_conflict_selection(
+        rerender_tab,
+        PageKind.GENERAL_ADMISSION,
+        rerender_snapshot.page_url,
+        rerender_snapshot.document_id,
+        rerender_snapshot.product_id,
+    ) is CommitResult.STALE
+
     destination_tab = await _open_fixture(
         browser, "UTK0203_quantity.html", query
     )
@@ -1295,6 +1417,7 @@ async def _assert_quantity_fixture(browser):
     active_submit = ctbc_tab_runtime(flow_tab)["purchase"]["active_submit"]
     assert active_submit["purchase_key"] == ("fixture-purchase",)
     assert active_submit["phase"] == "awaiting_result"
+    ctbc_tab_runtime(flow_tab)["purchase"]["active_submit"] = None
     assert await _read_fixture_quantities(flow_tab) == {
         "FULL": "2", "OTHER": "0"
     }
@@ -1783,6 +1906,22 @@ async def _assert_server_assigned_quantity_fixture(browser):
         f"/BROTHERS/UTK0201_001{query}"
     )
     try:
+        conflict_tab = await _open_fixture_url(browser, url)
+        conflict_snapshot = await read_quantity_snapshot(conflict_tab)
+        assert await clear_conflict_selection(
+            conflict_tab,
+            PageKind.SERVER_ASSIGNED_QUANTITY,
+            conflict_snapshot.page_url,
+            conflict_snapshot.document_id,
+            conflict_snapshot.product_id,
+        ) is CommitResult.COMMITTED
+        assert await _read_fixture_quantities(conflict_tab) == {
+            "FULL": "0", "OTHER": "0"
+        }
+        assert await conflict_tab.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        ) == 6
+
         tab = await _open_fixture_url(browser, url)
         snapshot = await read_quantity_snapshot(tab)
         plan = select_quantity_snapshot(

@@ -57,6 +57,7 @@ from platforms.utiki.selection import (
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
+    _ctbc_captcha_image_token,
     _ctbc_fast_destination_is_valid,
     _ctbc_purchase_state_key,
     _ctbc_submit_reached_checkout,
@@ -159,6 +160,15 @@ def _seat_snapshot(*, selected=(), submitted=None, counters=None):
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
+    def test_captcha_image_token_is_stable_and_nonempty_only_for_bytes(self):
+        first = _ctbc_captcha_image_token(b"synthetic-captcha")
+
+        self.assertEqual(64, len(first))
+        self.assertEqual(first, _ctbc_captcha_image_token(b"synthetic-captcha"))
+        self.assertNotEqual(first, _ctbc_captcha_image_token(b"changed"))
+        self.assertEqual("", _ctbc_captcha_image_token(b""))
+        self.assertEqual("", _ctbc_captcha_image_token("raw-image"))
+
     def test_legacy_facade_shares_the_canonical_workflow(self):
         for name in legacy_ctbc.__all__:
             with self.subTest(name=name):

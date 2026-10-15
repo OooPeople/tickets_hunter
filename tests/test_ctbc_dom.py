@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import gc
 import json
@@ -45,7 +46,9 @@ from platforms.utiki.workflow import (
     _ctbc_tab_state_key,
     _get_ctbc_captcha_image_bytes,
     _handle_ctbc_submit_dialog,
+    _recover_ctbc_captcha_dialog,
     _recover_ctbc_seat_conflict,
+    _reset_ctbc_captcha,
     _state,
     _utk_refresh_identity,
     nodriver_ctbc_area_auto_select,
@@ -1718,6 +1721,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
         cfg = config()
         submit_key = self._track_submit_state(tab)
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "source-document"
         ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
             "kind": "captcha", "source_url": CTBC_TEST_SEAT_URL,
             "source_document_id": "source-document", "nonce": "a" * 32,
@@ -1733,6 +1737,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         ), patch(
             "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
+        ), patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"old-image", b"new-image"]),
         ):
             await nodriver_ctbc_main(
                 tab, CTBC_TEST_SEAT_URL, cfg, ocr=None
@@ -2543,6 +2550,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = self._track_submit_state(tab)
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
 
         with patch("platforms.utiki.workflow.time.monotonic", return_value=100.0):
             self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
@@ -2551,7 +2559,13 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         tab.dialog = "驗證碼錯誤"
         tab.dialog_visible = True
-        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"old-image", b"new-image"]),
+        ):
+            self.assertEqual(
+                "captcha", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
         self.assertIsNone(self._outcome_for(tab, submit_key))
         self.assertEqual("", tab.captcha_input.value)
         self.assertEqual(1, tab.captcha_refresh.click_count)
@@ -2669,22 +2683,33 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         submit_key = self._track_submit_state(tab)
         identity = _ctbc_tab_identity(tab)
         ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
-        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = {
+        pending = {
             "kind": "seat_conflict",
+            "source_url": CTBC_TEST_SEAT_URL,
             "source_document_id": "document-1",
+            "dom_document_id": "time-origin-1",
+            "product_id": "PRODUCT_FIXTURE",
+            "page_type": "seat",
             "dialog_dismissed": True,
+            "clear_phase": "",
+            "clear_result": "",
             "reload_dispatched": False,
             "recovery_document_id": "",
         }
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = pending
 
         with patch(
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(side_effect=[False, True]),
-        ) as reload_page:
+        ) as reload_page, patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(return_value=CommitResult.STALE),
+        ) as clear_selection:
             self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
             self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
             self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
             self.assertEqual(2, reload_page.await_count)
+            clear_selection.assert_awaited_once()
 
             ctbc_identity_runtime(identity)["document"]["last_document"] = "document-2"
             self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
@@ -2714,6 +2739,178 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         )
         reload_page.assert_not_awaited()
         read_seat.assert_not_awaited()
+
+    async def test_conflict_unknown_clear_is_not_dispatched_twice(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
+        pending = {
+            "kind": "seat_conflict",
+            "source_url": CTBC_TEST_SEAT_URL,
+            "source_document_id": "document-1",
+            "dom_document_id": "time-origin-1",
+            "product_id": "PRODUCT_FIXTURE",
+            "page_type": "seat",
+            "dialog_dismissed": True,
+            "clear_phase": "",
+            "clear_result": "",
+            "reload_dispatched": False,
+            "recovery_document_id": "",
+        }
+        ctbc_tab_runtime(tab)["purchase"]["outcomes"][submit_key] = pending
+
+        with patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(side_effect=RuntimeError("CDP result unavailable")),
+        ) as clear_selection, patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page:
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            ctbc_identity_runtime(identity)["document"]["last_document"] = (
+                "document-2"
+            )
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        clear_selection.assert_awaited_once()
+        reload_page.assert_awaited_once_with(
+            tab, cfg, "selected seats were taken"
+        )
+        self.assertEqual("done", pending["clear_phase"])
+        self.assertEqual("unknown", pending["clear_result"])
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_conflict_clear_losing_outcome_stops_all_later_effects(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+            "document_id": "time-origin-1",
+            "product_id": "PRODUCT_FIXTURE",
+        })
+        replacement = {"kind": "quota", "text": "new outcome"}
+
+        async def replace_outcome(*_args):
+            runtime["purchase"]["outcomes"][submit_key] = replacement
+            return CommitResult.COMMITTED
+
+        with patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(side_effect=replace_outcome),
+        ), patch(
+            "platforms.utiki.workflow._reset_ctbc_captcha", AsyncMock()
+        ) as reset_captcha, patch(
+            "platforms.utiki.workflow._reload_with_interval", AsyncMock()
+        ) as reload_page:
+            self.assertEqual(
+                "seat_conflict", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        self.assertIs(runtime["purchase"]["outcomes"][submit_key], replacement)
+        reset_captcha.assert_not_awaited()
+        reload_page.assert_not_awaited()
+
+    async def test_conflict_busy_clear_blocks_second_recovery_effects(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+            "document_id": "time-origin-1",
+            "product_id": "PRODUCT_FIXTURE",
+        })
+        entered = asyncio.Event()
+        release = asyncio.get_running_loop().create_future()
+
+        async def pending_clear(*_args):
+            entered.set()
+            return await release
+
+        with patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(side_effect=pending_clear),
+        ), patch(
+            "platforms.utiki.workflow._reset_ctbc_captcha",
+            AsyncMock(return_value=True),
+        ) as reset_captcha, patch(
+            "platforms.utiki.workflow._reload_with_interval", AsyncMock()
+        ) as reload_page:
+            first = asyncio.create_task(
+                _handle_ctbc_submit_dialog(tab, cfg)
+            )
+            await entered.wait()
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+            reset_captcha.assert_not_awaited()
+            reload_page.assert_not_awaited()
+            release.set_result(CommitResult.COMMITTED)
+            self.assertEqual("seat_conflict", await first)
+
+        reset_captcha.assert_awaited_once_with(
+            tab, refresh_image=False, submit_key=submit_key
+        )
+        reload_page.assert_not_awaited()
+
+    async def test_conflict_clear_purchase_change_records_result_for_return(self):
+        tab = FakeSubmitTab(dialog="該位置已被選走")
+        cfg = config()
+        old_url = str(tab.target.url)
+        old_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, old_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+            "document_id": "time-origin-1",
+            "product_id": "PRODUCT_FIXTURE",
+        })
+        new_url = CTBC_TEST_SEAT_URL.replace(
+            "PERFORMANCE_ID=P1", "PERFORMANCE_ID=P2"
+        )
+
+        async def change_purchase(*_args):
+            tab.target.url = new_url
+            return CommitResult.COMMITTED
+
+        with patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(side_effect=change_purchase),
+        ) as clear_selection, patch(
+            "platforms.utiki.workflow._reset_ctbc_captcha", AsyncMock()
+        ) as reset_captcha, patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page:
+            self.assertEqual(
+                "seat_conflict", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertNotEqual(old_key, _ctbc_purchase_state_key(tab))
+            blocker = runtime["purchase"]["outcomes"].get(old_key)
+            self.assertEqual("done", blocker["clear_phase"])
+            self.assertEqual("committed", blocker["clear_result"])
+            self.assertEqual("ABCD", tab.captcha_input.value)
+            reset_captcha.assert_not_awaited()
+            reload_page.assert_not_awaited()
+
+            tab.target.url = old_url
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        clear_selection.assert_awaited_once()
+        reset_captcha.assert_not_awaited()
+        reload_page.assert_awaited_once_with(
+            tab, cfg, "selected seats were taken"
+        )
 
     async def test_conflict_click_without_close_blocks_reload(self):
         tab = FakeSubmitTab(dialog="該位置已被選走")
@@ -2877,7 +3074,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab = FakeSubmitTab(dialog="驗證碼錯誤")
         tab.dismiss_allowed = False
         submit_key = self._track_submit_state(tab)
-        self._set_active_submit(tab, submit_key, 1.0)
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+        })
         self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, config()))
         self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, config()))
         self.assertIsNone(self._active_submit_for(tab, submit_key))
@@ -2890,7 +3091,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         tab.dialog_visible = False
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
-        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"old-image", b"new-image"]),
+        ):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         self.assertEqual(0, tab.button.click_count)
         self.assertEqual("", tab.captcha_input.value)
@@ -2911,8 +3116,12 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             raise RuntimeError("CDP result unavailable")
 
         tab.captcha_refresh.click = refresh_then_raise
-        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
-        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(return_value=b"unchanged-image"),
+        ):
+            self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
         self.assertEqual(0, tab.button.click_count)
         self.assertEqual(1, tab.captcha_refresh.click_count)
@@ -2920,17 +3129,286 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual("unknown", self._outcome_for(tab, submit_key)["reset_phase"])
         self.assertEqual("captcha", self._outcome_for(tab, submit_key)["kind"])
 
-        async def refresh_success():
-            tab.captcha_refresh.clicked = True
-            tab.captcha_refresh.click_count += 1
-
-        tab.captcha_refresh.click = refresh_success
         ctbc_identity_runtime(identity)["document"]["last_document"] = "document-2"
         self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
 
-        self.assertEqual(2, tab.captcha_refresh.click_count)
-        self.assertEqual(2, tab.captcha_input.apply_count)
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertEqual(1, tab.captcha_input.apply_count)
         self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_captcha_refresh_waits_for_changed_image_without_second_click(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
+
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"same", b"same", b"same", b"changed"]),
+        ):
+            self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+            self.assertEqual("awaiting_change", self._outcome_for(
+                tab, submit_key
+            )["reset_phase"])
+            self.assertTrue(await _recover_ctbc_captcha_dialog(tab, cfg))
+            self.assertTrue(await _recover_ctbc_captcha_dialog(tab, cfg))
+
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_captcha_click_exception_can_attest_changed_image(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
+
+        async def refresh_then_raise():
+            tab.captcha_refresh.click_count += 1
+            raise RuntimeError("CDP result unavailable")
+
+        tab.captcha_refresh.click = refresh_then_raise
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"old-image", b"changed-image"]),
+        ):
+            self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_captcha_token_await_losing_outcome_never_clicks_refresh(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+        })
+        replacement = {"kind": "quota", "text": "new outcome"}
+
+        async def replace_outcome(*_args):
+            runtime["purchase"]["outcomes"][submit_key] = replacement
+            return b"old-image"
+
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=replace_outcome),
+        ):
+            self.assertEqual(
+                "captcha", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+
+        self.assertIs(runtime["purchase"]["outcomes"][submit_key], replacement)
+        self.assertEqual(0, tab.captcha_refresh.click_count)
+
+    async def test_captcha_query_await_document_change_stops_before_input_clear(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+        })
+        original_query = tab.query_selector
+
+        async def change_document(selector):
+            element = await original_query(selector)
+            if selector == "#CHK":
+                runtime["document"]["last_document"] = "document-2"
+            return element
+
+        tab.query_selector = change_document
+        self.assertEqual("captcha", await _handle_ctbc_submit_dialog(tab, cfg))
+
+        outcome = self._outcome_for(tab, submit_key)
+        self.assertEqual("", outcome["reset_phase"])
+        self.assertEqual("document-1", outcome["reset_source_document_id"])
+        self.assertEqual("ABCD", tab.captcha_input.value)
+        self.assertEqual(0, tab.captcha_refresh.click_count)
+
+    async def test_captcha_empty_token_retries_preflight_then_clicks_once(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+        })
+
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"", b"old-image", b"new-image"]),
+        ):
+            self.assertEqual(
+                "captcha", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+            self.assertEqual("", self._outcome_for(
+                tab, submit_key
+            )["reset_phase"])
+            self.assertTrue(await _recover_ctbc_captcha_dialog(tab, cfg))
+
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_captcha_missing_control_retries_preflight_then_clicks_once(self):
+        tab = FakeSubmitTab(dialog="驗證碼錯誤")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        self._set_active_submit(tab, submit_key, {
+            "dispatched_at": 1.0,
+            "source_document_id": "document-1",
+        })
+        original_query = tab.query_selector
+        control_ready = False
+
+        async def delayed_control(selector):
+            nonlocal control_ready
+            if selector == "#chang_pic" and not control_ready:
+                control_ready = True
+                return None
+            return await original_query(selector)
+
+        tab.query_selector = delayed_control
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"old-image", b"old-image", b"new-image"]),
+        ):
+            self.assertEqual(
+                "captcha", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+            self.assertEqual("", self._outcome_for(
+                tab, submit_key
+            )["reset_phase"])
+            self.assertTrue(await _recover_ctbc_captcha_dialog(tab, cfg))
+
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
+    async def test_concurrent_captcha_preflight_clicks_refresh_once(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        outcome = {
+            "kind": "captcha",
+            "source_document_id": "document-1",
+            "reset_phase": "",
+            "reset_source_document_id": "",
+            "reset_before_token": "",
+        }
+        runtime["purchase"]["outcomes"][submit_key] = outcome
+        entered = asyncio.Event()
+        release = asyncio.get_running_loop().create_future()
+        reads = 0
+
+        async def delayed_image(*_args):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                entered.set()
+                await release
+                return b"old-image"
+            return b"new-image"
+
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=delayed_image),
+        ) as image_reader:
+            first = asyncio.create_task(_reset_ctbc_captcha(
+                tab,
+                refresh_image=True,
+                submit_key=submit_key,
+                config_dict=cfg,
+            ))
+            await entered.wait()
+            self.assertEqual("preflighting", outcome["reset_phase"])
+            self.assertFalse(await _reset_ctbc_captcha(
+                tab,
+                refresh_image=True,
+                submit_key=submit_key,
+                config_dict=cfg,
+            ))
+            self.assertEqual(1, image_reader.await_count)
+            self.assertEqual(1, tab.captcha_input.apply_count)
+            self.assertEqual(0, tab.captcha_refresh.click_count)
+            release.set_result(None)
+            self.assertTrue(await first)
+
+        self.assertEqual(2, image_reader.await_count)
+        self.assertEqual(1, tab.captcha_input.apply_count)
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertEqual("done", outcome["reset_phase"])
+
+    async def test_captcha_preflight_purchase_change_can_retry_on_return(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        old_url = str(tab.target.url)
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        outcome = {
+            "kind": "captcha",
+            "source_document_id": "document-1",
+            "reset_phase": "",
+            "reset_source_document_id": "",
+            "reset_before_token": "",
+        }
+        runtime["purchase"]["outcomes"][submit_key] = outcome
+        entered = asyncio.Event()
+        release = asyncio.get_running_loop().create_future()
+        reads = 0
+
+        async def delayed_image(*_args):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                entered.set()
+                await release
+                return b"stale-image"
+            return b"old-image" if reads == 2 else b"new-image"
+
+        with patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=delayed_image),
+        ):
+            first = asyncio.create_task(_reset_ctbc_captcha(
+                tab,
+                refresh_image=True,
+                submit_key=submit_key,
+                config_dict=cfg,
+            ))
+            await entered.wait()
+            tab.target.url = old_url.replace(
+                "PERFORMANCE_ID=P1", "PERFORMANCE_ID=P2"
+            )
+            runtime["document"]["last_document"] = "document-2"
+            release.set_result(None)
+            self.assertFalse(await first)
+            self.assertEqual("", outcome["reset_phase"])
+            self.assertEqual(0, tab.captcha_refresh.click_count)
+
+            tab.target.url = old_url
+            runtime["document"]["last_document"] = "document-1"
+            self.assertTrue(await _reset_ctbc_captcha(
+                tab,
+                refresh_image=True,
+                submit_key=submit_key,
+                config_dict=cfg,
+            ))
+
+        self.assertEqual(3, reads)
+        self.assertEqual(1, tab.captcha_refresh.click_count)
+        self.assertEqual("done", outcome["reset_phase"])
 
     async def test_auth_error_blocks_retry_until_credentials_change(self):
         tab = FakeSubmitTab(dialog="帳號或密碼錯誤")

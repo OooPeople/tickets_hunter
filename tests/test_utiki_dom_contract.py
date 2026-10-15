@@ -30,6 +30,7 @@ from platforms.utiki.dom import (
     commit_area,
     dispatch_submit,
 )
+from platforms.utiki.profiles import PageKind
 from platforms.utiki.selection import (
     DialogSnapshot,
     build_submit_plan,
@@ -1313,7 +1314,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         reader.assert_not_awaited()
         attest.assert_not_awaited()
 
-    async def test_server_quantity_conflict_uses_paced_reload_not_seat_clear(self):
+    async def test_server_quantity_conflict_clears_once_then_uses_paced_reload(self):
         tab = FakeSubmitTab(
             dialog="該位置已被選走", url=CTBC_TEST_SERVER_QUANTITY_URL
         )
@@ -1355,9 +1356,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 "tenant_path": "/BROTHERS",
             },
         ), patch(
-            "platforms.utiki.workflow._clear_ctbc_selected_seats",
-            AsyncMock(),
-        ) as clear_seats, patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(return_value=CommitResult.REJECTED),
+        ) as clear_selection, patch(
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page, patch(
@@ -1389,7 +1390,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             )
 
         self.assertEqual(1, attest.await_count)
-        clear_seats.assert_not_awaited()
+        clear_selection.assert_awaited_once()
         reload_page.assert_awaited_once_with(
             tab, cfg, "selected seats were taken"
         )
@@ -1541,6 +1542,55 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ))
         dispatch.assert_awaited_once_with(tab, build_submit_plan(plan))
 
+    async def test_active_server_submit_conflict_uses_exact_clear_identity(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
+            page_url=CTBC_TEST_SERVER_QUANTITY_URL,
+            group_id="GROUP_FRONT",
+            product_id="PRODUCT_FIXTURE",
+        ))
+        plan = select_quantity_snapshot(
+            snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        submit_plan = build_submit_plan(plan)
+        tab = FakeSubmitTab(
+            dialog="", url=CTBC_TEST_SERVER_QUANTITY_URL
+        )
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_submit",
+            AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
+        ), patch(
+            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            AsyncMock(return_value=False),
+        ):
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, submit_plan=submit_plan
+            ))
+
+        tab.dialog = "該位置已被選走"
+        tab.dialog_visible = True
+        with patch(
+            "platforms.utiki.workflow.clear_conflict_selection",
+            AsyncMock(return_value=CommitResult.COMMITTED),
+        ) as clear_selection:
+            self.assertEqual(
+                "seat_conflict", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+
+        clear_selection.assert_awaited_once_with(
+            tab,
+            PageKind.SERVER_ASSIGNED_QUANTITY,
+            CTBC_TEST_SERVER_QUANTITY_URL,
+            submit_plan.document_id,
+            "PRODUCT_FIXTURE",
+        )
+
     async def test_unknown_quantity_dispatch_is_sticky(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
         plan = select_quantity_snapshot(snapshot, "全票", 2)
@@ -1611,6 +1661,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         cfg["ocr_captcha"].update({
             "enable": True, "force_submit": True,
         })
+        ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
 
         with patch(
             "platforms.utiki.workflow.dispatch_submit",
@@ -1618,6 +1669,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         ) as dispatch, patch(
             "platforms.utiki.workflow._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            AsyncMock(side_effect=[b"old-image", b"new-image"]),
         ):
             self.assertFalse(await _ctbc_captcha_and_submit(
                 tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)

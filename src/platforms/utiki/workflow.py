@@ -41,6 +41,7 @@ from .auth import (
 from .dom import (
     CommitResult,
     SubmitDispatchResult,
+    clear_conflict_selection,
     commit_area,
     commit_date_action,
     commit_seat,
@@ -1980,43 +1981,6 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         return False
 
 
-async def _get_ctbc_selected_seat_titles(tab):
-    raw = await tab.evaluate('''
-        (() => JSON.stringify(
-            Array.from(document.querySelectorAll('#TBL td[title]'))
-                .filter(seat => (seat.getAttribute('style') || '').includes('icon_chair_select'))
-                .map(seat => seat.getAttribute('title') || '')
-                .filter(Boolean)
-                .sort()
-        ))()
-    ''')
-    try:
-        result = json.loads(raw) if isinstance(raw, str) else []
-    except (TypeError, ValueError):
-        result = []
-    return tuple(result) if isinstance(result, list) else ()
-
-
-async def _clear_ctbc_selected_seats(tab, config_dict):
-    debug = util.create_debug_logger(config_dict)
-    try:
-        selected = await tab.query_selector_all('#TBL td[style*="icon_chair_select"]')
-    except Exception:
-        selected = []
-    for seat in selected or []:
-        try:
-            await seat.click()
-        except Exception:
-            try:
-                await seat.apply('function(el) { el.click(); }')
-            except Exception as exc:
-                debug.log(f"[CTBC SEAT] Failed to clear a selected seat: {exc}")
-                return False
-    if selected:
-        await tab.sleep(0.2)
-    return len(await _get_ctbc_selected_seat_titles(tab)) == 0
-
-
 async def _fill_ctbc_inline_login(tab, config_dict):
     state_raw = await tab.evaluate('''
         (() => {
@@ -2189,7 +2153,7 @@ async def _dismiss_ctbc_dialog(tab, expected_text):
 
 def _ctbc_purchase_outcome(
     kind, *, text="", reason="", source_url="", source_document_id="",
-    page_type="", nonce="",
+    page_type="", nonce="", dom_document_id="", product_id="",
 ):
     """Build one non-sensitive canonical purchase outcome record."""
     normalized_text = " ".join(str(text or "").split())
@@ -2201,6 +2165,10 @@ def _ctbc_purchase_outcome(
         "source_document_id": str(source_document_id or ""),
         "nonce": str(nonce or ""),
     }
+    if dom_document_id:
+        record["dom_document_id"] = str(dom_document_id)
+    if product_id:
+        record["product_id"] = str(product_id)
     if page_type:
         record["page_type"] = str(page_type)
     return record
@@ -2215,6 +2183,7 @@ def _ctbc_source_document_id(context):
 
 def _ctbc_dialog_outcome_record(
     outcome, text, source_url, source_document_id, page_type, nonce,
+    dom_document_id="", product_id="",
 ):
     """Purely reduce a classified dialog to its canonical blocker record."""
     kind = "unknown" if outcome == "rejected" else outcome
@@ -2227,17 +2196,25 @@ def _ctbc_dialog_outcome_record(
         source_document_id=source_document_id,
         page_type=page_type if kind == "seat_conflict" else "",
         nonce=nonce,
+        dom_document_id=dom_document_id if kind == "seat_conflict" else "",
+        product_id=product_id if kind == "seat_conflict" else "",
     )
     if kind == "seat_conflict":
         record.update({
             "dialog_dismissed": False,
+            "clear_phase": "",
+            "clear_result": "",
             "reload_dispatched": False,
             "recovery_document_id": "",
         })
     elif kind == "auth":
         record["fingerprint"] = ""
     elif kind == "captcha":
-        record.update({"reset_phase": "", "reset_source_document_id": ""})
+        record.update({
+            "reset_phase": "",
+            "reset_source_document_id": "",
+            "reset_before_token": "",
+        })
     return record
 
 
@@ -2291,8 +2268,140 @@ def _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=None):
     return True
 
 
-async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
-    reset_source_document_id = ""
+def _ctbc_captcha_image_token(image_bytes):
+    """Return a non-sensitive identity token without retaining image bytes."""
+    if not isinstance(image_bytes, (bytes, bytearray, memoryview)) or not image_bytes:
+        return ""
+    return hashlib.sha256(bytes(image_bytes)).hexdigest()
+
+
+async def _read_ctbc_captcha_image_token(tab, config_dict):
+    try:
+        image_bytes = await _get_ctbc_captcha_image_bytes(tab, config_dict)
+    except Exception:
+        return ""
+    return _ctbc_captcha_image_token(image_bytes)
+
+
+def _ctbc_captcha_reset_is_current(
+    tab, submit_key, outcome, source_document_id,
+):
+    runtime = _ctbc_tab_runtime(tab)
+    return bool(
+        source_document_id
+        and runtime["purchase"]["outcomes"].get(submit_key) is outcome
+        and _ctbc_purchase_state_key(tab) == submit_key
+        and runtime["document"]["last_document"] == source_document_id
+    )
+
+
+def _ctbc_captcha_phase_is_current(
+    tab, submit_key, outcome, source_document_id, phase,
+):
+    return bool(
+        _ctbc_captcha_reset_is_current(
+            tab, submit_key, outcome, source_document_id
+        )
+        and outcome.get("reset_phase") == phase
+    )
+
+
+def _release_ctbc_captcha_preflight(
+    tab, submit_key, outcome,
+):
+    if (
+        _ctbc_outcome_is_current(tab, submit_key, outcome)
+        and outcome.get("reset_phase") == "preflighting"
+    ):
+        outcome["reset_phase"] = ""
+    return False
+
+
+async def _observe_ctbc_captcha_refresh(
+    tab, config_dict, submit_key, outcome,
+):
+    current_document_id = _ctbc_tab_runtime(tab)["document"]["last_document"]
+    source_document_id = str(outcome.get("reset_source_document_id") or "")
+    if not _ctbc_outcome_is_current(tab, submit_key, outcome):
+        return False
+    if _ctbc_purchase_state_key(tab) != submit_key:
+        return False
+    if not source_document_id:
+        return False
+    if current_document_id and current_document_id != source_document_id:
+        outcome["reset_phase"] = "done"
+        return True
+    if current_document_id != source_document_id:
+        return False
+    before_token = str(outcome.get("reset_before_token") or "")
+    if not before_token:
+        return False
+    current_token = await _read_ctbc_captcha_image_token(tab, config_dict)
+    if not _ctbc_captcha_reset_is_current(
+        tab, submit_key, outcome, source_document_id
+    ):
+        return False
+    if current_token and current_token != before_token:
+        outcome["reset_phase"] = "done"
+        return True
+    return False
+
+
+async def _dispatch_ctbc_captcha_refresh(
+    tab, config_dict, submit_key, outcome, source_document_id,
+):
+    before_token = await _read_ctbc_captcha_image_token(tab, config_dict)
+    if not _ctbc_captcha_phase_is_current(
+        tab, submit_key, outcome, source_document_id, "preflighting"
+    ):
+        return _release_ctbc_captcha_preflight(
+            tab, submit_key, outcome
+        )
+    if not before_token:
+        return _release_ctbc_captcha_preflight(
+            tab, submit_key, outcome
+        )
+    outcome["reset_before_token"] = before_token
+    try:
+        refresh = await tab.query_selector('#chang_pic')
+    except Exception:
+        return _release_ctbc_captcha_preflight(
+            tab, submit_key, outcome
+        )
+    if not _ctbc_captcha_phase_is_current(
+        tab, submit_key, outcome, source_document_id, "preflighting"
+    ):
+        return _release_ctbc_captcha_preflight(
+            tab, submit_key, outcome
+        )
+    if not refresh:
+        return _release_ctbc_captcha_preflight(
+            tab, submit_key, outcome
+        )
+    outcome["reset_phase"] = "dispatching"
+    try:
+        await refresh.click()
+    except Exception:
+        if not _ctbc_captcha_phase_is_current(
+            tab, submit_key, outcome, source_document_id, "dispatching"
+        ):
+            return False
+        outcome["reset_phase"] = "unknown"
+        return await _observe_ctbc_captcha_refresh(
+            tab, config_dict, submit_key, outcome
+        )
+    if not _ctbc_captcha_phase_is_current(
+        tab, submit_key, outcome, source_document_id, "dispatching"
+    ):
+        return False
+    outcome["reset_phase"] = "awaiting_change"
+    return await _observe_ctbc_captcha_refresh(
+        tab, config_dict, submit_key, outcome
+    )
+
+
+async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None, config_dict=None):
+    config_dict = config_dict or {}
     runtime = _ctbc_tab_runtime(tab)
     purchase = runtime["purchase"]
     outcome = purchase["outcomes"].get(submit_key)
@@ -2301,36 +2410,119 @@ async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
     ):
         return False
     if refresh_image and submit_key is not None:
-        current_document_id = runtime["document"]["last_document"]
+        if not _ctbc_outcome_is_current(tab, submit_key, outcome):
+            return False
+        if _ctbc_purchase_state_key(tab) != submit_key:
+            return False
         phase = outcome.get("reset_phase")
-        source_document_id = str(outcome.get("reset_source_document_id") or "")
+        prior_source = str(outcome.get("reset_source_document_id") or "")
+        current_document_id = str(runtime["document"]["last_document"] or "")
+        if (
+            prior_source
+            and current_document_id
+            and current_document_id != prior_source
+        ):
+            outcome["reset_phase"] = "done"
+            return True
         if phase == "done":
             return True
-        if phase in ("dispatching", "unknown"):
-            if not current_document_id or current_document_id == source_document_id:
-                return False
-            outcome["reset_phase"] = ""
-            outcome["reset_source_document_id"] = ""
-        reset_source_document_id = current_document_id
+        if phase == "preflighting":
+            return False
+        if phase:
+            return await _observe_ctbc_captcha_refresh(
+                tab, config_dict, submit_key, outcome
+            )
+        source_document_id = current_document_id
+        if not source_document_id:
+            return False
+        outcome["reset_source_document_id"] = source_document_id
+        outcome["reset_before_token"] = ""
+        outcome["reset_phase"] = "preflighting"
 
-    captcha_input = await tab.query_selector('#CHK')
-    if captcha_input:
-        await captcha_input.apply('function(el) { el.value = ""; }')
+    try:
+        captcha_input = await tab.query_selector('#CHK')
+        if refresh_image and not _ctbc_captcha_phase_is_current(
+            tab, submit_key, outcome, source_document_id, "preflighting"
+        ):
+            return _release_ctbc_captcha_preflight(
+                tab, submit_key, outcome
+            )
+        if refresh_image and not captcha_input:
+            return _release_ctbc_captcha_preflight(
+                tab, submit_key, outcome
+            )
+        if captcha_input:
+            await captcha_input.apply('function(el) { el.value = ""; }')
+            if refresh_image and not _ctbc_captcha_phase_is_current(
+                tab, submit_key, outcome, source_document_id, "preflighting"
+            ):
+                return _release_ctbc_captcha_preflight(
+                    tab, submit_key, outcome
+                )
+    except Exception:
+        if refresh_image:
+            return _release_ctbc_captcha_preflight(
+                tab, submit_key, outcome
+            )
+        return False
     if refresh_image:
-        refresh = await tab.query_selector('#chang_pic')
-        if refresh:
-            if submit_key is not None:
-                outcome["reset_phase"] = "dispatching"
-                outcome["reset_source_document_id"] = reset_source_document_id
-            try:
-                await refresh.click()
-            except Exception:
-                if submit_key is not None:
-                    outcome["reset_phase"] = "unknown"
-                return False
-            if submit_key is not None:
-                outcome["reset_phase"] = "done"
+        return await _dispatch_ctbc_captcha_refresh(
+            tab, config_dict, submit_key, outcome, source_document_id
+        )
     return True
+
+
+def _ctbc_conflict_page_kind(page_type):
+    return {
+        "seat": PageKind.RESERVED_SEAT,
+        "general_admission": PageKind.GENERAL_ADMISSION,
+        "server_assigned_quantity": PageKind.SERVER_ASSIGNED_QUANTITY,
+    }.get(page_type)
+
+
+def _ctbc_outcome_is_current(tab, submit_key, record):
+    return _ctbc_purchase_runtime(tab)["outcomes"].get(submit_key) is record
+
+
+def _ctbc_conflict_is_current(tab, submit_key, record):
+    return bool(
+        _ctbc_outcome_is_current(tab, submit_key, record)
+        and _ctbc_purchase_state_key(tab) == submit_key
+    )
+
+
+async def _clear_ctbc_conflict_selection(
+    tab, config_dict, submit_key, record,
+):
+    if not _ctbc_conflict_is_current(tab, submit_key, record):
+        return False
+    clear_phase = record.get("clear_phase")
+    if clear_phase == "done":
+        return True
+    if clear_phase:
+        return False
+    record["clear_phase"] = "dispatching"
+    page_kind = _ctbc_conflict_page_kind(record.get("page_type"))
+    try:
+        result = await clear_conflict_selection(
+            tab,
+            page_kind,
+            str(record.get("source_url") or ""),
+            str(record.get("dom_document_id") or ""),
+            str(record.get("product_id") or ""),
+        )
+    except Exception as exc:
+        result = None
+        util.create_debug_logger(config_dict).log(
+            f"[CTBC] Conflict clear outcome is unknown: {exc}"
+        )
+    if not _ctbc_outcome_is_current(tab, submit_key, record):
+        return False
+    record["clear_phase"] = "done"
+    record["clear_result"] = (
+        result.value if isinstance(result, CommitResult) else "unknown"
+    )
+    return _ctbc_conflict_is_current(tab, submit_key, record)
 
 
 async def _apply_ctbc_dialog_effects(
@@ -2344,19 +2536,30 @@ async def _apply_ctbc_dialog_effects(
         debug.log("[CTBC LOGIN] Authentication rejected; waiting for credentials to change")
     elif outcome == "captcha":
         reset_complete = await _reset_ctbc_captcha(
-            tab, refresh_image=True, submit_key=submit_key
+            tab,
+            refresh_image=True,
+            submit_key=submit_key,
+            config_dict=config_dict,
         )
         if reset_complete and purchase["outcomes"].get(submit_key) is record:
             purchase["outcomes"].pop(submit_key, None)
         debug.log(f"[CTBC CAPTCHA] Server rejected captcha: {record['text']}")
     elif outcome == "seat_conflict":
+        if not _ctbc_conflict_is_current(tab, submit_key, record):
+            return
         record["dialog_dismissed"] = True
         debug.log(f"[CTBC SEAT] Selected seats were rejected: {record['text']}")
-        if record.get("page_type") == "seat" and not await _clear_ctbc_selected_seats(
-            tab, config_dict
+        if not await _clear_ctbc_conflict_selection(
+            tab, config_dict, submit_key, record
         ):
-            debug.log("[CTBC SEAT] Local seat reset failed; reload remains pending")
+            return
+        if record.get("clear_result") != CommitResult.COMMITTED.value:
+            debug.log("[CTBC] Local selection clear was not committed; reload remains pending")
+        if not _ctbc_conflict_is_current(tab, submit_key, record):
+            return
         await _reset_ctbc_captcha(tab, refresh_image=False, submit_key=submit_key)
+        if not _ctbc_conflict_is_current(tab, submit_key, record):
+            return
     elif outcome == "success":
         debug.log("[CTBC] Cart accepted; same-page resubmit is blocked")
     else:
@@ -2385,8 +2588,16 @@ async def _handle_ctbc_submit_dialog(
     active = context if context is purchase.get("active_submit") else None
     context_source = context.get("source_url", "") if isinstance(context, dict) else ""
     context_document = ""
+    context_dom_document = ""
+    context_product_id = ""
     if isinstance(context, dict):
         context_document = _ctbc_source_document_id(context)
+        context_dom_document = str(
+            context.get("dom_document_id")
+            or context.get("document_id")
+            or ""
+        )
+        context_product_id = str(context.get("product_id") or "")
     source_url = str(source_url or context_source or tab.target.url)
     page_type = _get_ctbc_page_type(source_url)
     dialog_text = dialog_snapshot.text
@@ -2406,6 +2617,8 @@ async def _handle_ctbc_submit_dialog(
         ),
         page_type,
         context.get("nonce", "") if isinstance(context, dict) else "",
+        context_dom_document,
+        context_product_id,
     )
     if not _ctbc_store_purchase_outcome(
         purchase, submit_key, record, active=active
@@ -2452,7 +2665,10 @@ async def _recover_ctbc_captcha_dialog(tab, config_dict):
     if await _ctbc_dialog_is_visible(tab):
         return True
     reset_complete = await _reset_ctbc_captcha(
-        tab, refresh_image=True, submit_key=submit_key
+        tab,
+        refresh_image=True,
+        submit_key=submit_key,
+        config_dict=config_dict,
     )
     if reset_complete and purchase["outcomes"].get(submit_key) is outcome:
         purchase["outcomes"].pop(submit_key, None)
@@ -2476,7 +2692,14 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
     if not pending.get("dialog_dismissed", False):
         if await _ctbc_dialog_is_visible(tab):
             return True
+        if not _ctbc_conflict_is_current(tab, submit_key, pending):
+            return False
         pending["dialog_dismissed"] = True
+
+    if not await _clear_ctbc_conflict_selection(
+        tab, config_dict, submit_key, pending
+    ):
+        return False
 
     if pending["reload_dispatched"]:
         recovery_document = str(pending.get("recovery_document_id") or "")
@@ -2489,7 +2712,14 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
             return False
         return True
 
-    if await _reload_with_interval(tab, config_dict, "selected seats were taken"):
+    if not _ctbc_conflict_is_current(tab, submit_key, pending):
+        return False
+    reload_dispatched = await _reload_with_interval(
+        tab, config_dict, "selected seats were taken"
+    )
+    if not _ctbc_conflict_is_current(tab, submit_key, pending):
+        return False
+    if reload_dispatched:
         pending["recovery_document_id"] = current_document_id
         pending["reload_dispatched"] = True
     return True
@@ -2512,6 +2742,8 @@ def _ctbc_unknown_submit_outcome(active, reason):
         source_url=active.get("source_url", ""),
         source_document_id=_ctbc_source_document_id(active),
         nonce=active.get("nonce", ""),
+        dom_document_id=active.get("document_id", ""),
+        product_id=active.get("product_id", ""),
     )
 
 
@@ -2734,6 +2966,9 @@ async def _dispatch_ctbc_submit(tab, config_dict, submit_key, submit_plan):
         ),
         "document_id": submit_plan.document_id,
         "page_kind": submit_plan.page_kind.value,
+        "product_id": str(
+            getattr(submit_plan.selection_plan, "product_id", "") or ""
+        ),
         "payload_fingerprint": submit_plan.payload_fingerprint,
     }
     purchase["active_submit"] = dispatch_state

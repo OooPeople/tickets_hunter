@@ -107,6 +107,17 @@ _state = {
 }
 
 
+def _get_utiki_behavior(config_dict, key, default):
+    """Read canonical family behavior with one-release legacy fallback."""
+    canonical = config_dict.get("utiki")
+    if isinstance(canonical, dict) and key in canonical:
+        return canonical[key]
+    legacy = config_dict.get("ctbc")
+    if isinstance(legacy, dict) and key in legacy:
+        return legacy[key]
+    return default
+
+
 def _ctbc_tab_identity(tab):
     """Use the tab object itself so recycled Python object IDs cannot leak state."""
     try:
@@ -2591,8 +2602,7 @@ async def nodriver_ctbc_ticket_type_auto_select(tab, config_dict):
         except Exception as exc:
             debug.log(f"[CTBC TICKET TYPE] Failed to inspect button: {exc}")
 
-    ctbc_config = config_dict.get("ctbc", {})
-    keyword = ctbc_config.get("ticket_type_keyword", "全票")
+    keyword = _get_utiki_behavior(config_dict, "ticket_type_keyword", "全票")
     target_index = _choose_candidate_index(candidates, keyword, "from top to bottom", False)
     if target_index is None:
         debug.log(f"[CTBC TICKET TYPE] No ticket type matched: {keyword}")
@@ -2680,7 +2690,7 @@ async def nodriver_ctbc_seat_auto_select(tab, config_dict):
         state.get("seats", []),
         needed,
         config_dict.get("advanced", {}).get("disable_adjacent_seat", False),
-        config_dict.get("ctbc", {}).get("seat_sorting", "row_seat"),
+        _get_utiki_behavior(config_dict, "seat_sorting", "row_seat"),
     )
     if len(indexes) != needed:
         debug.log(f"[CTBC SEAT] No suitable block for {needed} seat(s)")
@@ -3492,7 +3502,7 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         except Exception as exc:
             debug.log(f"[CTBC GENERAL] Failed to inspect ticket type: {exc}")
 
-    keyword = config_dict.get("ctbc", {}).get("ticket_type_keyword", "全票")
+    keyword = _get_utiki_behavior(config_dict, "ticket_type_keyword", "全票")
     target_index = _choose_candidate_index(candidates, keyword, "from top to bottom", False)
     if target_index is None:
         debug.log(f"[CTBC GENERAL] No ticket type matched: {keyword}")

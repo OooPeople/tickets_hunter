@@ -327,7 +327,7 @@ const HELP_CONTENT = {
       </table>
       <p>若球場座位圖採旋轉排列，程式會使用座位標題內的實際排號、座號排序，並以畫面座標判斷連座，不會把 DOM 最上方誤認為最前排。</p>
       <p class="mb-0 text-muted small">相鄰判定仍以座位圖中實際相鄰的格子為準，不會只因座號連續就跨越走道。走道位模式找不到端點連座時不會改選內側或不連續座位；端點判斷依賴網站為已售座位保留可解析的排號與座號。</p>`,
-    link: 'https://github.com/bouob/tickets_hunter/blob/main/guide/settings-guide.md#職棒座位排序依據ctbcseat_sorting'
+    link: 'https://github.com/bouob/tickets_hunter/blob/main/guide/settings-guide.md#職棒座位排序依據utikiseat_sorting'
   },
 
   ctbc_cookie: {

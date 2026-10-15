@@ -54,10 +54,12 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
         "area_keyword": area_keyword,
         "mode": "from top to bottom",
     })
-    config_dict["ctbc"].update({
+    utiki_behavior = {
         "ticket_type_keyword": "全票",
         "seat_sorting": "row_seat",
-    })
+    }
+    config_dict["utiki"].update(utiki_behavior)
+    config_dict["ctbc"].update(utiki_behavior)
     config_dict["ocr_captcha"].update({
         "enable": False,
         "force_submit": False,

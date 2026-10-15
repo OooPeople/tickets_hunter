@@ -115,6 +115,7 @@ var settings = null;
 var globalSettings = null;
 var globalSettingsRevision = null;
 let profileLoadGeneration = 0;
+const profileSaveGenerations = new Map();
 run_button.disabled = true;
 save_button.disabled = true;
 
@@ -123,6 +124,17 @@ function update_settings_action_state()
     const ready = !!settings && !!globalSettings && !!globalSettingsRevision;
     run_button.disabled = !ready;
     save_button.disabled = !ready;
+}
+
+function utiki_behavior_setting(config, key, fallback)
+{
+    for (const sectionName of ['utiki', 'ctbc']) {
+        const section = config && config[sectionName];
+        if (section && Object.prototype.hasOwnProperty.call(section, key)) {
+            return section[key];
+        }
+    }
+    return fallback;
 }
 let currentLanguage = 'zh-TW';
 let helpOffcanvasInstance = null;
@@ -1359,8 +1371,8 @@ function load_settins_to_form(settings)
         ctbc_password.value = settings.accounts.ctbc_password || '';
         ticket_password.value = settings.accounts.ticket_password;
 
-        ctbc_ticket_type_keyword.value = (settings.ctbc && settings.ctbc.ticket_type_keyword) || '全票';
-        const savedCtbcSeatSorting = (settings.ctbc && settings.ctbc.seat_sorting) || 'row_seat';
+        ctbc_ticket_type_keyword.value = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
+        const savedCtbcSeatSorting = utiki_behavior_setting(settings, 'seat_sorting', 'row_seat');
         const validCtbcSeatSortings = [
             'display', 'row_seat', 'row_asc_aisle',
             'row_asc_seat_desc', 'row_desc_seat_asc'
@@ -1795,9 +1807,12 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.kham_password = kham_password.value;
             settings.accounts.ctbc_password = ctbc_password.value;
             settings.accounts.ticket_password = ticket_password.value;
+            if (!settings.utiki) settings.utiki = {};
             if (!settings.ctbc) settings.ctbc = {};
-            settings.ctbc.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
-            settings.ctbc.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
+            settings.utiki.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
+            settings.utiki.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
+            settings.ctbc.ticket_type_keyword = settings.utiki.ticket_type_keyword;
+            settings.ctbc.seat_sorting = settings.utiki.seat_sorting;
             settings.accounts.udn_password = udn_password.value;
             settings.accounts.ticketplus_password = ticketplus_password.value;
             settings.advanced.discount_code = discount_code.value;
@@ -1825,14 +1840,30 @@ function maxbot_save_api(callback, targetProfile = current_profile)
     let api_url = "/save" + profile_query(targetProfile);
     const globalSettingsValue = collect_global_settings_from_form(true);
     if(settings && globalSettingsValue) {
+        const profilePayload = JSON.stringify(settings);
+        const loadGeneration = profileLoadGeneration;
+        const saveGeneration = (profileSaveGenerations.get(targetProfile) || 0) + 1;
+        profileSaveGenerations.set(targetProfile, saveGeneration);
+        const isLatestTargetSave = function() {
+            return profileSaveGenerations.get(targetProfile) === saveGeneration;
+        };
+        const mayUpdateCurrentProfile = function() {
+            return isLatestTargetSave()
+                && current_profile === targetProfile
+                && profileLoadGeneration === loadGeneration;
+        };
         const saveProfile = function(globalWasSaved) {
-            $.post(api_url, JSON.stringify(settings))
-            .done(function() {
+            if (!isLatestTargetSave()) return;
+            $.post(api_url, profilePayload)
+            .done(function(data) {
+                if (!mayUpdateCurrentProfile()) return;
+                if (data && typeof data === 'object') settings = data;
                 console.log("[MaxBot] Settings saved");
                 check_unsaved_fields();
                 if(callback) callback();
             })
             .fail(function(xhr, status, error) {
+                if (!mayUpdateCurrentProfile()) return;
                 console.error("[MaxBot] Profile save error:", status, error);
                 console.error("[MaxBot] Response content:", xhr.responseText);
                 run_message(uiText(
@@ -1944,14 +1975,14 @@ function check_unsaved_fields()
             }
         });
         if (ctbc_ticket_type_keyword) {
-            const savedValue = (settings.ctbc && settings.ctbc.ticket_type_keyword) || '全票';
+            const savedValue = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
             ctbc_ticket_type_keyword.classList.toggle(
                 'is-invalid',
                 ctbc_ticket_type_keyword.value !== savedValue
             );
         }
         if (ctbc_seat_sorting) {
-            const savedValue = (settings.ctbc && settings.ctbc.seat_sorting) || 'row_seat';
+            const savedValue = utiki_behavior_setting(settings, 'seat_sorting', 'row_seat');
             ctbc_seat_sorting.classList.toggle(
                 'is-invalid',
                 ctbc_seat_sorting.value !== savedValue

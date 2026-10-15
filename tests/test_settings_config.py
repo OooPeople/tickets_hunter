@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tornado.testing import AsyncHTTPTestCase
 from tornado.web import Application
@@ -15,12 +15,15 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from settings import (  # noqa: E402
+    LoadJsonHandler,
     ProfilesHandler,
     ResetJsonHandler,
     SaveJsonHandler,
     get_default_config,
+    migrate_config,
     save_profile_config,
 )
+from nodriver_tixcraft import reload_config  # noqa: E402
 
 
 class ProfileConfigPersistenceTest(unittest.TestCase):
@@ -39,6 +42,63 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
             )
             self.assertEqual([], list(Path(temp_dir).glob(".profile_settings_*.tmp")))
 
+    def test_utiki_behavior_migration_is_new_wins_idempotent_and_secret_safe(self):
+        config = {
+            "utiki": {"ticket_type_keyword": "", "seat_sorting": "unsupported"},
+            "ctbc": {"ticket_type_keyword": "舊票種", "seat_sorting": "display"},
+            "accounts": {
+                "ctbc_cookie": "cookie-sentinel",
+                "ctbc_account": "account-sentinel",
+                "ctbc_password": "password-sentinel",
+            },
+        }
+
+        migrated = migrate_config(config)
+        self.assertEqual("", migrated["utiki"]["ticket_type_keyword"])
+        self.assertEqual("row_seat", migrated["utiki"]["seat_sorting"])
+        self.assertEqual(migrated["utiki"], migrated["ctbc"])
+        self.assertEqual(
+            {"ticket_type_keyword", "seat_sorting"},
+            set(migrated["utiki"]),
+        )
+        self.assertEqual("cookie-sentinel", migrated["accounts"]["ctbc_cookie"])
+
+        snapshot = json.loads(json.dumps(migrated))
+        self.assertEqual(snapshot, migrate_config(migrated))
+
+    def test_utiki_behavior_migration_copies_each_missing_legacy_key(self):
+        migrated = migrate_config({
+            "utiki": {"ticket_type_keyword": "家族票種"},
+            "ctbc": {"ticket_type_keyword": "舊票種", "seat_sorting": "display"},
+        })
+
+        self.assertEqual("家族票種", migrated["utiki"]["ticket_type_keyword"])
+        self.assertEqual("display", migrated["utiki"]["seat_sorting"])
+        self.assertEqual(migrated["utiki"], migrated["ctbc"])
+
+
+class ProfileConfigReloadTest(unittest.IsolatedAsyncioTestCase):
+    async def test_hot_reload_migrates_before_updating_runtime_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "settings.json"
+            replacement = get_default_config()
+            replacement["utiki"] = {
+                "ticket_type_keyword": "熱更新票種",
+                "seat_sorting": "display",
+            }
+            replacement["ctbc"] = {
+                "ticket_type_keyword": "過時票種",
+                "seat_sorting": "row_seat",
+            }
+            target.write_text(json.dumps(replacement), encoding="utf-8")
+
+            with patch("nodriver_tixcraft.asyncio.sleep", new=AsyncMock()):
+                runtime, mtime = await reload_config(get_default_config(), 0, target)
+
+        self.assertGreater(mtime, 0)
+        self.assertEqual("熱更新票種", runtime["utiki"]["ticket_type_keyword"])
+        self.assertEqual(runtime["utiki"], runtime["ctbc"])
+
 
 class ProfileConfigHandlerTest(AsyncHTTPTestCase):
     def setUp(self):
@@ -56,6 +116,7 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
 
     def get_app(self):
         return Application([
+            (r"/load", LoadJsonHandler),
             (r"/save", SaveJsonHandler),
             (r"/reset", ResetJsonHandler),
             (r"/profiles", ProfilesHandler),
@@ -93,6 +154,45 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
         self.assertEqual(500, reset_response.code)
         self.assertEqual(500, create_response.code)
         self.assertFalse((Path(self.temp_dir.name) / "profiles" / "new-profile.json").exists())
+
+    def test_save_and_load_return_normalized_utiki_behavior(self):
+        old_config = get_default_config()
+        old_config.pop("utiki")
+        old_config["ctbc"] = {
+            "ticket_type_keyword": "學生票",
+            "seat_sorting": "display",
+        }
+
+        save_response = self.fetch(
+            "/save",
+            method="POST",
+            body=json.dumps(old_config),
+        )
+        self.assertEqual(200, save_response.code)
+        saved = json.loads(save_response.body)
+        self.assertEqual(saved["utiki"], saved["ctbc"])
+        self.assertEqual("學生票", saved["utiki"]["ticket_type_keyword"])
+        persisted = json.loads(
+            (Path(self.temp_dir.name) / "settings.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["utiki"], persisted["utiki"])
+        self.assertEqual(saved["ctbc"], persisted["ctbc"])
+
+        new_only = get_default_config()
+        new_only.pop("ctbc")
+        new_only["utiki"] = {
+            "ticket_type_keyword": "家族限定票",
+            "seat_sorting": "row_asc_aisle",
+        }
+        (Path(self.temp_dir.name) / "settings.json").write_text(
+            json.dumps(new_only), encoding="utf-8"
+        )
+
+        load_response = self.fetch("/load")
+        self.assertEqual(200, load_response.code)
+        loaded = json.loads(load_response.body)
+        self.assertEqual(new_only["utiki"], loaded["utiki"])
+        self.assertEqual(new_only["utiki"], loaded["ctbc"])
 
 
 if __name__ == "__main__":

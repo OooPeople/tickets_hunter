@@ -732,12 +732,12 @@ async def reload_config(config_dict, last_mtime, config_filepath):
         if current_mtime > last_mtime:
             await asyncio.sleep(0.1)
             with open(config_filepath, 'r', encoding='utf-8') as json_data:
-                new_config = json.load(json_data)
+                new_config = settings.migrate_config(json.load(json_data))
 
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
-                    "ocr_captcha", "tixcraft", "kktix", "ctbc", "cityline",
+                    "ocr_captcha", "tixcraft", "kktix", "utiki", "ctbc", "cityline",
                     "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:

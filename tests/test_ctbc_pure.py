@@ -35,6 +35,7 @@ from platforms.utiki.workflow import (
     _ctbc_general_quantity_audit_is_valid,
     _ctbc_seat_audit_is_valid,
     _get_ctbc_page_type,
+    _get_utiki_behavior,
     _normalize_ctbc_captcha_answer,
     _parse_ctbc_date_target,
     _parse_ctbc_map_send,
@@ -80,13 +81,14 @@ class CtbcPureSelectionTest(unittest.TestCase):
 
     def test_seat_sorting_setting_defaults_and_migrates_to_number_order(self):
         default = get_default_config()
+        self.assertEqual("row_seat", default["utiki"]["seat_sorting"])
         self.assertEqual("row_seat", default["ctbc"]["seat_sorting"])
 
         old_config = {"ctbc": {"ticket_type_keyword": "全票"}}
         migrated = migrate_config(old_config)
         self.assertEqual("row_seat", migrated["ctbc"]["seat_sorting"])
 
-        migrated["ctbc"]["seat_sorting"] = "unsupported"
+        migrated["utiki"]["seat_sorting"] = "unsupported"
         self.assertEqual("row_seat", migrate_config(migrated)["ctbc"]["seat_sorting"])
 
         for seat_sorting in (
@@ -98,6 +100,18 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 seat_sorting,
                 migrate_config(configured)["ctbc"]["seat_sorting"],
             )
+
+    def test_utiki_behavior_accessor_prefers_canonical_by_key(self):
+        configured = {
+            "utiki": {"ticket_type_keyword": ""},
+            "ctbc": {"ticket_type_keyword": "舊票種", "seat_sorting": "display"},
+        }
+        self.assertEqual(
+            "", _get_utiki_behavior(configured, "ticket_type_keyword", "全票")
+        )
+        self.assertEqual(
+            "display", _get_utiki_behavior(configured, "seat_sorting", "row_seat")
+        )
 
     def test_config_builder_returns_fresh_complete_configs(self):
         first = config()

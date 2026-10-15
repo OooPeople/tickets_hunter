@@ -205,7 +205,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             url="https://tix.wdragons.com/UTK0205_?PERFORMANCE_ID=P1",
         )
         cfg = config()
-        cfg["ctbc"]["ticket_type_keyword"] = "身心"
+        cfg["utiki"]["ticket_type_keyword"] = "身心"
         cfg["keyword_exclude"] = '"輪椅","身障","身心","障礙"'
 
         state_key = _ctbc_tab_state_key(tab)

@@ -10,14 +10,23 @@ import util
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
+    DateSnapshot,
     DialogSnapshot,
     QuantityPlan,
     QuantitySnapshot,
+    date_plan_matches_snapshot,
     parse_area_snapshot,
+    parse_date_snapshot,
     parse_dialog_snapshot,
     parse_quantity_snapshot,
 )
-from .profiles import TENANT_PROFILES
+from .profiles import (
+    PageKind,
+    TENANT_PROFILES,
+    classify_utiki_page,
+    same_origin,
+    unique_query,
+)
 
 
 CONST_SERVER_ASSIGNED_QUANTITY_PATHS = tuple(
@@ -45,6 +54,307 @@ def _decode_json_result(raw_value):
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
     return util.parse_nodriver_result(raw_value)
+
+
+CONST_DATE_SNAPSHOT_SCRIPT = r'''
+        (() => {
+            // __ticketsHunterUtikiDateSnapshot
+            const roots = Array.from(document.querySelectorAll(
+                '#PerformanceListTable'));
+            const pageUrl = location.href;
+            const documentId = String(performance.timeOrigin);
+            if (roots.length !== 1) {
+                return JSON.stringify({
+                    ok: false, reason: 'scope', page_url: pageUrl,
+                    document_id: documentId
+                });
+            }
+            const rows = Array.from(roots[0].querySelectorAll(
+                'table > tbody > tr'));
+            if (!rows.length) {
+                return JSON.stringify({
+                    ok: false, reason: 'not-ready', page_url: pageUrl,
+                    document_id: documentId
+                });
+            }
+            const visible = element => {
+                if (!element || !element.isConnected ||
+                    element.closest('[hidden], [inert], [aria-hidden="true"]')) {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return element.getClientRects().length > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden' &&
+                    style.pointerEvents !== 'none';
+            };
+            const fingerprint = element => ({
+                tag_name: (element.tagName || '').toUpperCase(),
+                id: element.getAttribute('id') || '',
+                href: element.getAttribute('href') || '',
+                resolved_href: element.href || '',
+                role: element.getAttribute('role') || '',
+                type: element.getAttribute('type') || '',
+                target: element.getAttribute('target') || '',
+                download: element.getAttribute('download') || '',
+                ping: element.getAttribute('ping') || '',
+                formaction: element.getAttribute('formaction') || '',
+                has_form: !!element.closest('form'),
+                onclick: element.getAttribute('onclick') || ''
+            });
+            return JSON.stringify({
+                ok: true,
+                page_url: pageUrl,
+                document_id: documentId,
+                rows: rows.map(row => {
+                    const cell = row.lastElementChild;
+                    const controls = cell && cell.tagName === 'TD' ?
+                        Array.from(cell.querySelectorAll(
+                            'button, a[href], [role="button"]')) : [];
+                    return {
+                        text: (row.innerText || row.textContent || '')
+                            .replace(/\s+/g, ' ').trim(),
+                        controls: controls.map(control => ({
+                            actionable: control.closest('tr') === row &&
+                                control.closest('td') === cell &&
+                                visible(control) && !control.matches(':disabled') &&
+                                control.getAttribute('aria-disabled') !== 'true',
+                            ...fingerprint(control)
+                        }))
+                    };
+                })
+            });
+        })()'''
+
+
+async def read_date_snapshot(tab):
+    """Read the official performance table without changing browser state."""
+    raw_value = await tab.evaluate(CONST_DATE_SNAPSHOT_SCRIPT)
+    snapshot = parse_date_snapshot(_decode_json_result(raw_value))
+    if (
+        isinstance(snapshot, DateSnapshot)
+        and snapshot.ok
+        and classify_utiki_page(snapshot.page_url) != PageKind.DATE
+    ):
+        return DateSnapshot(
+            False, snapshot.page_url, snapshot.document_id, (), "route"
+        )
+    return snapshot
+
+
+def _valid_date_commit_input(snapshot, plan, navigation_nonce):
+    return bool(
+        date_plan_matches_snapshot(snapshot, plan)
+        and re.fullmatch(r"[a-f0-9]{32}", str(navigation_nonce or ""))
+    )
+
+
+def _valid_fast_date_destination(snapshot, plan, destination_url, marker_key, ttl_ms):
+    if not destination_url:
+        return not marker_key and ttl_ms in (0, None)
+    fingerprint = dict(plan.control_fingerprint)
+    if (
+        plan.action_kind != "normal" or not plan.fast_area_prefetch
+        or fingerprint.get("tag_name") != "BUTTON"
+        or fingerprint.get("id") != "buy_btn"
+        or not isinstance(marker_key, str) or not 0 < len(marker_key) <= 256
+        or type(ttl_ms) is not int or not 0 < ttl_ms <= 60000
+    ):
+        return False
+    query = unique_query(destination_url)
+    page_kind = classify_utiki_page(destination_url)
+    try:
+        source = urlsplit(snapshot.page_url)
+        destination = urlsplit(destination_url)
+    except ValueError:
+        return False
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    group_id = query.get("GROUP_ID", "") if query else ""
+    return bool(
+        page_kind in {PageKind.RESERVED_SEAT, PageKind.GENERAL_ADMISSION}
+        and same_origin(source, destination)
+        and query is not None
+        and set(query) == {
+            "PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"
+        }
+        and query.get("PERFORMANCE_ID") == plan.performance_id
+        and token.fullmatch(query.get("PERFORMANCE_PRICE_AREA_ID", ""))
+        and (not group_id or token.fullmatch(group_id))
+        and (page_kind != PageKind.RESERVED_SEAT or bool(group_id))
+    )
+
+
+CONST_DATE_COMMIT_SCRIPT = r'''
+        (() => {
+            // __ticketsHunterUtikiDateCommit
+            const intent = __TICKETS_HUNTER_DATE_INTENT_JSON__;
+            if (location.href !== intent.pageUrl ||
+                String(performance.timeOrigin) !== intent.documentId) {
+                return 'stale';
+            }
+            const root = document.documentElement;
+            const commitMarker = 'data-tickets-hunter-utiki-date-commit';
+            const priorCommit = root.getAttribute(commitMarker);
+            if (priorCommit) {
+                return priorCommit === intent.navigationNonce ?
+                    'committed' : 'stale';
+            }
+            const tables = Array.from(document.querySelectorAll(
+                '#PerformanceListTable'));
+            if (tables.length !== 1) return 'rejected';
+            const rows = Array.from(tables[0].querySelectorAll(
+                'table > tbody > tr'));
+            const row = rows[intent.rowIndex];
+            if (!row) return 'rejected';
+            const rowText = (row.innerText || row.textContent || '')
+                .replace(/\s+/g, ' ').trim();
+            if (rowText !== intent.rowText) return 'stale';
+            const cell = row.lastElementChild;
+            if (!cell || cell.tagName !== 'TD') return 'rejected';
+            const controls = Array.from(cell.querySelectorAll(
+                'button, a[href], [role="button"]'));
+            const control = controls[intent.controlIndex];
+            if (!control) return 'rejected';
+            const visible = element => {
+                if (!element || !element.isConnected ||
+                    element.closest('[hidden], [inert], [aria-hidden="true"]')) {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return element.getClientRects().length > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden' &&
+                    style.pointerEvents !== 'none';
+            };
+            const actionable = candidate =>
+                candidate.closest('tr') === row &&
+                candidate.closest('td') === cell && visible(candidate) &&
+                !candidate.matches(':disabled') &&
+                candidate.getAttribute('aria-disabled') !== 'true';
+            const actionableControls = controls.filter(actionable);
+            if (actionableControls.length !== 1 ||
+                actionableControls[0] !== control) return 'rejected';
+            const liveFingerprint = {
+                tag_name: (control.tagName || '').toUpperCase(),
+                id: control.getAttribute('id') || '',
+                href: control.getAttribute('href') || '',
+                resolved_href: control.href || '',
+                role: control.getAttribute('role') || '',
+                type: control.getAttribute('type') || '',
+                target: control.getAttribute('target') || '',
+                download: control.getAttribute('download') || '',
+                ping: control.getAttribute('ping') || '',
+                formaction: control.getAttribute('formaction') || '',
+                has_form: !!control.closest('form'),
+                onclick: control.getAttribute('onclick') || ''
+            };
+            if (Object.keys(intent.fingerprint).some(key =>
+                liveFingerprint[key] !== intent.fingerprint[key])) {
+                return 'stale';
+            }
+            if (intent.fastDestinationUrl) {
+                const fastMatches = Array.from(tables[0].querySelectorAll(
+                    'button#buy_btn')).filter(candidate =>
+                        (candidate.getAttribute('onclick') || '') ===
+                            intent.fingerprint.onclick);
+                if (fastMatches.length !== 1 || fastMatches[0] !== control) {
+                    return 'rejected';
+                }
+            }
+            const cleanupOwnFastMarker = () => {
+                try {
+                    const raw = sessionStorage.getItem(intent.fastMarkerKey);
+                    if (raw === null) return true;
+                    const marker = JSON.parse(raw);
+                    if (!marker || marker.nonce !== intent.navigationNonce) {
+                        return false;
+                    }
+                    sessionStorage.removeItem(intent.fastMarkerKey);
+                    return sessionStorage.getItem(intent.fastMarkerKey) === null;
+                } catch (_error) {
+                    return false;
+                }
+            };
+            if (intent.fastDestinationUrl) {
+                let existingRaw;
+                try {
+                    existingRaw = sessionStorage.getItem(intent.fastMarkerKey);
+                } catch (_error) {
+                    return 'rejected';
+                }
+                if (existingRaw !== null) return 'stale';
+                const marker = {
+                    version: 1,
+                    nonce: intent.navigationNonce,
+                    source: intent.pageUrl,
+                    destination: intent.fastDestinationUrl,
+                    expires_at: Date.now() + intent.fastMarkerTtlMs
+                };
+                try {
+                    sessionStorage.setItem(
+                        intent.fastMarkerKey, JSON.stringify(marker));
+                    const stored = JSON.parse(
+                        sessionStorage.getItem(intent.fastMarkerKey) || 'null');
+                    if (!stored || stored.version !== marker.version ||
+                        stored.nonce !== marker.nonce ||
+                        stored.source !== marker.source ||
+                        stored.destination !== marker.destination ||
+                        stored.expires_at !== marker.expires_at) {
+                        return cleanupOwnFastMarker() ? 'rejected' : 'stale';
+                    }
+                } catch (_error) {
+                    return cleanupOwnFastMarker() ? 'rejected' : 'stale';
+                }
+            }
+            root.setAttribute(commitMarker, intent.navigationNonce);
+            if (intent.fastDestinationUrl) {
+                location.assign(intent.fastDestinationUrl);
+            } else if (intent.actionKind === 'anchor_native') {
+                location.assign(intent.targetUrl);
+            } else {
+                control.click();
+            }
+            return 'committed';
+        })()'''
+
+
+async def commit_date_action(
+    tab,
+    snapshot,
+    plan,
+    navigation_nonce,
+    fast_destination_url="",
+    fast_marker_key="",
+    fast_marker_ttl_ms=0,
+):
+    """Atomically revalidate and dispatch one date action per document intent."""
+    if not _valid_date_commit_input(snapshot, plan, navigation_nonce):
+        return CommitResult.REJECTED
+    if not _valid_fast_date_destination(
+        snapshot, plan, fast_destination_url, fast_marker_key,
+        fast_marker_ttl_ms,
+    ):
+        return CommitResult.REJECTED
+    intent_json = json.dumps({
+        "pageUrl": snapshot.page_url,
+        "documentId": snapshot.document_id,
+        "rowIndex": plan.row_index,
+        "controlIndex": plan.control_index,
+        "rowText": plan.text,
+        "fingerprint": dict(plan.control_fingerprint),
+        "actionKind": plan.action_kind,
+        "targetUrl": plan.target_url,
+        "navigationNonce": navigation_nonce,
+        "fastDestinationUrl": fast_destination_url,
+        "fastMarkerKey": fast_marker_key,
+        "fastMarkerTtlMs": fast_marker_ttl_ms,
+    }, ensure_ascii=False)
+    script = CONST_DATE_COMMIT_SCRIPT.replace(
+        "__TICKETS_HUNTER_DATE_INTENT_JSON__", intent_json, 1
+    )
+    raw_result = await tab.evaluate(script)
+    try:
+        return CommitResult(raw_result)
+    except (TypeError, ValueError):
+        raise RuntimeError("date action commit outcome is unknown")
 
 
 async def read_dialog_snapshot(tab):

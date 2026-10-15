@@ -15,7 +15,7 @@ import os
 import re
 import time
 import uuid
-from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from zendriver import cdp
 
@@ -42,11 +42,13 @@ from .dom import (
     CommitResult,
     SubmitDispatchResult,
     commit_area,
+    commit_date_action,
     commit_server_assigned_area,
     commit_quantity,
     dismiss_dialog,
     dispatch_quantity_submit,
     read_area_snapshot,
+    read_date_snapshot,
     read_dialog_snapshot,
     read_quantity_snapshot,
 )
@@ -63,12 +65,15 @@ from .profiles import (
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
+    DateActionPlan,
+    DateSnapshot,
     DialogSnapshot,
     QuantityPlan,
     QuantitySnapshot,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     select_area_snapshot as _select_ctbc_area_snapshot,
+    select_date_snapshot,
     select_quantity_snapshot,
 )
 
@@ -89,11 +94,6 @@ UTK_SPORTS_PROFILES = {
     host: profile.as_legacy_dict()
     for host, profile in TENANT_PROFILES.items()
 }
-CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
-CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
-    "td:last-child button, td:last-child a[href], "
-    "td:last-child [role=\"button\"]"
-)
 CTBC_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
 CTBC_FAST_PATH_TTL_SECONDS = 1.5
 CTBC_PENDING_NAVIGATION_TTL_SECONDS = 15.0
@@ -281,6 +281,20 @@ def _ctbc_area_action_payload(plan):
     }
 
 
+def _ctbc_date_target_payload(plan):
+    if not isinstance(plan, DateActionPlan) or not plan.target_url:
+        return None
+    return {
+        "url": plan.target_url,
+        "performance_id": plan.performance_id,
+        "product_id": plan.product_id,
+        "tenant_path": plan.tenant_path,
+        "host": plan.host,
+        "map_namespace": plan.map_namespace,
+        "fast_area_prefetch": plan.fast_area_prefetch,
+    }
+
+
 def _build_ctbc_destination_url(area_url, target):
     if _get_ctbc_page_type(area_url) != "area":
         return None
@@ -403,280 +417,6 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
         and _get_ctbc_page_type(destination_url) == "checkout"
         and _ctbc_same_origin(source, destination)
     )
-
-
-def _parse_ctbc_date_target(onclick, current_url):
-    """Strictly parse the site's ordinary date-button navigation target."""
-    if _get_ctbc_page_type(current_url) != "date":
-        return None
-    match = re.fullmatch(
-        r"\s*location\.href\s*=\s*(?P<quote>['\"])(?P<url>[^'\"]+)(?P=quote)\s*;?\s*",
-        str(onclick or ""),
-    )
-    if not match:
-        return None
-
-    target_url = urljoin(current_url, match.group("url"))
-    current = urlsplit(current_url)
-    target = urlsplit(target_url)
-    profile = _get_utk_sports_profile(current_url)
-    if (
-        not profile
-        or target.scheme != "https"
-        or target.hostname != profile["host"]
-        or not _ctbc_same_origin(current, target)
-        or target.fragment
-        or _get_ctbc_page_type(target_url) != "area"
-    ):
-        return None
-    current_tenant = current.path.rsplit("/", 1)[0]
-    if target.path != f"{current_tenant}/UTK0204_":
-        return None
-
-    target_query = _ctbc_unique_query(target_url)
-    current_query = _ctbc_unique_query(current_url)
-    if target_query is None or current_query is None:
-        return None
-    if set(target_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}:
-        return None
-    token_pattern = re.compile(r"[A-Za-z0-9_-]+")
-    performance_id = target_query["PERFORMANCE_ID"]
-    product_id = target_query["PRODUCT_ID"]
-    if not token_pattern.fullmatch(performance_id) or not token_pattern.fullmatch(product_id):
-        return None
-    if product_id != current_query.get("PRODUCT_ID"):
-        return None
-    return {
-        "url": urlunsplit((target.scheme, target.netloc, target.path, target.query, "")),
-        "performance_id": performance_id,
-        "product_id": product_id,
-        "tenant_path": current_tenant,
-        "host": profile["host"],
-        "map_namespace": profile["map_namespace"],
-        "fast_area_prefetch": profile["fast_area_prefetch"],
-    }
-
-
-def _parse_ctbc_vip_date_action(onclick, current_url):
-    """Parse the site's membership presale action without executing it."""
-    if _get_ctbc_page_type(current_url) != "date":
-        return None
-
-    current_query = _ctbc_unique_query(current_url)
-    product_id = (current_query or {}).get("PRODUCT_ID", "")
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", product_id):
-        return None
-
-    match = re.fullmatch(
-        r"\s*VipSellCheck\(\s*(?P<quote>['\"])(?P<token>[A-Za-z0-9_-]{1,128})"
-        r"(?P=quote)\s*\)\s*;?\s*",
-        str(onclick or ""),
-    )
-    if not match:
-        return None
-    return {
-        "kind": "vip_native",
-        "token": match.group("token"),
-        "product_id": product_id,
-    }
-
-
-def _classify_ctbc_date_action(onclick, current_url):
-    """Classify known actions while keeping an official-row native fallback."""
-    date_target = _parse_ctbc_date_target(onclick, current_url)
-    if date_target:
-        return {
-            "kind": "normal",
-            "date_target": date_target,
-        }
-
-    vip_action = _parse_ctbc_vip_date_action(onclick, current_url)
-    if vip_action:
-        return vip_action
-
-    # Future UTK tenants may use a different membership-check function.  The
-    # caller may use a native click only after proving that this is the sole
-    # actionable control in the selected row's purchase cell.
-    if (
-        _get_ctbc_page_type(current_url) == "date"
-        and _ctbc_safe_generic_button_handler(onclick)
-    ):
-        return {"kind": "structural_native"}
-    return None
-
-
-async def _ctbc_date_control_snapshot(control):
-    """Return the structural/actionable state of a date-row purchase control."""
-    raw_value = await control.apply(r'''function(el) {
-        // __ticketsHunterDateControlSnapshot
-        const row = el.closest('tr');
-        const cell = el.closest('td');
-        const tableRoot = row && row.closest('#PerformanceListTable');
-        const style = getComputedStyle(el);
-        const rects = el.getClientRects();
-        const blockedAncestor = el.closest('[hidden], [inert], [aria-hidden="true"]');
-        const disabled = el.matches(':disabled') || el.getAttribute('aria-disabled') === 'true';
-        const visible = el.isConnected && rects.length > 0 &&
-            style.display !== 'none' && style.visibility !== 'hidden' &&
-            style.pointerEvents !== 'none' && !blockedAncestor;
-        const inPurchaseCell = !!tableRoot && !!cell && cell === row.lastElementChild;
-        return JSON.stringify({
-            actionable: !!(visible && !disabled && inPurchaseCell),
-            connected: !!el.isConnected,
-            visible: !!visible,
-            disabled: !!disabled,
-            in_purchase_cell: !!inPurchaseCell,
-            tag_name: (el.tagName || '').toUpperCase(),
-            href: el.getAttribute('href') || '',
-            resolved_href: el.href || '',
-            role: el.getAttribute('role') || '',
-            type: el.getAttribute('type') || '',
-            target: el.getAttribute('target') || '',
-            download: el.getAttribute('download') || '',
-            ping: el.getAttribute('ping') || '',
-            formaction: el.getAttribute('formaction') || '',
-            has_form: !!el.closest('form'),
-            onclick: el.getAttribute('onclick') || '',
-            text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()
-        });
-    }''')
-    return _decode_ctbc_json_result(raw_value)
-
-
-def _ctbc_safe_generic_button_handler(onclick):
-    """Allow one inert-looking site function call, never arbitrary JavaScript."""
-    source = str(onclick or "").strip()
-    if not source:
-        return True
-    match = re.fullmatch(
-        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*"
-        r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\((?P<args>.*)\)\s*;?",
-        source,
-    )
-    if not match:
-        return False
-    arguments = match.group("args").strip()
-    if not arguments:
-        return True
-    return all(
-        re.fullmatch(r"(?P<q>['\"])[A-Za-z0-9_-]{1,128}(?P=q)", item.strip())
-        for item in arguments.split(",")
-    )
-
-
-def _ctbc_date_control_action(snapshot, current_url):
-    """Return a fail-closed action for one structurally attested date control."""
-    if not isinstance(snapshot, dict) or not snapshot.get("actionable"):
-        return None
-
-    tag_name = str(snapshot.get("tag_name") or "").upper()
-    role = str(snapshot.get("role") or "").lower()
-    onclick = str(snapshot.get("onclick") or "")
-    if tag_name == "A":
-        if onclick or any(
-            str(snapshot.get(key) or "")
-            for key in ("target", "download", "ping")
-        ):
-            return None
-        href = str(snapshot.get("resolved_href") or snapshot.get("href") or "")
-        # Anchors are navigational by nature.  Do not use the broad structural
-        # fallback for them: their own href must be the exact same-tenant,
-        # same-product UTK0204 target before a native click is permitted.
-        current = urlsplit(current_url)
-        resolved = urlsplit(urljoin(current_url, href))
-        if not _ctbc_same_origin(current, resolved):
-            return None
-        date_target = _parse_ctbc_date_target(
-            f"location.href={json.dumps(href, ensure_ascii=False)}", current_url
-        )
-        if not date_target:
-            return None
-        return {
-            "kind": "anchor_native",
-            "date_target": date_target,
-        }
-
-    date_target = _parse_ctbc_date_target(onclick, current_url)
-    if date_target:
-        return {"kind": "normal", "date_target": date_target}
-    vip_action = _parse_ctbc_vip_date_action(onclick, current_url)
-    if vip_action:
-        return vip_action
-
-    # The compatibility fallback intentionally remains independent of button
-    # text, but it is limited to an actual non-submit BUTTON and one simple
-    # site function call. This preserves future membership-sale handlers
-    # without executing assignments, multi-statement JavaScript or form posts.
-    control_type = str(snapshot.get("type") or "").lower()
-    if (
-        tag_name != "BUTTON"
-        or str(snapshot.get("formaction") or "")
-        or control_type not in ("", "button")
-        or (not control_type and snapshot.get("has_form"))
-        or not _ctbc_safe_generic_button_handler(onclick)
-    ):
-        return None
-    return {"kind": "structural_native"}
-
-
-async def _ctbc_commit_native_date_action(
-    control, source_url, expected_fingerprint, direct_url=""
-):
-    """Atomically re-attest and natively click one selected purchase control."""
-    source_json = json.dumps(source_url)
-    fingerprint_json = json.dumps(expected_fingerprint, ensure_ascii=False)
-    direct_url_json = json.dumps(str(direct_url or ""), ensure_ascii=False)
-    committed = await control.apply(f'''function(el) {{
-        // __ticketsHunterCommitNativeDateAction
-        const sourceUrl = {source_json};
-        const expectedFingerprint = {fingerprint_json};
-        const directUrl = {direct_url_json};
-        if (location.href !== sourceUrl || !el.isConnected) return false;
-        const row = el.closest('tr');
-        const cell = el.closest('td');
-        if (!row || !cell || !row.closest('#PerformanceListTable') ||
-            cell !== row.lastElementChild) return false;
-        const isActionable = candidate => {{
-            const style = getComputedStyle(candidate);
-            return candidate.isConnected && candidate.getClientRects().length > 0 &&
-                style.display !== 'none' && style.visibility !== 'hidden' &&
-                style.pointerEvents !== 'none' &&
-                !candidate.closest('[hidden], [inert], [aria-hidden="true"]') &&
-                !candidate.matches(':disabled') &&
-                candidate.getAttribute('aria-disabled') !== 'true';
-        }};
-        const controls = Array.from(cell.querySelectorAll(
-            'button, a[href], [role="button"]'
-        )).filter(isActionable);
-        if (controls.length !== 1 || controls[0] !== el) return false;
-        const currentFingerprint = {{
-            tag_name: (el.tagName || '').toUpperCase(),
-            href: el.getAttribute('href') || '',
-            resolved_href: el.href || '',
-            role: el.getAttribute('role') || '',
-            type: el.getAttribute('type') || '',
-            target: el.getAttribute('target') || '',
-            download: el.getAttribute('download') || '',
-            ping: el.getAttribute('ping') || '',
-            formaction: el.getAttribute('formaction') || '',
-            has_form: !!el.closest('form'),
-            onclick: el.getAttribute('onclick') || ''
-        }};
-        for (const key of [
-            'tag_name', 'href', 'resolved_href', 'role', 'type', 'target',
-            'download', 'ping', 'formaction', 'has_form', 'onclick'
-        ]) {{
-            if ((currentFingerprint[key] || '') !==
-                (expectedFingerprint[key] || '')) return false;
-        }}
-        if (directUrl) {{
-            location.assign(directUrl);
-            return true;
-        }}
-        el.click();
-        return true;
-    }}''')
-    return committed is True
 
 
 def _select_ctbc_seat_indexes(
@@ -1688,16 +1428,6 @@ def _ctbc_selection_config_fingerprint(config_dict):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _ctbc_choose_date_candidate(candidates, config_dict):
-    date_config = config_dict.get("date_auto_select", {})
-    return _choose_candidate_index(
-        candidates,
-        date_config.get("date_keyword", "").strip(),
-        date_config.get("mode", "from top to bottom"),
-        config_dict.get("date_auto_fallback", False),
-    )
-
-
 def _ctbc_navigation_urls_match(first_url, second_url):
     try:
         first = urlsplit(str(first_url or ""))
@@ -1756,6 +1486,80 @@ def _ctbc_new_pending_navigation(
         "config_fingerprint": _ctbc_selection_config_fingerprint(config_dict),
         "created_at": time.monotonic(),
     }
+
+
+def _ctbc_new_date_native_pending(tab, snapshot, plan):
+    """Build one cross-document guard for an atomically committed date click."""
+    if not isinstance(snapshot, DateSnapshot) or not isinstance(plan, DateActionPlan):
+        return None
+    source_url = snapshot.page_url
+    source_query = _ctbc_unique_query(source_url)
+    profile = _get_utk_sports_profile(source_url)
+    product_id = str((source_query or {}).get("PRODUCT_ID") or "")
+    if (
+        _get_ctbc_page_type(source_url) != "date"
+        or not profile
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", product_id)
+        or plan.action_kind not in {
+            "normal", "anchor_native", "vip_native", "structural_native",
+        }
+    ):
+        return None
+    area_url = str(plan.target_url or "")
+    if area_url and (
+        plan.action_kind not in {"normal", "anchor_native"}
+        or _get_ctbc_page_type(area_url) != "area"
+        or (_ctbc_unique_query(area_url) or {}).get("PRODUCT_ID") != product_id
+    ):
+        return None
+    identity = _ctbc_tab_identity(tab)
+    return {
+        "kind": "DATE_NATIVE",
+        "phase": "PREPARED",
+        "nonce": uuid.uuid4().hex,
+        "source_url": source_url,
+        "source_document_id": _state["last_document"].get(identity, ""),
+        "area_url": area_url,
+        "product_id": product_id,
+        "tenant_path": profile["tenant_path"],
+        "host": profile["host"],
+        "action_kind": plan.action_kind,
+        "created_at": time.monotonic(),
+    }
+
+
+def _ctbc_date_native_area_matches(pending, current_url):
+    if not isinstance(pending, dict) or pending.get("kind") != "DATE_NATIVE":
+        return False
+    source_url = str(pending.get("source_url") or "")
+    source_profile = _get_utk_sports_profile(source_url)
+    current_profile = _get_utk_sports_profile(current_url)
+    current_query = _ctbc_unique_query(current_url)
+    try:
+        source = urlsplit(source_url)
+        current = urlsplit(current_url)
+    except ValueError:
+        return False
+    if (
+        _get_ctbc_page_type(current_url) != "area"
+        or not source_profile
+        or not current_profile
+        or source_profile["host"] != pending.get("host")
+        or source_profile["tenant_path"] != pending.get("tenant_path")
+        or current_profile["host"] != pending.get("host")
+        or current_profile["tenant_path"] != pending.get("tenant_path")
+        or not _ctbc_same_origin(source, current)
+        or current_query is None
+        or set(current_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}
+        or current_query.get("PRODUCT_ID") != pending.get("product_id")
+    ):
+        return False
+    area_url = str(pending.get("area_url") or "")
+    return (
+        _ctbc_navigation_urls_match(current_url, area_url)
+        if area_url
+        else current.path == f"{pending.get('tenant_path', '')}/UTK0204_"
+    )
 
 
 def _ctbc_pending_from_fast_marker(marker):
@@ -2020,72 +1824,14 @@ async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
         return False
 
 
-async def _ctbc_commit_fast_navigation(tab, pending, onclick):
-    source_json = json.dumps(pending["source_url"])
-    onclick_json = json.dumps(onclick)
-    destination_json = json.dumps(pending["destination_url"])
-    nonce_json = json.dumps(pending["nonce"])
-    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
-    ttl_ms = int(CTBC_PENDING_NAVIGATION_TTL_SECONDS * 1000)
-    return await tab.evaluate(f'''
-        (() => {{
-            // __ticketsHunterCtbcFastCommit
-            const sourceUrl = {source_json};
-            const expectedOnclick = {onclick_json};
-            const destinationUrl = {destination_json};
-            const navigationNonce = {nonce_json};
-            const markerKey = {marker_key_json};
-            if (location.href !== sourceUrl || window.__ticketsHunterCtbcDateCommit) return 'pending';
-            const matches = Array.from(document.querySelectorAll('#PerformanceListTable button#buy_btn'))
-                .filter(button => (button.getAttribute('onclick') || '') === expectedOnclick);
-            if (matches.length !== 1) return 'rejected';
-            const button = matches[0];
-            const row = button.closest('tr');
-            const cell = button.closest('td');
-            const style = getComputedStyle(button);
-            if (!button.isConnected || !row || !cell ||
-                !row.closest('#PerformanceListTable') || cell !== row.lastElementChild ||
-                button.getClientRects().length === 0 || style.display === 'none' ||
-                style.visibility === 'hidden' || style.pointerEvents === 'none' ||
-                button.closest('[hidden], [inert], [aria-hidden="true"]') ||
-                button.matches(':disabled') || button.getAttribute('aria-disabled') === 'true') return 'rejected';
-            const marker = {{version: 1, nonce: navigationNonce, source: sourceUrl,
-                destination: destinationUrl, expires_at: Date.now() + {ttl_ms}}};
-            try {{
-                const existing = JSON.parse(sessionStorage.getItem(markerKey) || 'null');
-                if (existing) {{
-                    if (!/^[a-f0-9]{{32}}$/.test(existing.nonce || '') ||
-                        existing.version !== 1 || existing.expires_at > Date.now()) return 'pending';
-                    const current = JSON.parse(sessionStorage.getItem(markerKey) || 'null');
-                    if (!current || current.nonce !== existing.nonce) return 'pending';
-                    sessionStorage.removeItem(markerKey);
-                }}
-                sessionStorage.setItem(markerKey, JSON.stringify(marker));
-                const stored = JSON.parse(sessionStorage.getItem(markerKey) || 'null');
-                if (!stored || stored.version !== marker.version ||
-                    stored.expires_at !== marker.expires_at ||
-                    stored.nonce !== navigationNonce ||
-                    stored.source !== sourceUrl || stored.destination !== destinationUrl) {{
-                    if (stored && stored.nonce === navigationNonce) sessionStorage.removeItem(markerKey);
-                    return 'rejected';
-                }}
-            }} catch (_error) {{
-                return 'rejected';
-            }}
-            window.__ticketsHunterCtbcDateCommit = navigationNonce;
-            location.assign(destinationUrl);
-            return 'dispatched';
-        }})()
-    ''')
-
-
-async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick, source_url):
+async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_plan):
     """Use the attested normal-mode shortcut; False alone permits native fallback."""
     debug = util.create_debug_logger(config_dict)
     identity = _ctbc_tab_identity(tab)
     if _state["pending_navigation"].get(identity):
         return True
-    if not date_target.get("fast_area_prefetch", False):
+    date_target = _ctbc_date_target_payload(date_plan)
+    if not date_target or not date_plan.fast_area_prefetch:
         debug.log("[UTK SPORTS] Native area flow required by this platform")
         return False
     started = time.monotonic()
@@ -2109,7 +1855,8 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
         return False
     target_action = _ctbc_area_action_payload(target)
     pending = _ctbc_new_pending_navigation(
-        tab, "FAST", source_url, date_target["url"], target_action, config_dict
+        tab, "FAST", date_snapshot.page_url, date_target["url"],
+        target_action, config_dict,
     )
     if not pending:
         return False
@@ -2117,18 +1864,29 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
         return True
     _state["pending_navigation"][identity] = pending
     try:
-        committed = await _ctbc_commit_fast_navigation(tab, pending, onclick)
+        committed = await commit_date_action(
+            tab,
+            date_snapshot,
+            date_plan,
+            pending["nonce"],
+            fast_destination_url=pending["destination_url"],
+            fast_marker_key=CTBC_FAST_MARKER_KEY,
+            fast_marker_ttl_ms=int(CTBC_PENDING_NAVIGATION_TTL_SECONDS * 1000),
+        )
     except Exception as exc:
         pending["phase"] = "DISPATCH_UNKNOWN"
         debug.log(f"[CTBC FAST] Dispatch outcome unknown: {exc}")
         return True
-    if committed is False or committed == "rejected":
+    if committed is CommitResult.REJECTED:
         await _ctbc_delete_fast_navigation_marker(tab, pending["nonce"])
         _pop_pending_navigation_if_nonce(identity, pending["nonce"])
         return bool(_state["pending_navigation"].get(identity))
-    if committed == "pending":
+    if committed is CommitResult.STALE:
         pending["phase"] = "DISPATCH_UNKNOWN"
         return True
+    if committed is not CommitResult.COMMITTED:
+        pending["phase"] = "DISPATCH_UNKNOWN"
+        raise RuntimeError("date fast commit returned an unknown result")
     pending["phase"] = "DISPATCH_UNKNOWN"
     elapsed_ms = int((time.monotonic() - started) * 1000)
     debug.log(
@@ -2138,9 +1896,43 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
     return True
 
 
+async def _ctbc_commit_native_date(tab, snapshot, plan, debug):
+    """Install the cross-document intent before dispatching one native click."""
+    identity = _ctbc_tab_identity(tab)
+    if _state["pending_navigation"].get(identity):
+        return False
+    pending = _ctbc_new_date_native_pending(tab, snapshot, plan)
+    if not pending or _state["pending_navigation"].get(identity):
+        return False
+    _state["pending_navigation"][identity] = pending
+    try:
+        committed = await commit_date_action(
+            tab, snapshot, plan, pending["nonce"]
+        )
+    except Exception as exc:
+        if _ctbc_pending_navigation_is_current(identity, pending):
+            pending["phase"] = "DISPATCH_UNKNOWN"
+        debug.log(f"[CTBC DATE] Click failed: {exc}")
+        return False
+    if committed is CommitResult.REJECTED:
+        _pop_pending_navigation_if_nonce(identity, pending["nonce"])
+        debug.log(f"[CTBC DATE] Native commit rejected ({plan.action_kind})")
+        return False
+    if _ctbc_pending_navigation_is_current(identity, pending):
+        pending["phase"] = "DISPATCH_UNKNOWN"
+    if committed is CommitResult.COMMITTED:
+        debug.log(f"[CTBC DATE] Selected ({plan.action_kind}): {plan.text}")
+        return True
+    outcome = committed.value if isinstance(committed, CommitResult) else "unknown"
+    debug.log(f"[CTBC DATE] Native commit {outcome} ({plan.action_kind})")
+    return False
+
+
 async def nodriver_ctbc_date_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    if _get_ctbc_page_type(current_url) != "date":
+        return False
     if not await _ctbc_reconcile_navigation_source(
         tab, current_url, "date", config_dict
     ):
@@ -2156,99 +1948,45 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
                 "for this platform"
             )
             return False
-    rows = []
+
+    snapshot = None
     for _ in range(10):
         try:
-            rows = await tab.query_selector_all(CTBC_DATE_ROW_SELECTOR)
-        except Exception:
-            rows = []
-        if rows:
+            snapshot = await read_date_snapshot(tab)
+        except Exception as exc:
+            debug.log(f"[CTBC DATE] Failed to inspect date table: {exc}")
+            snapshot = None
+        if isinstance(snapshot, DateSnapshot) and snapshot.ok and snapshot.rows:
             break
         await tab.sleep(0.2)
+    if not isinstance(snapshot, DateSnapshot) or not snapshot.ok:
+        reason = snapshot.reason if isinstance(snapshot, DateSnapshot) else "invalid-result"
+        if _get_ctbc_page_type(str(getattr(tab.target, "url", ""))) != "date":
+            return False
+        await _reload_with_interval(
+            tab, config_dict, f"date table was not ready ({reason})"
+        )
+        return False
+    if snapshot.page_url != current_url or _get_ctbc_page_type(snapshot.page_url) != "date":
+        return False
 
-    candidates = []
-    for row in rows or []:
-        try:
-            controls = await row.query_selector_all(CTBC_DATE_PURCHASE_CONTROL_SELECTOR)
-            if not controls:
-                # Compatibility with older DOM/test adapters.  The structural
-                # snapshot below still requires the control to be in the last
-                # purchase cell of the official performance table.
-                legacy_button = await row.query_selector('button#buy_btn')
-                controls = [legacy_button] if legacy_button else []
-
-            actionable_controls = []
-            for control in controls:
-                snapshot = await _ctbc_date_control_snapshot(control)
-                if isinstance(snapshot, dict) and snapshot.get("actionable"):
-                    actionable_controls.append((control, snapshot))
-            if len(actionable_controls) != 1:
-                continue
-
-            button, button_snapshot = actionable_controls[0]
-            onclick = str(button_snapshot.get("onclick") or "")
-            action = _ctbc_date_control_action(button_snapshot, current_url)
-            if not action:
-                continue
-            row_text = await _element_text(row)
-            if not row_text or util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
-                continue
-            candidates.append({
-                "text": row_text,
-                "element": button,
-                "onclick": onclick,
-                "fingerprint": {
-                    key: (
-                        bool(button_snapshot.get(key))
-                        if key == "has_form"
-                        else str(button_snapshot.get(key) or "")
-                    )
-                    for key in (
-                        "tag_name", "href", "resolved_href", "role", "type",
-                        "target", "download", "ping", "formaction", "has_form",
-                        "onclick",
-                    )
-                },
-                "action": action,
-            })
-        except Exception as exc:
-            debug.log(f"[CTBC DATE] Failed to inspect row: {exc}")
-
-    target_index = _ctbc_choose_date_candidate(candidates, config_dict)
-
-    if target_index is None:
+    plan = select_date_snapshot(snapshot, config_dict)
+    if plan is None:
         await _reload_with_interval(tab, config_dict, "no purchasable date matched")
         return False
 
     await nodriver_utk_sports_cancel_refresh(tab, "purchasable date found")
-    target = candidates[target_index]
     try:
-        action = target["action"]
-        date_target = action.get("date_target") if action.get("kind") == "normal" else None
         if (
             seat_selection_mode == "manual"
-            and date_target
+            and plan.action_kind == "normal"
             and config_dict.get("area_auto_select", {}).get("enable", False)
         ):
             if await _ctbc_try_fast_area_navigation(
-                tab, config_dict, date_target, target["onclick"], current_url
+                tab, config_dict, snapshot, plan
             ):
                 return True
-        committed = await _ctbc_commit_native_date_action(
-            target["element"],
-            current_url,
-            target["fingerprint"],
-            direct_url=(
-                action.get("date_target", {}).get("url", "")
-                if action.get("kind") == "anchor_native"
-                else ""
-            ),
-        )
-        if not committed:
-            debug.log(f"[CTBC DATE] Native commit rejected ({action.get('kind', 'unknown')})")
-            return False
-        debug.log(f"[CTBC DATE] Selected ({action.get('kind')}): {target['text']}")
-        return True
+        return await _ctbc_commit_native_date(tab, snapshot, plan, debug)
     except Exception as exc:
         debug.log(f"[CTBC DATE] Click failed: {exc}")
         return False
@@ -3587,6 +3325,68 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
     )
 
 
+def _ctbc_date_native_direct_pending(pending, page_type):
+    return bool(
+        isinstance(pending, dict)
+        and pending.get("kind") == "DATE_NATIVE"
+        and not pending.get("area_url")
+        and pending.get("action_kind") in {"vip_native", "structural_native"}
+        and page_type in {"seat", "general_admission"}
+    )
+
+
+def _ctbc_date_native_direct_state_is_valid(pending, page_type, state):
+    if not isinstance(state, dict) or not state.get("ready"):
+        return False
+    source_url = str(pending.get("source_url") or "")
+    current_url = str(state.get("page_url") or "")
+    source_profile = _get_utk_sports_profile(source_url)
+    current_profile = _get_utk_sports_profile(current_url)
+    source_query = _ctbc_unique_query(source_url)
+    query = _ctbc_unique_query(current_url)
+    try:
+        source = urlsplit(source_url)
+        current = urlsplit(current_url)
+    except ValueError:
+        return False
+    expected_paths = {
+        "seat": {f"{pending.get('tenant_path', '')}/UTK0205_"},
+        "general_admission": {
+            f"{pending.get('tenant_path', '')}/UTK0202_",
+            f"{pending.get('tenant_path', '')}/UTK0203_",
+        },
+    }
+    if (
+        not source_profile or not current_profile or source_query is None
+        or query is None or _get_ctbc_page_type(source_url) != "date"
+        or _get_ctbc_page_type(current_url) != page_type
+        or current.path not in expected_paths[page_type]
+        or not _ctbc_same_origin(source, current)
+        or any(profile.get("host") != pending.get("host") or
+               profile.get("tenant_path") != pending.get("tenant_path")
+               for profile in (source_profile, current_profile))
+        or source_query.get("PRODUCT_ID") != pending.get("product_id")
+        or set(query) != {
+            "PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"
+        }
+    ):
+        return False
+    url_ids = tuple(query.get(key, "") for key in (
+        "PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"
+    ))
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    if (
+        not token.fullmatch(str(pending.get("product_id") or ""))
+        or not token.fullmatch(url_ids[0]) or not token.fullmatch(url_ids[2])
+        or (url_ids[1] and not token.fullmatch(url_ids[1]))
+        or (page_type == "seat" and not url_ids[1])
+    ):
+        return False
+    return url_ids == tuple(str(state.get(key) or "") for key in (
+        "performance_id", "group_id", "price_area_id"
+    )) and str(state.get("product_id") or "") == pending.get("product_id")
+
+
 async def _ctbc_return_to_native_area(tab, expected, source_url):
     area_url = str(expected.get("area_url") or "")
     if (
@@ -3663,6 +3463,10 @@ async def _ctbc_read_destination_state(tab, page_type):
                 const groupReady = !{group_required_json} || !!groupInput;
                 if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
                 finish({{ready: true, page_url: location.href,
+                    document_id: `${{location.href}}|${{Number(
+                        performance.timeOrigin ||
+                        (performance.timing && performance.timing.navigationStart) || 0
+                    )}}`,
                     performance_id: performanceInput.value || '',
                     product_id: productInput.value || '',
                     group_id: groupInput ? (groupInput.value || '') : '',
@@ -3674,7 +3478,11 @@ async def _ctbc_read_destination_state(tab, page_type):
             observer.observe(document.documentElement, {{childList: true, subtree: true}});
             poller = setInterval(read, 25);
             timer = setTimeout(() => finish({{
-                ready: false, page_url: location.href, document_ready: document.readyState
+                ready: false, page_url: location.href,
+                document_id: `${{location.href}}|${{Number(
+                    performance.timeOrigin ||
+                    (performance.timing && performance.timing.navigationStart) || 0
+                )}}`, document_ready: document.readyState
             }}), 2500);
         }}))()
     ''', await_promise=True)
@@ -3702,6 +3510,34 @@ async def _ctbc_clear_source_navigation(
     return _pop_pending_navigation_if_nonce(
         identity, pending.get("nonce")
     ) is not None
+
+
+def _ctbc_reduce_date_native_navigation(
+    identity, pending, current_url, page_type, document_changed,
+    exact_source, reload_requested_at, marker_present,
+):
+    """Return None only when a DATE_NATIVE source still needs TTL recovery."""
+    if page_type == "area":
+        if (
+            document_changed
+            and not marker_present
+            and _ctbc_date_native_area_matches(pending, current_url)
+        ):
+            return _pop_pending_navigation_if_nonce(
+                identity, pending.get("nonce")
+            ) is not None
+        return False
+    if (
+        page_type == "date"
+        and document_changed
+        and exact_source
+        and reload_requested_at
+        and not marker_present
+    ):
+        return _pop_pending_navigation_if_nonce(
+            identity, pending.get("nonce")
+        ) is not None
+    return None
 
 
 async def _ctbc_reconcile_navigation_source(
@@ -3757,7 +3593,14 @@ async def _ctbc_reconcile_navigation_source(
         and current_document != source_document
     )
     reload_requested_at = float(pending.get("reload_requested_at") or 0)
-    if document_changed and (exact_source or reload_requested_at):
+    if pending.get("kind") == "DATE_NATIVE":
+        date_result = _ctbc_reduce_date_native_navigation(
+            identity, pending, current_url, page_type, document_changed,
+            exact_source, reload_requested_at, marker_present,
+        )
+        if date_result is not None or page_type == "area":
+            return bool(date_result)
+    elif document_changed and (exact_source or reload_requested_at):
         return await _ctbc_clear_source_navigation(
             tab, identity, pending, marker_present, marker_pending
         )
@@ -3826,6 +3669,41 @@ async def _ctbc_attest_pending_destination(
     return False
 
 
+async def _ctbc_attest_date_native_direct_destination(
+    tab, page_type, pending, debug
+):
+    if not _ctbc_date_native_direct_pending(pending, page_type):
+        return None
+    identity = _ctbc_tab_identity(tab)
+    try:
+        state = await _ctbc_read_destination_state(tab, page_type)
+    except Exception as exc:
+        debug.log(f"[CTBC DATE] Direct destination attestation failed: {exc}")
+        return False
+    if not _ctbc_pending_navigation_is_current(identity, pending):
+        return False
+    current_document = str(_state["last_document"].get(identity) or "")
+    source_document = str(pending.get("source_document_id") or "")
+    state_document = str(state.get("document_id") or "") if isinstance(
+        state, dict
+    ) else ""
+    if (
+        state_document
+        and source_document
+        and current_document == state_document
+        and state_document != source_document
+        and _ctbc_date_native_direct_state_is_valid(pending, page_type, state)
+    ):
+        removed = _pop_pending_navigation_if_nonce(identity, pending["nonce"])
+        debug.log("[CTBC DATE] Direct destination IDs verified")
+        return removed is not None
+    if isinstance(state, dict) and state.get("document_ready") != "complete":
+        debug.log("[CTBC DATE] Direct destination is still loading")
+    else:
+        debug.log("[CTBC DATE] Direct destination mismatch; pending retained")
+    return False
+
+
 async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
     """Reconcile FAST/NATIVE provenance before ticket-page automation."""
     identity = _ctbc_tab_identity(tab)
@@ -3840,6 +3718,11 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
     elif pending:
         return False
     current_url = str(marker_state.get("page_url") or str(tab.target.url))
+    direct_result = await _ctbc_attest_date_native_direct_destination(
+        tab, page_type, pending, debug
+    )
+    if direct_result is not None:
+        return direct_result
     if not marker_state.get("available"):
         if not pending:
             return True

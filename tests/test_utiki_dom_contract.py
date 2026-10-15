@@ -4,15 +4,18 @@ from unittest.mock import AsyncMock, patch
 
 from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
+    CTBC_TEST_DATE_URL,
     CTBC_TEST_QUANTITY_URL,
     CTBC_TEST_SERVER_QUANTITY_URL,
     CtbcStateIsolationMixin,
     FakeSubmitTab,
     FakeTab,
+    FakeUtikiDateDomPort,
     FakeUtikiDomPort,
     FakeUtikiQuantityDomPort,
     config,
     make_ctbc_area_snapshot,
+    make_ctbc_date_snapshot,
     make_ctbc_quantity_snapshot,
 )
 
@@ -25,17 +28,21 @@ from platforms.utiki.dom import (
 from platforms.utiki.selection import (
     DialogSnapshot,
     parse_area_snapshot,
+    parse_date_snapshot,
     parse_quantity_snapshot,
     select_area_snapshot,
     select_quantity_snapshot,
 )
 from platforms.utiki.workflow import (
+    _ctbc_attest_fast_destination,
     _ctbc_captcha_and_submit,
     _handle_ctbc_submit_dialog,
     _ctbc_purchase_state_key,
+    _ctbc_reconcile_area_navigation,
     _ctbc_tab_identity,
     _state,
     nodriver_ctbc_area_auto_select,
+    nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
     nodriver_utiki_server_assigned_quantity_main,
 )
@@ -91,6 +98,368 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 tab, config(), ocr=None
             ))
         dispatch.assert_not_awaited()
+
+    async def test_date_workflow_reduces_committed_rejected_and_stale(self):
+        for outcome, expected in (
+            (CommitResult.COMMITTED, True),
+            (CommitResult.REJECTED, False),
+            (CommitResult.STALE, False),
+        ):
+            with self.subTest(outcome=outcome):
+                snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
+                dom_port = FakeUtikiDateDomPort(snapshot, outcome)
+                tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+                cfg = config()
+                cfg["area_auto_select"]["enable"] = False
+
+                with (
+                    patch(
+                        "platforms.utiki.workflow.read_date_snapshot",
+                        side_effect=dom_port.read_date_snapshot,
+                    ),
+                    patch(
+                        "platforms.utiki.workflow.commit_date_action",
+                        side_effect=dom_port.commit_date_action,
+                    ),
+                ):
+                    self.assertIs(
+                        expected,
+                        await nodriver_ctbc_date_auto_select(tab, cfg),
+                    )
+
+                self.assertEqual(
+                    ["inspect_date", "commit_date"], dom_port.events
+                )
+                self.assertEqual(
+                    int(outcome is CommitResult.COMMITTED),
+                    dom_port.committed_count,
+                )
+                identity = _ctbc_tab_identity(tab)
+                if outcome is CommitResult.REJECTED:
+                    self.assertNotIn(identity, _state["pending_navigation"])
+                else:
+                    pending = _state["pending_navigation"][identity]
+                    self.assertEqual("DATE_NATIVE", pending["kind"])
+                    self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
+
+    async def test_date_workflow_repeat_tick_does_not_redispatch_native_click(self):
+        snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
+        dom_port = FakeUtikiDateDomPort(
+            snapshot, [CommitResult.COMMITTED, CommitResult.STALE]
+        )
+        tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+        cfg = config()
+        cfg["area_auto_select"]["enable"] = False
+
+        with (
+            patch(
+                "platforms.utiki.workflow.read_date_snapshot",
+                side_effect=dom_port.read_date_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_date_action",
+                side_effect=dom_port.commit_date_action,
+            ),
+        ):
+            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        self.assertEqual(["inspect_date", "commit_date"], dom_port.events)
+        self.assertEqual(1, dom_port.committed_count)
+        self.assertEqual(1, len(dom_port.nonces))
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("DATE_NATIVE", pending["kind"])
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
+
+    async def test_native_date_unknown_waits_for_coordinated_reload_document(self):
+        snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
+        tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "source-document"
+        cfg = config()
+        cfg["area_auto_select"]["enable"] = False
+        commit = AsyncMock(side_effect=[
+            RuntimeError("execution context destroyed"),
+            CommitResult.REJECTED,
+        ])
+
+        with (
+            patch(
+                "platforms.utiki.workflow.read_date_snapshot",
+                AsyncMock(return_value=snapshot),
+            ) as reader,
+            patch(
+                "platforms.utiki.workflow.commit_date_action", commit,
+            ),
+        ):
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            pending = _state["pending_navigation"][identity]
+            self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
+
+            _state["last_document"][identity] = "spontaneous-document"
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            self.assertEqual(1, commit.await_count)
+            self.assertEqual(1, reader.await_count)
+
+            pending["created_at"] -= 30
+            with patch(
+                "platforms.utiki.workflow._reload_with_interval",
+                AsyncMock(return_value=True),
+            ) as reload_page:
+                self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+                reload_page.assert_awaited_once()
+                self.assertIn("reload_requested_at", pending)
+
+                _state["last_document"][identity] = "reloaded-document"
+                self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        self.assertEqual(2, commit.await_count)
+        self.assertNotIn(identity, _state["pending_navigation"])
+
+    async def test_native_date_pending_clears_only_at_attested_area(self):
+        snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
+        dom_port = FakeUtikiDateDomPort(snapshot, CommitResult.COMMITTED)
+        tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "source-document"
+        cfg = config()
+        cfg["area_auto_select"]["enable"] = False
+
+        with (
+            patch(
+                "platforms.utiki.workflow.read_date_snapshot",
+                side_effect=dom_port.read_date_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_date_action",
+                side_effect=dom_port.commit_date_action,
+            ),
+        ):
+            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        tab.target.url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=OTHER"
+        )
+        _state["last_document"][identity] = "area-document"
+        self.assertFalse(await _ctbc_reconcile_area_navigation(
+            tab, str(tab.target.url), cfg
+        ))
+        self.assertIn(identity, _state["pending_navigation"])
+
+        tab.target.url = CTBC_TEST_AREA_URL
+        self.assertTrue(await _ctbc_reconcile_area_navigation(
+            tab, str(tab.target.url), cfg
+        ))
+        self.assertNotIn(identity, _state["pending_navigation"])
+
+    async def test_structural_date_pending_accepts_same_tenant_product_area(self):
+        raw_snapshot = make_ctbc_date_snapshot()
+        raw_snapshot["rows"][0]["controls"][0]["onclick"] = "MemberCheck('P1')"
+        snapshot = parse_date_snapshot(raw_snapshot)
+        dom_port = FakeUtikiDateDomPort(snapshot, CommitResult.COMMITTED)
+        tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "source-document"
+        cfg = config()
+        cfg["area_auto_select"]["enable"] = False
+
+        with (
+            patch(
+                "platforms.utiki.workflow.read_date_snapshot",
+                side_effect=dom_port.read_date_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_date_action",
+                AsyncMock(return_value=CommitResult.COMMITTED),
+            ),
+        ):
+            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        pending = _state["pending_navigation"][identity]
+        self.assertEqual("", pending["area_url"])
+        tab.target.url = CTBC_TEST_AREA_URL
+        _state["last_document"][identity] = "area-document"
+        self.assertTrue(await _ctbc_reconcile_area_navigation(
+            tab, str(tab.target.url), cfg
+        ))
+        self.assertNotIn(identity, _state["pending_navigation"])
+
+    async def test_date_native_unknown_target_accepts_attested_direct_destination(self):
+        seat_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        for page_type, destination_url, group_id in (
+            ("seat", seat_url, "GROUP_FRONT"),
+            ("general_admission", CTBC_TEST_QUANTITY_URL, ""),
+        ):
+            with self.subTest(page_type=page_type):
+                tab = FakeTab("", [], url=destination_url)
+                identity = _ctbc_tab_identity(tab)
+                destination_document = f"{destination_url}|2000"
+                pending = {
+                    "kind": "DATE_NATIVE",
+                    "phase": "DISPATCH_UNKNOWN",
+                    "nonce": ("a" if page_type == "seat" else "b") * 32,
+                    "source_url": CTBC_TEST_DATE_URL,
+                    "source_document_id": f"{CTBC_TEST_DATE_URL}|1000",
+                    "area_url": "",
+                    "product_id": "P16ANF0L",
+                    "tenant_path": "/BROTHERS",
+                    "host": "tix.ctbcsports.com",
+                    "action_kind": "structural_native",
+                }
+                _state["pending_navigation"][identity] = pending
+                _state["last_document"][identity] = destination_document
+                destination_state = {
+                    "ready": True,
+                    "page_url": destination_url,
+                    "document_id": destination_document,
+                    "performance_id": "P16D0B8Z",
+                    "product_id": "P16ANF0L",
+                    "group_id": group_id,
+                    "price_area_id": "PRICE_FRONT",
+                }
+                with (
+                    patch(
+                        "platforms.utiki.workflow._ctbc_read_fast_navigation_marker",
+                        AsyncMock(return_value={
+                            "available": True, "present": False,
+                            "page_url": destination_url,
+                        }),
+                    ),
+                    patch(
+                        "platforms.utiki.workflow._ctbc_read_destination_state",
+                        AsyncMock(return_value=destination_state),
+                    ),
+                ):
+                    self.assertTrue(await _ctbc_attest_fast_destination(
+                        tab, page_type, config()
+                    ))
+                self.assertNotIn(identity, _state["pending_navigation"])
+
+    async def test_date_native_direct_mismatch_retains_pending_without_return(self):
+        destination_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        for label, overrides in (
+            ("product", {"product_id": "OTHER"}),
+            ("identity", {"performance_id": "OTHER"}),
+        ):
+            with self.subTest(label=label):
+                tab = FakeTab("", [], url=destination_url)
+                identity = _ctbc_tab_identity(tab)
+                destination_document = f"{destination_url}|2000"
+                pending = {
+                    "kind": "DATE_NATIVE", "phase": "DISPATCH_UNKNOWN",
+                    "nonce": ("c" if label == "product" else "d") * 32,
+                    "source_url": CTBC_TEST_DATE_URL,
+                    "source_document_id": f"{CTBC_TEST_DATE_URL}|1000",
+                    "area_url": "", "product_id": "P16ANF0L",
+                    "tenant_path": "/BROTHERS", "host": "tix.ctbcsports.com",
+                    "action_kind": "vip_native",
+                }
+                _state["pending_navigation"][identity] = pending
+                _state["last_document"][identity] = destination_document
+                destination_state = {
+                    "ready": True, "page_url": destination_url,
+                    "document_id": destination_document,
+                    "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
+                    "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+                    **overrides,
+                }
+                with (
+                    patch(
+                        "platforms.utiki.workflow._ctbc_read_fast_navigation_marker",
+                        AsyncMock(return_value={
+                            "available": True, "present": False,
+                            "page_url": destination_url,
+                        }),
+                    ),
+                    patch(
+                        "platforms.utiki.workflow._ctbc_read_destination_state",
+                        AsyncMock(return_value=destination_state),
+                    ),
+                    patch(
+                        "platforms.utiki.workflow._ctbc_return_current_pending",
+                        AsyncMock(),
+                    ) as return_to_area,
+                ):
+                    self.assertFalse(await _ctbc_attest_fast_destination(
+                        tab, "seat", config()
+                    ))
+                self.assertIs(pending, _state["pending_navigation"][identity])
+                self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
+                return_to_area.assert_not_awaited()
+
+    async def test_computer_date_capability_gate_has_no_dom_side_effects(self):
+        tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+        cfg = config()
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with (
+            patch(
+                "platforms.utiki.workflow._get_utk_sports_profile",
+                return_value={"supports_server_assignment": False},
+            ),
+            patch(
+                "platforms.utiki.workflow.read_date_snapshot", AsyncMock()
+            ) as reader,
+            patch(
+                "platforms.utiki.workflow.commit_date_action", AsyncMock()
+            ) as commit,
+            patch(
+                "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                AsyncMock(),
+            ) as fast,
+        ):
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        reader.assert_not_awaited()
+        commit.assert_not_awaited()
+        fast.assert_not_awaited()
+
+    async def test_date_fast_success_skips_native_and_failure_falls_back(self):
+        for fast_result, expected_events in (
+            (True, ["inspect_date", "fast"]),
+            (False, ["inspect_date", "fast", "commit_date"]),
+        ):
+            with self.subTest(fast_result=fast_result):
+                snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
+                dom_port = FakeUtikiDateDomPort(
+                    snapshot, CommitResult.COMMITTED
+                )
+                tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
+
+                async def fast_effect(*_args):
+                    dom_port.events.append("fast")
+                    return fast_result
+
+                with (
+                    patch(
+                        "platforms.utiki.workflow.read_date_snapshot",
+                        side_effect=dom_port.read_date_snapshot,
+                    ),
+                    patch(
+                        "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                        side_effect=fast_effect,
+                    ),
+                    patch(
+                        "platforms.utiki.workflow.commit_date_action",
+                        side_effect=dom_port.commit_date_action,
+                    ),
+                ):
+                    self.assertTrue(await nodriver_ctbc_date_auto_select(
+                        tab, config()
+                    ))
+
+                self.assertEqual(expected_events, dom_port.events)
+                self.assertEqual(int(not fast_result), dom_port.commit_count)
 
     async def test_area_workflow_commits_once_for_one_document_intent(self):
         snapshot = parse_area_snapshot(

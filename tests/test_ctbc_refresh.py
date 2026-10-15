@@ -13,7 +13,6 @@ from tests.ctbc_support import (
 )
 
 from platforms.utiki.workflow import (
-    CTBC_DATE_ROW_SELECTOR,
     _classify_utk_document_state,
     _ctbc_tab_identity,
     _finish_utk_recovery_probe,
@@ -27,6 +26,9 @@ from platforms.utiki.workflow import (
     nodriver_utk_sports_reload,
     nodriver_utk_sports_reload_wait,
 )
+
+
+CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
 
 
 class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):

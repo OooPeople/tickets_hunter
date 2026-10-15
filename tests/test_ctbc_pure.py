@@ -27,23 +27,25 @@ from platforms.utiki.profiles import (
     is_utiki_sports_url,
 )
 from platforms.utiki.selection import (
+    DateActionPlan,
     availability_has_tickets as _ctbc_availability_has_tickets,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     parse_area_send_action as _parse_ctbc_map_send,
     parse_area_send_a_action as _parse_ctbc_map_send_a,
+    parse_date_snapshot,
     parse_dialog_snapshot,
     parse_keyword_groups as _parse_keyword_groups,
     parse_map_title as _parse_ctbc_map_title,
     parse_quantity_snapshot,
     quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
+    select_date_snapshot,
     select_area_snapshot as _select_ctbc_area_snapshot,
     select_quantity_snapshot,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
-    _classify_ctbc_date_action,
     _ctbc_fast_destination_is_valid,
     _ctbc_purchase_state_key,
     _ctbc_submit_reached_checkout,
@@ -51,13 +53,48 @@ from platforms.utiki.workflow import (
     _get_ctbc_page_type,
     _get_utiki_behavior,
     _normalize_ctbc_captcha_answer,
-    _parse_ctbc_date_target,
-    _parse_ctbc_vip_date_action,
     _select_ctbc_seat_indexes,
     is_utk_sports_url,
     parse_ctbc_cookie_string,
 )
 from settings import get_default_config, migrate_config
+
+
+def _date_control(onclick="", **overrides):
+    control = {
+        "actionable": True,
+        "tag_name": "BUTTON",
+        "id": "buy_btn",
+        "href": "",
+        "resolved_href": "",
+        "role": "",
+        "type": "button",
+        "target": "",
+        "download": "",
+        "ping": "",
+        "formaction": "",
+        "has_form": False,
+        "onclick": onclick,
+    }
+    control.update(overrides)
+    return control
+
+
+def _date_snapshot(source_url, rows):
+    return {
+        "ok": True,
+        "page_url": source_url,
+        "document_id": "document-1",
+        "rows": rows,
+    }
+
+
+def _select_date_action(source_url, control, row_text="9/10 一般場"):
+    snapshot = _date_snapshot(
+        source_url,
+        [{"text": row_text, "controls": [control]}],
+    )
+    return select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
@@ -400,66 +437,137 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertFalse(_ctbc_availability_has_tickets("剩餘 1", 2))
         self.assertTrue(_ctbc_availability_has_tickets("熱賣中", 2))
 
+    def test_date_snapshot_is_immutable_and_rejects_ambiguous_controls(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=A1&PRODUCT_ID=P1'"
+        raw = _date_snapshot(source, [{
+            "text": "9/10 一般場",
+            "controls": [_date_control(onclick)],
+        }])
+        snapshot = parse_date_snapshot(raw)
+        raw["rows"][0]["text"] = "mutated"
+        raw["rows"][0]["controls"][0]["onclick"] = "alert('x')"
+        plan = select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+        self.assertEqual("9/10 一般場", plan.text)
+        self.assertEqual(onclick, plan.onclick)
+
+        ambiguous = _date_snapshot(source, [{
+            "text": "9/10 一般場",
+            "controls": [_date_control(onclick), _date_control(onclick)],
+        }])
+        self.assertIsNone(select_date_snapshot(
+            ambiguous, config(date_keyword='"9/10"')
+        ))
+
+    def test_date_selection_preserves_keyword_exclude_mode_and_fallback(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        snapshot = _date_snapshot(source, [
+            {
+                "text": "9/10 一般場",
+                "controls": [_date_control(
+                    "location.href='UTK0204_?PERFORMANCE_ID=A1&PRODUCT_ID=P1'"
+                )],
+            },
+            {
+                "text": "9/11 家庭場",
+                "controls": [_date_control(
+                    "location.href='UTK0204_?PERFORMANCE_ID=A2&PRODUCT_ID=P1'"
+                )],
+            },
+        ])
+        cfg = config(date_keyword='"家庭場","一般場"')
+        self.assertEqual(1, select_date_snapshot(snapshot, cfg).row_index)
+
+        cfg["keyword_exclude"] = '"家庭場"'
+        self.assertEqual(0, select_date_snapshot(snapshot, cfg).row_index)
+        cfg["date_auto_select"]["date_keyword"] = '"不存在"'
+        self.assertIsNone(select_date_snapshot(snapshot, cfg))
+        cfg["date_auto_fallback"] = True
+        self.assertEqual(0, select_date_snapshot(snapshot, cfg).row_index)
+        cfg["date_auto_select"]["date_keyword"] = ""
+        cfg["date_auto_select"]["mode"] = "from bottom to top"
+        cfg["keyword_exclude"] = ""
+        self.assertEqual(1, select_date_snapshot(snapshot, cfg).row_index)
+
     def test_date_target_parser_only_accepts_the_same_tenant_and_product(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        target = _parse_ctbc_date_target(onclick, source)
-        self.assertEqual("P16D0B8Z", target["performance_id"])
-        self.assertEqual("P16ANF0L", target["product_id"])
-        self.assertIsNone(_parse_ctbc_date_target(
+        target = _select_date_action(source, _date_control(onclick))
+        self.assertIsInstance(target, DateActionPlan)
+        self.assertEqual("normal", target.action_kind)
+        self.assertEqual("P16D0B8Z", target.performance_id)
+        self.assertEqual("P16ANF0L", target.product_id)
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='https://evil.example/UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'",
-            source,
-        ))
-        self.assertIsNone(_parse_ctbc_date_target(
+        )))
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=OTHER'",
-            source,
-        ))
-        self.assertIsNone(_parse_ctbc_date_target(
+        )))
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='https://tix.ctbcsports.com:444/BROTHERS/UTK0204_?"
             "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'",
-            source,
-        ))
-        self.assertIsNone(_parse_ctbc_date_target(
+        )))
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='https://user@tix.ctbcsports.com/BROTHERS/UTK0204_?"
             "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'",
-            source,
-        ))
+        )))
 
         dragons_source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P16MXT0U"
-        dragons_target = _parse_ctbc_date_target(
+        dragons_target = _select_date_action(dragons_source, _date_control(
             "location.href='UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'",
-            dragons_source,
-        )
-        self.assertEqual("tix.wdragons.com", dragons_target["host"])
-        self.assertEqual("WDRAGONS", dragons_target["map_namespace"])
-        self.assertFalse(dragons_target["fast_area_prefetch"])
-        self.assertIsNone(_parse_ctbc_date_target(
-            "location.href='https://tix.ctbcsports.com/UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'",
-            dragons_source,
         ))
+        self.assertEqual("tix.wdragons.com", dragons_target.host)
+        self.assertEqual("WDRAGONS", dragons_target.map_namespace)
+        self.assertFalse(dragons_target.fast_area_prefetch)
+        self.assertIsNone(_select_date_action(dragons_source, _date_control(
+            "location.href='https://tix.ctbcsports.com/UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'",
+        )))
 
     def test_date_action_classifier_supports_vip_and_safe_structural_fallback(self):
         source = (
             "https://tix.ctbcsports.com/BROTHERS/UTK0201_?"
             "PRODUCT_ID=P16ANF0P&STARTDATE=2026/09/18"
         )
-        vip = _parse_ctbc_vip_date_action("VipSellCheck('P1DN7WJI');", source)
-        self.assertEqual("vip_native", vip["kind"])
-        self.assertEqual("P1DN7WJI", vip["token"])
+        vip = _select_date_action(
+            source, _date_control("VipSellCheck('P1DN7WJI');")
+        )
+        self.assertEqual("vip_native", vip.action_kind)
+        self.assertEqual("P1DN7WJI", vip.action_token)
         self.assertEqual(
             "structural_native",
-            _classify_ctbc_date_action("DragonMemberCheck('P1DRAGON')", source)["kind"],
+            _select_date_action(
+                source, _date_control("DragonMemberCheck('P1DRAGON')")
+            ).action_kind,
         )
         self.assertEqual(
             "structural_native",
-            _classify_ctbc_date_action("", source)["kind"],
+            _select_date_action(source, _date_control()).action_kind,
         )
-        self.assertIsNone(_classify_ctbc_date_action(
-            "location.href='https://evil.example/'", source
+        self.assertIsNone(_select_date_action(
+            source, _date_control("location.href='https://evil.example/'")
         ))
-        self.assertIsNone(_classify_ctbc_date_action(
-            "DragonMemberCheck('P1'); alert('x')", source
+        self.assertIsNone(_select_date_action(
+            source, _date_control("DragonMemberCheck('P1'); alert('x')")
         ))
+        self.assertIsNone(_select_date_action(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P1",
+            _date_control(),
+        ))
+
+        anchor_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0P"
+        )
+        anchor = _select_date_action(source, _date_control(
+            tag_name="A", id="", type="", href=anchor_url,
+            resolved_href=anchor_url,
+        ))
+        self.assertEqual("anchor_native", anchor.action_kind)
+        self.assertEqual(anchor_url, anchor.target_url)
+        self.assertIsNone(_select_date_action(source, _date_control(
+            tag_name="A", id="", type="", href=anchor_url,
+            resolved_href=anchor_url, target="_blank",
+        )))
 
     def test_map_send_parser_is_anchored_and_builds_the_official_url(self):
         href = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','熱賣中')"

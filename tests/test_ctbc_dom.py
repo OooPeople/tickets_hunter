@@ -21,8 +21,6 @@ from platforms.utiki.selection import QuantityPlan
 
 from platforms.utiki.workflow import (
     CTBC_AREA_ROW_SELECTOR,
-    CTBC_DATE_PURCHASE_CONTROL_SELECTOR,
-    CTBC_DATE_ROW_SELECTOR,
     _ctbc_attest_fast_destination,
     _ctbc_captcha_and_submit,
     _ctbc_fast_marker_matches_pending,
@@ -43,6 +41,13 @@ from platforms.utiki.workflow import (
     nodriver_ctbc_inject_cookies,
     nodriver_ctbc_seat_main,
     nodriver_ctbc_ticket_type_auto_select,
+)
+
+
+CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
+CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
+    'td:last-child button, td:last-child a[href], '
+    'td:last-child [role="button"]'
 )
 
 
@@ -309,12 +314,13 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
         available_button = FakeElement(
-            "<button id='buy_btn'>購買</button>", attrs={"onclick": onclick}
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
         )
         sold_button = FakeElement(
             "<button id='buy_btn' disabled>已售完</button>",
             disabled=True,
-            attrs={"onclick": onclick},
+            attrs={"id": "buy_btn", "onclick": onclick},
         )
         available_row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
@@ -334,7 +340,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_date_fast_path_accepts_available_area_status_skew(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>立即選位》</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>立即選位》</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>立即選位》</button></td></tr>",
             children={"button#buy_btn": button},
@@ -355,8 +364,6 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 tab, config(area_keyword='"109區前排"')
             ))
             self.assertFalse(button.clicked)
-            self.assertEqual(2, tab.evaluate_count)
-            self.assertNotIn("includes('購買')", tab.evaluate_scripts[-1])
             expected = _state["pending_navigation"][_ctbc_tab_identity(tab)]
             self.assertEqual("PRICE_FRONT", expected["price_area_id"])
         finally:
@@ -365,7 +372,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_date_fast_path_failure_falls_back_to_the_native_button(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},
@@ -388,7 +398,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PRODUCT_ID=P16ANF0L'"
         )
         button = FakeElement(
-            "<button id='buy_btn'>購買</button>", attrs={"onclick": onclick}
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
         )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td>"
@@ -432,7 +443,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PRODUCT_ID=P16ANF0L'"
         )
         button = FakeElement(
-            "<button id='buy_btn'>購買</button>", attrs={"onclick": onclick}
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
         )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td>"
@@ -450,7 +462,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 AsyncMock(),
             ) as fast_path,
             patch(
-                "platforms.utiki.workflow._ctbc_commit_native_date_action",
+                "platforms.utiki.workflow.commit_date_action",
                 AsyncMock(),
             ) as native_commit,
         ):
@@ -479,7 +491,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
         )
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},
@@ -508,17 +523,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(["FAST"], observed)
         self.assertFalse(button.clicked)
         self.assertEqual(destination, tab.target.url)
-        self.assertIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
-        commit_script = next(
-            script for script in tab.evaluate_scripts
-            if "__ticketsHunterCtbcFastCommit" in script
-        )
-        self.assertLess(
-            commit_script.index("sessionStorage.setItem"),
-            commit_script.index("location.assign(destinationUrl)"),
-        )
-        self.assertIn("stored.nonce !== navigationNonce", commit_script)
-        self.assertNotIn("setTimeout", commit_script)
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
+        self.assertEqual(pending["nonce"], tab.session_marker["nonce"])
+        self.assertEqual(source, tab.session_marker["source"])
+        self.assertEqual(destination, tab.session_marker["destination"])
 
         self.assertTrue(await _ctbc_attest_fast_destination(tab, "seat", cfg))
         self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
@@ -527,7 +536,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_rejected_fast_commit_compare_pops_pending_before_native_fallback(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},
@@ -546,13 +558,18 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             tab, config(area_keyword='"109區前排"')
         ))
         self.assertTrue(button.clicked)
-        self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("DATE_NATIVE", pending["kind"])
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
         self.assertIsNone(tab.session_marker)
 
     async def test_rejected_old_nonce_does_not_clear_newer_pending(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},
@@ -577,7 +594,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_date_commit_guard_recovers_only_after_reload_document(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},
@@ -618,7 +638,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
 
         self.assertTrue(button.clicked)
-        self.assertNotIn(identity, _state["pending_navigation"])
+        pending = _state["pending_navigation"][identity]
+        self.assertEqual("DATE_NATIVE", pending["kind"])
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
 
     async def test_storage_unavailable_clean_date_uses_native_fallback(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
@@ -637,7 +659,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             tab, config(area_keyword='"109區前排"')
         ))
         self.assertTrue(button.clicked)
-        self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("DATE_NATIVE", pending["kind"])
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
 
     async def test_storage_unavailable_native_attests_but_fast_returns(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
@@ -756,7 +780,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
         )
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},
@@ -804,7 +831,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         self.assertTrue(button.clicked)
         self.assertIsNone(tab.session_marker)
-        self.assertNotIn(identity, _state["pending_navigation"])
+        pending = _state["pending_navigation"][identity]
+        self.assertEqual("DATE_NATIVE", pending["kind"])
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
 
     async def test_marker_only_fast_destination_returns_then_allows_native_retry(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
@@ -1400,7 +1429,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
     async def test_wdragons_logged_in_date_uses_native_notice_preserving_flow(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P16MXT0U"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'"
-        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>",
+            attrs={"id": "buy_btn", "onclick": onclick},
+        )
         row = FakeElement(
             "<tr><td>2026/09/08(二)18:35</td><td>臺北大巨蛋</td><td><button>購買</button></td></tr>",
             children={"button#buy_btn": button},

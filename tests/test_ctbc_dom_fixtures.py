@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import tempfile
 import threading
+import types
 from dataclasses import replace
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -17,31 +19,34 @@ from platforms.utiki.dom import (
     CommitResult,
     SubmitDispatchResult,
     commit_area,
+    commit_date_action,
     commit_server_assigned_area,
     commit_quantity,
     dismiss_dialog,
     dispatch_quantity_submit,
     read_area_snapshot,
+    read_date_snapshot,
     read_dialog_snapshot,
     read_quantity_snapshot,
 )
 from platforms.utiki.selection import (
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     select_area_snapshot,
+    select_date_snapshot,
     select_quantity_snapshot,
 )
+from platforms.utiki.profiles import PageKind
 from platforms.utiki.workflow import (
-    _ctbc_commit_fast_navigation,
     _ctbc_captcha_and_submit,
     _ctbc_delete_fast_navigation_marker,
     _ctbc_login_fingerprint,
     _ctbc_purchase_state_key,
+    _ctbc_read_destination_state,
     _ctbc_read_fast_navigation_marker,
     _ctbc_tab_identity,
     _dismiss_ctbc_dialog,
     _state,
     _validate_ctbc_seat_selection,
-    nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
     nodriver_ctbc_seat_auto_select,
     nodriver_ctbc_ticket_type_auto_select,
@@ -125,16 +130,121 @@ async def _open_fixture_url(browser, url):
 
 
 async def _assert_date_fixture(browser):
-    tab = await _open_fixture(
-        browser,
-        "UTK0201_date.html",
-        "?PRODUCT_ID=PRODUCT_FIXTURE",
-    )
-    cfg = config(date_keyword='"9/10"')
+    async def open_snapshot():
+        tab = await _open_fixture(
+            browser,
+            "UTK0201_date.html",
+            "?PRODUCT_ID=PRODUCT_FIXTURE",
+        )
+        with patch(
+            "platforms.utiki.dom.classify_utiki_page",
+            return_value=PageKind.DATE,
+        ):
+            snapshot = await read_date_snapshot(tab)
+        assert snapshot.ok
+        return tab, snapshot
 
-    assert await nodriver_ctbc_date_auto_select(tab, cfg)
+    def plan_for(snapshot):
+        with patch(
+            "platforms.utiki.selection.classify_utiki_page",
+            return_value=PageKind.DATE,
+        ):
+            plan = select_date_snapshot(
+                snapshot, config(date_keyword='"9/10"')
+            )
+        assert plan is not None
+        return plan
+
+    async def commit(tab, snapshot, plan, nonce):
+        with (
+            patch(
+                "platforms.utiki.dom.classify_utiki_page",
+                return_value=PageKind.DATE,
+            ),
+            patch(
+                "platforms.utiki.selection.classify_utiki_page",
+                return_value=PageKind.DATE,
+            ),
+        ):
+            return await commit_date_action(tab, snapshot, plan, nonce)
+
+    tab, snapshot = await open_snapshot()
+    assert snapshot.document_id
+    assert len(snapshot.rows) == 2
+    assert snapshot.rows[0][1][0][0]
+    assert not snapshot.rows[1][1][0][0]
+    assert await tab.evaluate("Number(document.body.dataset.dateClicks || 0)") == 0
+
+    plan = plan_for(snapshot)
+    nonce = "d" * 32
+    assert await commit(tab, snapshot, plan, nonce) is CommitResult.COMMITTED
     assert await tab.evaluate("document.body.dataset.selectedDate || ''") == "DATE_FRONT"
     assert await tab.evaluate("Number(document.body.dataset.dateClicks || 0)") == 1
+    assert await commit(tab, snapshot, plan, nonce) is CommitResult.COMMITTED
+    assert await tab.evaluate("Number(document.body.dataset.dateClicks || 0)") == 1
+    assert await commit(
+        tab, snapshot, plan, "e" * 32
+    ) is CommitResult.STALE
+    assert await tab.evaluate("Number(document.body.dataset.dateClicks || 0)") == 1
+
+    url_tab, url_snapshot = await open_snapshot()
+    await url_tab.evaluate(
+        "history.replaceState({}, '', location.pathname + '?changed=1')"
+    )
+    assert await commit(
+        url_tab, url_snapshot, plan_for(url_snapshot), "1" * 32
+    ) is CommitResult.STALE
+    assert await url_tab.evaluate(
+        "Number(document.body.dataset.dateClicks || 0)"
+    ) == 0
+
+    document_tab, document_snapshot = await open_snapshot()
+    await document_tab.sleep(0.05)
+    await document_tab.reload()
+    for _ in range(50):
+        if await document_tab.evaluate("document.readyState === 'complete'"):
+            break
+        await document_tab.sleep(0.02)
+    assert await commit(
+        document_tab,
+        document_snapshot,
+        plan_for(document_snapshot),
+        "2" * 32,
+    ) is CommitResult.STALE
+    assert await document_tab.evaluate(
+        "Number(document.body.dataset.dateClicks || 0)"
+    ) == 0
+
+    row_tab, row_snapshot = await open_snapshot()
+    await row_tab.evaluate(
+        "document.querySelector('#PerformanceListTable tr td').textContent = 'changed'"
+    )
+    assert await commit(
+        row_tab, row_snapshot, plan_for(row_snapshot), "3" * 32
+    ) is CommitResult.STALE
+    assert await row_tab.evaluate(
+        "Number(document.body.dataset.dateClicks || 0)"
+    ) == 0
+
+    ambiguous_tab, ambiguous_snapshot = await open_snapshot()
+    await ambiguous_tab.evaluate('''
+        (() => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.setAttribute('aria-label', 'duplicate');
+            document.querySelector('#PerformanceListTable tr td:last-child')
+                .append(button);
+        })()
+    ''')
+    assert await commit(
+        ambiguous_tab,
+        ambiguous_snapshot,
+        plan_for(ambiguous_snapshot),
+        "4" * 32,
+    ) is CommitResult.REJECTED
+    assert await ambiguous_tab.evaluate(
+        "Number(document.body.dataset.dateClicks || 0)"
+    ) == 0
 
 
 async def _assert_area_fixture(browser):
@@ -591,6 +701,37 @@ async def _assert_quantity_fixture(browser):
         "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
     )
     cfg = config()
+
+    destination_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await destination_tab.evaluate('''(() => {
+        const product = document.createElement('input');
+        product.id = 'PRODUCT_ID';
+        product.value = 'PRODUCT_FIXTURE';
+        product.hidden = true;
+        document.body.prepend(product);
+    })()''')
+    destination_url = await destination_tab.evaluate("location.href")
+    time_origin = await destination_tab.evaluate('''Number(
+        performance.timeOrigin ||
+        (performance.timing && performance.timing.navigationStart) || 0
+    )''')
+    assert isinstance(time_origin, (int, float)) and time_origin > 0
+    time_origin_text = (
+        str(int(time_origin))
+        if float(time_origin).is_integer()
+        else str(time_origin)
+    )
+    destination_state = await _ctbc_read_destination_state(
+        destination_tab, "general_admission"
+    )
+    assert destination_state["ready"]
+    assert destination_state["page_url"] == destination_url
+    assert destination_state["document_id"] == (
+        f"{destination_url}|{time_origin_text}"
+    )
+
     tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
     snapshot = await read_quantity_snapshot(tab)
     plan = select_quantity_snapshot(
@@ -1275,28 +1416,116 @@ async def _assert_fast_marker_fixture(browser):
         base_url = f"http://127.0.0.1:{server.server_port}"
         source_url = f"{base_url}/UTK0201_date.html?PRODUCT_ID=PRODUCT_FIXTURE"
         destination_url = (
-            f"{base_url}/UTK0205_seat.html?PERFORMANCE_ID=P16D0B8Z&"
+            f"{base_url}/UTK0205_?PERFORMANCE_ID=P16D0B8Z&"
             "GROUP_ID=GROUP_FRONT&PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
         )
-        tab = await browser.get(source_url)
-        for _ in range(50):
-            if await tab.evaluate("document.readyState === 'complete'"):
-                break
-            await tab.sleep(0.02)
+        area_url = (
+            f"{base_url}/UTK0204_?PERFORMANCE_ID=P16D0B8Z&"
+            "PRODUCT_ID=PRODUCT_FIXTURE"
+        )
+        onclick = f"location.href='{area_url}'"
 
+        def classify_fixture_url(url):
+            if "/UTK0201_date.html" in str(url):
+                return PageKind.DATE
+            if "/UTK0204_" in str(url):
+                return PageKind.AREA
+            if "/UTK0205_" in str(url):
+                return PageKind.RESERVED_SEAT
+            return PageKind.UNKNOWN
+
+        profile = types.SimpleNamespace(
+            tenant_path="",
+            host="127.0.0.1",
+            map_namespace="FIXTURE",
+            fast_area_prefetch=True,
+        )
+
+        def parse_fixture_date_target(target_value, current_url):
+            if str(target_value) != area_url or str(current_url) != source_url:
+                return None
+            return {
+                "target_url": area_url,
+                "performance_id": "P16D0B8Z",
+                "product_id": "PRODUCT_FIXTURE",
+                "tenant_path": profile.tenant_path,
+                "host": profile.host,
+                "map_namespace": profile.map_namespace,
+                "fast_area_prefetch": profile.fast_area_prefetch,
+            }
+
+        async def open_fast_tab(*, control_id="buy_btn", duplicate_row=False):
+            tab = await _open_fixture_url(browser, source_url)
+            await tab.evaluate(f'''(() => {{
+                const button = document.querySelector(
+                    '#PerformanceListTable button');
+                button.id = {json.dumps(control_id)};
+                button.setAttribute('onclick', {json.dumps(onclick)});
+                if ({json.dumps(duplicate_row)}) {{
+                    const row = button.closest('tr').cloneNode(true);
+                    row.querySelector('td').textContent = '2026/09/12（六）18:35';
+                    document.querySelector('#PerformanceListTable tbody')
+                        .append(row);
+                }}
+            }})()''')
+            return tab
+
+        async def fast_commit(tab, nonce):
+            with (
+                patch(
+                    "platforms.utiki.dom.classify_utiki_page",
+                    side_effect=classify_fixture_url,
+                ),
+                patch(
+                    "platforms.utiki.selection.classify_utiki_page",
+                    side_effect=classify_fixture_url,
+                ),
+                patch(
+                    "platforms.utiki.selection._parse_date_target_url",
+                    side_effect=parse_fixture_date_target,
+                ),
+            ):
+                snapshot = await read_date_snapshot(tab)
+                plan = select_date_snapshot(
+                    snapshot, config(date_keyword='"9/10"')
+                )
+                assert plan is not None
+                assert plan.action_kind == "normal"
+                return await commit_date_action(
+                    tab,
+                    snapshot,
+                    plan,
+                    nonce,
+                    fast_destination_url=destination_url,
+                    fast_marker_key="ticketsHunter.ctbc.fast-navigation.v1",
+                    fast_marker_ttl_ms=15000,
+                )
+
+        wrong_id_tab = await open_fast_tab(control_id="wrong_buy_btn")
+        assert await fast_commit(
+            wrong_id_tab, "b" * 32
+        ) is CommitResult.REJECTED
+        assert str(wrong_id_tab.target.url) == source_url
+        assert await wrong_id_tab.evaluate(
+            "Number(document.body.dataset.dateClicks || 0)"
+        ) == 0
+
+        duplicate_tab = await open_fast_tab(duplicate_row=True)
+        assert await fast_commit(
+            duplicate_tab, "c" * 32
+        ) is CommitResult.REJECTED
+        assert str(duplicate_tab.target.url) == source_url
+        assert await duplicate_tab.evaluate(
+            "Number(document.body.dataset.dateClicks || 0)"
+        ) == 0
+
+        tab = await open_fast_tab()
         nonce = "a" * 32
-        pending = {
-            "source_url": source_url,
-            "destination_url": destination_url,
-            "nonce": nonce,
-        }
         try:
-            await _ctbc_commit_fast_navigation(
-                tab, pending, "selectFixtureDate('DATE_FRONT')"
-            )
+            await fast_commit(tab, nonce)
         except Exception:
-            # A real navigation may destroy the source execution context before
-            # DevTools returns even though the marker and navigation committed.
+            # A real navigation may destroy the source execution context
+            # after the atomic marker and navigation already committed.
             pass
 
         for _ in range(100):

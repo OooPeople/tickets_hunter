@@ -2,8 +2,50 @@
 
 import re
 from dataclasses import dataclass
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import util
+
+from .profiles import (
+    PageKind,
+    classify_utiki_page,
+    get_utiki_tenant_profile,
+    same_origin,
+    unique_query,
+)
+
+
+DATE_CONTROL_FINGERPRINT_FIELDS = (
+    "tag_name", "id", "href", "resolved_href", "role", "type",
+    "target", "download", "ping", "formaction", "has_form", "onclick",
+)
+
+
+@dataclass(frozen=True)
+class DateSnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    rows: tuple
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class DateActionPlan:
+    row_index: int
+    control_index: int
+    text: str
+    action_kind: str
+    onclick: str
+    control_fingerprint: tuple
+    target_url: str = ""
+    performance_id: str = ""
+    product_id: str = ""
+    tenant_path: str = ""
+    host: str = ""
+    map_namespace: str = ""
+    fast_area_prefetch: bool = False
+    action_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,6 +110,58 @@ class DialogSnapshot:
     document_id: str
     visible_count: int
     text: str
+
+
+def _freeze_date_control(raw_control):
+    if not isinstance(raw_control, dict):
+        return None
+    actionable = raw_control.get("actionable")
+    has_form = raw_control.get("has_form")
+    if not isinstance(actionable, bool) or not isinstance(has_form, bool):
+        return None
+    string_fields = set(DATE_CONTROL_FINGERPRINT_FIELDS) - {"has_form"}
+    if any(not isinstance(raw_control.get(field, ""), str) for field in string_fields):
+        return None
+    fingerprint = tuple(
+        (field, has_form if field == "has_form" else raw_control.get(field, ""))
+        for field in DATE_CONTROL_FINGERPRINT_FIELDS
+    )
+    return actionable, fingerprint
+
+
+def parse_date_snapshot(raw_snapshot):
+    """Freeze one side-effect-free observation of the date table."""
+    if isinstance(raw_snapshot, DateSnapshot):
+        return raw_snapshot
+    if not isinstance(raw_snapshot, dict):
+        return None
+    if raw_snapshot.get("ok") is False:
+        return DateSnapshot(
+            ok=False,
+            page_url=str(raw_snapshot.get("page_url") or ""),
+            document_id=str(raw_snapshot.get("document_id") or ""),
+            rows=(),
+            reason=str(raw_snapshot.get("reason") or "invalid-result"),
+        )
+    rows = raw_snapshot.get("rows")
+    if not isinstance(rows, list):
+        return None
+    frozen_rows = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("text"), str):
+            return None
+        controls = row.get("controls")
+        if not isinstance(controls, list):
+            return None
+        frozen_controls = tuple(_freeze_date_control(item) for item in controls)
+        if any(item is None for item in frozen_controls):
+            return None
+        frozen_rows.append((row["text"], frozen_controls))
+    page_url = raw_snapshot.get("page_url")
+    document_id = raw_snapshot.get("document_id")
+    if not isinstance(page_url, str) or not isinstance(document_id, str):
+        return None
+    return DateSnapshot(True, page_url, document_id, tuple(frozen_rows))
 
 
 def parse_area_snapshot(raw_snapshot):
@@ -242,6 +336,241 @@ def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=Fals
             return None
     target = util.get_target_item_from_matched_list(indexed, mode)
     return target[0] if target else None
+
+
+def _parse_date_target_url(target_value, current_url):
+    if classify_utiki_page(current_url) != PageKind.DATE:
+        return None
+    profile = get_utiki_tenant_profile(current_url)
+    current_query = unique_query(current_url)
+    if profile is None or current_query is None:
+        return None
+    target_url = urljoin(current_url, str(target_value or ""))
+    try:
+        current = urlsplit(current_url)
+        target = urlsplit(target_url)
+    except ValueError:
+        return None
+    if (
+        target.scheme != "https"
+        or target.fragment
+        or not same_origin(current, target)
+        or classify_utiki_page(target_url) != PageKind.AREA
+        or target.path != f"{profile.tenant_path}/UTK0204_"
+    ):
+        return None
+    target_query = unique_query(target_url)
+    if target_query is None or set(target_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}:
+        return None
+    performance_id = target_query["PERFORMANCE_ID"]
+    product_id = target_query["PRODUCT_ID"]
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    if (
+        not token.fullmatch(performance_id)
+        or not token.fullmatch(product_id)
+        or product_id != current_query.get("PRODUCT_ID")
+    ):
+        return None
+    return {
+        "target_url": urlunsplit(
+            (target.scheme, target.netloc, target.path, target.query, "")
+        ),
+        "performance_id": performance_id,
+        "product_id": product_id,
+        "tenant_path": profile.tenant_path,
+        "host": profile.host,
+        "map_namespace": profile.map_namespace,
+        "fast_area_prefetch": profile.fast_area_prefetch,
+    }
+
+
+def _parse_date_target(onclick, current_url):
+    match = re.fullmatch(
+        r"\s*location\.href\s*=\s*(?P<quote>['\"])(?P<url>[^'\"]+)"
+        r"(?P=quote)\s*;?\s*",
+        str(onclick or ""),
+    )
+    return _parse_date_target_url(match.group("url"), current_url) if match else None
+
+
+def _parse_vip_date_token(onclick, current_url):
+    if classify_utiki_page(current_url) != PageKind.DATE:
+        return None
+    current_query = unique_query(current_url)
+    product_id = (current_query or {}).get("PRODUCT_ID", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", product_id):
+        return None
+    match = re.fullmatch(
+        r"\s*VipSellCheck\(\s*(?P<quote>['\"])"
+        r"(?P<token>[A-Za-z0-9_-]{1,128})(?P=quote)\s*\)\s*;?\s*",
+        str(onclick or ""),
+    )
+    return match.group("token") if match else None
+
+
+def _safe_date_button_handler(onclick):
+    source = str(onclick or "").strip()
+    if not source:
+        return True
+    match = re.fullmatch(
+        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*"
+        r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\((?P<args>.*)\)\s*;?",
+        source,
+    )
+    if not match:
+        return False
+    arguments = match.group("args").strip()
+    if not arguments:
+        return True
+    return all(
+        re.fullmatch(r"(?P<q>['\"])[A-Za-z0-9_-]{1,128}(?P=q)", item.strip())
+        for item in arguments.split(",")
+    )
+
+
+def _classify_date_control(fingerprint, current_url):
+    control = dict(fingerprint)
+    tag_name = control.get("tag_name", "").upper()
+    onclick = control.get("onclick", "")
+    if tag_name == "A":
+        if onclick or any(control.get(key, "") for key in ("target", "download", "ping")):
+            return None
+        target = _parse_date_target_url(
+            control.get("resolved_href") or control.get("href"), current_url
+        )
+        return ("anchor_native", target, "") if target else None
+
+    target = _parse_date_target(onclick, current_url)
+    if target:
+        return "normal", target, ""
+    vip_token = _parse_vip_date_token(onclick, current_url)
+    if vip_token:
+        return "vip_native", None, vip_token
+    control_type = control.get("type", "").lower()
+    if (
+        tag_name != "BUTTON"
+        or control.get("formaction", "")
+        or control_type not in ("", "button")
+        or (not control_type and control.get("has_form"))
+        or not _safe_date_button_handler(onclick)
+    ):
+        return None
+    return "structural_native", None, ""
+
+
+def _date_candidates(snapshot, config_dict):
+    candidates = []
+    for row_index, (row_text, controls) in enumerate(snapshot.rows):
+        actionable = [
+            (index, fingerprint)
+            for index, (is_actionable, fingerprint) in enumerate(controls)
+            if is_actionable
+        ]
+        if len(actionable) != 1 or not row_text:
+            continue
+        if util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
+            continue
+        control_index, fingerprint = actionable[0]
+        action = _classify_date_control(fingerprint, snapshot.page_url)
+        if action:
+            candidates.append({
+                "text": row_text,
+                "row_index": row_index,
+                "control_index": control_index,
+                "fingerprint": fingerprint,
+                "action": action,
+            })
+    return candidates
+
+
+def select_date_snapshot(snapshot, config_dict):
+    """Choose one safe date action from an immutable table snapshot."""
+    snapshot = parse_date_snapshot(snapshot)
+    if (
+        not isinstance(snapshot, DateSnapshot)
+        or not snapshot.ok
+        or not snapshot.page_url
+        or not snapshot.document_id
+        or classify_utiki_page(snapshot.page_url) != PageKind.DATE
+        or not 0 < len(snapshot.rows) <= 200
+    ):
+        return None
+    candidates = _date_candidates(snapshot, config_dict)
+    date_config = config_dict.get("date_auto_select", {})
+    target_index = choose_candidate_index(
+        candidates,
+        date_config.get("date_keyword", "").strip(),
+        date_config.get("mode", "from top to bottom"),
+        config_dict.get("date_auto_fallback", False),
+    )
+    if target_index is None:
+        return None
+    target = candidates[target_index]
+    action_kind, date_target, action_token = target["action"]
+    date_target = date_target or {}
+    return DateActionPlan(
+        row_index=target["row_index"],
+        control_index=target["control_index"],
+        text=target["text"],
+        action_kind=action_kind,
+        onclick=dict(target["fingerprint"]).get("onclick", ""),
+        control_fingerprint=target["fingerprint"],
+        target_url=date_target.get("target_url", ""),
+        performance_id=date_target.get("performance_id", ""),
+        product_id=date_target.get("product_id", ""),
+        tenant_path=date_target.get("tenant_path", ""),
+        host=date_target.get("host", ""),
+        map_namespace=date_target.get("map_namespace", ""),
+        fast_area_prefetch=bool(date_target.get("fast_area_prefetch", False)),
+        action_token=action_token,
+    )
+
+
+def date_plan_matches_snapshot(snapshot, plan):
+    """Verify that one immutable plan is derived from the supplied snapshot."""
+    if not isinstance(snapshot, DateSnapshot) or not isinstance(
+        plan, DateActionPlan
+    ):
+        return False
+    if (
+        not snapshot.ok or not snapshot.page_url or not snapshot.document_id
+        or classify_utiki_page(snapshot.page_url) != PageKind.DATE
+        or type(plan.row_index) is not int or type(plan.control_index) is not int
+        or type(plan.fast_area_prefetch) is not bool
+        or not 0 <= plan.row_index < len(snapshot.rows)
+    ):
+        return False
+    row_text, controls = snapshot.rows[plan.row_index]
+    if not 0 <= plan.control_index < len(controls):
+        return False
+    actionable, fingerprint = controls[plan.control_index]
+    if (
+        not actionable or plan.text != row_text
+        or plan.control_fingerprint != fingerprint
+        or tuple(key for key, _value in fingerprint)
+        != DATE_CONTROL_FINGERPRINT_FIELDS
+        or plan.onclick != dict(fingerprint)["onclick"]
+    ):
+        return False
+    action = _classify_date_control(fingerprint, snapshot.page_url)
+    if not action:
+        return False
+    action_kind, target, action_token = action
+    target = target or {}
+    return (
+        plan.action_kind == action_kind
+        and plan.action_token == action_token
+        and (
+            plan.target_url, plan.performance_id, plan.product_id,
+            plan.tenant_path, plan.host, plan.map_namespace,
+            plan.fast_area_prefetch,
+        ) == (
+            target.get("target_url", ""), target.get("performance_id", ""),
+            target.get("product_id", ""), target.get("tenant_path", ""),
+            target.get("host", ""), target.get("map_namespace", ""),
+            bool(target.get("fast_area_prefetch", False)),
+        )
+    )
 
 
 def availability_has_tickets(status_text, ticket_number=1):

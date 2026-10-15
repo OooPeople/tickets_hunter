@@ -33,8 +33,12 @@ from refresh_coordinator import (
     UTK_SPORTS_SCOPE,
     get_shared_refresh_coordinator,
 )
+from .auth import (
+    cookie_domain_is_in_scope,
+    get_tenant_auth_profile,
+    parse_ctbc_cookie_string,
+)
 from .profiles import (
-    CTBC_DOMAIN,
     CTBC_MAP_DOMAIN,
     PageKind,
     TENANT_PROFILES,
@@ -149,53 +153,16 @@ def _ctbc_pending_navigation_is_current(identity, pending):
     )
 
 
-def parse_ctbc_cookie_string(raw_value):
-    """Return CTBC session cookie pairs from a Cookie header or JSON export."""
-    raw = str(raw_value or "").strip()
-    if not raw:
-        return []
-
-    cookie_pairs = []
-    if raw.startswith("{") or raw.startswith("["):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                if isinstance(parsed.get("cookies"), list):
-                    parsed = parsed["cookies"]
-                else:
-                    parsed = [{"name": name, "value": value} for name, value in parsed.items()]
-            if isinstance(parsed, list):
-                for item in parsed:
-                    if isinstance(item, dict):
-                        cookie_pairs.append((str(item.get("name", "")).strip(), str(item.get("value", ""))))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            cookie_pairs = []
-
-    if not cookie_pairs:
-        if raw.lower().startswith("cookie:"):
-            raw = raw.split(":", 1)[1].strip()
-        for part in raw.replace("\r", ";").replace("\n", ";").split(";"):
-            name, separator, value = part.strip().partition("=")
-            if separator:
-                cookie_pairs.append((name.strip(), value.strip()))
-
-    # ASP.NET antiforgery and analytics cookies are intentionally excluded.
-    # The page generates a fresh antiforgery token after the injected session
-    # is reloaded, while stale antiforgery cookies would make POSTs fail.
-    result = []
-    seen = set()
-    for name, value in cookie_pairs:
-        if not name.startswith("CTBC_") or "|" not in name or not value or name in seen:
-            continue
-        result.append((name, value))
-        seen.add(name)
-    return result
-
-
 async def nodriver_ctbc_inject_cookies(tab, config_dict):
     """Inject a copied CTBC cookie set; account/password remains the fallback."""
     debug = util.create_debug_logger(config_dict)
-    raw_value = config_dict.get("accounts", {}).get("ctbc_cookie", "")
+    auth_profile = get_tenant_auth_profile(str(tab.target.url))
+    if not auth_profile or not auth_profile.supports_cookie_login:
+        debug.log("[CTBC COOKIE] Cookie login is unavailable for this tenant")
+        return False
+    raw_value = config_dict.get("accounts", {}).get(
+        auth_profile.cookie_config_key, ""
+    )
     cookies = parse_ctbc_cookie_string(raw_value)
     if not cookies:
         if str(raw_value or "").strip():
@@ -205,12 +172,10 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
     try:
         existing_cookies = await tab.browser.cookies.get_all()
         for cookie in existing_cookies:
-            cookie_domain = str(cookie.domain or "").lstrip(".").lower()
-            is_ctbc_domain = (
-                cookie_domain == "ctbcsports.com"
-                or cookie_domain.endswith(".ctbcsports.com")
-            )
-            if cookie.name.startswith("CTBC_") and is_ctbc_domain:
+            if (
+                cookie.name.startswith(auth_profile.cookie_name_prefix)
+                and cookie_domain_is_in_scope(auth_profile, cookie.domain)
+            ):
                 try:
                     await tab.send(cdp.network.delete_cookies(
                         name=cookie.name,
@@ -228,7 +193,7 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
             result = await tab.send(cdp.network.set_cookie(
                 name=name,
                 value=value,
-                domain=CTBC_DOMAIN,
+                domain=auth_profile.cookie_set_host,
                 path="/",
                 secure=True,
                 http_only=True,
@@ -2879,14 +2844,28 @@ async def _fill_ctbc_inline_login(tab, config_dict):
     if state.get("account") and state.get("password"):
         return True
 
+    auth_profile = get_tenant_auth_profile(str(tab.target.url))
+    if not auth_profile or not auth_profile.supports_inline_login:
+        return False
     accounts = config_dict.get("accounts", {})
-    account = str(state.get("account") or accounts.get("ctbc_account", "")).strip()
-    password = str(state.get("password") or accounts.get("ctbc_password", "")).strip()
+    account = str(
+        state.get("account") or accounts.get(auth_profile.account_key, "")
+    ).strip()
+    password = str(
+        state.get("password") or accounts.get(auth_profile.password_key, "")
+    ).strip()
     if not account or not password:
         return False
 
     result = await tab.evaluate(f'''
         (() => {{
+            const expectedOrigin = {json.dumps(auth_profile.inline_login_origin)};
+            const currentUrl = new URL(location.href);
+            if (
+                currentUrl.origin !== expectedOrigin ||
+                currentUrl.username ||
+                currentUrl.password
+            ) return false;
             const account = document.querySelector('#LOGIN_ID');
             const password = document.querySelector('#LOGIN_PWD');
             if (!account || !password) return false;

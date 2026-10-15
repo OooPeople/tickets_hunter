@@ -14,6 +14,10 @@ from tests.ctbc_support import (
 import platforms.ctbc as legacy_ctbc
 import platforms.utiki as utiki
 from platforms.utiki import workflow
+from platforms.utiki.auth import (
+    cookie_domain_is_in_scope,
+    get_tenant_auth_profile,
+)
 from platforms.utiki.profiles import (
     PageKind,
     classify_utiki_page,
@@ -162,6 +166,28 @@ class CtbcPureSelectionTest(unittest.TestCase):
             [("CTBC_BROTHERS|BROTHERS|_1", "abc")],
             parse_ctbc_cookie_string(raw),
         )
+
+    def test_tenant_auth_capabilities_keep_ctbc_credentials_scoped(self):
+        ctbc = get_tenant_auth_profile(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1"
+        )
+        dragons = get_tenant_auth_profile(
+            "https://tix.wdragons.com/UTK0205_?PERFORMANCE_ID=P1"
+        )
+
+        self.assertTrue(ctbc.supports_cookie_login)
+        self.assertTrue(ctbc.supports_inline_login)
+        self.assertEqual("ctbc_account", ctbc.account_key)
+        self.assertEqual("ctbc_password", ctbc.password_key)
+        self.assertTrue(cookie_domain_is_in_scope(ctbc, ".ctbcsports.com"))
+        self.assertTrue(cookie_domain_is_in_scope(ctbc, "login.ctbcsports.com"))
+        self.assertFalse(cookie_domain_is_in_scope(ctbc, "evilctbcsports.com"))
+        self.assertFalse(cookie_domain_is_in_scope(ctbc, "ctbcsports.com.evil.test"))
+
+        self.assertFalse(dragons.supports_cookie_login)
+        self.assertFalse(dragons.supports_inline_login)
+        self.assertEqual("", dragons.account_key)
+        self.assertEqual("", dragons.password_key)
 
     def test_page_routing(self):
         base = "https://tix.ctbcsports.com/BROTHERS/"

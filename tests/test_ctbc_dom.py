@@ -22,6 +22,7 @@ from platforms.utiki.workflow import (
     _ctbc_attest_fast_destination,
     _ctbc_captcha_and_submit,
     _ctbc_fast_marker_matches_pending,
+    _fill_ctbc_inline_login,
     _ctbc_pending_from_fast_marker,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
@@ -55,6 +56,86 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.addCleanup(_state[state_name].pop, submit_key, None)
         return submit_key
 
+    async def test_inline_login_never_reuses_ctbc_credentials_for_dragons(self):
+        class LoginTab:
+            def __init__(self, url, navigate_before_commit=False):
+                self.target = types.SimpleNamespace(url=url)
+                self.scripts = []
+                self.navigate_before_commit = navigate_before_commit
+                self.credentials_written = False
+
+            async def evaluate(self, script):
+                self.scripts.append(script)
+                if len(self.scripts) == 1:
+                    return {"required": True, "account": "", "password": ""}
+                if self.navigate_before_commit:
+                    self.target.url = (
+                        "https://tix.wdragons.com/UTK0205_?PERFORMANCE_ID=P1"
+                    )
+                has_atomic_origin_gate = (
+                    'const expectedOrigin = "https://tix.ctbcsports.com";' in script
+                    and "const currentUrl = new URL(location.href);" in script
+                    and "currentUrl.origin !== expectedOrigin" in script
+                    and "currentUrl.username" in script
+                    and "currentUrl.password" in script
+                )
+                if (
+                    has_atomic_origin_gate
+                    and not self.target.url.startswith(
+                        "https://tix.ctbcsports.com/BROTHERS/"
+                    )
+                ):
+                    return False
+                self.credentials_written = True
+                return True
+
+        cfg = config()
+        cfg["accounts"]["ctbc_account"] = "ctbc-test-account"
+        cfg["accounts"]["ctbc_password"] = "ctbc-test-password"
+        dragons = LoginTab(
+            "https://tix.wdragons.com/UTK0205_?PERFORMANCE_ID=P1"
+        )
+        ctbc = LoginTab(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1"
+        )
+
+        self.assertFalse(await _fill_ctbc_inline_login(dragons, cfg))
+        self.assertEqual(1, len(dragons.scripts))
+        self.assertNotIn("ctbc-test-account", dragons.scripts[0])
+        self.assertNotIn("ctbc-test-password", dragons.scripts[0])
+
+        self.assertTrue(await _fill_ctbc_inline_login(ctbc, cfg))
+        self.assertEqual(2, len(ctbc.scripts))
+        self.assertIn("ctbc-test-account", ctbc.scripts[1])
+        self.assertIn("ctbc-test-password", ctbc.scripts[1])
+        self.assertTrue(ctbc.credentials_written)
+
+        raced = LoginTab(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1",
+            navigate_before_commit=True,
+        )
+        self.assertFalse(await _fill_ctbc_inline_login(raced, cfg))
+        self.assertFalse(raced.credentials_written)
+
+    async def test_cookie_injection_rechecks_the_exact_tenant(self):
+        get_all = AsyncMock(return_value=[])
+        send = AsyncMock(return_value=True)
+        tab = types.SimpleNamespace(
+            target=types.SimpleNamespace(
+                url="https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+            ),
+            browser=types.SimpleNamespace(
+                cookies=types.SimpleNamespace(get_all=get_all)
+            ),
+            send=send,
+        )
+        cfg = config()
+        cfg["accounts"]["ctbc_cookie"] = "CTBC_IMPORTED|BROTHERS|_1=session"
+
+        self.assertFalse(await nodriver_ctbc_inject_cookies(tab, cfg))
+        get_all.assert_not_awaited()
+        send.assert_not_awaited()
+
     async def test_cookie_cleanup_requires_ctbc_dns_label_boundary(self):
         cookies = [
             types.SimpleNamespace(
@@ -71,6 +152,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             ),
         ]
         tab = types.SimpleNamespace(
+            target=types.SimpleNamespace(
+                url="https://tix.ctbcsports.com/BROTHERS/"
+            ),
             browser=types.SimpleNamespace(
                 cookies=types.SimpleNamespace(
                     get_all=AsyncMock(return_value=cookies)
@@ -97,7 +181,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(
             [".ctbcsports.com", "login.ctbcsports.com"], deleted_domains
         )
-        self.assertEqual(1, sum(command[0] == "set" for command in commands))
+        set_commands = [command for command in commands if command[0] == "set"]
+        self.assertEqual(1, len(set_commands))
+        self.assertEqual("tix.ctbcsports.com", set_commands[0][1]["domain"])
 
     async def test_explicit_ticket_type_keyword_overrides_global_exclusions(self):
         full_counter = FakeElement(attrs={"id": "FULL", "val": "內野全票-NT$800"})

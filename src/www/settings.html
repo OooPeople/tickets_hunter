@@ -473,6 +473,16 @@
           </div>
         </div>
         <div class="row mb-3" data-under="ctbc">
+          <label for="ctbc_seat_selection_mode" class="col-sm-2 col-form-label">職棒選位方式</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <select class="form-select" id="ctbc_seat_selection_mode">
+              <option value="manual" selected>手動劃位</option>
+              <option value="computer">網站電腦選位</option>
+            </select>
+            <div class="form-text">預設使用手動劃位。網站電腦選位只會在已驗證支援的平台啟用，並繼續依區域關鍵字選擇票區。</div>
+          </div>
+        </div>
+        <div class="row mb-3" data-under="ctbc">
           <label for="ctbc_ticket_type_keyword" class="col-sm-2 col-form-label">職棒票種關鍵字</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input class="form-control" id="ctbc_ticket_type_keyword" value="全票" placeholder="例如：全票" />

@@ -2,16 +2,12 @@
 """uTiki2 sports ticketing workflow.
 
 The CTBC site uses the same UTK naming convention as a few older ticketing
-sites. Keep all browser side effects and mutable runtime state in this module.
+sites. This module owns the single per-tab runtime and purchase workflow.
 """
 
-import asyncio
 import base64
-import contextlib
-import glob
 import hashlib
 import json
-import os
 import re
 import time
 import uuid
@@ -20,19 +16,14 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 from zendriver import cdp
 
 import util
-from global_settings import get_global_settings_path, load_global_settings
 from nodriver_common import (
     check_and_handle_pause,
-    check_and_handle_quit,
     nodriver_get_captcha_image_from_dom_snapshot,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
 )
-from refresh_coordinator import (
-    UTK_SPORTS_SCOPE,
-    get_shared_refresh_coordinator,
-)
+from . import refresh as refresh_engine
 from .auth import (
     cookie_domain_is_in_scope,
     get_tenant_auth_profile,
@@ -109,14 +100,6 @@ CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
 CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
 CTBC_SEAT_STALE_RELOAD_REASON = "requested seats are unavailable"
-UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
-UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
-UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
-# This must cover the coordinator's default 5-second fail-closed retry.  Every
-# pre-report writer uses the same-or-longer duration, so a later process cannot
-# shorten a marker written after a transient SQLite failure.
-UTK_EMERGENCY_MARKER_SECONDS = 6.0
-UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
 _state = {
     "tabs": {},
     "cancel_tasks": set(),
@@ -202,16 +185,6 @@ def _ctbc_purchase_runtime(tab):
 def _ctbc_tab_state_key(tab):
     identity = _ctbc_tab_identity(tab)
     return (identity, str(tab.target.url))
-
-
-def _pop_reload_request_if_token(identity, request_token):
-    """Remove only the logical request that the current coroutine captured."""
-    refresh = _ctbc_runtime_for_identity(identity)["refresh"]
-    current = refresh["reload_request"]
-    if current and current.get("request_token") == request_token:
-        refresh["reload_request"] = None
-        return current
-    return None
 
 
 def _pop_pending_navigation_if_nonce(identity, nonce):
@@ -464,159 +437,17 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
     )
 
 
-def _utk_refresh_settings(*, force_refresh=False):
-    """Hot-read the one global UTK Sports pacing configuration."""
-    settings_path = get_global_settings_path() if force_refresh else None
-    return load_global_settings(settings_path).get("utk_sports", {})
+def _utk_refresh_context(tab):
+    identity = _ctbc_tab_identity(tab)
+    return (
+        _ctbc_runtime_for_identity(identity),
+        refresh_engine.build_refresh_identity(identity),
+    )
 
 
 def _utk_refresh_identity(tab):
     """Return one stable, process-unique queue identity for this browser tab."""
-    return f"{util.get_instance_id()}:{os.getpid()}:{_ctbc_tab_identity(tab)}"
-
-
-def _utk_emergency_marker_path():
-    return os.path.join(
-        util.get_app_root(),
-        ".runtime",
-        "utk_sports_emergency_"
-        f"{os.getpid()}_{UTK_EMERGENCY_PROCESS_TOKEN}_{uuid.uuid4().hex}.until",
-    )
-
-
-def _mark_utk_emergency_window(seconds=UTK_EMERGENCY_MARKER_SECONDS):
-    """Best-effort cross-process stopgap while a 429 DB report is pending."""
-    marker_path = _utk_emergency_marker_path()
-    marker_dir = os.path.dirname(marker_path)
-    temp_path = f"{marker_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    try:
-        os.makedirs(marker_dir, exist_ok=True)
-        new_deadline = time.time() + max(float(seconds), UTK_EMERGENCY_MARKER_SECONDS)
-        with open(temp_path, "w", encoding="utf-8") as marker_file:
-            marker_file.write(str(new_deadline))
-            marker_file.flush()
-            os.fsync(marker_file.fileno())
-        os.replace(temp_path, marker_path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(temp_path)
-
-
-def _utk_emergency_remaining():
-    marker_pattern = os.path.join(
-        util.get_app_root(), ".runtime", "utk_sports_emergency_*.until"
-    )
-    deadline = 0.0
-    now = time.time()
-    for marker_path in glob.glob(marker_pattern):
-        try:
-            with open(marker_path, encoding="utf-8") as marker_file:
-                marker_deadline = float(marker_file.read().strip())
-        except (OSError, TypeError, ValueError):
-            with contextlib.suppress(OSError):
-                os.remove(marker_path)
-            continue
-        if marker_deadline <= now:
-            with contextlib.suppress(OSError):
-                os.remove(marker_path)
-            continue
-        deadline = max(deadline, marker_deadline)
-    return max(deadline - now, 0.0)
-
-
-def _classify_utk_document_state(snapshot):
-    if not isinstance(snapshot, dict) or not snapshot.get("ready"):
-        return "unknown"
-    body_text = str(snapshot.get("body_text") or "")
-    has_code = bool(
-        re.search(r"(^|\s|[:：])(?:HTTP\s*)?429(?:\s|[-:：]|$)", body_text, re.I)
-    )
-    has_message = bool(re.search(r"請求頻率過高|Too Many Requests", body_text, re.I))
-    if has_code and has_message and not snapshot.get("has_normal_root"):
-        return "blocked"
-    if snapshot.get("has_normal_root"):
-        return "normal"
-    if not snapshot.get("requires_normal_root", True):
-        return "unverified"
-    return "unknown"
-
-
-async def _inspect_utk_document(tab, url=None, *, force=False):
-    """Classify the current document without mistaking a loading page for 429."""
-    current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
-    document = _ctbc_tab_runtime(tab)["document"]
-    cached = document["snapshot"]
-    if (
-        not force
-        and cached
-        and cached.get("url") == current_url
-        and time.monotonic() - cached.get("checked_at", 0.0) < 0.2
-    ):
-        return dict(cached["snapshot"])
-    page_type = _get_ctbc_page_type(current_url)
-    normal_selector = {
-        "date": "#PerformanceListTable",
-        "area": ".seats, #mapdata",
-        "seat": "#TBL, .ticket",
-        "general_admission": "#table_tickettype, .ticket",
-    }.get(page_type)
-    selector_expression = (
-        f"!!document.querySelector({json.dumps(normal_selector)})"
-        if normal_selector
-        else "false"
-    )
-    try:
-        raw_value = await tab.evaluate(f'''
-            (() => {{
-                const ready = document.readyState === 'interactive' ||
-                    document.readyState === 'complete';
-                const bodyText = document.body
-                    ? (document.body.innerText || document.body.textContent || '')
-                        .replace(/\\s+/g, ' ').trim().slice(0, 12000)
-                    : '';
-                const normalRoot = {selector_expression};
-                const timeOrigin = Number(performance.timeOrigin ||
-                    (performance.timing && performance.timing.navigationStart) || 0);
-                return JSON.stringify({{
-                    ready,
-                    body_text: bodyText,
-                    document_id: `${{location.href}}|${{timeOrigin}}`,
-                    document_started_at: timeOrigin > 0 ? timeOrigin / 1000 : 0,
-                    url: location.href,
-                    ready_state: document.readyState,
-                    has_normal_root: normalRoot,
-                    requires_normal_root: {str(bool(normal_selector)).lower()}
-                }});
-            }})()
-        ''')
-        snapshot = _decode_ctbc_json_result(raw_value)
-    except Exception:
-        snapshot = None
-    if not isinstance(snapshot, dict):
-        return {
-            "classification": "unknown",
-            "document_id": current_url,
-            "document_started_at": 0.0,
-            "url": current_url,
-            "ready_state": "",
-            "has_normal_root": False,
-            "requires_normal_root": bool(normal_selector),
-        }
-    snapshot["classification"] = _classify_utk_document_state(snapshot)
-    snapshot["document_id"] = str(snapshot.get("document_id") or current_url)
-    try:
-        snapshot["document_started_at"] = max(
-            float(snapshot.get("document_started_at") or 0.0), 0.0
-        )
-    except (TypeError, ValueError):
-        snapshot["document_started_at"] = 0.0
-    snapshot["url"] = str(snapshot.get("url") or current_url)
-    document["snapshot"] = {
-        "url": snapshot["url"],
-        "checked_at": time.monotonic(),
-        "snapshot": dict(snapshot),
-    }
-    return snapshot
+    return refresh_engine.build_refresh_identity(_ctbc_tab_identity(tab))
 
 
 async def nodriver_utk_sports_cancel_refresh(
@@ -626,247 +457,22 @@ async def nodriver_utk_sports_cancel_refresh(
     wait=False,
     abandon_probe=False,
 ):
-    """Cancel pending work and optionally release an owned recovery probe."""
-    identity = _ctbc_tab_identity(tab)
-    refresh = _ctbc_runtime_for_identity(identity)["refresh"]
-    request = refresh["reload_request"]
-    refresh["reload_request"] = None
-    probe = refresh["recovery_probe"] if abandon_probe else None
-    if probe is not None:
-        probe["abandon_requested"] = True
-    if request is None and probe is None:
-        return False
-    coordinator = get_shared_refresh_coordinator()
-    async def cancel_all():
-        changed = False
-        if request is not None:
-            changed = await coordinator.cancel_request(
-                UTK_SPORTS_SCOPE,
-                _utk_refresh_identity(tab),
-                request_token=request.get("request_token"),
-            ) or changed
-        if probe is not None:
-            completion = await coordinator.complete_recovery_probe(
-                UTK_SPORTS_SCOPE,
-                _utk_refresh_identity(tab),
-                probe.get("permit_id", ""),
-                success=False,
-            )
-            if completion.accepted or "not owned" in str(completion.error or ""):
-                current = refresh["recovery_probe"]
-                if current and current.get("permit_id") == probe.get("permit_id"):
-                    refresh["recovery_probe"] = None
-            changed = bool(completion.accepted) or changed
-        return changed
-
-    cancel_call = cancel_all()
-    if wait:
-        return await cancel_call
-    task = asyncio.create_task(cancel_call)
-    _state["cancel_tasks"].add(task)
-    task.add_done_callback(_state["cancel_tasks"].discard)
-    return True
+    """Thin facade over the canonical uTiki refresh engine."""
+    runtime, refresh_identity = _utk_refresh_context(tab)
+    return await refresh_engine.cancel_refresh(
+        tab,
+        runtime,
+        refresh_identity,
+        _state["cancel_tasks"],
+        reason,
+        wait=wait,
+        abandon_probe=abandon_probe,
+    )
 
 
 def nodriver_utk_sports_consume_reload_event(tab):
     """Tell the outer router that a same-URL reload needs fresh CF detection."""
-    refresh = _ctbc_tab_runtime(tab)["refresh"]
-    if not refresh["reload_event"]:
-        return False
-    refresh["reload_event"] = False
-    return True
-
-
-async def _report_utk_rate_limit(
-    tab,
-    config_dict,
-    document_id,
-    probe_permit_id=None,
-    document_started_at=0.0,
-    suspected=False,
-):
-    settings = _utk_refresh_settings()
-    if not settings.get("enabled", True):
-        return None
-    refresh = _ctbc_tab_runtime(tab)["refresh"]
-    coordinator = get_shared_refresh_coordinator()
-    _mark_utk_emergency_window()
-    report = await coordinator.report_rate_limited(
-        UTK_SPORTS_SCOPE,
-        _utk_refresh_identity(tab),
-        initial_cooldown_seconds=settings.get("initial_cooldown_seconds", 60),
-        max_cooldown_seconds=settings.get("max_cooldown_seconds", 240),
-        probe_permit_id=probe_permit_id,
-        document_started_at=document_started_at,
-    )
-    debug = util.create_debug_logger(config_dict)
-    if report.accepted:
-        refresh["rate_limit_observation"] = document_id
-        refresh["rate_limit_retry"] = 0.0
-    else:
-        retry_seconds = max(float(report.retry_after_seconds or 1.0), 0.5)
-        refresh["rate_limit_retry"] = time.monotonic() + retry_seconds
-        _mark_utk_emergency_window(retry_seconds + 1.0)
-    if report.accepted and report.new_incident:
-        if suspected:
-            debug.log(
-                "[UTK RATE] Ticket page stayed unrecognizable; starting a "
-                f"shared safety cooldown for {report.retry_after_seconds:.1f}s"
-            )
-        else:
-            debug.log(
-                "[UTK RATE] HTTP 429 detected; all baseball instances cooling down "
-                f"for {report.retry_after_seconds:.1f}s "
-                f"(level {report.consecutive_incidents})"
-            )
-    elif report.error:
-        debug.log(f"[UTK RATE] Failed to record HTTP 429 safely: {report.error}")
-    return report
-
-
-async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
-    """Resolve a probe only after a different document becomes normal or 429."""
-    refresh = _ctbc_tab_runtime(tab)["refresh"]
-    probe = refresh["recovery_probe"]
-    if not probe:
-        return False
-    now = time.monotonic()
-    probe.setdefault("started_at", now)
-    probe.setdefault(
-        "next_renew_at", now + UTK_RECOVERY_PROBE_RENEW_SECONDS
-    )
-    coordinator = get_shared_refresh_coordinator()
-    if now - probe.get("started_at", now) >= UTK_RECOVERY_PROBE_MAX_SECONDS:
-        completion = await coordinator.complete_recovery_probe(
-            UTK_SPORTS_SCOPE,
-            _utk_refresh_identity(tab),
-            probe.get("permit_id", ""),
-            success=False,
-        )
-        # The hard lifecycle limit has been reached. Stop local renewals even
-        # if SQLite is temporarily unavailable; the DB lease then expires
-        # naturally instead of being hammered on every 100ms health pass.
-        current = refresh["recovery_probe"]
-        if current and current.get("permit_id") == probe.get("permit_id"):
-            refresh["recovery_probe"] = None
-        return True
-    if not probe.get("lease_task") and now >= probe.get("next_renew_at", 0.0):
-        renewed = await coordinator.renew_recovery_probe(
-            UTK_SPORTS_SCOPE, probe.get("permit_id", "")
-        )
-        if renewed is False:
-            refresh["recovery_probe"] = None
-            return False
-        probe["next_renew_at"] = now + (
-            UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
-        )
-    if snapshot.get("document_id") == probe.get("source_document_id"):
-        return False
-    classification = snapshot.get("classification")
-    if classification == "unknown":
-        return False
-    if time.monotonic() < refresh["rate_limit_retry"]:
-        return True
-    if classification == "blocked":
-        report = await _report_utk_rate_limit(
-            tab,
-            config_dict,
-            snapshot.get("document_id", ""),
-            probe_permit_id=probe.get("permit_id"),
-            document_started_at=snapshot.get("document_started_at", 0.0),
-        )
-        if report and report.accepted:
-            refresh["recovery_probe"] = None
-    else:
-        settings = _utk_refresh_settings()
-        if settings.get("enabled", True):
-            completion = await coordinator.complete_recovery_probe(
-                UTK_SPORTS_SCOPE,
-                _utk_refresh_identity(tab),
-                probe.get("permit_id", ""),
-                success=(classification == "normal"),
-            )
-            if completion.accepted:
-                refresh["recovery_probe"] = None
-                if classification == "normal":
-                    util.create_debug_logger(config_dict).log(
-                        "[UTK RATE] Recovery probe succeeded; shared refresh resumed"
-                    )
-            elif "not owned" in str(completion.error or ""):
-                refresh["recovery_probe"] = None
-            else:
-                refresh["rate_limit_retry"] = time.monotonic() + 1.0
-    return True
-
-
-async def _utk_document_guard(tab, config_dict, url=None):
-    """Apply the 429 circuit breaker before any UTK page-specific action."""
-    settings = _utk_refresh_settings()
-    snapshot = await _inspect_utk_document(tab, url)
-    runtime = _ctbc_tab_runtime(tab)
-    document = runtime["document"]
-    refresh = runtime["refresh"]
-    document_id = snapshot.get("document_id")
-    previous_document_id = document["last_document"]
-    if previous_document_id and previous_document_id != document_id:
-        refresh["reload_event"] = True
-    document["last_document"] = document_id
-    if not settings.get("enabled", True):
-        return "disabled", snapshot
-    probe_handled = await _finish_utk_recovery_probe(tab, config_dict, snapshot)
-    classification = snapshot.get("classification", "unknown")
-    if classification == "unknown":
-        if refresh["rate_limit_observation"] == document_id:
-            return "blocked", snapshot
-        unknown = document["unknown_document"]
-        if not unknown or unknown.get("document_id") != document_id:
-            unknown = {
-                "document_id": document_id,
-                "first_seen_at": time.monotonic(),
-            }
-            document["unknown_document"] = unknown
-        # Unknown is a local fail-closed state, not evidence of HTTP 429.
-        # Cloudflare interstitials, loading/empty documents and CDP failures can
-        # all remain unknown for a long time.  Promoting those to a shared
-        # incident would unnecessarily cool down every CTBC/Dragons process.
-        # Only the explicit code+message classifier above may open a global
-        # rate-limit incident.
-        return "unknown", snapshot
-
-    document["unknown_document"] = None
-    if classification == "blocked":
-        request = refresh["reload_request"]
-        request_is_stale = bool(request) and (
-            request.get("document_id") != snapshot.get("document_id")
-            or request.get("expected_url") != snapshot.get("url")
-        )
-        if (
-            not request
-            or not request.get("allow_blocked_recovery")
-            or request_is_stale
-        ):
-            await nodriver_utk_sports_cancel_refresh(tab, "HTTP 429", wait=True)
-        if (
-            not probe_handled
-            and refresh["rate_limit_observation"]
-            != snapshot.get("document_id")
-            and time.monotonic() >= refresh["rate_limit_retry"]
-        ):
-            await _report_utk_rate_limit(
-                tab,
-                config_dict,
-                snapshot.get("document_id", ""),
-                document_started_at=snapshot.get("document_started_at", 0.0),
-            )
-        return "blocked", snapshot
-
-    request = refresh["reload_request"]
-    if request and (
-        request.get("expected_url") != snapshot.get("url")
-        or request.get("document_id") != snapshot.get("document_id")
-    ):
-        await nodriver_utk_sports_cancel_refresh(tab, "document changed", wait=True)
-    return classification, snapshot
+    return refresh_engine.consume_reload_event(_ctbc_tab_runtime(tab))
 
 
 async def nodriver_utk_sports_reload(
@@ -879,307 +485,20 @@ async def nodriver_utk_sports_reload(
     allow_blocked_recovery=False,
     dispatch_deadline=None,
 ):
-    """Poll once and reload only after obtaining the shared one-shot permit."""
-    debug = util.create_debug_logger(config_dict)
-    settings = _utk_refresh_settings()
-    if not settings.get("enabled", True):
-        await nodriver_utk_sports_cancel_refresh(
-            tab,
-            "shared protection disabled",
-            wait=True,
-            abandon_probe=True,
-        )
-        interval = config_dict.get("advanced", {}).get(
-            "auto_reload_page_interval", 0.0
-        )
-        if apply_local_interval:
-            delay = float(interval) if interval and interval > 0 else 1.0
-            deadline = time.monotonic() + delay
-            while time.monotonic() < deadline:
-                if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
-                    return False
-                await asyncio.sleep(min(0.25, deadline - time.monotonic()))
-        if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
-            return False
-        # The switch may have been re-enabled while this tab was serving its
-        # legacy local delay.  Re-enter through the coordinator next loop
-        # instead of allowing one final uncoordinated network request.
-        if _utk_refresh_settings(force_refresh=True).get("enabled", True):
-            return False
-        try:
-            await tab.reload()
-            runtime = _ctbc_tab_runtime(tab)
-            runtime["document"]["snapshot"] = None
-            runtime["refresh"]["reload_event"] = True
-            return True
-        except Exception as exc:
-            debug.log(f"[CTBC] Reload failed: {exc}")
-            return False
-
-    if dispatch_deadline is not None:
-        remaining = float(dispatch_deadline) - time.monotonic()
-        if remaining <= 0:
-            return False
-        try:
-            classification, snapshot = await asyncio.wait_for(
-                _utk_document_guard(tab, config_dict), timeout=remaining
-            )
-        except asyncio.TimeoutError:
-            return False
-    else:
-        classification, snapshot = await _utk_document_guard(tab, config_dict)
-    if classification == "blocked" and not allow_blocked_recovery:
-        return False
-    if classification == "unknown" and not allow_unknown_document:
-        return False
-
-    identity = _ctbc_tab_identity(tab)
-    refresh = _ctbc_runtime_for_identity(identity)["refresh"]
-    request = refresh["reload_request"]
-    if request is None:
-        interval = config_dict.get("advanced", {}).get(
-            "auto_reload_page_interval", 0.0
-        )
-        local_delay = (
-            (float(interval) if interval and interval > 0 else 1.0)
-            if apply_local_interval
-            else 0.0
-        )
-        request = {
-            "document_id": snapshot.get("document_id"),
-            "expected_url": snapshot.get("url"),
-            "eligible_at": time.monotonic() + local_delay,
-            "next_poll_at": 0.0,
-            "reason": reason,
-            "allow_blocked_recovery": bool(allow_blocked_recovery),
-            "request_token": uuid.uuid4().hex,
-        }
-        refresh["reload_request"] = request
-        debug.log(f"[CTBC] {reason}; queued for shared refresh")
-    request_token = request.get("request_token")
-
-    now = time.monotonic()
-    if now < request.get("eligible_at", 0.0) or now < request.get("next_poll_at", 0.0):
-        return False
-
-    emergency_remaining = _utk_emergency_remaining()
-    if emergency_remaining > 0:
-        request["next_poll_at"] = time.monotonic() + min(
-            emergency_remaining, 0.5
-        )
-        return False
-
-    if dispatch_deadline is not None and time.monotonic() >= dispatch_deadline:
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-
-    coordinator = get_shared_refresh_coordinator()
-    reservation = await coordinator.reserve_refresh(
-        UTK_SPORTS_SCOPE,
-        _utk_refresh_identity(tab),
-        min_interval_seconds=settings.get("min_interval_seconds", 1.5),
-        jitter_range_seconds=(0.1, 0.3),
-        request_token=request_token,
+    """Thin facade over the canonical uTiki shared reload engine."""
+    runtime, refresh_identity = _utk_refresh_context(tab)
+    return await refresh_engine.reload(
+        tab,
+        runtime,
+        refresh_identity,
+        _state["cancel_tasks"],
+        config_dict,
+        reason,
+        apply_local_interval=apply_local_interval,
+        allow_unknown_document=allow_unknown_document,
+        allow_blocked_recovery=allow_blocked_recovery,
+        dispatch_deadline=dispatch_deadline,
     )
-    if not reservation.reserved:
-        retry_delay = max(float(reservation.retry_after_seconds or 0.1), 0.05)
-        if reservation.status == "cooldown":
-            cooldown_remaining = max(
-                float(reservation.cooldown_until or 0.0) - time.time(), 0.1
-            )
-            retry_delay = min(cooldown_remaining, 1.0)
-        elif reservation.status == "recovery_probe_active":
-            retry_delay = max(retry_delay, 1.0)
-        request["next_poll_at"] = time.monotonic() + retry_delay
-        if reservation.error:
-            debug.log(
-                "[UTK RATE] Shared coordinator failed closed: "
-                f"{reservation.error}"
-            )
-        return False
-
-    async def release_reservation():
-        return await coordinator.release_refresh(
-            UTK_SPORTS_SCOPE,
-            _utk_refresh_identity(tab),
-            reservation.reservation_id,
-            request_token=request_token,
-            drop_request=True,
-        )
-
-    # Reservation does not consume the shared interval. Browser-side checks
-    # happen first; commit below is the final linearization point immediately
-    # before the network action.
-    try:
-        if dispatch_deadline is not None:
-            remaining = float(dispatch_deadline) - time.monotonic()
-            if remaining <= 0:
-                await release_reservation()
-                _pop_reload_request_if_token(identity, request_token)
-                return False
-            preflight = await asyncio.wait_for(
-                _inspect_utk_document(tab, force=True), timeout=remaining
-            )
-        else:
-            preflight = await _inspect_utk_document(tab, force=True)
-    except asyncio.TimeoutError:
-        await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-    except BaseException:
-        with contextlib.suppress(BaseException):
-            await asyncio.shield(release_reservation())
-        _pop_reload_request_if_token(identity, request_token)
-        raise
-    preflight_classification = preflight.get("classification")
-    if (
-        preflight_classification == "unknown"
-        and refresh["rate_limit_observation"]
-        == preflight.get("document_id")
-    ):
-        preflight_classification = "blocked"
-    same_blocked_document = (
-        preflight.get("document_id") == request.get("document_id")
-    )
-    recovery_probe_reload = (
-        allow_blocked_recovery
-        and reservation.is_recovery_probe
-        and same_blocked_document
-    )
-    paced_follower_reload = (
-        allow_blocked_recovery
-        and not reservation.is_recovery_probe
-        and same_blocked_document
-        and refresh["rate_limit_observation"]
-        == preflight.get("document_id")
-    )
-    if preflight_classification == "blocked" and not (
-        recovery_probe_reload or paced_follower_reload
-    ):
-        await _report_utk_rate_limit(
-            tab,
-            config_dict,
-            preflight.get("document_id", ""),
-            document_started_at=preflight.get("document_started_at", 0.0),
-        )
-        await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-    if (
-        preflight.get("document_id") != request.get("document_id")
-        or preflight.get("url") != request.get("expected_url")
-        or (
-            preflight_classification == "unknown"
-            and not allow_unknown_document
-        )
-    ):
-        await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-    if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
-        await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-
-    if _utk_emergency_remaining() > 0:
-        await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-
-    if dispatch_deadline is not None and time.monotonic() >= dispatch_deadline:
-        await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        return False
-
-    try:
-        decision = await coordinator.commit_refresh(
-            UTK_SPORTS_SCOPE,
-            _utk_refresh_identity(tab),
-            reservation.reservation_id,
-            request_token=request_token,
-        )
-    except BaseException:
-        with contextlib.suppress(BaseException):
-            await asyncio.shield(release_reservation())
-        _pop_reload_request_if_token(identity, request_token)
-        raise
-    if not decision.granted:
-        # The commit transaction re-checks cooldown and recovery phase.  Any
-        # incident opened during preflight therefore revokes this dispatch.
-        if decision.status != "already_committed":
-            await release_reservation()
-        _pop_reload_request_if_token(identity, request_token)
-        if decision.error:
-            debug.log(
-                "[UTK RATE] Shared commit failed closed: "
-                f"{decision.error}"
-            )
-        return False
-
-    if decision.is_recovery_probe:
-        started_at = time.monotonic()
-        probe_state = {
-            "permit_id": decision.permit_id,
-            "source_document_id": preflight.get("document_id"),
-            "started_at": started_at,
-            "next_renew_at": started_at + UTK_RECOVERY_PROBE_RENEW_SECONDS,
-        }
-        refresh["recovery_probe"] = probe_state
-    _pop_reload_request_if_token(identity, request_token)
-    if decision.is_recovery_probe:
-        async def renew_probe_lease():
-            while True:
-                await asyncio.sleep(UTK_RECOVERY_PROBE_RENEW_SECONDS)
-                current = refresh["recovery_probe"]
-                if (
-                    not current
-                    or current.get("permit_id") != decision.permit_id
-                    or current.get("abandon_requested")
-                ):
-                    return
-                if (
-                    time.monotonic() - started_at
-                    >= UTK_RECOVERY_PROBE_MAX_SECONDS
-                ):
-                    completion = await get_shared_refresh_coordinator().complete_recovery_probe(
-                        UTK_SPORTS_SCOPE,
-                        _utk_refresh_identity(tab),
-                        decision.permit_id,
-                        success=False,
-                    )
-                    current = refresh["recovery_probe"]
-                    if current and current.get("permit_id") == decision.permit_id:
-                        refresh["recovery_probe"] = None
-                    return
-                renewed = await get_shared_refresh_coordinator().renew_recovery_probe(
-                    UTK_SPORTS_SCOPE, decision.permit_id
-                )
-                if renewed is False:
-                    current = refresh["recovery_probe"]
-                    if current and current.get("permit_id") == decision.permit_id:
-                        refresh["recovery_probe"] = None
-                    return
-                current["next_renew_at"] = time.monotonic() + (
-                    UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
-                )
-
-        probe_state["lease_task"] = asyncio.create_task(renew_probe_lease())
-    try:
-        reload_call = tab.reload()
-        await asyncio.wait_for(
-            reload_call, timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
-        )
-        runtime = _ctbc_runtime_for_identity(identity)
-        runtime["document"]["snapshot"] = None
-        runtime["refresh"]["reload_event"] = True
-        return True
-    except Exception as exc:
-        debug.log(f"[CTBC] Reload failed: {exc}")
-        # A CDP exception does not prove that the browser rejected the
-        # navigation.  Keep a recovery lease until the next document guard or
-        # lease expiry instead of immediately releasing a possible in-flight
-        # probe and creating a parallel retry.
-        return False
 
 
 async def nodriver_utk_sports_reload_wait(
@@ -1191,54 +510,32 @@ async def nodriver_utk_sports_reload_wait(
     allow_unknown_document=True,
     allow_blocked_recovery=True,
 ):
-    """Wait in short chunks for startup/fallback callers needing one reload."""
-    source_url = str(getattr(getattr(tab, "target", None), "url", ""))
-    wait_deadline = time.monotonic() + UTK_RELOAD_WAIT_MAX_SECONDS
-    last_heartbeat_at = 0.0
-    while True:
-        if time.monotonic() >= wait_deadline:
-            await nodriver_utk_sports_cancel_refresh(
-                tab, "shared reload wait timed out", wait=True, abandon_probe=True
-            )
-            util.create_debug_logger(config_dict).log(
-                "[UTK RATE] Shared reload wait timed out; leaving the page "
-                "unchanged instead of bypassing the coordinator"
-            )
-            return False
-        heartbeat_now = time.time()
-        if heartbeat_now - last_heartbeat_at >= 5.0:
-            last_heartbeat_at = heartbeat_now
-            try:
-                with open(
-                    util.get_instance_state_path("heartbeat.txt"),
-                    "w",
-                    encoding="utf-8",
-                ) as heartbeat_file:
-                    heartbeat_file.write(str(int(heartbeat_now)))
-            except OSError:
-                pass
-        if await nodriver_utk_sports_reload(
-            tab,
-            config_dict,
-            reason,
-            apply_local_interval=apply_local_interval,
-            allow_unknown_document=allow_unknown_document,
-            allow_blocked_recovery=allow_blocked_recovery,
-            dispatch_deadline=wait_deadline,
-        ):
-            return True
-        if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
-            await nodriver_utk_sports_cancel_refresh(
-                tab, "paused or stopped", wait=True, abandon_probe=True
-            )
-            return False
-        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-        if current_url != source_url:
-            await nodriver_utk_sports_cancel_refresh(
-                tab, "navigation", wait=True, abandon_probe=True
-            )
-            return False
-        await asyncio.sleep(0.1)
+    """Thin facade over the bounded uTiki shared reload waiter."""
+    runtime, refresh_identity = _utk_refresh_context(tab)
+    return await refresh_engine.reload_wait(
+        tab,
+        runtime,
+        refresh_identity,
+        _state["cancel_tasks"],
+        config_dict,
+        reason,
+        apply_local_interval=apply_local_interval,
+        allow_unknown_document=allow_unknown_document,
+        allow_blocked_recovery=allow_blocked_recovery,
+    )
+
+
+async def nodriver_utk_sports_health_check(tab, url, config_dict):
+    """Run only rate-limit recovery, without selecting a ticket control."""
+    runtime, refresh_identity = _utk_refresh_context(tab)
+    return await refresh_engine.health_check(
+        tab,
+        runtime,
+        refresh_identity,
+        _state["cancel_tasks"],
+        url,
+        config_dict,
+    )
 
 
 async def _reload_with_interval(tab, config_dict, reason):
@@ -1269,21 +566,6 @@ async def _poll_ctbc_seat_reload(tab, config_dict):
         return False
     await _reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
     return True
-
-
-async def nodriver_utk_sports_health_check(tab, url, config_dict):
-    """Run only rate-limit recovery, without selecting any ticket control."""
-    guard_state, _ = await _utk_document_guard(tab, config_dict, url)
-    if guard_state == "blocked":
-        await nodriver_utk_sports_reload(
-            tab,
-            config_dict,
-            "HTTP 429 recovery probe",
-            apply_local_interval=False,
-            allow_unknown_document=False,
-            allow_blocked_recovery=True,
-        )
-    return guard_state
 
 
 def _decode_ctbc_json_result(raw_value):

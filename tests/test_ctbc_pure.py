@@ -14,6 +14,12 @@ from tests.ctbc_support import (
 import platforms.ctbc as legacy_ctbc
 import platforms.utiki as utiki
 from platforms.utiki import workflow
+from platforms.utiki.profiles import (
+    PageKind,
+    classify_utiki_page,
+    get_utiki_tenant_profile,
+    is_utiki_sports_url,
+)
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
@@ -183,6 +189,48 @@ class CtbcPureSelectionTest(unittest.TestCase):
             _get_ctbc_page_type(dragons + "UTK0203_?PERFORMANCE_ID=P1"),
         )
         self.assertEqual("checkout", _get_ctbc_page_type(dragons + "UTK0206_"))
+
+    def test_family_profiles_and_page_kind_contract(self):
+        ctbc_root = "https://tix.ctbcsports.com/BROTHERS/"
+        dragons_root = "https://tix.wdragons.com/"
+        cases = (
+            (ctbc_root + "UTK0201_?PRODUCT_ID=P1", PageKind.DATE),
+            (ctbc_root + "UTK0204_?PERFORMANCE_ID=P1", PageKind.AREA),
+            (ctbc_root + "UTK0205_?PERFORMANCE_ID=P1", PageKind.RESERVED_SEAT),
+            (ctbc_root + "UTK0202_?PERFORMANCE_ID=P1", PageKind.GENERAL_ADMISSION),
+            (ctbc_root + "UTK0206_", PageKind.CHECKOUT),
+            (dragons_root + "UTK0201_?PRODUCT_ID=P1", PageKind.DATE),
+            (dragons_root + "UTK0204_?PERFORMANCE_ID=P1", PageKind.AREA),
+            (dragons_root + "UTK0205_?PERFORMANCE_ID=P1", PageKind.RESERVED_SEAT),
+            (dragons_root + "UTK0203_?PERFORMANCE_ID=P1", PageKind.GENERAL_ADMISSION),
+            (dragons_root + "UTK0206_", PageKind.CHECKOUT),
+        )
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertEqual(expected, classify_utiki_page(url))
+                self.assertEqual(expected.value, _get_ctbc_page_type(url))
+
+        ctbc = get_utiki_tenant_profile(ctbc_root)
+        dragons = get_utiki_tenant_profile(dragons_root)
+        self.assertEqual("ctbc_brothers", ctbc.key)
+        self.assertEqual("/BROTHERS", ctbc.tenant_path)
+        self.assertEqual("CTBC_SPORTS", ctbc.map_namespace)
+        self.assertTrue(ctbc.fast_area_prefetch)
+        self.assertFalse(ctbc.supports_server_assignment)
+        self.assertEqual("wei_chuan_dragons", dragons.key)
+        self.assertEqual("", dragons.tenant_path)
+        self.assertEqual("WDRAGONS", dragons.map_namespace)
+        self.assertFalse(dragons.fast_area_prefetch)
+        self.assertFalse(dragons.supports_server_assignment)
+
+    def test_family_membership_is_independent_from_actionable_routes(self):
+        homepage = "https://tix.ctbcsports.com/BROTHERS/"
+        unknown_page = homepage + "account/profile"
+        self.assertTrue(is_utiki_sports_url(homepage))
+        self.assertTrue(is_utiki_sports_url(unknown_page))
+        self.assertEqual(PageKind.UNKNOWN, classify_utiki_page(homepage))
+        self.assertEqual(PageKind.UNKNOWN, classify_utiki_page(unknown_page))
+        self.assertIsNone(_get_ctbc_page_type(unknown_page))
 
     def test_utk_origin_rejects_insecure_or_ambiguous_authorities(self):
         valid_urls = (

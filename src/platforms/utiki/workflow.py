@@ -15,7 +15,7 @@ import os
 import re
 import time
 import uuid
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 from zendriver import cdp
 
@@ -33,6 +33,17 @@ from refresh_coordinator import (
     UTK_SPORTS_SCOPE,
     get_shared_refresh_coordinator,
 )
+from .profiles import (
+    CTBC_DOMAIN,
+    CTBC_MAP_DOMAIN,
+    PageKind,
+    TENANT_PROFILES,
+    classify_utiki_page,
+    get_utiki_tenant_profile,
+    is_utiki_sports_url,
+    same_origin,
+    unique_query,
+)
 
 
 __all__ = [
@@ -47,24 +58,9 @@ __all__ = [
 ]
 
 
-CTBC_DOMAIN = "tix.ctbcsports.com"
-CTBC_MAP_DOMAIN = "imgs2.utiki.com.tw"
 UTK_SPORTS_PROFILES = {
-    CTBC_DOMAIN: {
-        "name": "CTBC Sports",
-        "map_namespace": "CTBC_SPORTS",
-        "fast_area_prefetch": True,
-        "tenant_path": "/BROTHERS",
-    },
-    "tix.wdragons.com": {
-        "name": "Wei Chuan Dragons",
-        "map_namespace": "WDRAGONS",
-        # WDragons' native Send() first calls GET_PRICE_AREA_NOTICE and may
-        # display a confirmation.  Keep the optimized native map flow instead
-        # of bypassing that server-side notice check.
-        "fast_area_prefetch": False,
-        "tenant_path": "",
-    },
+    host: profile.as_legacy_dict()
+    for host, profile in TENANT_PROFILES.items()
 }
 CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
 CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
@@ -250,60 +246,20 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
 
 
 def _is_ctbc_url(url):
-    return _get_utk_sports_profile(url) is not None
+    return is_utiki_sports_url(url)
 
 
-def is_utk_sports_url(url):
-    return _is_ctbc_url(url)
+is_utk_sports_url = is_utiki_sports_url
 
 
 def _get_utk_sports_profile(url):
-    try:
-        parsed = urlsplit(str(url or ""))
-        host = (parsed.hostname or "").lower()
-        if (
-            parsed.scheme.lower() != "https"
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in (None, 443)
-        ):
-            return None
-    except ValueError:
-        return None
-    profile = UTK_SPORTS_PROFILES.get(host)
-    return dict(profile, host=host) if profile else None
+    profile = get_utiki_tenant_profile(url)
+    return profile.as_legacy_dict() if profile else None
 
 
 def _get_ctbc_page_type(url):
-    profile = _get_utk_sports_profile(url)
-    if not profile:
-        return None
-    try:
-        parsed = urlsplit(str(url or ""))
-    except ValueError:
-        return None
-    if parsed.fragment:
-        return None
-
-    tenant_path = profile["tenant_path"]
-    route_specs = {
-        f"{tenant_path}/UTK0201_": ("date", "PRODUCT_ID"),
-        f"{tenant_path}/UTK0202_": ("general_admission", "PERFORMANCE_ID"),
-        f"{tenant_path}/UTK0203_": ("general_admission", "PERFORMANCE_ID"),
-        f"{tenant_path}/UTK0204_": ("area", "PERFORMANCE_ID"),
-        f"{tenant_path}/UTK0205_": ("seat", "PERFORMANCE_ID"),
-        f"{tenant_path}/UTK0206_": ("checkout", None),
-    }
-    route = route_specs.get(parsed.path)
-    query = _ctbc_unique_query(url)
-    if route is None or query is None:
-        return None
-    page_type, required_key = route
-    if required_key and not re.fullmatch(
-        r"[A-Za-z0-9_-]+", str(query.get(required_key) or "")
-    ):
-        return None
-    return page_type
+    page_kind = classify_utiki_page(url)
+    return None if page_kind is PageKind.UNKNOWN else page_kind.value
 
 
 def _parse_keyword_groups(keyword_string):
@@ -367,31 +323,11 @@ def _ctbc_availability_has_tickets(status_text, ticket_number=1):
 
 
 def _ctbc_unique_query(url):
-    """Return a query dict only when every key occurs exactly once."""
-    pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
-    if len({key for key, _value in pairs}) != len(pairs):
-        return None
-    return dict(pairs)
+    return unique_query(url)
 
 
 def _ctbc_same_origin(first, second):
-    """Compare URL origins while rejecting embedded credentials."""
-    if first.username or first.password or second.username or second.password:
-        return False
-    try:
-        first_port = first.port or (443 if first.scheme == "https" else 80)
-        second_port = second.port or (443 if second.scheme == "https" else 80)
-    except ValueError:
-        return False
-    return (
-        first.scheme.lower(),
-        (first.hostname or "").lower(),
-        first_port,
-    ) == (
-        second.scheme.lower(),
-        (second.hostname or "").lower(),
-        second_port,
-    )
+    return same_origin(first, second)
 
 
 def _ctbc_purchase_state_key(tab):

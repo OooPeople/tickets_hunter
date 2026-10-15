@@ -58,6 +58,7 @@ a = Analysis(
         'platforms.hkticketing',
         'platforms.ctbc',
         'platforms.utiki',
+        'platforms.utiki.profiles',
         'platforms.utiki.workflow',
         # Chrome downloader dependencies
         'requests',

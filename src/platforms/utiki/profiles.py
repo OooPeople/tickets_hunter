@@ -1,0 +1,155 @@
+"""Tenant identity and route classification for the uTiki2 sports family."""
+
+import re
+from dataclasses import dataclass
+from enum import Enum
+from types import MappingProxyType
+from urllib.parse import parse_qsl, urlsplit
+
+
+class PageKind(str, Enum):
+    UNKNOWN = "unknown"
+    DATE = "date"
+    AREA = "area"
+    RESERVED_SEAT = "seat"
+    GENERAL_ADMISSION = "general_admission"
+    SERVER_ASSIGNED_QUANTITY = "server_assigned_quantity"
+    CHECKOUT = "checkout"
+
+
+@dataclass(frozen=True)
+class TenantProfile:
+    key: str
+    name: str
+    host: str
+    tenant_path: str
+    map_namespace: str
+    fast_area_prefetch: bool
+    supports_server_assignment: bool = False
+
+    def as_legacy_dict(self):
+        return {
+            "name": self.name,
+            "host": self.host,
+            "tenant_path": self.tenant_path,
+            "map_namespace": self.map_namespace,
+            "fast_area_prefetch": self.fast_area_prefetch,
+            "supports_server_assignment": self.supports_server_assignment,
+        }
+
+
+CTBC_DOMAIN = "tix.ctbcsports.com"
+CTBC_MAP_DOMAIN = "imgs2.utiki.com.tw"
+
+_TENANTS = (
+    TenantProfile(
+        key="ctbc_brothers",
+        name="CTBC Sports",
+        host=CTBC_DOMAIN,
+        tenant_path="/BROTHERS",
+        map_namespace="CTBC_SPORTS",
+        fast_area_prefetch=True,
+    ),
+    TenantProfile(
+        key="wei_chuan_dragons",
+        name="Wei Chuan Dragons",
+        host="tix.wdragons.com",
+        tenant_path="",
+        map_namespace="WDRAGONS",
+        fast_area_prefetch=False,
+    ),
+)
+
+TENANT_PROFILES = MappingProxyType({profile.host: profile for profile in _TENANTS})
+
+
+def get_utiki_tenant_profile(url):
+    """Return a tenant for an exact secure family origin, independent of route."""
+    try:
+        parsed = urlsplit(str(url or ""))
+        host = (parsed.hostname or "").lower()
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            return None
+    except ValueError:
+        return None
+    return TENANT_PROFILES.get(host)
+
+
+def is_utiki_sports_url(url):
+    return get_utiki_tenant_profile(url) is not None
+
+
+def unique_query(url):
+    """Return a query dict only when every key occurs exactly once."""
+    try:
+        pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
+    except ValueError:
+        return None
+    if len({key for key, _value in pairs}) != len(pairs):
+        return None
+    return dict(pairs)
+
+
+def classify_utiki_page(url):
+    profile = get_utiki_tenant_profile(url)
+    if profile is None:
+        return PageKind.UNKNOWN
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return PageKind.UNKNOWN
+    if parsed.fragment:
+        return PageKind.UNKNOWN
+
+    route_specs = {
+        f"{profile.tenant_path}/UTK0201_": (PageKind.DATE, "PRODUCT_ID"),
+        f"{profile.tenant_path}/UTK0202_": (
+            PageKind.GENERAL_ADMISSION,
+            "PERFORMANCE_ID",
+        ),
+        f"{profile.tenant_path}/UTK0203_": (
+            PageKind.GENERAL_ADMISSION,
+            "PERFORMANCE_ID",
+        ),
+        f"{profile.tenant_path}/UTK0204_": (PageKind.AREA, "PERFORMANCE_ID"),
+        f"{profile.tenant_path}/UTK0205_": (
+            PageKind.RESERVED_SEAT,
+            "PERFORMANCE_ID",
+        ),
+        f"{profile.tenant_path}/UTK0206_": (PageKind.CHECKOUT, None),
+    }
+    route = route_specs.get(parsed.path)
+    query = unique_query(url)
+    if route is None or query is None:
+        return PageKind.UNKNOWN
+    page_kind, required_key = route
+    if required_key and not re.fullmatch(
+        r"[A-Za-z0-9_-]+", str(query.get(required_key) or "")
+    ):
+        return PageKind.UNKNOWN
+    return page_kind
+
+
+def same_origin(first, second):
+    """Compare parsed origins while rejecting embedded credentials."""
+    if first.username or first.password or second.username or second.password:
+        return False
+    try:
+        first_port = first.port or (443 if first.scheme == "https" else 80)
+        second_port = second.port or (443 if second.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        first.scheme.lower(),
+        (first.hostname or "").lower(),
+        first_port,
+    ) == (
+        second.scheme.lower(),
+        (second.hostname or "").lower(),
+        second_port,
+    )

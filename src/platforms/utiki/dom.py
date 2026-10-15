@@ -342,6 +342,229 @@ async def commit_area(
         raise RuntimeError("area commit outcome is unknown")
 
 
+CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
+        (() => {
+            // __ticketsHunterUtikiServerAssignedAreaCommit
+            const intent = __TICKETS_HUNTER_INTENT_JSON__;
+            const visible = element => {
+                if (!element || !element.isConnected || element.hidden ||
+                    element.getAttribute('aria-hidden') === 'true') {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    style.pointerEvents !== 'none' &&
+                    element.getClientRects().length > 0;
+            };
+            const actionable = element => visible(element) &&
+                !element.matches(':disabled') &&
+                element.getAttribute('aria-disabled') !== 'true';
+            const identityValid = () =>
+                location.href === intent.pageUrl &&
+                String(performance.timeOrigin) === intent.documentId;
+            const uniqueVisible = selector => {
+                const matches = Array.from(document.querySelectorAll(selector))
+                    .filter(visible);
+                return matches.length === 1 ? matches[0] : null;
+            };
+            const controls = () => {
+                const root = uniqueVisible('#SeatOptions');
+                const server = uniqueVisible('#byServer');
+                const manual = uniqueVisible('#byhend');
+                const checkboxRoot = uniqueVisible('#ABdiv_ATYPE_CB');
+                const checkboxes = checkboxRoot ? Array.from(
+                    checkboxRoot.querySelectorAll('#ATYPE_CB')) : [];
+                const checkbox = checkboxes.length === 1 ? checkboxes[0] : null;
+                if (!root || !server || !manual || !checkboxRoot || !checkbox ||
+                    !root.contains(server) || !root.contains(manual) ||
+                    !root.contains(checkboxRoot) ||
+                    !checkboxRoot.contains(checkbox) ||
+                    !visible(root) || !visible(checkboxRoot) ||
+                    !actionable(server) || !actionable(manual) ||
+                    !checkbox.isConnected || checkbox.disabled ||
+                    checkbox.getAttribute('aria-disabled') === 'true' ||
+                    checkbox.type !== 'checkbox') {
+                    return null;
+                }
+                return {root, server, manual, checkbox};
+            };
+            const modeIsUnambiguous = state =>
+                state.server.classList.contains('active') !==
+                    state.manual.classList.contains('active');
+            const normalizeArea = value => (value || '').replace(/\s+/g, '');
+            const normalizePrice = value =>
+                (value || '').replace(/[\s,$]/g, '');
+            const hasTickets = value => {
+                const text = (value || '').replace(/\s+/g, '');
+                if (!text || text.includes('售完') ||
+                    /^(0|0張|無)$/.test(text)) return false;
+                if (text === '熱賣中') return true;
+                if (/^\d+$/.test(text)) {
+                    return Number(text) >= intent.ticketNumber;
+                }
+                const count = text.match(
+                    /^(?:剩餘|尚餘|剩|餘)[:：]?(\d+)(?:張)?$/);
+                if (count) return Number(count[1]) >= intent.ticketNumber;
+                return false;
+            };
+            const parseAction = value => {
+                const match = (value || '').match(
+                    /^\s*(?:javascript:\s*)?(Send|SendA)\(\s*(.*?)\s*\)\s*;?\s*$/);
+                if (!match) return null;
+                const args = [];
+                let remaining = match[2];
+                while (remaining) {
+                    const argument = remaining.match(
+                        /^\s*(?:'([^'\"]*)'|"([^'\"]*)")\s*(?:,\s*|$)/);
+                    if (!argument) return null;
+                    args.push(argument[1] !== undefined ?
+                        argument[1] : argument[2]);
+                    remaining = remaining.slice(argument[0].length);
+                }
+                const expectedLength = match[1] === 'Send' ? 5 : 7;
+                if (args.length !== expectedLength) return null;
+                return {
+                    name: match[1], stableArgs: args.slice(0, -1),
+                    status: args.at(-1)
+                };
+            };
+            const parseTitle = value => {
+                const match = (value || '').match(
+                    /^\s*票區\s*[:：]\s*(.*?)\s+票價\s*[:：]\s*(.*?)\s+尚餘\s*[:：]\s*(.*?)\s*$/);
+                return match ? {
+                    area: normalizeArea(match[1]),
+                    price: normalizePrice(match[2]), status: match[3]
+                } : null;
+            };
+            const targetRow = () => {
+                const area = document.querySelector(
+                    `#mapdata area#${CSS.escape(intent.areaId)}`);
+                if (!area) return null;
+                const action = parseAction(area.getAttribute('href'));
+                const title = parseTitle(area.getAttribute('title'));
+                if (!action || !title || action.name !== intent.actionName ||
+                    action.stableArgs.length !== intent.actionArgs.length ||
+                    action.stableArgs.some((value, index) =>
+                        value !== intent.actionArgs[index]) ||
+                    title.area !== normalizeArea(intent.area) ||
+                    title.price !== normalizePrice(intent.price) ||
+                    !hasTickets(action.status) || !hasTickets(title.status)) {
+                    return null;
+                }
+                const rows = Array.from(document.querySelectorAll(
+                    '.seats table.f1 > tbody > tr.saleTr')).filter(row => {
+                    if (!(row.getAttribute('rel') || '').split(/\s+/)
+                        .includes(intent.areaId) || !actionable(row)) return false;
+                    const areaText = row.querySelector(
+                        'td[data-title^="票區"]')?.textContent;
+                    const priceText = row.querySelector(
+                        'td[data-title^="票價"]')?.textContent;
+                    const status = row.querySelector(
+                        'td[data-title^="空位"]')?.textContent;
+                    const rowAction = parseAction(
+                        row.getAttribute('onclick'));
+                    return normalizeArea(areaText) ===
+                        normalizeArea(intent.area) &&
+                        normalizePrice(priceText) ===
+                        normalizePrice(intent.price) && hasTickets(status) &&
+                        rowAction && rowAction.name === intent.actionName &&
+                        rowAction.stableArgs.length ===
+                            intent.actionArgs.length &&
+                        rowAction.stableArgs.every((value, index) =>
+                            value === intent.actionArgs[index]) &&
+                        hasTickets(rowAction.status);
+                });
+                return rows.length === 1 ? rows[0] : null;
+            };
+
+            const root = document.documentElement;
+            const commitMarker = 'data-tickets-hunter-ctbc-area-commit';
+            const modePrepareMarker =
+                'data-tickets-hunter-utiki-server-mode-prepare';
+            const checkboxPrepareMarker =
+                'data-tickets-hunter-utiki-server-checkbox-prepare';
+            const beginPreparation = markerName => {
+                if (root.getAttribute(markerName) === intent.documentId) {
+                    return false;
+                }
+                root.setAttribute(markerName, intent.documentId);
+                return true;
+            };
+            if (!identityValid()) return 'stale';
+            if (root.hasAttribute(commitMarker)) {
+                return root.getAttribute(commitMarker) ===
+                    intent.navigationNonce ? 'committed' : 'stale';
+            }
+            try {
+                if (sessionStorage.getItem(intent.fastMarkerKey) !== null) {
+                    return 'stale';
+                }
+            } catch (_error) {}
+
+            let state = controls();
+            if (!state || !modeIsUnambiguous(state)) return 'rejected';
+            if (!state.server.classList.contains('active')) {
+                if (!beginPreparation(modePrepareMarker)) return 'rejected';
+                state.server.click();
+                if (!identityValid()) return 'stale';
+                state = controls();
+            }
+            if (!state || !state.server.classList.contains('active') ||
+                state.manual.classList.contains('active')) return 'rejected';
+            if (state.checkbox.checked) {
+                if (!beginPreparation(checkboxPrepareMarker)) return 'rejected';
+                state.checkbox.click();
+                if (!identityValid()) return 'stale';
+                state = controls();
+            }
+            if (!state || !state.server.classList.contains('active') ||
+                state.manual.classList.contains('active') ||
+                state.checkbox.checked) return 'rejected';
+
+            const row = targetRow();
+            if (!row) return 'rejected';
+            root.setAttribute(commitMarker, intent.navigationNonce);
+            row.click();
+            return 'committed';
+        })()
+
+    '''
+
+
+async def commit_server_assigned_area(
+    tab, snapshot, plan, ticket_number, navigation_nonce, fast_marker_key
+):
+    """Switch to native server assignment and click one revalidated area row."""
+    if not _valid_area_commit_input(
+        snapshot, plan, ticket_number, navigation_nonce
+    ):
+        return CommitResult.REJECTED
+
+    intent_json = json.dumps({
+        "pageUrl": snapshot.page_url,
+        "documentId": snapshot.document_id,
+        "areaId": plan.rel,
+        "area": plan.area,
+        "price": plan.price,
+        "actionName": plan.action_name,
+        "actionArgs": plan.stable_args,
+        "ticketNumber": int(ticket_number),
+        "navigationNonce": navigation_nonce,
+        "fastMarkerKey": fast_marker_key,
+    }, ensure_ascii=False)
+    script = CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT.replace(
+        "__TICKETS_HUNTER_INTENT_JSON__", intent_json, 1
+    )
+    raw_result = await tab.evaluate(script)
+    try:
+        return CommitResult(raw_result)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "server-assigned area commit outcome is unknown"
+        )
+
+
 async def read_quantity_snapshot(tab):
     """Read a general-admission quantity page in one browser call."""
     raw_value = await tab.evaluate(r'''

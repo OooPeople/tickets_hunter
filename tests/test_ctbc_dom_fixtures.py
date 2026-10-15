@@ -17,6 +17,7 @@ from platforms.utiki.dom import (
     CommitResult,
     SubmitDispatchResult,
     commit_area,
+    commit_server_assigned_area,
     commit_quantity,
     dismiss_dialog,
     dispatch_quantity_submit,
@@ -253,6 +254,306 @@ async def _assert_area_fixture(browser):
     assert await marker_tab.evaluate(
         "Number(document.body.dataset.areaClicks || 0)"
     ) == 0
+
+    server_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    server_snapshot = await read_area_snapshot(server_tab)
+    server_target = select_area_snapshot(
+        server_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await server_tab.evaluate(
+        "sessionStorage.removeItem("
+        "'ticketsHunter.ctbc.fast-navigation.v1')"
+    )
+    assert await commit_server_assigned_area(
+        server_tab, server_snapshot, server_target, cfg["ticket_number"],
+        "c" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await server_tab.evaluate(
+        "document.querySelector('#byServer').classList.contains('active')"
+    )
+    assert not await server_tab.evaluate(
+        "document.querySelector('#byhend').classList.contains('active')"
+    )
+    assert not await server_tab.evaluate(
+        "document.querySelector('#ATYPE_CB').checked"
+    )
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.serverModeClicks || 0)"
+    ) == 1
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.checkboxClicks || 0)"
+    ) == 1
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 1
+    assert await server_tab.evaluate(
+        "document.body.dataset.selectedArea || ''"
+    ) == "PRICE_FRONT"
+    assert await commit_server_assigned_area(
+        server_tab, server_snapshot, server_target, cfg["ticket_number"],
+        "c" * 32, "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await server_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 1
+
+    ambiguous_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    ambiguous_snapshot = await read_area_snapshot(ambiguous_tab)
+    ambiguous_target = select_area_snapshot(
+        ambiguous_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await ambiguous_tab.evaluate(
+        "document.querySelector('#byServer').classList.add('active')"
+    )
+    assert await commit_server_assigned_area(
+        ambiguous_tab, ambiguous_snapshot, ambiguous_target,
+        cfg["ticket_number"], "9" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await ambiguous_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    post_click_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    post_click_snapshot = await read_area_snapshot(post_click_tab)
+    post_click_target = select_area_snapshot(
+        post_click_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await post_click_tab.evaluate("""
+        (() => {
+            const oldButton = document.querySelector('#byServer');
+            const button = oldButton.cloneNode(true);
+            oldButton.replaceWith(button);
+            button.addEventListener('click', () => {
+                button.classList.add('active');
+                document.body.dataset.serverModeClicks = String(
+                    Number(document.body.dataset.serverModeClicks || 0) + 1
+                );
+            });
+        })()
+    """)
+    assert await commit_server_assigned_area(
+        post_click_tab, post_click_snapshot, post_click_target,
+        cfg["ticket_number"], "8" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await post_click_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+    assert await commit_server_assigned_area(
+        post_click_tab, post_click_snapshot, post_click_target,
+        cfg["ticket_number"], "5" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await post_click_tab.evaluate(
+        "Number(document.body.dataset.serverModeClicks || 0)"
+    ) == 1
+
+    stale_row_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    stale_row_snapshot = await read_area_snapshot(stale_row_tab)
+    stale_row_target = select_area_snapshot(
+        stale_row_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await stale_row_tab.evaluate("""
+        (() => {
+            const oldButton = document.querySelector('#byServer');
+            const button = oldButton.cloneNode(true);
+            oldButton.replaceWith(button);
+            button.addEventListener('click', () => {
+                button.classList.add('active');
+                document.querySelector('#byhend').classList.remove('active');
+                document.querySelector(
+                    'tr.saleTr[rel="front"] td[data-title^="空位"]'
+                ).textContent = '0';
+            });
+        })()
+    """)
+    assert await commit_server_assigned_area(
+        stale_row_tab, stale_row_snapshot, stale_row_target,
+        cfg["ticket_number"], "7" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await stale_row_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    stale_action_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    stale_action_snapshot = await read_area_snapshot(stale_action_tab)
+    stale_action_target = select_area_snapshot(
+        stale_action_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await stale_action_tab.evaluate("""
+        document.querySelector('tr.saleTr[rel="front"]').setAttribute(
+            'onclick',
+            "Send('0205','P16D0B8Z','PRICE_BACK','GROUP_BACK','45')"
+        )
+    """)
+    assert await commit_server_assigned_area(
+        stale_action_tab, stale_action_snapshot, stale_action_target,
+        cfg["ticket_number"], "4" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await stale_action_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    checkbox_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    checkbox_snapshot = await read_area_snapshot(checkbox_tab)
+    checkbox_target = select_area_snapshot(
+        checkbox_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await checkbox_tab.evaluate("""
+        document.querySelector('#ATYPE_CB').addEventListener(
+            'click', event => event.preventDefault())
+    """)
+    assert await commit_server_assigned_area(
+        checkbox_tab, checkbox_snapshot, checkbox_target,
+        cfg["ticket_number"], "3" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await commit_server_assigned_area(
+        checkbox_tab, checkbox_snapshot, checkbox_target,
+        cfg["ticket_number"], "2" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await checkbox_tab.evaluate(
+        "Number(document.body.dataset.checkboxClicks || 0)"
+    ) == 1
+    assert await checkbox_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    rerender_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    rerender_snapshot = await read_area_snapshot(rerender_tab)
+    rerender_target = select_area_snapshot(
+        rerender_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await rerender_tab.evaluate("""
+        (() => {
+            const oldButton = document.querySelector('#byServer');
+            const button = oldButton.cloneNode(true);
+            oldButton.replaceWith(button);
+            button.addEventListener('click', () => {
+                button.classList.add('active');
+                document.querySelector('#byhend').classList.remove('active');
+                document.body.dataset.serverModeClicks = String(
+                    Number(document.body.dataset.serverModeClicks || 0) + 1
+                );
+                window.fixtureCheckboxRoot =
+                    document.querySelector('#ABdiv_ATYPE_CB');
+                window.fixtureCheckboxRoot.remove();
+            });
+        })()
+    """)
+    assert await commit_server_assigned_area(
+        rerender_tab, rerender_snapshot, rerender_target,
+        cfg["ticket_number"], "1" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    await rerender_tab.evaluate("""
+        document.querySelector('#SeatOptions').append(
+            window.fixtureCheckboxRoot)
+    """)
+    assert await commit_server_assigned_area(
+        rerender_tab, rerender_snapshot, rerender_target,
+        cfg["ticket_number"], "0" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await rerender_tab.evaluate(
+        "Number(document.body.dataset.serverModeClicks || 0)"
+    ) == 1
+    assert await rerender_tab.evaluate(
+        "Number(document.body.dataset.checkboxClicks || 0)"
+    ) == 1
+    assert await rerender_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 1
+
+    duplicate_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    duplicate_snapshot = await read_area_snapshot(duplicate_tab)
+    duplicate_target = select_area_snapshot(
+        duplicate_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    await duplicate_tab.evaluate("""
+        document.querySelector('#SeatOptions').append(
+            document.querySelector('#byServer').cloneNode(true))
+    """)
+    assert await commit_server_assigned_area(
+        duplicate_tab, duplicate_snapshot, duplicate_target,
+        cfg["ticket_number"], "6" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await duplicate_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+
+    unknown_availability_mutations = (
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '暫停銷售'",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'title', '票區:109區前排 票價：1600 尚餘：暫停銷售')",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','暫停銷售')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"]').setAttribute("
+        "'onclick', \"Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','暫停銷售')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = "
+        "'暫停銷售，剩餘2筆資料待同步'",
+    )
+    for index, mutation in enumerate(unknown_availability_mutations):
+        unknown_tab = await _open_fixture(
+            browser,
+            "UTK0204_area.html",
+            "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+        )
+        unknown_snapshot = await read_area_snapshot(unknown_tab)
+        unknown_target = select_area_snapshot(
+            unknown_snapshot, cfg, "P16D0B8Z",
+            require_direct_destination=False,
+        )
+        await unknown_tab.evaluate(mutation)
+        assert await commit_server_assigned_area(
+            unknown_tab, unknown_snapshot, unknown_target,
+            cfg["ticket_number"], f"{index + 10:x}" * 32,
+            "ticketsHunter.ctbc.fast-navigation.v1",
+        ) is CommitResult.REJECTED
+        assert await unknown_tab.evaluate(
+            "Number(document.body.dataset.rowClicks || 0)"
+        ) == 0
 
 
 async def _assert_seat_fixture(browser):

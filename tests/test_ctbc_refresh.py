@@ -636,6 +636,42 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )
         self.assertFalse(tab.reloaded)
 
+    async def test_disabled_guard_still_observes_document_changes(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        disabled = {
+            "utk_sports": dict(self.global_settings["utk_sports"], enabled=False)
+        }
+        snapshots = [
+            {
+                "classification": "normal",
+                "document_id": source + "|old",
+                "url": source,
+            },
+            {
+                "classification": "normal",
+                "document_id": source + "|new",
+                "url": source,
+            },
+        ]
+
+        with patch(
+            "platforms.ctbc.load_global_settings", return_value=disabled
+        ), patch(
+            "platforms.ctbc._inspect_utk_document",
+            AsyncMock(side_effect=snapshots),
+        ):
+            first, first_snapshot = await _utk_document_guard(tab, config(), source)
+            second, second_snapshot = await _utk_document_guard(tab, config(), source)
+
+        self.assertEqual("disabled", first)
+        self.assertEqual("disabled", second)
+        self.assertEqual(source + "|old", first_snapshot["document_id"])
+        self.assertEqual(source + "|new", second_snapshot["document_id"])
+        self.assertEqual(source + "|new", _state["last_document"][identity])
+        self.assertIn(identity, _state["reload_event"])
+
     async def test_persistent_unknown_document_never_opens_shared_cooldown(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)

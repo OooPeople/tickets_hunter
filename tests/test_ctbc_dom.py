@@ -21,7 +21,10 @@ from platforms.ctbc import (
     CTBC_DATE_ROW_SELECTOR,
     _ctbc_attest_fast_destination,
     _ctbc_captcha_and_submit,
+    _ctbc_fast_marker_matches_pending,
+    _ctbc_pending_from_fast_marker,
     _ctbc_purchase_state_key,
+    _ctbc_reconcile_area_navigation,
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
     _get_ctbc_captcha_image_bytes,
@@ -249,10 +252,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             self.assertFalse(button.clicked)
             self.assertEqual(2, tab.evaluate_count)
             self.assertNotIn("includes('購買')", tab.evaluate_scripts[-1])
-            expected = _state["fast_target"][_ctbc_tab_identity(tab)]
+            expected = _state["pending_navigation"][_ctbc_tab_identity(tab)]
             self.assertEqual("PRICE_FRONT", expected["price_area_id"])
         finally:
-            _state["fast_target"].pop(_ctbc_tab_identity(tab), None)
+            _state["pending_navigation"].pop(_ctbc_tab_identity(tab), None)
 
     async def test_date_fast_path_failure_falls_back_to_the_native_button(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
@@ -269,6 +272,658 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertTrue(await nodriver_ctbc_date_auto_select(tab, config()))
         self.assertTrue(button.clicked)
         self.assertEqual(1, tab.evaluate_count)
+
+    async def test_fast_navigation_installs_pending_before_dispatch_exception(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
+        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        observed = []
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR,
+            [row],
+            url=source,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            fast_commit_outcome="throw_after_dispatch",
+            dom_ids={
+                "performance_id": "P16D0B8Z",
+                "product_id": "P16ANF0L",
+                "group_id": "GROUP_FRONT",
+                "price_area_id": "PRICE_FRONT",
+            },
+            on_fast_commit=lambda: observed.append(
+                _state["pending_navigation"][_ctbc_tab_identity(tab)]["kind"]
+            ),
+        )
+
+        cfg = config(area_keyword='"109區前排"')
+        self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertEqual(["FAST"], observed)
+        self.assertFalse(button.clicked)
+        self.assertEqual(destination, tab.target.url)
+        self.assertIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+        commit_script = next(
+            script for script in tab.evaluate_scripts
+            if "__ticketsHunterCtbcFastCommit" in script
+        )
+        self.assertLess(
+            commit_script.index("sessionStorage.setItem"),
+            commit_script.index("location.assign(destinationUrl)"),
+        )
+        self.assertIn("stored.nonce !== navigationNonce", commit_script)
+        self.assertNotIn("setTimeout", commit_script)
+
+        self.assertTrue(await _ctbc_attest_fast_destination(tab, "seat", cfg))
+        self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+        self.assertIsNone(tab.session_marker)
+
+    async def test_rejected_fast_commit_compare_pops_pending_before_native_fallback(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
+        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR,
+            [row],
+            url=source,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            fast_commit_outcome="rejected",
+            marker_delete_allowed=False,
+        )
+
+        self.assertTrue(await nodriver_ctbc_date_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
+        self.assertTrue(button.clicked)
+        self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+        self.assertIsNone(tab.session_marker)
+
+    async def test_rejected_old_nonce_does_not_clear_newer_pending(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
+        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        replacement = {"kind": "FAST", "nonce": "9" * 32}
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [row], url=source,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            fast_commit_outcome="rejected",
+            on_fast_commit=lambda: _state["pending_navigation"].__setitem__(
+                _ctbc_tab_identity(tab), replacement
+            ),
+        )
+
+        self.assertTrue(await nodriver_ctbc_date_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
+        self.assertIs(replacement, _state["pending_navigation"][_ctbc_tab_identity(tab)])
+        self.assertFalse(button.clicked)
+
+    async def test_date_commit_guard_recovers_only_after_reload_document(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
+        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [row], url=source,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            fast_commit_outcome="pending",
+        )
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "document-1"
+        cfg = config(area_keyword='"109區前排"')
+
+        self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertIn(identity, _state["pending_navigation"])
+        self.assertFalse(button.clicked)
+        _state["pending_navigation"][identity]["created_at"] -= 30
+
+        with patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(side_effect=[False, True]),
+        ) as reload_page:
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            self.assertNotIn(
+                "reload_requested_at", _state["pending_navigation"][identity]
+            )
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            pending = _state["pending_navigation"][identity]
+            self.assertEqual(2, reload_page.await_count)
+            self.assertIn("reload_requested_at", pending)
+
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            self.assertEqual(2, reload_page.await_count)
+
+            _state["last_document"][identity] = "document-2"
+            cfg["area_auto_select"]["enable"] = False
+            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        self.assertTrue(button.clicked)
+        self.assertNotIn(identity, _state["pending_navigation"])
+
+    async def test_storage_unavailable_clean_date_uses_native_fallback(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        button = FakeElement("<button id='buy_btn'>購買</button>")
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [row], url=source,
+            semantic_navigation=True, storage_available=False,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+        )
+
+        self.assertTrue(await nodriver_ctbc_date_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
+        self.assertTrue(button.clicked)
+        self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+
+    async def test_storage_unavailable_native_attests_but_fast_returns(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        expected = {
+            "phase": "DISPATCH_UNKNOWN", "nonce": "4" * 32,
+            "source_url": source, "area_url": CTBC_TEST_AREA_URL,
+            "destination_url": destination, "route": "0205",
+            "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
+            "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+            "created_at": time.monotonic(),
+        }
+        dom_ids = {
+            "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
+            "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+        }
+        native = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            storage_available=False, dom_ids=dom_ids,
+        )
+        native_pending = {**expected, "kind": "NATIVE"}
+        native_identity = _ctbc_tab_identity(native)
+        _state["pending_navigation"][native_identity] = native_pending
+        self.assertTrue(await _ctbc_attest_fast_destination(
+            native, "seat", config()
+        ))
+        self.assertNotIn(native_identity, _state["pending_navigation"])
+
+        fast = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            storage_available=False, dom_ids=dom_ids,
+        )
+        fast_pending = {**expected, "kind": "FAST", "nonce": "5" * 32}
+        fast_identity = _ctbc_tab_identity(fast)
+        _state["pending_navigation"][fast_identity] = fast_pending
+        self.assertFalse(await _ctbc_attest_fast_destination(
+            fast, "seat", config()
+        ))
+        self.assertEqual(CTBC_TEST_AREA_URL, fast.target.url)
+        self.assertEqual("RETURNING", fast_pending["phase"])
+        return_script = next(
+            script for script in fast.evaluate_scripts
+            if "__ticketsHunterCtbcReturn" in script
+        )
+        self.assertIn("location.href !== sourceUrl", return_script)
+
+    async def test_async_old_navigation_observation_cannot_replace_new_nonce(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        replacement = {
+            "kind": "NATIVE", "phase": "DISPATCH_UNKNOWN",
+            "nonce": "6" * 32, "area_url": CTBC_TEST_AREA_URL,
+        }
+        tab = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            marker={
+                "version": 1, "nonce": "7" * 32, "source": source,
+                "destination": destination,
+                "expires_at": time.time() * 1000 + 15000,
+            },
+        )
+        identity = _ctbc_tab_identity(tab)
+        tab.on_marker_read = lambda: _state["pending_navigation"].__setitem__(
+            identity, replacement
+        )
+
+        self.assertFalse(await _ctbc_attest_fast_destination(
+            tab, "seat", config()
+        ))
+        self.assertIs(replacement, _state["pending_navigation"][identity])
+        self.assertEqual(destination, tab.target.url)
+
+        other_destination = destination.replace("GROUP_FRONT", "GROUP_OTHER")
+        native = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            dom_ids={
+                "performance_id": "WRONG", "product_id": "P16ANF0L",
+                "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+            },
+        )
+        native_identity = _ctbc_tab_identity(native)
+        old_pending = {
+            "kind": "NATIVE", "phase": "DISPATCH_UNKNOWN",
+            "nonce": "a" * 32, "area_url": CTBC_TEST_AREA_URL,
+            "destination_url": destination, "route": "0205",
+            "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
+            "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+        }
+        new_pending = {**old_pending, "nonce": "b" * 32}
+        _state["pending_navigation"][native_identity] = old_pending
+
+        def replace_during_destination_read():
+            _state["pending_navigation"][native_identity] = new_pending
+            native.target.url = other_destination
+
+        native.on_destination_state = replace_during_destination_read
+        self.assertFalse(await _ctbc_attest_fast_destination(
+            native, "seat", config()
+        ))
+        self.assertIs(new_pending, _state["pending_navigation"][native_identity])
+        self.assertEqual(other_destination, native.target.url)
+
+    async def test_browser_marker_blocks_duplicate_fast_dispatch_after_state_loss(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
+        button = FakeElement("<button id='buy_btn'>購買</button>", attrs={"onclick": onclick})
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        marker = {
+            "version": 1,
+            "nonce": "f" * 32,
+            "source": source,
+            "destination": destination,
+            "expires_at": time.time() * 1000 + 15000,
+        }
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR,
+            [row],
+            url=source,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            marker=marker,
+        )
+
+        cfg = config(area_keyword='"109區前排"')
+        cfg["area_auto_select"]["enable"] = False
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "document-1"
+
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertEqual(source, tab.target.url)
+        self.assertEqual(marker, tab.session_marker)
+        self.assertFalse(button.clicked)
+        self.assertIn(identity, _state["pending_navigation"])
+        self.assertFalse(any("fetch(areaUrl" in script for script in tab.evaluate_scripts))
+
+        tab.session_marker["expires_at"] = time.time() * 1000 - 1
+        _state["pending_navigation"][identity]["created_at"] -= 30
+        with patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page:
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+            reload_page.assert_awaited_once()
+
+            _state["last_document"][identity] = "document-2"
+            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        self.assertTrue(button.clicked)
+        self.assertIsNone(tab.session_marker)
+        self.assertNotIn(identity, _state["pending_navigation"])
+
+    async def test_marker_only_fast_destination_returns_then_allows_native_retry(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        area_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
+        )
+        tab = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            marker={
+                "version": 1,
+                "nonce": "a" * 32,
+                "source": source,
+                "destination": destination,
+                "expires_at": time.time() * 1000 + 15000,
+            },
+        )
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "destination-document"
+
+        self.assertFalse(await _ctbc_attest_fast_destination(tab, "seat", config()))
+        pending = _state["pending_navigation"][identity]
+        self.assertEqual(("FAST", "RETURNING"), (pending["kind"], pending["phase"]))
+        self.assertEqual(area_url, tab.target.url)
+        self.assertIsNotNone(tab.session_marker)
+
+        _state["last_document"][identity] = "area-document"
+        self.assertTrue(await _ctbc_reconcile_area_navigation(tab, area_url))
+        self.assertNotIn(identity, _state["pending_navigation"])
+        self.assertIsNone(tab.session_marker)
+
+    async def test_active_fast_marker_blocks_native_area_snapshot(self):
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        tab = FakeTab(
+            CTBC_AREA_ROW_SELECTOR,
+            [],
+            url=CTBC_TEST_AREA_URL,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            native_clears_marker=False,
+            native_destination=destination,
+            marker={
+                "version": 1,
+                "nonce": "b" * 32,
+                "source": "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L",
+                "destination": destination,
+                "expires_at": time.time() * 1000 + 15000,
+            },
+            dom_ids={
+                "performance_id": "P16D0B8Z",
+                "product_id": "P16ANF0L",
+                "group_id": "GROUP_FRONT",
+                "price_area_id": "PRICE_FRONT",
+            },
+        )
+
+        self.assertFalse(await nodriver_ctbc_area_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
+        self.assertFalse(any(
+            "__ticketsHunterCtbcNativeAreaCommit" in script
+            for script in tab.evaluate_scripts
+        ))
+        self.assertFalse(any(
+            "new MutationObserver(collect)" in script
+            for script in tab.evaluate_scripts
+        ))
+        self.assertIsNotNone(tab.session_marker)
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("FAST", pending["kind"])
+
+    def test_fast_marker_requires_exact_pending_identity(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        marker_pending = _ctbc_pending_from_fast_marker({
+            "version": 1,
+            "nonce": "1" * 32,
+            "source": source,
+            "destination": destination,
+            "expires_at": time.time() * 1000 + 15000,
+        })
+        pending = dict(marker_pending)
+        self.assertTrue(_ctbc_fast_marker_matches_pending(marker_pending, pending))
+
+        changes = {
+            "source_url": source + "&TRACKING=1",
+            "destination_url": destination.replace("GROUP_FRONT", "GROUP_OTHER"),
+            "route": "0202",
+            "performance_id": "OTHER_PERFORMANCE",
+            "product_id": "OTHER_PRODUCT",
+            "group_id": "OTHER_GROUP",
+            "price_area_id": "OTHER_PRICE",
+        }
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                changed = dict(pending)
+                changed[key] = value
+                self.assertFalse(
+                    _ctbc_fast_marker_matches_pending(marker_pending, changed)
+                )
+
+    async def test_malformed_marker_clears_once_and_preserves_racing_replacement(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        button = FakeElement("<button id='buy_btn'>購買</button>")
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        cfg = config()
+        cfg["area_auto_select"]["enable"] = False
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [row], url=source,
+            semantic_navigation=True, marker_raw="{broken-json",
+        )
+
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertIsNone(tab._marker_raw())
+        self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertTrue(button.clicked)
+
+        replacement = {
+            "version": 1,
+            "nonce": "2" * 32,
+            "source": source,
+            "destination": destination,
+            "expires_at": time.time() * 1000 + 15000,
+        }
+        racing = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [row], url=source,
+            semantic_navigation=True, marker_raw="{old-broken-json",
+        )
+
+        def replace_marker():
+            racing.session_marker_raw = None
+            racing.session_marker = replacement
+
+        racing.on_raw_marker_delete = replace_marker
+        self.assertFalse(await nodriver_ctbc_date_auto_select(racing, cfg))
+        self.assertEqual(replacement, racing.session_marker)
+
+        far_future = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [row], url=source,
+            semantic_navigation=True,
+            marker={**replacement, "expires_at": time.time() * 1000 + 60000},
+        )
+        self.assertFalse(await nodriver_ctbc_date_auto_select(far_future, cfg))
+        self.assertIsNone(far_future.session_marker)
+
+    async def test_malformed_destination_marker_fails_one_tick_then_recovers(self):
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        tab = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            marker_raw="not-json",
+        )
+
+        self.assertFalse(await _ctbc_attest_fast_destination(tab, "seat", config()))
+        self.assertIsNone(tab._marker_raw())
+        self.assertTrue(await _ctbc_attest_fast_destination(tab, "seat", config()))
+
+    async def test_native_exception_reloads_before_same_area_retry(self):
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        snapshot = json.dumps(make_ctbc_area_snapshot(include_back=False))
+        tab = FakeTab(
+            CTBC_AREA_ROW_SELECTOR, [], url=CTBC_TEST_AREA_URL,
+            semantic_navigation=True,
+            evaluate_results=[snapshot],
+            native_commit_outcome="throw_after_dispatch",
+        )
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "document-1"
+        cfg = config(area_keyword='"109區前排"')
+
+        self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
+        pending = _state["pending_navigation"][identity]
+        self.assertEqual("NATIVE", pending["kind"])
+        self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
+        self.assertEqual(1, sum(
+            "__ticketsHunterCtbcNativeAreaCommit" in script
+            for script in tab.evaluate_scripts
+        ))
+
+        pending["created_at"] -= 30
+        with patch(
+            "platforms.ctbc._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page:
+            self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
+            self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
+            reload_page.assert_awaited_once()
+
+            _state["last_document"][identity] = "document-2"
+            tab.native_commit_outcome = True
+            tab.native_destination = destination
+            tab.evaluate_results.append(snapshot)
+            self.assertTrue(await nodriver_ctbc_area_auto_select(tab, cfg))
+
+        self.assertEqual(2, sum(
+            "__ticketsHunterCtbcNativeAreaCommit" in script
+            for script in tab.evaluate_scripts
+        ))
+
+    async def test_native_exception_after_navigation_is_consumed_at_destination(self):
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        tab = FakeTab(
+            CTBC_AREA_ROW_SELECTOR, [], url=CTBC_TEST_AREA_URL,
+            semantic_navigation=True,
+            evaluate_results=[json.dumps(make_ctbc_area_snapshot(include_back=False))],
+            native_commit_outcome="throw_after_dispatch",
+            native_clears_marker=False,
+            native_destination=destination,
+            dom_ids={
+                "performance_id": "P16D0B8Z",
+                "product_id": "P16ANF0L",
+                "group_id": "GROUP_FRONT",
+                "price_area_id": "PRICE_FRONT",
+            },
+            on_native_commit=lambda: setattr(tab, "session_marker", {
+                "version": 1,
+                "nonce": "8" * 32,
+                "source": (
+                    "https://tix.ctbcsports.com/BROTHERS/UTK0201_?"
+                    "PRODUCT_ID=P16ANF0L"
+                ),
+                "destination": destination,
+                "expires_at": time.time() * 1000 + 15000,
+            }),
+        )
+
+        self.assertFalse(await nodriver_ctbc_area_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
+        identity = _ctbc_tab_identity(tab)
+        self.assertIn(identity, _state["pending_navigation"])
+        self.assertIsNotNone(tab.session_marker)
+        self.assertTrue(await _ctbc_attest_fast_destination(
+            tab, "seat", config(area_keyword='"109區前排"')
+        ))
+        self.assertNotIn(identity, _state["pending_navigation"])
+        self.assertIsNone(tab.session_marker)
+
+    async def test_expired_exact_marker_fails_closed_and_manual_arrival_passes(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        tab = FakeTab(
+            "", [], url=destination, semantic_navigation=True,
+            marker={
+                "version": 1,
+                "nonce": "c" * 32,
+                "source": source,
+                "destination": destination,
+                "expires_at": time.time() * 1000 - 1,
+            },
+        )
+        self.assertFalse(await _ctbc_attest_fast_destination(tab, "seat", config()))
+
+        manual = FakeTab("", [], url=destination, semantic_navigation=True)
+        self.assertTrue(await _ctbc_attest_fast_destination(manual, "seat", config()))
+
+    async def test_marker_destination_mismatch_fails_closed(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
+        marker_destination = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+        )
+        current_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=OTHER&"
+            "PERFORMANCE_PRICE_AREA_ID=OTHER_PRICE"
+        )
+        tab = FakeTab(
+            "", [], url=current_url, semantic_navigation=True,
+            marker={
+                "version": 1,
+                "nonce": "e" * 32,
+                "source": source,
+                "destination": marker_destination,
+                "expires_at": time.time() * 1000 + 15000,
+            },
+        )
+
+        self.assertFalse(await _ctbc_attest_fast_destination(tab, "seat", config()))
+        self.assertEqual(CTBC_TEST_AREA_URL, tab.target.url)
 
     async def test_vip_presale_uses_native_click_without_fast_prefetch(self):
         source = (
@@ -595,7 +1250,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertIn("hasTickets(mapTitle.status)", commit_script)
         self.assertIn("hasTickets(status)", commit_script)
         self.assertIn("root.hasAttribute(commitMarker)", commit_script)
-        self.assertIn("root.setAttribute(commitMarker, '1')", commit_script)
+        self.assertIn("root.setAttribute(commitMarker, navigationNonce)", commit_script)
         self.assertIn("area.click();", commit_script)
         self.assertNotIn("setTimeout", commit_script)
         self.assertNotIn("expectedHref", commit_script)
@@ -607,18 +1262,19 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         seat_url = "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&PERFORMANCE_PRICE_AREA_ID=P16D12YO"
         tab = FakeTab("", [], url=seat_url, evaluate_results=[True, True])
         identity = _ctbc_tab_identity(tab)
-        _state["fast_target"][identity] = {
+        _state["pending_navigation"][identity] = {
+            "kind": "FAST", "phase": "RETURNING", "nonce": "d" * 32,
             "route": "0205", "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
-            "group_id": "35", "price_area_id": "P16D12YO", "returning": True,
+            "group_id": "35", "price_area_id": "P16D12YO",
             "area_url": "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L",
             "created_at": time.monotonic(),
         }
         try:
             self.assertFalse(await _ctbc_attest_fast_destination(tab, "seat", config()))
             self.assertFalse(await _ctbc_attest_fast_destination(tab, "seat", config()))
-            self.assertIn(identity, _state["fast_target"])
+            self.assertIn(identity, _state["pending_navigation"])
         finally:
-            _state["fast_target"].pop(identity, None)
+            _state["pending_navigation"].pop(identity, None)
 
     async def test_captcha_does_not_submit_when_force_submit_is_off(self):
         tab = FakeSubmitTab(dialog="")

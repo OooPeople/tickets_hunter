@@ -74,6 +74,9 @@ CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
 )
 CTBC_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
 CTBC_FAST_PATH_TTL_SECONDS = 1.5
+CTBC_PENDING_NAVIGATION_TTL_SECONDS = 15.0
+CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
+CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
@@ -91,7 +94,7 @@ _state = {
     "ticket_type": {},
     "auth_failure": {},
     "captcha_reset": {},
-    "fast_target": {},
+    "pending_navigation": {},
     "reload_request": {},
     "rate_limit_observation": {},
     "rate_limit_retry": {},
@@ -133,6 +136,22 @@ def _pop_reload_request_if_token(identity, request_token):
     if current and current.get("request_token") == request_token:
         return _state["reload_request"].pop(identity, None)
     return None
+
+
+def _pop_pending_navigation_if_nonce(identity, nonce):
+    current = _state["pending_navigation"].get(identity)
+    if current and current.get("nonce") == nonce:
+        return _state["pending_navigation"].pop(identity, None)
+    return None
+
+
+def _ctbc_pending_navigation_is_current(identity, pending):
+    current = _state["pending_navigation"].get(identity)
+    return bool(
+        current
+        and pending
+        and current.get("nonce") == pending.get("nonce")
+    )
 
 
 def parse_ctbc_cookie_string(raw_value):
@@ -1422,16 +1441,16 @@ async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
 async def _utk_document_guard(tab, config_dict, url=None):
     """Apply the 429 circuit breaker before any UTK page-specific action."""
     settings = _utk_refresh_settings()
-    if not settings.get("enabled", True):
-        return "disabled", None
     snapshot = await _inspect_utk_document(tab, url)
-    probe_handled = await _finish_utk_recovery_probe(tab, config_dict, snapshot)
     identity = _ctbc_tab_identity(tab)
     document_id = snapshot.get("document_id")
     previous_document_id = _state["last_document"].get(identity)
     if previous_document_id and previous_document_id != document_id:
         _state["reload_event"].add(identity)
     _state["last_document"][identity] = document_id
+    if not settings.get("enabled", True):
+        return "disabled", snapshot
+    probe_handled = await _finish_utk_recovery_probe(tab, config_dict, snapshot)
     classification = snapshot.get("classification", "unknown")
     if classification == "unknown":
         if _state["rate_limit_observation"].get(identity) == document_id:
@@ -1913,6 +1932,152 @@ def _ctbc_selection_config_fingerprint(config_dict):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _ctbc_choose_date_candidate(candidates, config_dict):
+    date_config = config_dict.get("date_auto_select", {})
+    return _choose_candidate_index(
+        candidates,
+        date_config.get("date_keyword", "").strip(),
+        date_config.get("mode", "from top to bottom"),
+        config_dict.get("date_auto_fallback", False),
+    )
+
+
+def _ctbc_navigation_urls_match(first_url, second_url):
+    try:
+        first = urlsplit(str(first_url or ""))
+        second = urlsplit(str(second_url or ""))
+    except ValueError:
+        return False
+    first_query = _ctbc_unique_query(first_url)
+    second_query = _ctbc_unique_query(second_url)
+    return bool(
+        not first.fragment
+        and not second.fragment
+        and _ctbc_same_origin(first, second)
+        and first.path == second.path
+        and first_query is not None
+        and first_query == second_query
+    )
+
+
+def _ctbc_new_pending_navigation(
+    tab, kind, source_url, area_url, target, config_dict
+):
+    destination_url = _build_ctbc_destination_url(area_url, target)
+    area_query = _ctbc_unique_query(area_url)
+    if (
+        not destination_url
+        or area_query is None
+        or set(area_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", area_query.get("PRODUCT_ID", ""))
+    ):
+        return None
+    identity = _ctbc_tab_identity(tab)
+    return {
+        "kind": kind,
+        "phase": "PREPARED",
+        "nonce": uuid.uuid4().hex,
+        "source_url": source_url,
+        "source_document_id": _state["last_document"].get(identity, ""),
+        "area_url": area_url,
+        "destination_url": destination_url,
+        "route": target.get("route"),
+        "performance_id": target.get("performance_id"),
+        "product_id": area_query.get("PRODUCT_ID"),
+        "group_id": target.get("group_id"),
+        "price_area_id": target.get("price_area_id"),
+        "config_fingerprint": _ctbc_selection_config_fingerprint(config_dict),
+        "created_at": time.monotonic(),
+    }
+
+
+def _ctbc_pending_from_fast_marker(marker):
+    if (
+        not isinstance(marker, dict)
+        or type(marker.get("version")) is not int
+        or marker.get("version") != 1
+    ):
+        return None
+    nonce = str(marker.get("nonce") or "")
+    source_url = str(marker.get("source") or "")
+    destination_url = str(marker.get("destination") or "")
+    expires_value = marker.get("expires_at")
+    if isinstance(expires_value, bool) or not isinstance(expires_value, (int, float)):
+        return None
+    try:
+        expires_at = float(expires_value)
+        source = urlsplit(source_url)
+        destination = urlsplit(destination_url)
+    except (TypeError, ValueError):
+        return None
+    source_query = _ctbc_unique_query(source_url)
+    destination_query = _ctbc_unique_query(destination_url)
+    page_type = _get_ctbc_page_type(destination_url)
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    max_expiry = time.time() * 1000 + 1000 * (
+        CTBC_PENDING_NAVIGATION_TTL_SECONDS
+        + CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS
+    )
+    if (
+        not re.fullmatch(r"[a-f0-9]{32}", nonce)
+        or not 0 < expires_at <= max_expiry
+        or _get_ctbc_page_type(source_url) != "date"
+        or page_type not in {"seat", "general_admission"}
+        or not _ctbc_same_origin(source, destination)
+        or source.path.rsplit("/", 1)[0] != destination.path.rsplit("/", 1)[0]
+        or source_query is None
+        or destination_query is None
+        or set(destination_query) != {
+            "PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"
+        }
+    ):
+        return None
+    product_id = str(source_query.get("PRODUCT_ID") or "")
+    performance_id = str(destination_query.get("PERFORMANCE_ID") or "")
+    group_id = str(destination_query.get("GROUP_ID") or "")
+    price_area_id = str(destination_query.get("PERFORMANCE_PRICE_AREA_ID") or "")
+    if not all(token.fullmatch(value) for value in (
+        product_id, performance_id, price_area_id
+    )) or (group_id and not token.fullmatch(group_id)) or (
+        page_type == "seat" and not group_id
+    ):
+        return None
+    area_path = f"{source.path.rsplit('/', 1)[0]}/UTK0204_"
+    area_url = urlunsplit((source.scheme, source.netloc, area_path, urlencode({
+        "PERFORMANCE_ID": performance_id, "PRODUCT_ID": product_id,
+    }), ""))
+    created_at = (
+        time.monotonic()
+        + (expires_at - time.time() * 1000) / 1000
+        - CTBC_PENDING_NAVIGATION_TTL_SECONDS
+    )
+    return {
+        "kind": "FAST", "phase": "RETURNING", "nonce": nonce,
+        "source_url": source_url, "source_document_id": "",
+        "area_url": area_url, "destination_url": destination_url,
+        "route": "0205" if page_type == "seat" else "0202",
+        "performance_id": performance_id, "product_id": product_id,
+        "group_id": group_id, "price_area_id": price_area_id,
+        "marker_expires_at": expires_at, "created_at": created_at,
+    }
+
+
+def _ctbc_fast_marker_matches_pending(marker_pending, pending):
+    if not marker_pending or not pending or pending.get("kind") != "FAST":
+        return False
+    if marker_pending.get("nonce") != pending.get("nonce"):
+        return False
+    for key in (
+        "route", "performance_id", "product_id", "group_id", "price_area_id"
+    ):
+        if marker_pending.get(key) != pending.get(key):
+            return False
+    return all(
+        _ctbc_navigation_urls_match(marker_pending.get(key), pending.get(key))
+        for key in ("source_url", "area_url", "destination_url")
+    )
+
+
 async def _ctbc_prefetch_area_snapshot(tab, date_target):
     """Fetch one selected area's fresh HTML and exact map in the current browser session."""
     area_url_json = json.dumps(date_target["url"])
@@ -2007,9 +2172,152 @@ async def _ctbc_prefetch_area_snapshot(tab, date_target):
     return _decode_ctbc_json_result(raw_value)
 
 
+async def _ctbc_read_fast_navigation_marker(tab):
+    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    try:
+        raw_value = await tab.evaluate(f'''(() => {{
+            // __ticketsHunterCtbcFastMarkerRead
+            try {{
+                const raw = sessionStorage.getItem({marker_key_json});
+                if (raw === null) return JSON.stringify({{
+                    available: true, present: false, marker: null,
+                    raw: null, page_url: location.href
+                }});
+                try {{
+                    return JSON.stringify({{
+                        available: true, present: true, marker: JSON.parse(raw),
+                        raw, page_url: location.href
+                    }});
+                }} catch (_error) {{
+                    return JSON.stringify({{
+                        available: true, present: true, marker: null,
+                        raw, page_url: location.href
+                    }});
+                }}
+            }} catch (_error) {{
+                return JSON.stringify({{
+                    available: false, present: false, marker: null,
+                    page_url: location.href
+                }});
+            }}
+        }})()''')
+    except Exception:
+        return {"available": False, "present": False, "marker": None}
+    result = _decode_ctbc_json_result(raw_value)
+    return result if isinstance(result, dict) else {
+        "available": False, "present": False, "marker": None,
+    }
+
+
+async def _ctbc_delete_fast_navigation_marker(tab, nonce):
+    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    nonce_json = json.dumps(nonce)
+    try:
+        return await tab.evaluate(f'''(() => {{
+            // __ticketsHunterCtbcFastMarkerDelete
+            const expectedNonce = {nonce_json};
+            try {{
+                const raw = sessionStorage.getItem({marker_key_json});
+                if (raw === null) return true;
+                const marker = JSON.parse(raw);
+                if (!marker || marker.nonce !== expectedNonce) return false;
+                sessionStorage.removeItem({marker_key_json});
+                return true;
+            }} catch (_error) {{
+                return false;
+            }}
+        }})()''')
+    except Exception:
+        return False
+
+
+async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
+    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    expected_raw_json = json.dumps(expected_raw)
+    try:
+        return await tab.evaluate(f'''(() => {{
+            // __ticketsHunterCtbcMalformedMarkerDelete
+            const expectedRaw = {expected_raw_json};
+            try {{
+                const current = sessionStorage.getItem({marker_key_json});
+                if (current !== expectedRaw) return false;
+                const confirmed = sessionStorage.getItem({marker_key_json});
+                if (confirmed !== expectedRaw) return false;
+                sessionStorage.removeItem({marker_key_json});
+                return true;
+            }} catch (_error) {{
+                return false;
+            }}
+        }})()''')
+    except Exception:
+        return False
+
+
+async def _ctbc_commit_fast_navigation(tab, pending, onclick):
+    source_json = json.dumps(pending["source_url"])
+    onclick_json = json.dumps(onclick)
+    destination_json = json.dumps(pending["destination_url"])
+    nonce_json = json.dumps(pending["nonce"])
+    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    ttl_ms = int(CTBC_PENDING_NAVIGATION_TTL_SECONDS * 1000)
+    return await tab.evaluate(f'''
+        (() => {{
+            // __ticketsHunterCtbcFastCommit
+            const sourceUrl = {source_json};
+            const expectedOnclick = {onclick_json};
+            const destinationUrl = {destination_json};
+            const navigationNonce = {nonce_json};
+            const markerKey = {marker_key_json};
+            if (location.href !== sourceUrl || window.__ticketsHunterCtbcDateCommit) return 'pending';
+            const matches = Array.from(document.querySelectorAll('#PerformanceListTable button#buy_btn'))
+                .filter(button => (button.getAttribute('onclick') || '') === expectedOnclick);
+            if (matches.length !== 1) return 'rejected';
+            const button = matches[0];
+            const row = button.closest('tr');
+            const cell = button.closest('td');
+            const style = getComputedStyle(button);
+            if (!button.isConnected || !row || !cell ||
+                !row.closest('#PerformanceListTable') || cell !== row.lastElementChild ||
+                button.getClientRects().length === 0 || style.display === 'none' ||
+                style.visibility === 'hidden' || style.pointerEvents === 'none' ||
+                button.closest('[hidden], [inert], [aria-hidden="true"]') ||
+                button.matches(':disabled') || button.getAttribute('aria-disabled') === 'true') return 'rejected';
+            const marker = {{version: 1, nonce: navigationNonce, source: sourceUrl,
+                destination: destinationUrl, expires_at: Date.now() + {ttl_ms}}};
+            try {{
+                const existing = JSON.parse(sessionStorage.getItem(markerKey) || 'null');
+                if (existing) {{
+                    if (!/^[a-f0-9]{{32}}$/.test(existing.nonce || '') ||
+                        existing.version !== 1 || existing.expires_at > Date.now()) return 'pending';
+                    const current = JSON.parse(sessionStorage.getItem(markerKey) || 'null');
+                    if (!current || current.nonce !== existing.nonce) return 'pending';
+                    sessionStorage.removeItem(markerKey);
+                }}
+                sessionStorage.setItem(markerKey, JSON.stringify(marker));
+                const stored = JSON.parse(sessionStorage.getItem(markerKey) || 'null');
+                if (!stored || stored.version !== marker.version ||
+                    stored.expires_at !== marker.expires_at ||
+                    stored.nonce !== navigationNonce ||
+                    stored.source !== sourceUrl || stored.destination !== destinationUrl) {{
+                    if (stored && stored.nonce === navigationNonce) sessionStorage.removeItem(markerKey);
+                    return 'rejected';
+                }}
+            }} catch (_error) {{
+                return 'rejected';
+            }}
+            window.__ticketsHunterCtbcDateCommit = navigationNonce;
+            location.assign(destinationUrl);
+            return 'dispatched';
+        }})()
+    ''')
+
+
 async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick, source_url):
-    """Use the attested normal-mode shortcut; return False for native-flow fallback."""
+    """Use the attested normal-mode shortcut; False alone permits native fallback."""
     debug = util.create_debug_logger(config_dict)
+    identity = _ctbc_tab_identity(tab)
+    if _state["pending_navigation"].get(identity):
+        return True
     if not date_target.get("fast_area_prefetch", False):
         debug.log("[UTK SPORTS] Native area flow required by this platform")
         return False
@@ -2026,57 +2334,34 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
     if time.monotonic() - started > CTBC_FAST_PATH_TTL_SECONDS:
         debug.log("[CTBC FAST] Native area-page fallback: snapshot expired")
         return False
-
     target = _select_ctbc_area_snapshot(
         snapshot, config_dict, date_target["performance_id"], require_direct_destination=True
     )
     if not target or not target.get("destination"):
         debug.log("[CTBC FAST] Native area-page fallback: no attested area matched")
         return False
-    destination_url = _build_ctbc_destination_url(date_target["url"], target["destination"])
-    if not destination_url:
+    pending = _ctbc_new_pending_navigation(
+        tab, "FAST", source_url, date_target["url"], target["destination"], config_dict
+    )
+    if not pending:
         return False
-
-    source_json = json.dumps(source_url)
-    onclick_json = json.dumps(onclick)
-    destination_json = json.dumps(destination_url)
-    committed = await tab.evaluate(f'''
-        (() => {{
-            const sourceUrl = {source_json};
-            const expectedOnclick = {onclick_json};
-            const destinationUrl = {destination_json};
-            if (location.href !== sourceUrl || window.__ticketsHunterCtbcDateCommit) return false;
-            const matches = Array.from(document.querySelectorAll('#PerformanceListTable button#buy_btn'))
-                .filter(button => (button.getAttribute('onclick') || '') === expectedOnclick);
-            if (matches.length !== 1) return false;
-            const button = matches[0];
-            const row = button.closest('tr');
-            const cell = button.closest('td');
-            const style = getComputedStyle(button);
-            if (!button.isConnected || !row || !cell ||
-                !row.closest('#PerformanceListTable') || cell !== row.lastElementChild ||
-                button.getClientRects().length === 0 || style.display === 'none' ||
-                style.visibility === 'hidden' || style.pointerEvents === 'none' ||
-                button.closest('[hidden], [inert], [aria-hidden="true"]') ||
-                button.matches(':disabled') || button.getAttribute('aria-disabled') === 'true') return false;
-            window.__ticketsHunterCtbcDateCommit = destinationUrl;
-            setTimeout(() => location.assign(destinationUrl), 0);
-            return true;
-        }})()
-    ''')
-    if committed is not True:
-        return False
-
-    expected = dict(target["destination"])
-    expected.update({
-        "product_id": date_target["product_id"],
-        "area_url": date_target["url"],
-        "destination_url": destination_url,
-        "map_url": snapshot.get("map_url", ""),
-        "config_fingerprint": _ctbc_selection_config_fingerprint(config_dict),
-        "created_at": time.monotonic(),
-    })
-    _state["fast_target"][_ctbc_tab_identity(tab)] = expected
+    if _state["pending_navigation"].get(identity):
+        return True
+    _state["pending_navigation"][identity] = pending
+    try:
+        committed = await _ctbc_commit_fast_navigation(tab, pending, onclick)
+    except Exception as exc:
+        pending["phase"] = "DISPATCH_UNKNOWN"
+        debug.log(f"[CTBC FAST] Dispatch outcome unknown: {exc}")
+        return True
+    if committed is False or committed == "rejected":
+        await _ctbc_delete_fast_navigation_marker(tab, pending["nonce"])
+        _pop_pending_navigation_if_nonce(identity, pending["nonce"])
+        return bool(_state["pending_navigation"].get(identity))
+    if committed == "pending":
+        pending["phase"] = "DISPATCH_UNKNOWN"
+        return True
+    pending["phase"] = "DISPATCH_UNKNOWN"
     elapsed_ms = int((time.monotonic() - started) * 1000)
     debug.log(f"[CTBC FAST] Selected: {target['text']} ({target['status']}) in {elapsed_ms} ms")
     return True
@@ -2132,6 +2417,10 @@ async def _ctbc_wait_area_snapshot(tab):
 async def nodriver_ctbc_date_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    if not await _ctbc_reconcile_navigation_source(
+        tab, current_url, "date", config_dict
+    ):
+        return False
     rows = []
     for _ in range(10):
         try:
@@ -2190,14 +2479,7 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         except Exception as exc:
             debug.log(f"[CTBC DATE] Failed to inspect row: {exc}")
 
-    date_config = config_dict.get("date_auto_select", {})
-    keyword = date_config.get("date_keyword", "").strip()
-    target_index = _choose_candidate_index(
-        candidates,
-        keyword,
-        date_config.get("mode", "from top to bottom"),
-        config_dict.get("date_auto_fallback", False),
-    )
+    target_index = _ctbc_choose_date_candidate(candidates, config_dict)
 
     if target_index is None:
         await _reload_with_interval(tab, config_dict, "no purchasable date matched")
@@ -2233,7 +2515,9 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         return False
 
 
-async def _ctbc_commit_native_area_action(tab, page_url, target, ticket_number):
+async def _ctbc_commit_native_area_action(
+    tab, page_url, target, ticket_number, navigation_nonce
+):
     page_url_json = json.dumps(page_url)
     rel_json = json.dumps(target["rel"])
     area_json = json.dumps(target["area"])
@@ -2241,8 +2525,11 @@ async def _ctbc_commit_native_area_action(tab, page_url, target, ticket_number):
     action_name_json = json.dumps(target["map_action"]["action_name"])
     action_args_json = json.dumps(target["map_action"]["stable_args"])
     ticket_number_json = json.dumps(int(ticket_number))
+    nonce_json = json.dumps(navigation_nonce)
+    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     committed = await tab.evaluate(f'''
         (() => {{
+            // __ticketsHunterCtbcNativeAreaCommit
             const pageUrl = {page_url_json};
             const areaId = {rel_json};
             const expectedArea = {area_json};
@@ -2250,6 +2537,7 @@ async def _ctbc_commit_native_area_action(tab, page_url, target, ticket_number):
             const expectedActionName = {action_name_json};
             const expectedActionArgs = {action_args_json};
             const ticketNumber = {ticket_number_json};
+            const navigationNonce = {nonce_json};
             const normalizeArea = value => (value || '').replace(/\\s+/g, '');
             const normalizePrice = value => (value || '').replace(/[\\s,$]/g, '');
             const hasTickets = value => {{
@@ -2308,7 +2596,14 @@ async def _ctbc_commit_native_area_action(tab, page_url, target, ticket_number):
                     normalizePrice(currentPrice) === normalizePrice(expectedPrice) && hasTickets(status);
             }});
             if (!matchingRows.length) return false;
-            root.setAttribute(commitMarker, '1');
+            try {{
+                const stale = JSON.parse(sessionStorage.getItem({marker_key_json}) || 'null');
+                const current = JSON.parse(sessionStorage.getItem({marker_key_json}) || 'null');
+                if (stale && current && stale.nonce && current.nonce === stale.nonce) {{
+                    sessionStorage.removeItem({marker_key_json});
+                }}
+            }} catch (_error) {{}}
+            root.setAttribute(commitMarker, navigationNonce);
             area.click();
             return true;
         }})()
@@ -2318,6 +2613,11 @@ async def _ctbc_commit_native_area_action(tab, page_url, target, ticket_number):
 
 async def nodriver_ctbc_area_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    if not await _ctbc_reconcile_area_navigation(
+        tab, current_url, config_dict
+    ):
+        return False
     try:
         snapshot = await _ctbc_wait_area_snapshot(tab)
     except Exception as exc:
@@ -2341,16 +2641,29 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         return False
 
     await nodriver_utk_sports_cancel_refresh(tab, "available area found")
+    identity = _ctbc_tab_identity(tab)
+    if _state["pending_navigation"].get(identity):
+        return False
+    pending = _ctbc_new_pending_navigation(
+        tab, "NATIVE", page_url, page_url, target["map_action"], config_dict
+    )
+    if not pending:
+        return False
+    _state["pending_navigation"][identity] = pending
     try:
         committed = await _ctbc_commit_native_area_action(
-            tab, page_url, target, config_dict.get("ticket_number", 1)
+            tab, page_url, target, config_dict.get("ticket_number", 1),
+            pending["nonce"],
         )
         if not committed:
+            _pop_pending_navigation_if_nonce(identity, pending["nonce"])
             debug.log("[CTBC AREA] Area changed before commit; no click was sent")
             return False
+        pending["phase"] = "DISPATCH_UNKNOWN"
         debug.log(f"[CTBC AREA] Selected: {target['text']} ({target['status']})")
         return True
     except Exception as exc:
+        pending["phase"] = "DISPATCH_UNKNOWN"
         debug.log(f"[CTBC AREA] Click failed: {exc}")
         return False
 
@@ -3391,45 +3704,37 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
     )
 
 
-async def _ctbc_return_to_native_area(tab, expected):
+async def _ctbc_return_to_native_area(tab, expected, source_url):
     area_url = str(expected.get("area_url") or "")
-    if _get_ctbc_page_type(area_url) != "area":
-        return
+    if (
+        _get_ctbc_page_type(area_url) != "area"
+        or _get_ctbc_page_type(source_url) not in {"seat", "general_admission"}
+    ):
+        return False
     area_url_json = json.dumps(area_url)
+    source_url_json = json.dumps(source_url)
     try:
-        await tab.evaluate(f'''(() => {{
+        return await tab.evaluate(f'''(() => {{
+            // __ticketsHunterCtbcReturn
             const areaUrl = {area_url_json};
-            if (location.href !== areaUrl && !window.__ticketsHunterCtbcReturn) {{
-                window.__ticketsHunterCtbcReturn = true;
-                setTimeout(() => location.assign(areaUrl), 0);
-            }}
+            const sourceUrl = {source_url_json};
+            if (location.href !== sourceUrl) return false;
+            location.assign(areaUrl);
             return true;
         }})()''')
     except Exception:
-        pass
-
-
-async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
-    """Fail closed until a direct-navigation destination proves its hidden IDs."""
-    identity = _ctbc_tab_identity(tab)
-    expected = _state["fast_target"].get(identity)
-    if not expected:
-        return True
-    debug = util.create_debug_logger(config_dict)
-    if expected.get("returning"):
-        await _ctbc_return_to_native_area(tab, expected)
-        return False
-    if expected.get("config_fingerprint") != _ctbc_selection_config_fingerprint(config_dict):
-        expected["returning"] = True
-        debug.log("[CTBC FAST] Selection settings changed; returning to native area flow")
-        await _ctbc_return_to_native_area(tab, expected)
-        return False
-    if time.monotonic() - expected.get("created_at", 0) > 15.0:
-        expected["returning"] = True
-        debug.log("[CTBC FAST] Destination attestation expired")
-        await _ctbc_return_to_native_area(tab, expected)
         return False
 
+
+async def _ctbc_return_current_pending(tab, identity, pending, source_url):
+    if not _ctbc_pending_navigation_is_current(identity, pending):
+        return False
+    pending["phase"] = "RETURNING"
+    pending["return_source_url"] = source_url
+    return await _ctbc_return_to_native_area(tab, pending, source_url)
+
+
+async def _ctbc_read_destination_state(tab, page_type):
     marker_selectors = ["#TBL", ".ticket .checkNum"] if page_type == "seat" else [
         "#table_tickettype", "input.numbox[key]"
     ]
@@ -3438,66 +3743,284 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
         "#PRICE_AREA_ID" if page_type == "seat" else "#PERFORMANCE_PRICE_AREA_ID"
     )
     group_required_json = "true" if page_type == "seat" else "false"
-    try:
-        raw_value = await tab.evaluate(f'''
-            (() => new Promise(resolve => {{
-                let observer = null;
-                let timer = null;
-                let poller = null;
-                const finish = value => {{
-                    if (observer) observer.disconnect();
-                    if (timer) clearTimeout(timer);
-                    if (poller) clearInterval(poller);
-                    resolve(JSON.stringify(value));
-                }};
-                const read = () => {{
-                    const markers = {marker_json};
-                    const markerReady = markers.every(selector => document.querySelector(selector));
-                    const performanceInput = document.querySelector('#PERFORMANCE_ID');
-                    const productInput = document.querySelector('#PRODUCT_ID');
-                    const groupInput = document.querySelector('#GROUP_ID');
-                    const priceAreaInput = document.querySelector({price_area_selector_json});
-                    const groupReady = !{group_required_json} || !!groupInput;
-                    if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
-                    finish({{
-                        ready: true,
-                        page_url: location.href,
-                        performance_id: performanceInput.value || '',
-                        product_id: productInput.value || '',
-                        group_id: groupInput ? (groupInput.value || '') : '',
-                        price_area_id: priceAreaInput.value || ''
-                    }});
-                    return true;
-                }};
-                if (read()) return;
-                observer = new MutationObserver(read);
-                observer.observe(document.documentElement, {{childList: true, subtree: true}});
-                poller = setInterval(read, 25);
-                timer = setTimeout(() => finish({{
-                    ready: false, page_url: location.href, document_ready: document.readyState
-                }}), 2500);
-            }}))()
-        ''', await_promise=True)
-        state = _decode_ctbc_json_result(raw_value)
-    except Exception as exc:
-        debug.log(f"[CTBC FAST] Destination attestation failed: {exc}")
+    raw_value = await tab.evaluate(f'''
+        (() => new Promise(resolve => {{
+            // __ticketsHunterCtbcDestinationState
+            let observer = null;
+            let timer = null;
+            let poller = null;
+            const finish = value => {{
+                if (observer) observer.disconnect();
+                if (timer) clearTimeout(timer);
+                if (poller) clearInterval(poller);
+                resolve(JSON.stringify(value));
+            }};
+            const read = () => {{
+                const markers = {marker_json};
+                const markerReady = markers.every(selector => document.querySelector(selector));
+                const performanceInput = document.querySelector('#PERFORMANCE_ID');
+                const productInput = document.querySelector('#PRODUCT_ID');
+                const groupInput = document.querySelector('#GROUP_ID');
+                const priceAreaInput = document.querySelector({price_area_selector_json});
+                const groupReady = !{group_required_json} || !!groupInput;
+                if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
+                finish({{ready: true, page_url: location.href,
+                    performance_id: performanceInput.value || '',
+                    product_id: productInput.value || '',
+                    group_id: groupInput ? (groupInput.value || '') : '',
+                    price_area_id: priceAreaInput.value || ''}});
+                return true;
+            }};
+            if (read()) return;
+            observer = new MutationObserver(read);
+            observer.observe(document.documentElement, {{childList: true, subtree: true}});
+            poller = setInterval(read, 25);
+            timer = setTimeout(() => finish({{
+                ready: false, page_url: location.href, document_ready: document.readyState
+            }}), 2500);
+        }}))()
+    ''', await_promise=True)
+    return _decode_ctbc_json_result(raw_value)
+
+
+async def _ctbc_clear_source_navigation(
+    tab, identity, pending, marker_present, marker_pending
+):
+    if not _ctbc_pending_navigation_is_current(identity, pending):
+        return False
+    if pending.get("kind") == "FAST" and marker_present:
+        if not _ctbc_fast_marker_matches_pending(marker_pending, pending):
+            _pop_pending_navigation_if_nonce(identity, pending.get("nonce"))
+            return False
+        if not await _ctbc_delete_fast_navigation_marker(
+            tab, marker_pending["nonce"]
+        ):
+            return False
+    elif pending.get("kind") == "NATIVE" and marker_present:
+        if not await _ctbc_delete_fast_navigation_marker(
+            tab, marker_pending["nonce"]
+        ):
+            return False
+    return _pop_pending_navigation_if_nonce(
+        identity, pending.get("nonce")
+    ) is not None
+
+
+async def _ctbc_reconcile_navigation_source(
+    tab, current_url, page_type, config_dict
+):
+    identity = _ctbc_tab_identity(tab)
+    observed_pending = _state["pending_navigation"].get(identity)
+    marker_state = await _ctbc_read_fast_navigation_marker(tab)
+    pending = _state["pending_navigation"].get(identity)
+    if observed_pending:
+        if not _ctbc_pending_navigation_is_current(identity, observed_pending):
+            return False
+        pending = observed_pending
+    elif pending:
+        return False
+    storage_available = bool(marker_state.get("available"))
+    if not storage_available and not pending:
+        return True
+    marker_present = storage_available and bool(marker_state.get("present"))
+    marker_pending = _ctbc_pending_from_fast_marker(
+        marker_state.get("marker") if marker_present else None
+    )
+    if storage_available and marker_present and not marker_pending:
+        raw = marker_state.get("raw")
+        if isinstance(raw, str):
+            await _ctbc_delete_malformed_fast_marker(tab, raw)
         return False
 
+    current_document = str(_state["last_document"].get(identity) or "")
+    if not pending:
+        if not marker_pending:
+            return True
+        pending = marker_pending
+        pending["phase"] = "DISPATCH_UNKNOWN"
+        pending["source_document_id"] = current_document
+        current = _state["pending_navigation"].get(identity)
+        if current:
+            pending = current
+        else:
+            _state["pending_navigation"][identity] = pending
+
+    expected_url = pending.get(
+        "source_url" if page_type == "date" else "area_url"
+    )
+    exact_source = _ctbc_navigation_urls_match(current_url, expected_url)
+    source_document = str(pending.get("source_document_id") or "")
+    if not source_document and current_document:
+        pending["source_document_id"] = current_document
+        source_document = current_document
+    document_changed = bool(
+        source_document
+        and current_document
+        and current_document != source_document
+    )
+    reload_requested_at = float(pending.get("reload_requested_at") or 0)
+    if document_changed and (exact_source or reload_requested_at):
+        return await _ctbc_clear_source_navigation(
+            tab, identity, pending, marker_present, marker_pending
+        )
+
+    pending_expired = (
+        time.monotonic() - pending.get("created_at", 0)
+        >= CTBC_PENDING_NAVIGATION_TTL_SECONDS
+    )
+    marker_active = bool(
+        pending.get("kind") == "FAST"
+        and marker_pending
+        and marker_pending.get("marker_expires_at", 0) > time.time() * 1000
+    )
+    now = time.monotonic()
+    if (
+        not pending_expired
+        or marker_active
+        or (
+            reload_requested_at
+            and now - reload_requested_at < CTBC_PENDING_NAVIGATION_TTL_SECONDS
+        )
+    ):
+        return False
+    if not _ctbc_pending_navigation_is_current(identity, pending):
+        return False
+    reloaded = await _reload_with_interval(
+        tab, config_dict, f"{page_type} navigation outcome unknown"
+    )
+    if reloaded and _ctbc_pending_navigation_is_current(identity, pending):
+        pending["reload_requested_at"] = now
+    return False
+
+
+async def _ctbc_attest_pending_destination(
+    tab, page_type, pending, debug, stale_marker_nonce=""
+):
+    identity = _ctbc_tab_identity(tab)
+    try:
+        state = await _ctbc_read_destination_state(tab, page_type)
+    except Exception as exc:
+        debug.log(f"[CTBC NAV] Destination attestation failed: {exc}")
+        return False
     current_url = str(state.get("page_url") or "") if isinstance(state, dict) else ""
     if isinstance(state, dict) and state.get("ready") and _ctbc_fast_destination_is_valid(
-        expected, page_type, current_url, state
+        pending, page_type, current_url, state
     ):
-        _state["fast_target"].pop(identity, None)
-        debug.log("[CTBC FAST] Destination IDs verified")
-        return True
+        current = _state["pending_navigation"].get(identity)
+        if not current or current.get("nonce") != pending.get("nonce"):
+            return False
+        marker_nonce = (
+            pending["nonce"] if pending.get("kind") == "FAST"
+            else stale_marker_nonce
+        )
+        if marker_nonce and not await _ctbc_delete_fast_navigation_marker(
+            tab, marker_nonce
+        ):
+            return False
+        removed = _pop_pending_navigation_if_nonce(identity, pending["nonce"])
+        debug.log(f"[CTBC {pending.get('kind')}] Destination IDs verified")
+        return removed is not None
     if isinstance(state, dict) and state.get("document_ready") != "complete":
-        debug.log("[CTBC FAST] Destination is still loading")
+        debug.log("[CTBC NAV] Destination is still loading")
         return False
-
-    debug.log("[CTBC FAST] Destination mismatch; returning to native area flow")
-    expected["returning"] = True
-    await _ctbc_return_to_native_area(tab, expected)
+    debug.log("[CTBC NAV] Destination mismatch; returning to native area flow")
+    await _ctbc_return_current_pending(tab, identity, pending, current_url)
     return False
+
+
+async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
+    """Reconcile FAST/NATIVE provenance before ticket-page automation."""
+    identity = _ctbc_tab_identity(tab)
+    debug = util.create_debug_logger(config_dict)
+    observed_pending = _state["pending_navigation"].get(identity)
+    marker_state = await _ctbc_read_fast_navigation_marker(tab)
+    pending = _state["pending_navigation"].get(identity)
+    if observed_pending:
+        if not _ctbc_pending_navigation_is_current(identity, observed_pending):
+            return False
+        pending = observed_pending
+    elif pending:
+        return False
+    current_url = str(marker_state.get("page_url") or str(tab.target.url))
+    if not marker_state.get("available"):
+        if not pending:
+            return True
+        if pending.get("kind") == "NATIVE":
+            if pending.get("phase") == "RETURNING":
+                await _ctbc_return_current_pending(
+                    tab, identity, pending, pending.get("return_source_url", "")
+                )
+                return False
+            return await _ctbc_attest_pending_destination(
+                tab, page_type, pending, debug
+            )
+        debug.log("[CTBC FAST] Marker storage unavailable; returning to native flow")
+        await _ctbc_return_current_pending(tab, identity, pending, current_url)
+        return False
+    marker_present = bool(marker_state.get("present"))
+    marker = marker_state.get("marker") if marker_present else None
+    marker_pending = _ctbc_pending_from_fast_marker(marker)
+    if marker_present and not marker_pending:
+        raw = marker_state.get("raw")
+        if isinstance(raw, str):
+            await _ctbc_delete_malformed_fast_marker(tab, raw)
+        return False
+    if pending and pending.get("kind") == "NATIVE":
+        if pending.get("phase") == "RETURNING":
+            await _ctbc_return_current_pending(
+                tab, identity, pending, pending.get("return_source_url", "")
+            )
+            return False
+        marker_nonce = str(marker.get("nonce") or "") if isinstance(marker, dict) else ""
+        stale_marker_nonce = (
+            marker_nonce if re.fullmatch(r"[a-f0-9]{32}", marker_nonce) else ""
+        )
+        return await _ctbc_attest_pending_destination(
+            tab, page_type, pending, debug, stale_marker_nonce
+        )
+    if not pending:
+        if not marker_present:
+            return True
+        marker_pending["source_document_id"] = str(
+            _state["last_document"].get(identity) or ""
+        )
+        if _state["pending_navigation"].get(identity):
+            return False
+        _state["pending_navigation"][identity] = marker_pending
+        await _ctbc_return_current_pending(
+            tab, identity, marker_pending, current_url
+        )
+        return False
+    if pending.get("phase") == "RETURNING":
+        await _ctbc_return_current_pending(
+            tab, identity, pending, pending.get("return_source_url", "")
+        )
+        return False
+    marker_matches = bool(
+        _ctbc_fast_marker_matches_pending(marker_pending, pending)
+        and _ctbc_navigation_urls_match(
+            marker_pending.get("destination_url"),
+            marker_state.get("page_url") or str(tab.target.url),
+        )
+        and marker_pending.get("marker_expires_at", 0) >= time.time() * 1000
+    )
+    pending_valid = bool(
+        pending.get("config_fingerprint") == _ctbc_selection_config_fingerprint(config_dict)
+        and time.monotonic() - pending.get("created_at", 0)
+        <= CTBC_PENDING_NAVIGATION_TTL_SECONDS
+    )
+    if not marker_matches or not pending_valid:
+        debug.log("[CTBC FAST] Provenance mismatch or expiry; returning to native area flow")
+        await _ctbc_return_current_pending(tab, identity, pending, current_url)
+        return False
+    return await _ctbc_attest_pending_destination(tab, page_type, pending, debug)
+
+
+async def _ctbc_reconcile_area_navigation(tab, current_url, config_dict=None):
+    """Block duplicate area actions until navigation reaches a new document."""
+    return await _ctbc_reconcile_navigation_source(
+        tab, current_url, "area", config_dict or {}
+    )
 
 
 async def _handle_ctbc_checkout(tab, config_dict):
@@ -3527,9 +4050,11 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
     page_type = _get_ctbc_page_type(url)
     if page_type == "date" and config_dict.get("date_auto_select", {}).get("enable", False):
         await nodriver_ctbc_date_auto_select(tab, config_dict)
-    elif page_type == "area" and config_dict.get("area_auto_select", {}).get("enable", False):
-        _state["fast_target"].pop(_ctbc_tab_identity(tab), None)
-        await nodriver_ctbc_area_auto_select(tab, config_dict)
+    elif page_type == "area":
+        if config_dict.get("area_auto_select", {}).get("enable", False):
+            await nodriver_ctbc_area_auto_select(tab, config_dict)
+        else:
+            await _ctbc_reconcile_area_navigation(tab, url, config_dict)
     elif page_type == "seat":
         await nodriver_ctbc_seat_main(tab, config_dict, ocr)
     elif page_type == "general_admission":

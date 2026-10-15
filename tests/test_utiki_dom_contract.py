@@ -15,6 +15,8 @@ from tests.ctbc_support import (
     FakeUtikiDomPort,
     FakeUtikiQuantityDomPort,
     FakeUtikiSeatDomPort,
+    ctbc_identity_runtime,
+    ctbc_tab_runtime,
     config,
     make_ctbc_area_snapshot,
     make_ctbc_date_snapshot,
@@ -62,7 +64,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
     async def test_ambiguous_visible_dialog_blocks_without_dismiss(self):
         tab = FakeSubmitTab(dialog="")
         submit_key = _ctbc_purchase_state_key(tab)
-        _state["submitted"][submit_key] = {
+        ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = {
             "dispatched_at": 1.0,
             "phase": "awaiting_result",
             "source_url": str(tab.target.url),
@@ -86,8 +88,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 )
             )
         dismiss.assert_not_awaited()
-        self.assertNotIn(submit_key, _state["submitted"])
-        self.assertEqual("rejected", _state["submit_blocked"][submit_key])
+        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+        self.assertEqual("rejected", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
 
         with patch(
             "platforms.utiki.workflow.read_dialog_snapshot",
@@ -143,9 +145,13 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 )
                 identity = _ctbc_tab_identity(tab)
                 if outcome is CommitResult.REJECTED:
-                    self.assertNotIn(identity, _state["pending_navigation"])
+                    self.assertIsNone(
+                        ctbc_identity_runtime(identity)["transition"][
+                            "pending_navigation"
+                        ]
+                    )
                 else:
-                    pending = _state["pending_navigation"][identity]
+                    pending = ctbc_identity_runtime(identity)["transition"]["pending_navigation"]
                     self.assertEqual("DATE_NATIVE", pending["kind"])
                     self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
 
@@ -174,7 +180,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         self.assertEqual(["inspect_date", "commit_date"], dom_port.events)
         self.assertEqual(1, dom_port.committed_count)
         self.assertEqual(1, len(dom_port.nonces))
-        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        pending = ctbc_tab_runtime(tab)["transition"]["pending_navigation"]
         self.assertEqual("DATE_NATIVE", pending["kind"])
         self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
 
@@ -182,7 +188,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
         tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
         identity = _ctbc_tab_identity(tab)
-        _state["last_document"][identity] = "source-document"
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "source-document"
         cfg = config()
         cfg["area_auto_select"]["enable"] = False
         commit = AsyncMock(side_effect=[
@@ -200,10 +206,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ),
         ):
             self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
-            pending = _state["pending_navigation"][identity]
+            pending = ctbc_identity_runtime(identity)["transition"]["pending_navigation"]
             self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
 
-            _state["last_document"][identity] = "spontaneous-document"
+            ctbc_identity_runtime(identity)["document"]["last_document"] = "spontaneous-document"
             self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
             self.assertEqual(1, commit.await_count)
             self.assertEqual(1, reader.await_count)
@@ -217,18 +223,22 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 reload_page.assert_awaited_once()
                 self.assertIn("reload_requested_at", pending)
 
-                _state["last_document"][identity] = "reloaded-document"
+                ctbc_identity_runtime(identity)["document"]["last_document"] = "reloaded-document"
                 self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
 
         self.assertEqual(2, commit.await_count)
-        self.assertNotIn(identity, _state["pending_navigation"])
+        self.assertIsNone(
+            ctbc_identity_runtime(identity)["transition"][
+                "pending_navigation"
+            ]
+        )
 
     async def test_native_date_pending_clears_only_at_attested_area(self):
         snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
         dom_port = FakeUtikiDateDomPort(snapshot, CommitResult.COMMITTED)
         tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
         identity = _ctbc_tab_identity(tab)
-        _state["last_document"][identity] = "source-document"
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "source-document"
         cfg = config()
         cfg["area_auto_select"]["enable"] = False
 
@@ -248,17 +258,25 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
             "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=OTHER"
         )
-        _state["last_document"][identity] = "area-document"
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "area-document"
         self.assertFalse(await _ctbc_reconcile_area_navigation(
             tab, str(tab.target.url), cfg
         ))
-        self.assertIn(identity, _state["pending_navigation"])
+        self.assertIsNotNone(
+            ctbc_identity_runtime(identity)["transition"][
+                "pending_navigation"
+            ]
+        )
 
         tab.target.url = CTBC_TEST_AREA_URL
         self.assertTrue(await _ctbc_reconcile_area_navigation(
             tab, str(tab.target.url), cfg
         ))
-        self.assertNotIn(identity, _state["pending_navigation"])
+        self.assertIsNone(
+            ctbc_identity_runtime(identity)["transition"][
+                "pending_navigation"
+            ]
+        )
 
     async def test_structural_date_pending_accepts_same_tenant_product_area(self):
         raw_snapshot = make_ctbc_date_snapshot()
@@ -267,7 +285,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         dom_port = FakeUtikiDateDomPort(snapshot, CommitResult.COMMITTED)
         tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
         identity = _ctbc_tab_identity(tab)
-        _state["last_document"][identity] = "source-document"
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "source-document"
         cfg = config()
         cfg["area_auto_select"]["enable"] = False
 
@@ -283,14 +301,18 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         ):
             self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
 
-        pending = _state["pending_navigation"][identity]
+        pending = ctbc_identity_runtime(identity)["transition"]["pending_navigation"]
         self.assertEqual("", pending["area_url"])
         tab.target.url = CTBC_TEST_AREA_URL
-        _state["last_document"][identity] = "area-document"
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "area-document"
         self.assertTrue(await _ctbc_reconcile_area_navigation(
             tab, str(tab.target.url), cfg
         ))
-        self.assertNotIn(identity, _state["pending_navigation"])
+        self.assertIsNone(
+            ctbc_identity_runtime(identity)["transition"][
+                "pending_navigation"
+            ]
+        )
 
     async def test_date_native_unknown_target_accepts_attested_direct_destination(self):
         seat_url = (
@@ -319,8 +341,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                     "host": "tix.ctbcsports.com",
                     "action_kind": "structural_native",
                 }
-                _state["pending_navigation"][identity] = pending
-                _state["last_document"][identity] = pending[
+                ctbc_identity_runtime(identity)["transition"]["pending_navigation"] = pending
+                ctbc_identity_runtime(identity)["document"]["last_document"] = pending[
                     "source_document_id"
                 ]
                 destination_state = {
@@ -349,24 +371,28 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                         tab, page_type, config()
                     ))
                     self.assertIs(
-                        pending, _state["pending_navigation"][identity]
+                        pending, ctbc_identity_runtime(identity)["transition"]["pending_navigation"]
                     )
 
-                    _state["last_document"][identity] = destination_document
+                    ctbc_identity_runtime(identity)["document"]["last_document"] = destination_document
                     destination_state["document_id"] = destination_document
                     pending["source_document_id"] = ""
                     self.assertFalse(await _ctbc_attest_fast_destination(
                         tab, page_type, config()
                     ))
                     self.assertIs(
-                        pending, _state["pending_navigation"][identity]
+                        pending, ctbc_identity_runtime(identity)["transition"]["pending_navigation"]
                     )
 
                     pending["source_document_id"] = source_document
                     self.assertTrue(await _ctbc_attest_fast_destination(
                         tab, page_type, config()
                     ))
-                self.assertNotIn(identity, _state["pending_navigation"])
+                self.assertIsNone(
+                    ctbc_identity_runtime(identity)["transition"][
+                        "pending_navigation"
+                    ]
+                )
 
     async def test_date_native_direct_mismatch_retains_pending_without_return(self):
         destination_url = (
@@ -391,8 +417,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                     "tenant_path": "/BROTHERS", "host": "tix.ctbcsports.com",
                     "action_kind": "vip_native",
                 }
-                _state["pending_navigation"][identity] = pending
-                _state["last_document"][identity] = destination_document
+                ctbc_identity_runtime(identity)["transition"]["pending_navigation"] = pending
+                ctbc_identity_runtime(identity)["document"]["last_document"] = destination_document
                 destination_state = {
                     "ready": True, "page_url": destination_url,
                     "document_id": destination_document,
@@ -420,7 +446,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                     self.assertFalse(await _ctbc_attest_fast_destination(
                         tab, "seat", config()
                     ))
-                self.assertIs(pending, _state["pending_navigation"][identity])
+                self.assertIs(pending, ctbc_identity_runtime(identity)["transition"]["pending_navigation"])
                 self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
                 return_to_area.assert_not_awaited()
 
@@ -517,7 +543,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         self.assertEqual(1, dom_port.commit_count)
         self.assertEqual(
             "DISPATCH_UNKNOWN",
-            _state["pending_navigation"][_ctbc_tab_identity(tab)]["phase"],
+            ctbc_tab_runtime(tab)["transition"]["pending_navigation"]["phase"],
         )
 
     async def test_computer_area_uses_same_planner_and_server_committer(self):
@@ -556,7 +582,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             dom_port.events,
         )
         manual_commit.assert_not_awaited()
-        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        pending = ctbc_tab_runtime(tab)["transition"]["pending_navigation"]
         self.assertEqual("computer", pending["selection_mode"])
         self.assertEqual("0201_001", pending["route"])
         destination = urlsplit(pending["destination_url"])
@@ -594,7 +620,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         ):
             self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
 
-        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        pending = ctbc_tab_runtime(tab)["transition"]["pending_navigation"]
         self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
         self.assertEqual("computer", pending["selection_mode"])
 
@@ -644,8 +670,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ))
 
         self.assertEqual(1, dom_port.commit_count)
-        self.assertNotIn(
-            _ctbc_tab_identity(tab), _state["pending_navigation"]
+        self.assertIsNone(
+            ctbc_tab_runtime(tab)["transition"]["pending_navigation"]
         )
 
     async def test_unknown_area_dispatch_keeps_pending_and_does_not_retry(self):
@@ -672,7 +698,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 tab, config(area_keyword='"109區前排"')
             ))
 
-        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        pending = ctbc_tab_runtime(tab)["transition"]["pending_navigation"]
         self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
         self.assertEqual(1, dom_port.commit_count)
 
@@ -780,7 +806,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         self.assertEqual(0, tab.button.click_count)
         observe.assert_awaited_once()
         self.assertEqual(
-            "awaiting_result", _state["submitted"][submit_key]["phase"]
+            "awaiting_result", ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key]["phase"]
         )
 
     async def test_reserved_seat_clear_commit_never_submits_or_reloads(self):
@@ -888,9 +914,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             reload_calls += 1
             identity = _ctbc_tab_identity(reload_tab)
             if reload_calls == 1:
-                _state["reload_request"][identity] = {"reason": reason}
+                ctbc_identity_runtime(identity)["refresh"]["reload_request"] = {"reason": reason}
                 return False
-            _state["reload_request"].pop(identity, None)
+            ctbc_identity_runtime(identity)["refresh"]["reload_request"] = None
             return True
 
         with (
@@ -949,9 +975,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             reload_calls += 1
             identity = _ctbc_tab_identity(reload_tab)
             if reload_calls == 1:
-                _state["reload_request"][identity] = {"reason": reason}
+                ctbc_identity_runtime(identity)["refresh"]["reload_request"] = {"reason": reason}
                 return False
-            _state["reload_request"].pop(identity, None)
+            ctbc_identity_runtime(identity)["refresh"]["reload_request"] = None
             return True
 
         with (
@@ -1126,7 +1152,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         cfg = config()
         cfg["utiki"]["seat_selection_mode"] = "computer"
         cfg["ctbc"] = dict(cfg["utiki"])
-        _state["pending_navigation"][_ctbc_tab_identity(tab)] = {
+        ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = {
             "kind": "NATIVE",
             "route": "0201_001",
             "selection_mode": "computer",
@@ -1135,7 +1161,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         submit_calls = 0
 
         async def attest_effect(*_args):
-            _state["pending_navigation"].pop(_ctbc_tab_identity(tab), None)
+            ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = None
             return True
 
         async def submit_effect(*_args, **kwargs):
@@ -1223,7 +1249,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         reader.assert_not_awaited()
         attest.assert_not_awaited()
 
-        _state["pending_navigation"][_ctbc_tab_identity(tab)] = {
+        ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = {
             "kind": "NATIVE",
             "route": "0201_001",
             "selection_mode": "computer",
@@ -1236,7 +1262,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         ))
 
         async def attest_effect(*_args):
-            _state["pending_navigation"].pop(_ctbc_tab_identity(tab), None)
+            ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = None
             return True
 
         with patch(
@@ -1262,7 +1288,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             )
         commit.assert_not_awaited()
 
-        _state["pending_navigation"][_ctbc_tab_identity(tab)] = {
+        ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = {
             "kind": "NATIVE",
             "route": "0201_001",
             "selection_mode": "computer",
@@ -1291,8 +1317,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         cfg["utiki"]["seat_selection_mode"] = "computer"
         cfg["ctbc"] = dict(cfg["utiki"])
         identity = _ctbc_tab_identity(tab)
-        _state["last_document"][identity] = "document-1"
-        _state["pending_navigation"][identity] = {
+        ctbc_identity_runtime(identity)["document"]["last_document"] = "document-1"
+        ctbc_identity_runtime(identity)["transition"]["pending_navigation"] = {
             "kind": "NATIVE",
             "route": "0201_001",
             "selection_mode": "computer",
@@ -1308,7 +1334,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         )
 
         async def attest_effect(*_args):
-            _state["pending_navigation"].pop(identity, None)
+            ctbc_identity_runtime(identity)["transition"][
+                "pending_navigation"
+            ] = None
             return True
 
         with patch(
@@ -1348,7 +1376,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 )
             )
             self.assertEqual([], dom_port.events)
-            _state["last_document"][identity] = "document-2"
+            ctbc_identity_runtime(identity)["document"]["last_document"] = "document-2"
             self.assertTrue(
                 await nodriver_utiki_server_assigned_quantity_main(
                     tab, cfg, ocr=None
@@ -1378,9 +1406,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             reload_calls += 1
             identity = _ctbc_tab_identity(reload_tab)
             if reload_calls == 1:
-                _state["reload_request"][identity] = {"reason": reason}
+                ctbc_identity_runtime(identity)["refresh"]["reload_request"] = {"reason": reason}
                 return False
-            _state["reload_request"].pop(identity, None)
+            ctbc_identity_runtime(identity)["refresh"]["reload_request"] = None
             return True
 
         with (
@@ -1473,9 +1501,9 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             dom_port.events[:2],
         )
         self.assertEqual(
-            "awaiting_result", _state["submitted"][submit_key]["phase"]
+            "awaiting_result", ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key]["phase"]
         )
-        self.assertNotIn(submit_key, _state["submit_blocked"])
+        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submit_blocked"])
 
     async def test_server_quantity_plan_reaches_shared_submit_dispatch(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
@@ -1529,8 +1557,8 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ))
 
         self.assertEqual(1, dispatch.await_count)
-        self.assertNotIn(submit_key, _state["submitted"])
-        self.assertEqual("unknown", _state["submit_blocked"][submit_key])
+        self.assertNotIn(submit_key, ctbc_tab_runtime(tab)["purchase"]["submitted"])
+        self.assertEqual("unknown", ctbc_tab_runtime(tab)["purchase"]["submit_blocked"][submit_key])
 
     async def test_late_stale_dispatch_cannot_reload_after_losing_guard(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
@@ -1548,7 +1576,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         }
 
         async def lose_guard(*_args):
-            _state["submitted"][submit_key] = replacement
+            ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key] = replacement
             return SubmitDispatchResult.STALE
 
         with patch(
@@ -1563,7 +1591,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             ))
 
         reload_page.assert_not_awaited()
-        self.assertIs(_state["submitted"][submit_key], replacement)
+        self.assertIs(ctbc_tab_runtime(tab)["purchase"]["submitted"][submit_key], replacement)
 
     async def test_captcha_rejection_allows_one_new_quantity_dispatch(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())

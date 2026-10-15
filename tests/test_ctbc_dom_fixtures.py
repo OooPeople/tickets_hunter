@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import zendriver as uc
 
-from tests.ctbc_support import config
+from tests.ctbc_support import ctbc_identity_runtime, ctbc_tab_runtime, config
 
 from platforms.utiki.dom import (
     CommitResult,
@@ -1292,7 +1292,9 @@ async def _assert_quantity_fixture(browser):
     assert await flow_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 1
-    assert _state["submitted"][("fixture-purchase",)]["phase"] == (
+    assert ctbc_tab_runtime(flow_tab)["purchase"]["submitted"][
+        ("fixture-purchase",)
+    ]["phase"] == (
         "awaiting_result"
     )
     assert await _read_fixture_quantities(flow_tab) == {
@@ -1576,7 +1578,9 @@ async def _assert_quantity_fixture(browser):
         assert await wait_tab.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
         ) == 0
-        assert (f"fixture-wait-{mutation}",) not in _state["submitted"]
+        assert (f"fixture-wait-{mutation}",) not in (
+            ctbc_tab_runtime(wait_tab)["purchase"]["submitted"]
+        )
 
     race_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
     await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
@@ -1675,10 +1679,11 @@ async def _assert_quantity_fixture(browser):
         nonlocal reload_calls
         reload_calls += 1
         identity = _ctbc_tab_identity(reload_tab)
+        refresh = ctbc_identity_runtime(identity)["refresh"]
         if reload_calls == 1:
-            _state["reload_request"][identity] = {"reason": reason}
+            refresh["reload_request"] = {"reason": reason}
             return False
-        _state["reload_request"].pop(identity, None)
+        refresh["reload_request"] = None
         return True
 
     with patch(

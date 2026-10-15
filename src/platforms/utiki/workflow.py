@@ -117,25 +117,41 @@ UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
 UTK_EMERGENCY_MARKER_SECONDS = 6.0
 UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
 _state = {
-    "submitted": {},
-    "seat_conflict_pending": {},
-    "submit_blocked": {},
-    "checkout_notified": set(),
-    "auth_failure": {},
-    "captcha_reset": {},
-    "pending_navigation": {},
-    "server_assignment_authorized": {},
-    "reload_request": {},
-    "rate_limit_observation": {},
-    "rate_limit_retry": {},
-    "recovery_probe": {},
-    "reload_event": set(),
+    "tabs": {},
     "cancel_tasks": set(),
-    "document_snapshot": {},
-    "last_document": {},
-    "unknown_document": {},
-    "tab_tokens": [],
 }
+_UTIKI_TAB_TOKEN_ATTR = "_tickets_hunter_utiki_tab_token"
+
+
+def _new_ctbc_tab_runtime():
+    """Return the single mutable runtime owned by one browser tab."""
+    return {
+        "document": {
+            "snapshot": None,
+            "last_document": "",
+            "unknown_document": None,
+        },
+        "action": {},
+        "transition": {
+            "pending_navigation": None,
+            "server_assignment_authorized": None,
+        },
+        "purchase": {
+            "submitted": {},
+            "seat_conflict_pending": {},
+            "submit_blocked": {},
+            "checkout_notified": set(),
+            "auth_failure": {},
+            "captcha_reset": {},
+        },
+        "refresh": {
+            "reload_request": None,
+            "rate_limit_observation": None,
+            "rate_limit_retry": 0.0,
+            "recovery_probe": None,
+            "reload_event": False,
+        },
+    }
 
 
 def _get_utiki_behavior(config_dict, key, default):
@@ -150,20 +166,38 @@ def _get_utiki_behavior(config_dict, key, default):
 
 
 def _ctbc_tab_identity(tab):
-    """Use the tab object itself so recycled Python object IDs cannot leak state."""
+    """Return a stable scalar identity without retaining the tab object."""
+    identity = str(getattr(tab, _UTIKI_TAB_TOKEN_ATTR, "") or "")
+    if identity:
+        return identity
+    target_id = str(
+        getattr(getattr(tab, "target", None), "target_id", "") or ""
+    ).strip()
+    if target_id:
+        identity = f"utiki-target-{target_id}"
+    else:
+        identity = f"utiki-tab-{uuid.uuid4().hex}"
     try:
-        hash(tab)
-        identity = tab
-    except TypeError:
-        identity = None
-        for existing_tab, token in _state["tab_tokens"]:
-            if existing_tab is tab:
-                identity = token
-                break
-        if identity is None:
-            identity = f"ctbc-tab-{id(tab)}-{time.monotonic_ns()}"
-            _state["tab_tokens"].append((tab, identity))
+        setattr(tab, _UTIKI_TAB_TOKEN_ATTR, identity)
+    except (AttributeError, TypeError) as exc:
+        raise TypeError("uTiki tab does not support a stable identity token") from exc
     return identity
+
+
+def _ctbc_runtime_for_identity(identity):
+    runtime = _state["tabs"].get(identity)
+    if runtime is None:
+        runtime = _new_ctbc_tab_runtime()
+        _state["tabs"][identity] = runtime
+    return runtime
+
+
+def _ctbc_tab_runtime(tab):
+    return _ctbc_runtime_for_identity(_ctbc_tab_identity(tab))
+
+
+def _ctbc_purchase_runtime(tab):
+    return _ctbc_tab_runtime(tab)["purchase"]
 
 
 def _ctbc_tab_state_key(tab):
@@ -173,21 +207,27 @@ def _ctbc_tab_state_key(tab):
 
 def _pop_reload_request_if_token(identity, request_token):
     """Remove only the logical request that the current coroutine captured."""
-    current = _state["reload_request"].get(identity)
+    refresh = _ctbc_runtime_for_identity(identity)["refresh"]
+    current = refresh["reload_request"]
     if current and current.get("request_token") == request_token:
-        return _state["reload_request"].pop(identity, None)
+        refresh["reload_request"] = None
+        return current
     return None
 
 
 def _pop_pending_navigation_if_nonce(identity, nonce):
-    current = _state["pending_navigation"].get(identity)
+    transition = _ctbc_runtime_for_identity(identity)["transition"]
+    current = transition["pending_navigation"]
     if current and current.get("nonce") == nonce:
-        return _state["pending_navigation"].pop(identity, None)
+        transition["pending_navigation"] = None
+        return current
     return None
 
 
 def _ctbc_pending_navigation_is_current(identity, pending):
-    current = _state["pending_navigation"].get(identity)
+    current = _ctbc_runtime_for_identity(identity)["transition"][
+        "pending_navigation"
+    ]
     return bool(
         current
         and pending
@@ -433,7 +473,7 @@ def _utk_refresh_settings(*, force_refresh=False):
 
 def _utk_refresh_identity(tab):
     """Return one stable, process-unique queue identity for this browser tab."""
-    return f"{util.get_instance_id()}:{os.getpid()}:{id(tab):x}"
+    return f"{util.get_instance_id()}:{os.getpid()}:{_ctbc_tab_identity(tab)}"
 
 
 def _utk_emergency_marker_path():
@@ -505,8 +545,8 @@ def _classify_utk_document_state(snapshot):
 async def _inspect_utk_document(tab, url=None, *, force=False):
     """Classify the current document without mistaking a loading page for 429."""
     current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
-    identity = _ctbc_tab_identity(tab)
-    cached = _state["document_snapshot"].get(identity)
+    document = _ctbc_tab_runtime(tab)["document"]
+    cached = document["snapshot"]
     if (
         not force
         and cached
@@ -572,7 +612,7 @@ async def _inspect_utk_document(tab, url=None, *, force=False):
     except (TypeError, ValueError):
         snapshot["document_started_at"] = 0.0
     snapshot["url"] = str(snapshot.get("url") or current_url)
-    _state["document_snapshot"][identity] = {
+    document["snapshot"] = {
         "url": snapshot["url"],
         "checked_at": time.monotonic(),
         "snapshot": dict(snapshot),
@@ -589,8 +629,10 @@ async def nodriver_utk_sports_cancel_refresh(
 ):
     """Cancel pending work and optionally release an owned recovery probe."""
     identity = _ctbc_tab_identity(tab)
-    request = _state["reload_request"].pop(identity, None)
-    probe = _state["recovery_probe"].get(identity) if abandon_probe else None
+    refresh = _ctbc_runtime_for_identity(identity)["refresh"]
+    request = refresh["reload_request"]
+    refresh["reload_request"] = None
+    probe = refresh["recovery_probe"] if abandon_probe else None
     if probe is not None:
         probe["abandon_requested"] = True
     if request is None and probe is None:
@@ -612,9 +654,9 @@ async def nodriver_utk_sports_cancel_refresh(
                 success=False,
             )
             if completion.accepted or "not owned" in str(completion.error or ""):
-                current = _state["recovery_probe"].get(identity)
+                current = refresh["recovery_probe"]
                 if current and current.get("permit_id") == probe.get("permit_id"):
-                    _state["recovery_probe"].pop(identity, None)
+                    refresh["recovery_probe"] = None
             changed = bool(completion.accepted) or changed
         return changed
 
@@ -629,10 +671,10 @@ async def nodriver_utk_sports_cancel_refresh(
 
 def nodriver_utk_sports_consume_reload_event(tab):
     """Tell the outer router that a same-URL reload needs fresh CF detection."""
-    identity = _ctbc_tab_identity(tab)
-    if identity not in _state["reload_event"]:
+    refresh = _ctbc_tab_runtime(tab)["refresh"]
+    if not refresh["reload_event"]:
         return False
-    _state["reload_event"].discard(identity)
+    refresh["reload_event"] = False
     return True
 
 
@@ -647,7 +689,7 @@ async def _report_utk_rate_limit(
     settings = _utk_refresh_settings()
     if not settings.get("enabled", True):
         return None
-    identity = _ctbc_tab_identity(tab)
+    refresh = _ctbc_tab_runtime(tab)["refresh"]
     coordinator = get_shared_refresh_coordinator()
     _mark_utk_emergency_window()
     report = await coordinator.report_rate_limited(
@@ -660,11 +702,11 @@ async def _report_utk_rate_limit(
     )
     debug = util.create_debug_logger(config_dict)
     if report.accepted:
-        _state["rate_limit_observation"][identity] = document_id
-        _state["rate_limit_retry"].pop(identity, None)
+        refresh["rate_limit_observation"] = document_id
+        refresh["rate_limit_retry"] = 0.0
     else:
         retry_seconds = max(float(report.retry_after_seconds or 1.0), 0.5)
-        _state["rate_limit_retry"][identity] = time.monotonic() + retry_seconds
+        refresh["rate_limit_retry"] = time.monotonic() + retry_seconds
         _mark_utk_emergency_window(retry_seconds + 1.0)
     if report.accepted and report.new_incident:
         if suspected:
@@ -685,8 +727,8 @@ async def _report_utk_rate_limit(
 
 async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
     """Resolve a probe only after a different document becomes normal or 429."""
-    identity = _ctbc_tab_identity(tab)
-    probe = _state["recovery_probe"].get(identity)
+    refresh = _ctbc_tab_runtime(tab)["refresh"]
+    probe = refresh["recovery_probe"]
     if not probe:
         return False
     now = time.monotonic()
@@ -705,16 +747,16 @@ async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
         # The hard lifecycle limit has been reached. Stop local renewals even
         # if SQLite is temporarily unavailable; the DB lease then expires
         # naturally instead of being hammered on every 100ms health pass.
-        current = _state["recovery_probe"].get(identity)
+        current = refresh["recovery_probe"]
         if current and current.get("permit_id") == probe.get("permit_id"):
-            _state["recovery_probe"].pop(identity, None)
+            refresh["recovery_probe"] = None
         return True
     if not probe.get("lease_task") and now >= probe.get("next_renew_at", 0.0):
         renewed = await coordinator.renew_recovery_probe(
             UTK_SPORTS_SCOPE, probe.get("permit_id", "")
         )
         if renewed is False:
-            _state["recovery_probe"].pop(identity, None)
+            refresh["recovery_probe"] = None
             return False
         probe["next_renew_at"] = now + (
             UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
@@ -724,7 +766,7 @@ async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
     classification = snapshot.get("classification")
     if classification == "unknown":
         return False
-    if time.monotonic() < _state["rate_limit_retry"].get(identity, 0.0):
+    if time.monotonic() < refresh["rate_limit_retry"]:
         return True
     if classification == "blocked":
         report = await _report_utk_rate_limit(
@@ -735,7 +777,7 @@ async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
             document_started_at=snapshot.get("document_started_at", 0.0),
         )
         if report and report.accepted:
-            _state["recovery_probe"].pop(identity, None)
+            refresh["recovery_probe"] = None
     else:
         settings = _utk_refresh_settings()
         if settings.get("enabled", True):
@@ -746,15 +788,15 @@ async def _finish_utk_recovery_probe(tab, config_dict, snapshot):
                 success=(classification == "normal"),
             )
             if completion.accepted:
-                _state["recovery_probe"].pop(identity, None)
+                refresh["recovery_probe"] = None
                 if classification == "normal":
                     util.create_debug_logger(config_dict).log(
                         "[UTK RATE] Recovery probe succeeded; shared refresh resumed"
                     )
             elif "not owned" in str(completion.error or ""):
-                _state["recovery_probe"].pop(identity, None)
+                refresh["recovery_probe"] = None
             else:
-                _state["rate_limit_retry"][identity] = time.monotonic() + 1.0
+                refresh["rate_limit_retry"] = time.monotonic() + 1.0
     return True
 
 
@@ -762,26 +804,28 @@ async def _utk_document_guard(tab, config_dict, url=None):
     """Apply the 429 circuit breaker before any UTK page-specific action."""
     settings = _utk_refresh_settings()
     snapshot = await _inspect_utk_document(tab, url)
-    identity = _ctbc_tab_identity(tab)
+    runtime = _ctbc_tab_runtime(tab)
+    document = runtime["document"]
+    refresh = runtime["refresh"]
     document_id = snapshot.get("document_id")
-    previous_document_id = _state["last_document"].get(identity)
+    previous_document_id = document["last_document"]
     if previous_document_id and previous_document_id != document_id:
-        _state["reload_event"].add(identity)
-    _state["last_document"][identity] = document_id
+        refresh["reload_event"] = True
+    document["last_document"] = document_id
     if not settings.get("enabled", True):
         return "disabled", snapshot
     probe_handled = await _finish_utk_recovery_probe(tab, config_dict, snapshot)
     classification = snapshot.get("classification", "unknown")
     if classification == "unknown":
-        if _state["rate_limit_observation"].get(identity) == document_id:
+        if refresh["rate_limit_observation"] == document_id:
             return "blocked", snapshot
-        unknown = _state["unknown_document"].get(identity)
+        unknown = document["unknown_document"]
         if not unknown or unknown.get("document_id") != document_id:
             unknown = {
                 "document_id": document_id,
                 "first_seen_at": time.monotonic(),
             }
-            _state["unknown_document"][identity] = unknown
+            document["unknown_document"] = unknown
         # Unknown is a local fail-closed state, not evidence of HTTP 429.
         # Cloudflare interstitials, loading/empty documents and CDP failures can
         # all remain unknown for a long time.  Promoting those to a shared
@@ -790,9 +834,9 @@ async def _utk_document_guard(tab, config_dict, url=None):
         # rate-limit incident.
         return "unknown", snapshot
 
-    _state["unknown_document"].pop(identity, None)
+    document["unknown_document"] = None
     if classification == "blocked":
-        request = _state["reload_request"].get(identity)
+        request = refresh["reload_request"]
         request_is_stale = bool(request) and (
             request.get("document_id") != snapshot.get("document_id")
             or request.get("expected_url") != snapshot.get("url")
@@ -805,9 +849,9 @@ async def _utk_document_guard(tab, config_dict, url=None):
             await nodriver_utk_sports_cancel_refresh(tab, "HTTP 429", wait=True)
         if (
             not probe_handled
-            and _state["rate_limit_observation"].get(identity)
+            and refresh["rate_limit_observation"]
             != snapshot.get("document_id")
-            and time.monotonic() >= _state["rate_limit_retry"].get(identity, 0.0)
+            and time.monotonic() >= refresh["rate_limit_retry"]
         ):
             await _report_utk_rate_limit(
                 tab,
@@ -817,7 +861,7 @@ async def _utk_document_guard(tab, config_dict, url=None):
             )
         return "blocked", snapshot
 
-    request = _state["reload_request"].get(identity)
+    request = refresh["reload_request"]
     if request and (
         request.get("expected_url") != snapshot.get("url")
         or request.get("document_id") != snapshot.get("document_id")
@@ -865,9 +909,9 @@ async def nodriver_utk_sports_reload(
             return False
         try:
             await tab.reload()
-            identity = _ctbc_tab_identity(tab)
-            _state["document_snapshot"].pop(identity, None)
-            _state["reload_event"].add(identity)
+            runtime = _ctbc_tab_runtime(tab)
+            runtime["document"]["snapshot"] = None
+            runtime["refresh"]["reload_event"] = True
             return True
         except Exception as exc:
             debug.log(f"[CTBC] Reload failed: {exc}")
@@ -891,7 +935,8 @@ async def nodriver_utk_sports_reload(
         return False
 
     identity = _ctbc_tab_identity(tab)
-    request = _state["reload_request"].get(identity)
+    refresh = _ctbc_runtime_for_identity(identity)["refresh"]
+    request = refresh["reload_request"]
     if request is None:
         interval = config_dict.get("advanced", {}).get(
             "auto_reload_page_interval", 0.0
@@ -910,7 +955,7 @@ async def nodriver_utk_sports_reload(
             "allow_blocked_recovery": bool(allow_blocked_recovery),
             "request_token": uuid.uuid4().hex,
         }
-        _state["reload_request"][identity] = request
+        refresh["reload_request"] = request
         debug.log(f"[CTBC] {reason}; queued for shared refresh")
     request_token = request.get("request_token")
 
@@ -990,7 +1035,7 @@ async def nodriver_utk_sports_reload(
     preflight_classification = preflight.get("classification")
     if (
         preflight_classification == "unknown"
-        and _state["rate_limit_observation"].get(identity)
+        and refresh["rate_limit_observation"]
         == preflight.get("document_id")
     ):
         preflight_classification = "blocked"
@@ -1006,7 +1051,7 @@ async def nodriver_utk_sports_reload(
         allow_blocked_recovery
         and not reservation.is_recovery_probe
         and same_blocked_document
-        and _state["rate_limit_observation"].get(identity)
+        and refresh["rate_limit_observation"]
         == preflight.get("document_id")
     )
     if preflight_classification == "blocked" and not (
@@ -1080,13 +1125,13 @@ async def nodriver_utk_sports_reload(
             "started_at": started_at,
             "next_renew_at": started_at + UTK_RECOVERY_PROBE_RENEW_SECONDS,
         }
-        _state["recovery_probe"][identity] = probe_state
+        refresh["recovery_probe"] = probe_state
     _pop_reload_request_if_token(identity, request_token)
     if decision.is_recovery_probe:
         async def renew_probe_lease():
             while True:
                 await asyncio.sleep(UTK_RECOVERY_PROBE_RENEW_SECONDS)
-                current = _state["recovery_probe"].get(identity)
+                current = refresh["recovery_probe"]
                 if (
                     not current
                     or current.get("permit_id") != decision.permit_id
@@ -1103,17 +1148,17 @@ async def nodriver_utk_sports_reload(
                         decision.permit_id,
                         success=False,
                     )
-                    current = _state["recovery_probe"].get(identity)
+                    current = refresh["recovery_probe"]
                     if current and current.get("permit_id") == decision.permit_id:
-                        _state["recovery_probe"].pop(identity, None)
+                        refresh["recovery_probe"] = None
                     return
                 renewed = await get_shared_refresh_coordinator().renew_recovery_probe(
                     UTK_SPORTS_SCOPE, decision.permit_id
                 )
                 if renewed is False:
-                    current = _state["recovery_probe"].get(identity)
+                    current = refresh["recovery_probe"]
                     if current and current.get("permit_id") == decision.permit_id:
-                        _state["recovery_probe"].pop(identity, None)
+                        refresh["recovery_probe"] = None
                     return
                 current["next_renew_at"] = time.monotonic() + (
                     UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
@@ -1125,8 +1170,9 @@ async def nodriver_utk_sports_reload(
         await asyncio.wait_for(
             reload_call, timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
         )
-        _state["document_snapshot"].pop(identity, None)
-        _state["reload_event"].add(identity)
+        runtime = _ctbc_runtime_for_identity(identity)
+        runtime["document"]["snapshot"] = None
+        runtime["refresh"]["reload_event"] = True
         return True
     except Exception as exc:
         debug.log(f"[CTBC] Reload failed: {exc}")
@@ -1208,7 +1254,7 @@ async def _reload_with_interval(tab, config_dict, reason):
 
 async def _poll_ctbc_quantity_reload(tab, config_dict):
     """Continue one queued quantity recovery without resetting its interval."""
-    request = _state["reload_request"].get(_ctbc_tab_identity(tab))
+    request = _ctbc_tab_runtime(tab)["refresh"]["reload_request"]
     if not request or request.get("reason") != CTBC_QUANTITY_STALE_RELOAD_REASON:
         return False
     await _reload_with_interval(
@@ -1219,7 +1265,7 @@ async def _poll_ctbc_quantity_reload(tab, config_dict):
 
 async def _poll_ctbc_seat_reload(tab, config_dict):
     """Continue one queued reserved-seat recovery without resetting its interval."""
-    request = _state["reload_request"].get(_ctbc_tab_identity(tab))
+    request = _ctbc_tab_runtime(tab)["refresh"]["reload_request"]
     if not request or request.get("reason") != CTBC_SEAT_STALE_RELOAD_REASON:
         return False
     await _reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
@@ -1308,12 +1354,13 @@ def _ctbc_new_pending_navigation(
     ):
         return None
     identity = _ctbc_tab_identity(tab)
+    document = _ctbc_runtime_for_identity(identity)["document"]
     return {
         "kind": kind,
         "phase": "PREPARED",
         "nonce": uuid.uuid4().hex,
         "source_url": source_url,
-        "source_document_id": _state["last_document"].get(identity, ""),
+        "source_document_id": document["last_document"],
         "area_url": area_url,
         "destination_url": destination_url,
         "route": route,
@@ -1352,12 +1399,13 @@ def _ctbc_new_date_native_pending(tab, snapshot, plan):
     ):
         return None
     identity = _ctbc_tab_identity(tab)
+    document = _ctbc_runtime_for_identity(identity)["document"]
     return {
         "kind": "DATE_NATIVE",
         "phase": "PREPARED",
         "nonce": uuid.uuid4().hex,
         "source_url": source_url,
-        "source_document_id": _state["last_document"].get(identity, ""),
+        "source_document_id": document["last_document"],
         "area_url": area_url,
         "product_id": product_id,
         "tenant_path": profile["tenant_path"],
@@ -1667,7 +1715,8 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_p
     """Use the attested normal-mode shortcut; False alone permits native fallback."""
     debug = util.create_debug_logger(config_dict)
     identity = _ctbc_tab_identity(tab)
-    if _state["pending_navigation"].get(identity):
+    transition = _ctbc_runtime_for_identity(identity)["transition"]
+    if transition["pending_navigation"]:
         return True
     date_target = _ctbc_date_target_payload(date_plan)
     if not date_target or not date_plan.fast_area_prefetch:
@@ -1699,9 +1748,9 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_p
     )
     if not pending:
         return False
-    if _state["pending_navigation"].get(identity):
+    if transition["pending_navigation"]:
         return True
-    _state["pending_navigation"][identity] = pending
+    transition["pending_navigation"] = pending
     try:
         committed = await commit_date_action(
             tab,
@@ -1719,7 +1768,7 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_p
     if committed is CommitResult.REJECTED:
         await _ctbc_delete_fast_navigation_marker(tab, pending["nonce"])
         _pop_pending_navigation_if_nonce(identity, pending["nonce"])
-        return bool(_state["pending_navigation"].get(identity))
+        return bool(transition["pending_navigation"])
     if committed is CommitResult.STALE:
         pending["phase"] = "DISPATCH_UNKNOWN"
         return True
@@ -1738,12 +1787,13 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_snapshot, date_p
 async def _ctbc_commit_native_date(tab, snapshot, plan, debug):
     """Install the cross-document intent before dispatching one native click."""
     identity = _ctbc_tab_identity(tab)
-    if _state["pending_navigation"].get(identity):
+    transition = _ctbc_runtime_for_identity(identity)["transition"]
+    if transition["pending_navigation"]:
         return False
     pending = _ctbc_new_date_native_pending(tab, snapshot, plan)
-    if not pending or _state["pending_navigation"].get(identity):
+    if not pending or transition["pending_navigation"]:
         return False
-    _state["pending_navigation"][identity] = pending
+    transition["pending_navigation"] = pending
     try:
         committed = await commit_date_action(
             tab, snapshot, plan, pending["nonce"]
@@ -1877,7 +1927,8 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
 
     await nodriver_utk_sports_cancel_refresh(tab, "available area found")
     identity = _ctbc_tab_identity(tab)
-    if _state["pending_navigation"].get(identity):
+    transition = _ctbc_runtime_for_identity(identity)["transition"]
+    if transition["pending_navigation"]:
         return False
     pending = _ctbc_new_pending_navigation(
         tab, "NATIVE", page_url, page_url,
@@ -1886,7 +1937,7 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
     )
     if not pending:
         return False
-    _state["pending_navigation"][identity] = pending
+    transition["pending_navigation"] = pending
     try:
         committer = (
             commit_server_assigned_area
@@ -2140,10 +2191,12 @@ async def _dismiss_ctbc_dialog(tab, expected_text):
 
 async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
     reset_source_document_id = ""
+    runtime = _ctbc_tab_runtime(tab)
+    purchase = runtime["purchase"]
+    captcha_resets = purchase["captcha_reset"]
     if refresh_image and submit_key is not None:
-        identity = _ctbc_tab_identity(tab)
-        current_document_id = _state["last_document"].get(identity, "")
-        reset = _state["captcha_reset"].get(submit_key)
+        current_document_id = runtime["document"]["last_document"]
+        reset = captcha_resets.get(submit_key)
         if isinstance(reset, dict):
             phase = reset.get("phase")
             source_document_id = str(reset.get("source_document_id") or "")
@@ -2152,7 +2205,7 @@ async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
             if phase in ("dispatching", "unknown"):
                 if not current_document_id or current_document_id == source_document_id:
                     return False
-                _state["captcha_reset"].pop(submit_key, None)
+                captcha_resets.pop(submit_key, None)
         reset_source_document_id = current_document_id
 
     captcha_input = await tab.query_selector('#CHK')
@@ -2162,7 +2215,7 @@ async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
         refresh = await tab.query_selector('#chang_pic')
         if refresh:
             if submit_key is not None:
-                _state["captcha_reset"][submit_key] = {
+                captcha_resets[submit_key] = {
                     "phase": "dispatching",
                     "source_document_id": reset_source_document_id,
                 }
@@ -2170,10 +2223,10 @@ async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None):
                 await refresh.click()
             except Exception:
                 if submit_key is not None:
-                    _state["captcha_reset"][submit_key]["phase"] = "unknown"
+                    captcha_resets[submit_key]["phase"] = "unknown"
                 return False
             if submit_key is not None:
-                _state["captcha_reset"][submit_key]["phase"] = "done"
+                captcha_resets[submit_key]["phase"] = "done"
     return True
 
 
@@ -2181,6 +2234,13 @@ async def _handle_ctbc_submit_dialog(
     tab, config_dict, submit_key=None, source_url=None
 ):
     debug = util.create_debug_logger(config_dict)
+    runtime = _ctbc_tab_runtime(tab)
+    purchase = runtime["purchase"]
+    submitted = purchase["submitted"]
+    blockers = purchase["submit_blocked"]
+    conflicts = purchase["seat_conflict_pending"]
+    auth_failures = purchase["auth_failure"]
+    captcha_resets = purchase["captcha_reset"]
     dialog_snapshot = await read_dialog_snapshot(tab)
     if dialog_snapshot is None:
         debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
@@ -2191,11 +2251,11 @@ async def _handle_ctbc_submit_dialog(
         if submit_key is None:
             submit_key = _ctbc_purchase_state_key(tab)
         if submit_key is not None:
-            _state["submitted"].pop(submit_key, None)
-            if _state["submit_blocked"].get(submit_key) not in (
+            submitted.pop(submit_key, None)
+            if blockers.get(submit_key) not in (
                 "success", "quota"
             ):
-                _state["submit_blocked"][submit_key] = "rejected"
+                blockers[submit_key] = "rejected"
         debug.log("[CTBC] Submit dialog is ambiguous; action blocked")
         return "rejected"
     dialog_text = dialog_snapshot.text
@@ -2208,34 +2268,32 @@ async def _handle_ctbc_submit_dialog(
     if submit_key is None:
         debug.log("[CTBC] Submit dialog appeared outside a valid purchase context")
         return "rejected"
-    _state["submitted"].pop(submit_key, None)
-    if _state["submit_blocked"].get(submit_key) in ("unknown", "captcha_pending"):
-        _state["submit_blocked"].pop(submit_key, None)
+    submitted.pop(submit_key, None)
+    if blockers.get(submit_key) in ("unknown", "captcha_pending"):
+        blockers.pop(submit_key, None)
     if outcome == "success":
-        if submit_key not in _state["submit_blocked"]:
+        if submit_key not in blockers:
             debug.log("[CTBC] Cart accepted; same-page resubmit is blocked")
-        _state["submit_blocked"][submit_key] = "success"
+        blockers[submit_key] = "success"
         return outcome
 
     if outcome == "seat_conflict":
-        identity = _ctbc_tab_identity(tab)
         page_type = _get_ctbc_page_type(source_url or str(tab.target.url))
-        _state["seat_conflict_pending"].setdefault(
+        conflicts.setdefault(
             submit_key,
             {
-                "source_document_id": _state["last_document"].get(identity, ""),
+                "source_document_id": runtime["document"]["last_document"],
                 "page_type": page_type,
                 "dialog_dismissed": False,
                 "reload_dispatched": False,
             },
         )
     elif outcome == "auth":
-        identity = _ctbc_tab_identity(tab)
         auth_failure = {
             "fingerprint": "",
-            "source_document_id": _state["last_document"].get(identity, ""),
+            "source_document_id": runtime["document"]["last_document"],
         }
-        _state["auth_failure"][submit_key] = auth_failure
+        auth_failures[submit_key] = auth_failure
         try:
             login_fingerprint = await _ctbc_login_fingerprint(
                 tab, expected_dialog=dialog_snapshot
@@ -2246,12 +2304,12 @@ async def _handle_ctbc_submit_dialog(
                 f"document-scoped blocker retained: {exc}"
             )
         else:
-            if _state["auth_failure"].get(submit_key) is auth_failure:
+            if auth_failures.get(submit_key) is auth_failure:
                 auth_failure["fingerprint"] = login_fingerprint
     elif outcome == "captcha":
-        _state["submit_blocked"][submit_key] = "captcha_pending"
+        blockers[submit_key] = "captcha_pending"
     elif outcome in ("quota", "rejected"):
-        _state["submit_blocked"][submit_key] = outcome
+        blockers[submit_key] = outcome
 
     dismiss_result = await dismiss_dialog(tab, dialog_snapshot)
     if (
@@ -2267,14 +2325,14 @@ async def _handle_ctbc_submit_dialog(
         reset_complete = await _reset_ctbc_captcha(
             tab, refresh_image=True, submit_key=submit_key
         )
-        if reset_complete and _state["submit_blocked"].get(submit_key) == "captcha_pending":
-            _state["submit_blocked"].pop(submit_key, None)
-            _state["captcha_reset"].pop(submit_key, None)
+        if reset_complete and blockers.get(submit_key) == "captcha_pending":
+            blockers.pop(submit_key, None)
+            captcha_resets.pop(submit_key, None)
         debug.log(f"[CTBC CAPTCHA] Server rejected captcha: {dialog_text}")
     elif outcome == "seat_conflict":
-        _state["seat_conflict_pending"][submit_key]["dialog_dismissed"] = True
+        conflicts[submit_key]["dialog_dismissed"] = True
         debug.log(f"[CTBC SEAT] Selected seats were rejected: {dialog_text}")
-        pending = _state["seat_conflict_pending"][submit_key]
+        pending = conflicts[submit_key]
         if pending.get("page_type") == "seat" and not await _clear_ctbc_selected_seats(
             tab, config_dict
         ):
@@ -2287,16 +2345,19 @@ async def _handle_ctbc_submit_dialog(
 
 async def _recover_ctbc_captcha_dialog(tab, config_dict):
     submit_key = _ctbc_purchase_state_key(tab)
-    if _state["submit_blocked"].get(submit_key) != "captcha_pending":
+    purchase = _ctbc_purchase_runtime(tab)
+    blockers = purchase["submit_blocked"]
+    captcha_resets = purchase["captcha_reset"]
+    if blockers.get(submit_key) != "captcha_pending":
         return False
     if await _ctbc_dialog_is_visible(tab):
         return True
     reset_complete = await _reset_ctbc_captcha(
         tab, refresh_image=True, submit_key=submit_key
     )
-    if reset_complete and _state["submit_blocked"].get(submit_key) == "captcha_pending":
-        _state["submit_blocked"].pop(submit_key, None)
-        _state["captcha_reset"].pop(submit_key, None)
+    if reset_complete and blockers.get(submit_key) == "captcha_pending":
+        blockers.pop(submit_key, None)
+        captcha_resets.pop(submit_key, None)
     debug = util.create_debug_logger(config_dict)
     if reset_complete:
         debug.log("[CTBC CAPTCHA] Dialog disappeared; captcha was reset before retry")
@@ -2307,14 +2368,15 @@ async def _recover_ctbc_captcha_dialog(tab, config_dict):
 
 async def _recover_ctbc_seat_conflict(tab, config_dict):
     submit_key = _ctbc_purchase_state_key(tab)
-    pending = _state["seat_conflict_pending"].get(submit_key)
+    runtime = _ctbc_tab_runtime(tab)
+    conflicts = runtime["purchase"]["seat_conflict_pending"]
+    pending = conflicts.get(submit_key)
     if not pending:
         return False
 
-    identity = _ctbc_tab_identity(tab)
-    current_document_id = _state["last_document"].get(identity, "")
+    current_document_id = runtime["document"]["last_document"]
     if current_document_id and current_document_id != pending["source_document_id"]:
-        _state["seat_conflict_pending"].pop(submit_key, None)
+        conflicts.pop(submit_key, None)
         return False
 
     if not pending.get("dialog_dismissed", False):
@@ -2326,7 +2388,7 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
         return True
 
     if await _reload_with_interval(tab, config_dict, "selected seats were taken"):
-        pending["source_document_id"] = _state["last_document"].get(identity, "")
+        pending["source_document_id"] = runtime["document"]["last_document"]
         pending["reload_dispatched"] = True
     return True
 
@@ -2341,27 +2403,28 @@ def _ctbc_submit_dispatched_at(value):
 
 
 def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
-    failure = _state["auth_failure"].get(submit_key)
+    runtime = _ctbc_tab_runtime(tab)
+    auth_failures = runtime["purchase"]["auth_failure"]
+    failure = auth_failures.get(submit_key)
     if not failure:
         return False
     if not isinstance(failure, dict):
         if failure == login_fingerprint:
             return True
-        _state["auth_failure"].pop(submit_key, None)
+        auth_failures.pop(submit_key, None)
         return False
 
     failed_fingerprint = str(failure.get("fingerprint") or "")
     if failed_fingerprint:
         if failed_fingerprint == login_fingerprint:
             return True
-        _state["auth_failure"].pop(submit_key, None)
+        auth_failures.pop(submit_key, None)
         return False
 
-    identity = _ctbc_tab_identity(tab)
-    current_document_id = _state["last_document"].get(identity, "")
+    current_document_id = runtime["document"]["last_document"]
     source_document_id = str(failure.get("source_document_id") or "")
     if current_document_id and current_document_id != source_document_id:
-        _state["auth_failure"].pop(submit_key, None)
+        auth_failures.pop(submit_key, None)
         return False
     return True
 
@@ -2374,7 +2437,9 @@ def _normalize_ctbc_captcha_answer(answer):
 async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key):
     """Reduce the first observable result after an add-to-cart dispatch."""
     debug = util.create_debug_logger(config_dict)
-    submitted = _state["submitted"]
+    purchase = _ctbc_purchase_runtime(tab)
+    submitted = purchase["submitted"]
+    blockers = purchase["submit_blocked"]
     await tab.sleep(1.0)
     dialog_outcome = await _handle_ctbc_submit_dialog(
         tab, config_dict, submit_key=submit_key, source_url=source_url
@@ -2384,7 +2449,7 @@ async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key)
 
     if _ctbc_submit_reached_checkout(source_url, str(tab.target.url)):
         submitted.pop(submit_key, None)
-        _state["submit_blocked"][submit_key] = "success"
+        blockers[submit_key] = "success"
         return True
 
     destination_url = str(tab.target.url)
@@ -2397,7 +2462,7 @@ async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key)
         )
     ):
         submitted.pop(submit_key, None)
-        _state["submit_blocked"][submit_key] = "unknown"
+        blockers[submit_key] = "unknown"
         debug.log("[CTBC] Submit left the purchase page without verified checkout")
     return False
 
@@ -2485,7 +2550,8 @@ async def _ctbc_captcha(tab, config_dict, ocr):
 async def _dispatch_ctbc_submit(tab, config_dict, submit_key, submit_plan):
     """Dispatch once; the caller still has to observe a verified outcome."""
     debug = util.create_debug_logger(config_dict)
-    submitted = _state["submitted"]
+    purchase = _ctbc_purchase_runtime(tab)
+    submitted = purchase["submitted"]
     if submit_key in submitted:
         return False
     dispatched_at = time.monotonic()
@@ -2527,7 +2593,7 @@ async def _dispatch_ctbc_submit(tab, config_dict, submit_key, submit_plan):
     except Exception as exc:
         if submitted.get(submit_key) is dispatch_state:
             submitted.pop(submit_key, None)
-            _state["submit_blocked"][submit_key] = "unknown"
+            purchase["submit_blocked"][submit_key] = "unknown"
         debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
         return False
     if submitted.get(submit_key) is not dispatch_state:
@@ -2547,6 +2613,9 @@ async def _ctbc_captcha_and_submit(
     tab, config_dict, ocr, *, submit_plan=None
 ):
     debug = util.create_debug_logger(config_dict)
+    purchase = _ctbc_purchase_runtime(tab)
+    blockers = purchase["submit_blocked"]
+    conflicts = purchase["seat_conflict_pending"]
     current_url = str(tab.target.url)
     submit_key = _ctbc_purchase_state_key(tab)
     page_type = _get_ctbc_page_type(current_url)
@@ -2574,12 +2643,12 @@ async def _ctbc_captcha_and_submit(
     if await _recover_ctbc_captcha_dialog(tab, config_dict):
         return False
     if (
-        submit_key in _state["submit_blocked"]
-        or submit_key in _state["seat_conflict_pending"]
+        submit_key in blockers
+        or submit_key in conflicts
     ):
         return False
 
-    submitted = _state["submitted"]
+    submitted = purchase["submitted"]
     dispatched_at = _ctbc_submit_dispatched_at(submitted.get(submit_key))
     if submit_key in submitted:
         if (
@@ -2587,7 +2656,7 @@ async def _ctbc_captcha_and_submit(
             or time.monotonic() - dispatched_at >= CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS
         ):
             submitted.pop(submit_key, None)
-            _state["submit_blocked"][submit_key] = "unknown"
+            blockers[submit_key] = "unknown"
             debug.log("[CTBC] Submit outcome is unknown; automatic resubmit is blocked")
         return False
 
@@ -2628,8 +2697,8 @@ async def _ctbc_captcha_and_submit(
     if dialog_outcome is not None:
         return dialog_outcome == "success"
     if (
-        submit_key in _state["submit_blocked"]
-        or submit_key in _state["seat_conflict_pending"]
+        submit_key in blockers
+        or submit_key in conflicts
     ):
         return False
 
@@ -2652,12 +2721,13 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     submit_key = _ctbc_purchase_state_key(tab)
     if submit_key is None:
         return False
+    blockers = _ctbc_purchase_runtime(tab)["submit_blocked"]
     dialog_outcome = await _handle_ctbc_submit_dialog(
         tab, config_dict, submit_key=submit_key
     )
     if await _recover_ctbc_captcha_dialog(tab, config_dict):
         return False
-    if submit_key in _state["submit_blocked"]:
+    if submit_key in blockers:
         return False
     if await _recover_ctbc_seat_conflict(tab, config_dict):
         return False
@@ -2794,12 +2864,13 @@ async def _nodriver_utiki_quantity_main(
     submit_key = _ctbc_purchase_state_key(tab)
     if submit_key is None:
         return False
+    blockers = _ctbc_purchase_runtime(tab)["submit_blocked"]
     dialog_outcome = await _handle_ctbc_submit_dialog(
         tab, config_dict, submit_key=submit_key
     )
     if await _recover_ctbc_captcha_dialog(tab, config_dict):
         return False
-    if submit_key in _state["submit_blocked"]:
+    if submit_key in blockers:
         return False
     if await _recover_ctbc_seat_conflict(tab, config_dict):
         return False
@@ -2893,9 +2964,9 @@ def _ctbc_server_assignment_pending_is_expected(pending):
 
 
 def _ctbc_server_assignment_is_authorized(tab):
-    identity = _ctbc_tab_identity(tab)
     purchase_key = _ctbc_purchase_state_key(tab)
-    authorized = _state["server_assignment_authorized"].get(identity)
+    transition = _ctbc_tab_runtime(tab)["transition"]
+    authorized = transition["server_assignment_authorized"]
     if (
         purchase_key is not None
         and isinstance(authorized, dict)
@@ -2906,7 +2977,7 @@ def _ctbc_server_assignment_is_authorized(tab):
         )
     ):
         return authorized
-    _state["server_assignment_authorized"].pop(identity, None)
+    transition["server_assignment_authorized"] = None
     return None
 
 
@@ -2914,7 +2985,7 @@ async def nodriver_utiki_server_assigned_quantity_main(
     tab, config_dict, ocr
 ):
     """Select quantity after an attested native computer-area click."""
-    identity = _ctbc_tab_identity(tab)
+    transition = _ctbc_tab_runtime(tab)["transition"]
     current_url = str(tab.target.url)
     profile = _get_utk_sports_profile(current_url)
     if (
@@ -2924,13 +2995,13 @@ async def nodriver_utiki_server_assigned_quantity_main(
         or not profile
         or not profile.get("supports_server_assignment", False)
     ):
-        _state["server_assignment_authorized"].pop(identity, None)
+        transition["server_assignment_authorized"] = None
         return False
-    pending = _state["pending_navigation"].get(identity)
+    pending = transition["pending_navigation"]
     authorization = _ctbc_server_assignment_is_authorized(tab)
     if pending:
         if not _ctbc_server_assignment_pending_is_expected(pending):
-            _state["server_assignment_authorized"].pop(identity, None)
+            transition["server_assignment_authorized"] = None
             return False
         if not await _ctbc_attest_fast_destination(
             tab, "server_assigned_quantity", config_dict
@@ -2943,7 +3014,7 @@ async def nodriver_utiki_server_assigned_quantity_main(
             "purchase_key": purchase_key,
             "product_id": pending["product_id"],
         }
-        _state["server_assignment_authorized"][identity] = authorization
+        transition["server_assignment_authorized"] = authorization
     elif authorization is None:
         return False
     return await _nodriver_utiki_quantity_main(
@@ -3235,9 +3306,11 @@ async def _ctbc_reconcile_navigation_source(
     tab, current_url, page_type, config_dict
 ):
     identity = _ctbc_tab_identity(tab)
-    observed_pending = _state["pending_navigation"].get(identity)
+    runtime = _ctbc_runtime_for_identity(identity)
+    transition = runtime["transition"]
+    observed_pending = transition["pending_navigation"]
     marker_state = await _ctbc_read_fast_navigation_marker(tab)
-    pending = _state["pending_navigation"].get(identity)
+    pending = transition["pending_navigation"]
     if observed_pending:
         if not _ctbc_pending_navigation_is_current(identity, observed_pending):
             return False
@@ -3257,18 +3330,18 @@ async def _ctbc_reconcile_navigation_source(
             await _ctbc_delete_malformed_fast_marker(tab, raw)
         return False
 
-    current_document = str(_state["last_document"].get(identity) or "")
+    current_document = str(runtime["document"]["last_document"] or "")
     if not pending:
         if not marker_pending:
             return True
         pending = marker_pending
         pending["phase"] = "DISPATCH_UNKNOWN"
         pending["source_document_id"] = current_document
-        current = _state["pending_navigation"].get(identity)
+        current = transition["pending_navigation"]
         if current:
             pending = current
         else:
-            _state["pending_navigation"][identity] = pending
+            transition["pending_navigation"] = pending
 
     expected_url = pending.get(
         "source_url" if page_type == "date" else "area_url"
@@ -3329,13 +3402,14 @@ async def _ctbc_attest_pending_destination(
     tab, page_type, pending, debug, stale_marker_nonce=""
 ):
     identity = _ctbc_tab_identity(tab)
+    runtime = _ctbc_runtime_for_identity(identity)
     try:
         state = await _ctbc_read_destination_state(tab, page_type)
     except Exception as exc:
         debug.log(f"[CTBC NAV] Destination attestation failed: {exc}")
         return False
     current_url = str(state.get("page_url") or "") if isinstance(state, dict) else ""
-    current_document = str(_state["last_document"].get(identity) or "")
+    current_document = str(runtime["document"]["last_document"] or "")
     state_document = str(state.get("document_id") or "") if isinstance(
         state, dict
     ) else ""
@@ -3351,7 +3425,7 @@ async def _ctbc_attest_pending_destination(
             pending, page_type, current_url, state
         )
     ):
-        current = _state["pending_navigation"].get(identity)
+        current = runtime["transition"]["pending_navigation"]
         if not current or current.get("nonce") != pending.get("nonce"):
             return False
         marker_nonce = (
@@ -3379,6 +3453,7 @@ async def _ctbc_attest_date_native_direct_destination(
     if not _ctbc_date_native_direct_pending(pending, page_type):
         return None
     identity = _ctbc_tab_identity(tab)
+    runtime = _ctbc_runtime_for_identity(identity)
     try:
         state = await _ctbc_read_destination_state(tab, page_type)
     except Exception as exc:
@@ -3386,7 +3461,7 @@ async def _ctbc_attest_date_native_direct_destination(
         return False
     if not _ctbc_pending_navigation_is_current(identity, pending):
         return False
-    current_document = str(_state["last_document"].get(identity) or "")
+    current_document = str(runtime["document"]["last_document"] or "")
     source_document = str(pending.get("source_document_id") or "")
     state_document = str(state.get("document_id") or "") if isinstance(
         state, dict
@@ -3411,10 +3486,12 @@ async def _ctbc_attest_date_native_direct_destination(
 async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
     """Reconcile FAST/NATIVE provenance before ticket-page automation."""
     identity = _ctbc_tab_identity(tab)
+    runtime = _ctbc_runtime_for_identity(identity)
+    transition = runtime["transition"]
     debug = util.create_debug_logger(config_dict)
-    observed_pending = _state["pending_navigation"].get(identity)
+    observed_pending = transition["pending_navigation"]
     marker_state = await _ctbc_read_fast_navigation_marker(tab)
-    pending = _state["pending_navigation"].get(identity)
+    pending = transition["pending_navigation"]
     if observed_pending:
         if not _ctbc_pending_navigation_is_current(identity, observed_pending):
             return False
@@ -3467,11 +3544,11 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
         if not marker_present:
             return True
         marker_pending["source_document_id"] = str(
-            _state["last_document"].get(identity) or ""
+            runtime["document"]["last_document"] or ""
         )
-        if _state["pending_navigation"].get(identity):
+        if transition["pending_navigation"]:
             return False
-        _state["pending_navigation"][identity] = marker_pending
+        transition["pending_navigation"] = marker_pending
         await _ctbc_return_current_pending(
             tab, identity, marker_pending, current_url
         )
@@ -3510,9 +3587,10 @@ async def _ctbc_reconcile_area_navigation(tab, current_url, config_dict=None):
 
 async def _handle_ctbc_checkout(tab, config_dict):
     checkout_key = _ctbc_tab_state_key(tab)
-    if checkout_key in _state["checkout_notified"]:
+    checkout_notified = _ctbc_purchase_runtime(tab)["checkout_notified"]
+    if checkout_key in checkout_notified:
         return
-    _state["checkout_notified"].add(checkout_key)
+    checkout_notified.add(checkout_key)
     if config_dict.get("advanced", {}).get("play_sound", {}).get("order", False):
         play_sound_while_ordering(config_dict)
     send_discord_notification(config_dict, "order", "CTBC Sports")
@@ -3522,9 +3600,9 @@ async def _handle_ctbc_checkout(tab, config_dict):
 async def nodriver_ctbc_main(tab, url, config_dict, ocr):
     page_type = _get_ctbc_page_type(url)
     if page_type != "server_assigned_quantity":
-        _state["server_assignment_authorized"].pop(
-            _ctbc_tab_identity(tab), None
-        )
+        _ctbc_tab_runtime(tab)["transition"][
+            "server_assignment_authorized"
+        ] = None
     if await check_and_handle_pause(config_dict):
         await nodriver_utk_sports_cancel_refresh(
             tab, "paused", wait=True, abandon_probe=True

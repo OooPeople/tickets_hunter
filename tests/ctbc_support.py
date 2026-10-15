@@ -83,9 +83,23 @@ class CtbcStateIsolationMixin:
         self.addCleanup(self._clear_ctbc_test_state)
 
     def _clear_ctbc_test_state(self):
-        for bucket in (self.ctbc_state or {}).values():
-            if isinstance(bucket, (dict, list, set)):
-                bucket.clear()
+        state = self.ctbc_state or {}
+        state.get("tabs", {}).clear()
+        state.get("cancel_tasks", set()).clear()
+
+
+def ctbc_tab_runtime(tab):
+    """Return the production-owned canonical runtime for one semantic fake."""
+    from platforms.utiki.workflow import _ctbc_tab_runtime
+
+    return _ctbc_tab_runtime(tab)
+
+
+def ctbc_identity_runtime(identity):
+    """Return the production-owned canonical runtime for an observed identity."""
+    from platforms.utiki.workflow import _ctbc_runtime_for_identity
+
+    return _ctbc_runtime_for_identity(identity)
 
 
 class FakeUtikiDomPort:

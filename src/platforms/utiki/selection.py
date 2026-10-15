@@ -87,6 +87,11 @@ class QuantitySnapshot:
     rows: tuple
     product_id: str = ""
     reason: str = ""
+    performance_hidden_present: bool = False
+    product_hidden_present: bool = False
+    group_hidden_present: bool = False
+    price_area_hidden_present: bool = False
+    quantity_limit_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,12 @@ class QuantityPlan:
     ticket_number: int
     page_type: str = "general_admission"
     product_id: str = ""
+    performance_hidden_present: bool = False
+    product_hidden_present: bool = False
+    group_hidden_present: bool = False
+    price_area_hidden_present: bool = False
+    quantity_limit_present: bool = False
+    target_remaining_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -211,6 +222,30 @@ def parse_area_snapshot(raw_snapshot):
     )
 
 
+def _quantity_presence_fields(raw_snapshot):
+    product_id = str(raw_snapshot.get("product_id") or "")
+    limit_raw = str(raw_snapshot.get("quantity_limit_raw") or "")
+    return {
+        "performance_hidden_present": bool(
+            raw_snapshot.get("performance_hidden_present")
+        ),
+        "product_hidden_present": bool(raw_snapshot.get(
+            "product_hidden_present",
+            bool(product_id),
+        )),
+        "group_hidden_present": bool(
+            raw_snapshot.get("group_hidden_present")
+        ),
+        "price_area_hidden_present": bool(
+            raw_snapshot.get("price_area_hidden_present")
+        ),
+        "quantity_limit_present": bool(raw_snapshot.get(
+            "quantity_limit_present",
+            bool(limit_raw),
+        )),
+    }
+
+
 def parse_quantity_snapshot(raw_snapshot):
     """Freeze a general-admission quantity reader result."""
     if isinstance(raw_snapshot, QuantitySnapshot):
@@ -255,6 +290,7 @@ def parse_quantity_snapshot(raw_snapshot):
             for row in rows
         ),
         product_id=str(raw_snapshot.get("product_id") or ""),
+        **_quantity_presence_fields(raw_snapshot),
     )
 
 
@@ -860,8 +896,37 @@ def _quantity_candidates(snapshot, requested):
                 continue
             if int(remaining_raw) < requested:
                 continue
-        candidates.append({"text": name, "key": key})
+        candidates.append({
+            "text": name,
+            "key": key,
+            "remaining_present": remaining_present,
+        })
     return candidates
+
+
+def _quantity_page_type_matches(page_url, page_type):
+    if page_type == "general_admission":
+        return classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION
+    return page_type == "server_assigned_quantity"
+
+
+def _quantity_snapshot_identity_is_valid(snapshot, page_type):
+    token = r"[A-Za-z0-9_-]+"
+    if not _quantity_page_type_matches(snapshot.page_url, page_type):
+        return False
+    if snapshot.product_hidden_present and not re.fullmatch(
+        token, snapshot.product_id
+    ):
+        return False
+    if (
+        bool(snapshot.product_id) != snapshot.product_hidden_present
+        or (bool(snapshot.quantity_limit_raw) and not snapshot.quantity_limit_present)
+    ):
+        return False
+    return bool(
+        page_type != "server_assigned_quantity"
+        or re.fullmatch(token, snapshot.product_id)
+    )
 
 
 def select_quantity_snapshot(snapshot, keyword, ticket_number,
@@ -871,12 +936,7 @@ def select_quantity_snapshot(snapshot, keyword, ticket_number,
     snapshot = parse_quantity_snapshot(snapshot)
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
         return None
-    if page_type not in {"general_admission", "server_assigned_quantity"}:
-        return None
-    if (
-        page_type == "server_assigned_quantity"
-        and not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot.product_id)
-    ):
+    if not _quantity_snapshot_identity_is_valid(snapshot, page_type):
         return None
     request = _parse_quantity_request(snapshot, ticket_number)
     if request is None:
@@ -903,6 +963,12 @@ def select_quantity_snapshot(snapshot, keyword, ticket_number,
         ticket_number=requested,
         page_type=page_type,
         product_id=snapshot.product_id,
+        performance_hidden_present=snapshot.performance_hidden_present,
+        product_hidden_present=snapshot.product_hidden_present,
+        group_hidden_present=snapshot.group_hidden_present,
+        price_area_hidden_present=snapshot.price_area_hidden_present,
+        quantity_limit_present=snapshot.quantity_limit_present,
+        target_remaining_present=target["remaining_present"],
     )
 
 

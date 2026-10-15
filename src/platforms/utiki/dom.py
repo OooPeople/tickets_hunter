@@ -33,6 +33,11 @@ CONST_SERVER_ASSIGNED_QUANTITY_PATHS = tuple(
     f"{profile.tenant_path}/UTK0201_001"
     for profile in TENANT_PROFILES.values()
 )
+CONST_GENERAL_ADMISSION_ROUTES = tuple(
+    (f"https://{profile.host}", f"{profile.tenant_path}/UTK020{route}_")
+    for profile in TENANT_PROFILES.values()
+    for route in (2, 3)
+)
 
 
 class CommitResult(Enum):
@@ -883,9 +888,7 @@ async def commit_server_assigned_area(
         )
 
 
-async def read_quantity_snapshot(tab):
-    """Read a general-admission quantity page in one browser call."""
-    raw_value = await tab.evaluate(r'''
+CONST_QUANTITY_SNAPSHOT_SCRIPT = r'''
         (() => {
             const roots = Array.from(document.querySelectorAll(
                 '[id="table_tickettype"]'));
@@ -911,14 +914,16 @@ async def read_quantity_snapshot(tab):
             const identity = (selector, key) => {
                 const values = query.getAll(key);
                 if (values.length !== 1) return null;
-                const hidden = document.querySelector(selector);
-                if (hidden && (hidden.value || '') !== values[0]) return null;
-                return values[0];
+                const hidden = Array.from(document.querySelectorAll(selector));
+                if (hidden.length > 1 ||
+                    (hidden.length === 1 &&
+                        (hidden[0].value || '') !== values[0])) return null;
+                return {value: values[0], present: hidden.length === 1};
             };
-            const performanceId = identity(
+            const performanceIdentity = identity(
                 '#PERFORMANCE_ID', 'PERFORMANCE_ID');
-            const groupId = identity('#GROUP_ID', 'GROUP_ID');
-            const priceAreaId = identity(
+            const groupIdentity = identity('#GROUP_ID', 'GROUP_ID');
+            const priceAreaIdentity = identity(
                 '#PERFORMANCE_PRICE_AREA_ID',
                 'PERFORMANCE_PRICE_AREA_ID');
             const productInputs = Array.from(
@@ -926,22 +931,32 @@ async def read_quantity_snapshot(tab):
             const productId = productInputs.length === 1 ?
                 (productInputs[0].value || '') :
                 (productInputs.length ? '__invalid__' : '');
-            if (performanceId === null || groupId === null ||
-                priceAreaId === null) {
+            const limitInputs = Array.from(
+                document.querySelectorAll('#QUANTITY_LIMIT'));
+            if (performanceIdentity === null || groupIdentity === null ||
+                priceAreaIdentity === null || productInputs.length > 1 ||
+                (productInputs.length === 1 &&
+                    !/^[A-Za-z0-9_-]+$/.test(productId)) ||
+                limitInputs.length > 1) {
                 return JSON.stringify({
                     ok: false, reason: 'identity', page_url: location.href,
                     document_id: String(performance.timeOrigin)
                 });
             }
-            const limit = document.querySelector('#QUANTITY_LIMIT');
+            const limit = limitInputs[0] || null;
             return JSON.stringify({
                 ok: true,
                 page_url: location.href,
                 document_id: String(performance.timeOrigin),
-                performance_id: performanceId,
+                performance_id: performanceIdentity.value,
                 product_id: productId,
-                group_id: groupId,
-                price_area_id: priceAreaId,
+                group_id: groupIdentity.value,
+                price_area_id: priceAreaIdentity.value,
+                performance_hidden_present: performanceIdentity.present,
+                product_hidden_present: productInputs.length === 1,
+                group_hidden_present: groupIdentity.present,
+                price_area_hidden_present: priceAreaIdentity.present,
+                quantity_limit_present: limitInputs.length === 1,
                 quantity_limit_raw: limit ? (limit.value || '').trim() : '',
                 rows: inputs.map(input => {
                     const row = input.closest('tr') ||
@@ -964,13 +979,35 @@ async def read_quantity_snapshot(tab):
                 })
             });
         })()
-    ''')
-    return parse_quantity_snapshot(_decode_json_result(raw_value))
+    '''
+
+
+async def read_quantity_snapshot(tab):
+    """Read a supported quantity page in one browser call."""
+    raw_value = await tab.evaluate(CONST_QUANTITY_SNAPSHOT_SCRIPT)
+    snapshot = parse_quantity_snapshot(_decode_json_result(raw_value))
+    if isinstance(snapshot, QuantitySnapshot) and snapshot.ok:
+        page_kind = classify_utiki_page(snapshot.page_url)
+        try:
+            server_path = urlsplit(snapshot.page_url).path in (
+                CONST_SERVER_ASSIGNED_QUANTITY_PATHS
+            )
+        except ValueError:
+            server_path = False
+        if page_kind == PageKind.GENERAL_ADMISSION or server_path:
+            return snapshot
+        return parse_quantity_snapshot({
+            "ok": False,
+            "reason": "route",
+            "page_url": snapshot.page_url,
+            "document_id": snapshot.document_id,
+        })
+    return snapshot
 
 
 def _quantity_plan_route_is_valid(plan):
     if plan.page_type == "general_admission":
-        return True
+        return classify_utiki_page(plan.page_url) == PageKind.GENERAL_ADMISSION
     if plan.page_type != "server_assigned_quantity":
         return False
     try:
@@ -992,6 +1029,13 @@ def _valid_quantity_commit_input(snapshot, plan):
         and snapshot.group_id == plan.group_id
         and snapshot.price_area_id == plan.price_area_id
         and snapshot.product_id == plan.product_id
+        and snapshot.performance_hidden_present
+        == plan.performance_hidden_present
+        and snapshot.product_hidden_present == plan.product_hidden_present
+        and snapshot.group_hidden_present == plan.group_hidden_present
+        and snapshot.price_area_hidden_present
+        == plan.price_area_hidden_present
+        and snapshot.quantity_limit_present == plan.quantity_limit_present
         and plan.page_type in {
             "general_admission", "server_assigned_quantity"
         }
@@ -999,6 +1043,10 @@ def _valid_quantity_commit_input(snapshot, plan):
         and (
             plan.page_type != "server_assigned_quantity"
             or (bool(plan.group_id) and bool(plan.product_id))
+        )
+        and (
+            not plan.product_hidden_present
+            or re.fullmatch(r"[A-Za-z0-9_-]+", plan.product_id)
         )
         and plan.ticket_number > 0
         and re.fullmatch(r"[A-Za-z0-9_-]+", plan.target_key)
@@ -1019,9 +1067,14 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                     const values = query.getAll(key);
                     return values.length === 1 && values[0] === expected;
                 };
-                const hiddenMatches = (selector, expected) => {
-                    const input = document.querySelector(selector);
-                    return !input || (input.value || '') === expected;
+                const optionalHiddenMatches = (
+                    selector, expected, expectedPresent
+                ) => {
+                    const inputs = Array.from(
+                        document.querySelectorAll(selector));
+                    return inputs.length === (expectedPresent ? 1 : 0) &&
+                        (!expectedPresent ||
+                            (inputs[0].value || '') === expected);
                 };
                 const exactHiddenMatches = (selector, expected) => {
                     const inputs = Array.from(
@@ -1029,8 +1082,12 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                     return inputs.length === 1 &&
                         (inputs[0].value || '') === expected;
                 };
-                const serverRouteValid = () => {
-                    if (plan.pageType === 'general_admission') return true;
+                const routeValid = () => {
+                    if (plan.pageType === 'general_admission') {
+                        return plan.generalRoutes.some(route =>
+                            location.origin === route[0] &&
+                            location.pathname === route[1]);
+                    }
                     if (plan.pageType !== 'server_assigned_quantity') {
                         return false;
                     }
@@ -1038,22 +1095,32 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                     return plan.routePaths.includes(location.pathname) &&
                         keys.length === 4 &&
                         new Set(keys).size === 4 &&
-                        exactQuery('ATYPE', 'N') &&
+                        exactQuery('ATYPE', 'N');
+                };
+                const hiddenIdentityValid =
+                    plan.pageType === 'general_admission' ?
+                        optionalHiddenMatches(
+                            '#PERFORMANCE_ID', plan.performanceId,
+                            plan.performanceHiddenPresent) &&
+                        optionalHiddenMatches(
+                            '#PRODUCT_ID', plan.productId,
+                            plan.productHiddenPresent) &&
+                        optionalHiddenMatches(
+                            '#GROUP_ID', plan.groupId,
+                            plan.groupHiddenPresent) &&
+                        optionalHiddenMatches(
+                            '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId,
+                            plan.priceAreaHiddenPresent) :
                         exactHiddenMatches(
                             '#PERFORMANCE_ID', plan.performanceId) &&
                         exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
                         exactHiddenMatches('#GROUP_ID', plan.groupId) &&
                         exactHiddenMatches(
                             '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId);
-                };
                 return exactQuery('PERFORMANCE_ID', plan.performanceId) &&
                     exactQuery('GROUP_ID', plan.groupId) &&
                     exactQuery('PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) &&
-                    hiddenMatches('#PERFORMANCE_ID', plan.performanceId) &&
-                    hiddenMatches('#GROUP_ID', plan.groupId) &&
-                    hiddenMatches(
-                        '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) &&
-                    serverRouteValid();
+                    hiddenIdentityValid && routeValid();
             };
             const inspectLive = () => {
                 if (!identityValid()) return {status: 'stale'};
@@ -1076,7 +1143,13 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                 const targets = scoped.filter(input =>
                     input.getAttribute('key') === plan.targetKey);
                 if (targets.length !== 1) return {status: 'rejected'};
-                const limitInput = document.querySelector('#QUANTITY_LIMIT');
+                const limitInputs = Array.from(
+                    document.querySelectorAll('#QUANTITY_LIMIT'));
+                if (limitInputs.length !==
+                    (plan.quantityLimitPresent ? 1 : 0)) {
+                    return {status: 'rejected'};
+                }
+                const limitInput = limitInputs[0] || null;
                 const limitRaw = limitInput ?
                     (limitInput.value || '').trim() : '';
                 if (limitRaw && !/^\d+$/.test(limitRaw)) {
@@ -1101,7 +1174,10 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                     target.getAttribute('aria-disabled') === 'true') {
                     return {status: 'rejected'};
                 }
-                if (remaining.length > 1) return {status: 'rejected'};
+                if (remaining.length !==
+                    (plan.targetRemainingPresent ? 1 : 0)) {
+                    return {status: 'rejected'};
+                }
                 if (remaining.length === 1) {
                     const raw = (remaining[0].value || '').trim();
                     if (!/^\d+$/.test(raw) ||
@@ -1157,6 +1233,13 @@ async def commit_quantity(tab, snapshot, plan):
         "ticketNumber": plan.ticket_number,
         "pageType": plan.page_type,
         "routePaths": CONST_SERVER_ASSIGNED_QUANTITY_PATHS,
+        "generalRoutes": CONST_GENERAL_ADMISSION_ROUTES,
+        "performanceHiddenPresent": plan.performance_hidden_present,
+        "productHiddenPresent": plan.product_hidden_present,
+        "groupHiddenPresent": plan.group_hidden_present,
+        "priceAreaHiddenPresent": plan.price_area_hidden_present,
+        "quantityLimitPresent": plan.quantity_limit_present,
+        "targetRemainingPresent": plan.target_remaining_present,
     }, ensure_ascii=False)
     script = CONST_QUANTITY_COMMIT_SCRIPT.replace(
         "__TICKETS_HUNTER_PLAN_JSON__", plan_json, 1
@@ -1190,6 +1273,10 @@ def _valid_quantity_submit_input(plan):
             plan.page_type != "server_assigned_quantity"
             or (bool(plan.group_id) and re.fullmatch(token, plan.product_id))
         )
+        and (
+            not plan.product_hidden_present
+            or re.fullmatch(token, plan.product_id)
+        )
         and plan.ticket_number > 0
         and plan.quantity_limit >= 0
     )
@@ -1208,9 +1295,14 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
                 const values = query.getAll(key);
                 return values.length === 1 && values[0] === expected;
             };
-            const hiddenMatches = (selector, expected) => {
-                const input = document.querySelector(selector);
-                return !input || (input.value || '') === expected;
+            const optionalHiddenMatches = (
+                selector, expected, expectedPresent
+            ) => {
+                const inputs = Array.from(
+                    document.querySelectorAll(selector));
+                return inputs.length === (expectedPresent ? 1 : 0) &&
+                    (!expectedPresent ||
+                        (inputs[0].value || '') === expected);
             };
             const exactHiddenMatches = (selector, expected) => {
                 const inputs = Array.from(document.querySelectorAll(selector));
@@ -1218,28 +1310,41 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
                     (inputs[0].value || '') === expected;
             };
             const queryKeys = Array.from(query.keys());
-            const serverRouteValid =
-                plan.pageType === 'general_admission' ||
+            const routeValid =
+                (plan.pageType === 'general_admission' &&
+                    plan.generalRoutes.some(route =>
+                        location.origin === route[0] &&
+                        location.pathname === route[1])) ||
                 (plan.pageType === 'server_assigned_quantity' &&
                     plan.routePaths.includes(location.pathname) &&
                     queryKeys.length === 4 &&
                     new Set(queryKeys).size === 4 &&
-                    exactQuery('ATYPE', 'N') &&
+                    exactQuery('ATYPE', 'N'));
+            const hiddenIdentityValid =
+                plan.pageType === 'general_admission' ?
+                    optionalHiddenMatches(
+                        '#PERFORMANCE_ID', plan.performanceId,
+                        plan.performanceHiddenPresent) &&
+                    optionalHiddenMatches(
+                        '#PRODUCT_ID', plan.productId,
+                        plan.productHiddenPresent) &&
+                    optionalHiddenMatches(
+                        '#GROUP_ID', plan.groupId,
+                        plan.groupHiddenPresent) &&
+                    optionalHiddenMatches(
+                        '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId,
+                        plan.priceAreaHiddenPresent) :
                     exactHiddenMatches(
                         '#PERFORMANCE_ID', plan.performanceId) &&
                     exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
                     exactHiddenMatches('#GROUP_ID', plan.groupId) &&
                     exactHiddenMatches(
-                        '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId));
+                        '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId);
             if (!exactQuery('PERFORMANCE_ID', plan.performanceId) ||
                 !exactQuery('GROUP_ID', plan.groupId) ||
                 !exactQuery(
                     'PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) ||
-                !hiddenMatches('#PERFORMANCE_ID', plan.performanceId) ||
-                !hiddenMatches('#GROUP_ID', plan.groupId) ||
-                !hiddenMatches(
-                    '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) ||
-                !serverRouteValid) {
+                !hiddenIdentityValid || !routeValid) {
                 return 'stale';
             }
             const quantityIntent = JSON.stringify([
@@ -1264,7 +1369,11 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
             const targets = scoped.filter(input =>
                 input.getAttribute('key') === plan.targetKey);
             if (targets.length !== 1) return 'stale';
-            const limitInput = document.querySelector('#QUANTITY_LIMIT');
+            const limitInputs = Array.from(
+                document.querySelectorAll('#QUANTITY_LIMIT'));
+            if (limitInputs.length !==
+                (plan.quantityLimitPresent ? 1 : 0)) return 'stale';
+            const limitInput = limitInputs[0] || null;
             const limitRaw = limitInput ?
                 (limitInput.value || '').trim() : '';
             if (limitRaw && !/^\d+$/.test(limitRaw)) return 'stale';
@@ -1285,7 +1394,8 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
             if (name !== plan.targetName || text.includes('售完') ||
                 target.disabled ||
                 target.getAttribute('aria-disabled') === 'true' ||
-                remaining.length > 1) return 'stale';
+                remaining.length !==
+                    (plan.targetRemainingPresent ? 1 : 0)) return 'stale';
             if (remaining.length === 1) {
                 const raw = (remaining[0].value || '').trim();
                 if (!/^\d+$/.test(raw) ||
@@ -1379,6 +1489,13 @@ async def dispatch_quantity_submit(tab, plan):
         "ticketNumber": plan.ticket_number,
         "pageType": plan.page_type,
         "routePaths": CONST_SERVER_ASSIGNED_QUANTITY_PATHS,
+        "generalRoutes": CONST_GENERAL_ADMISSION_ROUTES,
+        "performanceHiddenPresent": plan.performance_hidden_present,
+        "productHiddenPresent": plan.product_hidden_present,
+        "groupHiddenPresent": plan.group_hidden_present,
+        "priceAreaHiddenPresent": plan.price_area_hidden_present,
+        "quantityLimitPresent": plan.quantity_limit_present,
+        "targetRemainingPresent": plan.target_remaining_present,
     }, ensure_ascii=False)
     script = CONST_QUANTITY_SUBMIT_SCRIPT.replace(
         "__TICKETS_HUNTER_PLAN_JSON__", plan_json, 1

@@ -91,7 +91,36 @@ async def _run_browser_fixtures():
             _assert_dialog_fixture,
             _assert_fast_marker_fixture,
         ):
-            await assertion(browser)
+            if assertion is _assert_quantity_fixture:
+                general_paths = tuple(
+                    str((FIXTURE_ROOT / filename).resolve())
+                    for filename in (
+                        "UTK0202_quantity.html",
+                        "UTK0203_quantity.html",
+                    )
+                )
+                fixture_routes = tuple(
+                    (origin, path)
+                    for origin in ("file://", "null")
+                    for path in general_paths
+                )
+                with (
+                    patch(
+                        "platforms.utiki.dom.classify_utiki_page",
+                        return_value=PageKind.GENERAL_ADMISSION,
+                    ),
+                    patch(
+                        "platforms.utiki.selection.classify_utiki_page",
+                        return_value=PageKind.GENERAL_ADMISSION,
+                    ),
+                    patch(
+                        "platforms.utiki.dom.CONST_GENERAL_ADMISSION_ROUTES",
+                        fixture_routes,
+                    ),
+                ):
+                    await assertion(browser)
+            else:
+                await assertion(browser)
             _clear_ctbc_test_state()
     finally:
         try:
@@ -731,6 +760,13 @@ async def _assert_quantity_fixture(browser):
     assert destination_state["document_id"] == (
         f"{destination_url}|{time_origin_text}"
     )
+    await destination_tab.evaluate('''document.body.appendChild(
+        document.querySelector('#PRODUCT_ID').cloneNode(true)
+    )''')
+    duplicate_destination_state = await _ctbc_read_destination_state(
+        destination_tab, "general_admission"
+    )
+    assert not duplicate_destination_state["ready"]
 
     tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
     snapshot = await read_quantity_snapshot(tab)
@@ -771,26 +807,188 @@ async def _assert_quantity_fixture(browser):
     ) == 0
 
     flow_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
-    submit_gate = AsyncMock(return_value=True)
+    flow_cfg = config()
+    flow_cfg["ocr_captcha"].update({
+        "enable": True, "force_submit": True,
+    })
+    dispatch_results = []
+
+    async def capture_flow_dispatch(*args):
+        result = await dispatch_quantity_submit(*args)
+        dispatch_results.append(result)
+        return result
+
     with patch(
-        "platforms.utiki.workflow._ctbc_captcha_and_submit",
-        submit_gate,
-    ), patch(
         "platforms.utiki.workflow._ctbc_attest_fast_destination",
         AsyncMock(return_value=True),
     ), patch(
         "platforms.utiki.workflow._ctbc_purchase_state_key",
         return_value=("fixture-purchase",),
-    ):
-        assert await nodriver_ctbc_general_admission_main(
-            flow_tab, cfg, ocr=None
+    ), patch(
+        "platforms.utiki.workflow._get_ctbc_page_type",
+        return_value="general_admission",
+    ), patch(
+        "platforms.utiki.workflow.dispatch_quantity_submit",
+        AsyncMock(side_effect=capture_flow_dispatch),
+    ), patch(
+        "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+        AsyncMock(return_value=False),
+    ) as observe:
+        assert not await nodriver_ctbc_general_admission_main(
+            flow_tab, flow_cfg, ocr=None
         )
-    submit_gate.assert_awaited_once()
-    assert submit_gate.await_args.args == (flow_tab, cfg, None)
-    assert submit_gate.await_args.kwargs["quantity_plan"].target_key == "FULL"
+        flow_event_count = await flow_tab.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        )
+        assert not await nodriver_ctbc_general_admission_main(
+            flow_tab, flow_cfg, ocr=None
+        )
+    assert dispatch_results == [SubmitDispatchResult.DISPATCHED]
+    observe.assert_awaited_once()
+    assert await flow_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == flow_event_count
+    assert await flow_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 1
+    assert _state["submitted"][("fixture-purchase",)]["phase"] == (
+        "awaiting_result"
+    )
     assert await _read_fixture_quantities(flow_tab) == {
         "FULL": "2", "OTHER": "0"
     }
+
+    rejected_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    rejected_snapshot = await read_quantity_snapshot(rejected_tab)
+    rejected_plan = select_quantity_snapshot(
+        rejected_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await rejected_tab.evaluate('''(() => {
+        const url = new URL(location.href);
+        url.searchParams.set('PERFORMANCE_ID', 'OTHER_PERFORMANCE');
+        history.replaceState({}, '', url.href);
+    })()''')
+    assert await rejected_tab.evaluate("location.href") != (
+        rejected_snapshot.page_url
+    )
+    assert await commit_quantity(
+        rejected_tab, rejected_snapshot, rejected_plan
+    ) is CommitResult.STALE
+    assert await rejected_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+    assert await rejected_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    for duplicate_kind, mutation in (
+        (
+            "identity",
+            "document.body.appendChild(document.querySelector("
+            "'#PERFORMANCE_ID').cloneNode(true))",
+        ),
+        (
+            "product",
+            "for (let index = 0; index < 2; index += 1) {"
+            " const input = document.createElement('input');"
+            " input.id = 'PRODUCT_ID'; input.value = 'PRODUCT_FIXTURE';"
+            " input.hidden = true; document.body.appendChild(input); }",
+        ),
+        (
+            "quantity-limit",
+            "document.body.appendChild(document.querySelector("
+            "'#QUANTITY_LIMIT').cloneNode(true))",
+        ),
+    ):
+        duplicate_tab = await _open_fixture(
+            browser, "UTK0203_quantity.html", query
+        )
+        await duplicate_tab.evaluate(f"(() => {{{mutation}}})()")
+        duplicate_snapshot = await read_quantity_snapshot(duplicate_tab)
+        assert not duplicate_snapshot.ok, duplicate_kind
+        assert select_quantity_snapshot(
+            duplicate_snapshot, cfg["utiki"]["ticket_type_keyword"],
+            cfg["ticket_number"],
+        ) is None, duplicate_kind
+
+    product_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await product_tab.evaluate('''(() => {
+        const input = document.createElement('input');
+        input.id = 'PRODUCT_ID';
+        input.value = 'PRODUCT_FIXTURE';
+        input.hidden = true;
+        document.body.appendChild(input);
+    })()''')
+    product_snapshot = await read_quantity_snapshot(product_tab)
+    product_plan = select_quantity_snapshot(
+        product_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await product_tab.evaluate(
+        "document.querySelector('#PRODUCT_ID').value = 'OTHER_PRODUCT'"
+    )
+    assert await commit_quantity(
+        product_tab, product_snapshot, product_plan
+    ) is CommitResult.STALE
+    assert await product_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    remaining_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    remaining_snapshot = await read_quantity_snapshot(remaining_tab)
+    remaining_plan = select_quantity_snapshot(
+        remaining_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await remaining_tab.evaluate('''document.querySelector(
+        'input.numbox[key="FULL"]'
+    ).closest('tr').querySelector('input[key="LAST_AMOUNT"]').remove()''')
+    assert await commit_quantity(
+        remaining_tab, remaining_snapshot, remaining_plan
+    ) is CommitResult.REJECTED
+    assert await remaining_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    limit_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    limit_snapshot = await read_quantity_snapshot(limit_tab)
+    limit_plan = select_quantity_snapshot(
+        limit_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await limit_tab.evaluate('''document.body.appendChild(
+        document.querySelector('#QUANTITY_LIMIT').cloneNode(true)
+    )''')
+    assert await commit_quantity(
+        limit_tab, limit_snapshot, limit_plan
+    ) is CommitResult.REJECTED
+    assert await limit_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+    await limit_tab.evaluate(
+        "document.querySelectorAll('#QUANTITY_LIMIT')[1].remove()"
+    )
+    assert await commit_quantity(
+        limit_tab, limit_snapshot, limit_plan
+    ) is CommitResult.COMMITTED
+    await limit_tab.evaluate('''document.body.appendChild(
+        document.querySelector('#QUANTITY_LIMIT').cloneNode(true)
+    )''')
+    assert await dispatch_quantity_submit(
+        limit_tab, limit_plan
+    ) is SubmitDispatchResult.STALE
+    assert await limit_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
 
     dispatch_tab = await _open_fixture(
         browser, "UTK0203_quantity.html", query

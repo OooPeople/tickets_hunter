@@ -11,6 +11,7 @@ from tests.ctbc_support import (
     FakeSubmitTab,
     config,
     make_ctbc_area_snapshot,
+    make_ctbc_quantity_snapshot,
 )
 
 import platforms.ctbc as legacy_ctbc
@@ -1236,6 +1237,11 @@ class CtbcPureSelectionTest(unittest.TestCase):
             "performance_id": "P1",
             "group_id": "",
             "price_area_id": "A1",
+            "performance_hidden_present": True,
+            "product_hidden_present": False,
+            "group_hidden_present": True,
+            "price_area_hidden_present": True,
+            "quantity_limit_present": True,
             "quantity_limit_raw": "4",
             "rows": [
                 {
@@ -1254,6 +1260,10 @@ class CtbcPureSelectionTest(unittest.TestCase):
         plan = select_quantity_snapshot(snapshot, "全票", 2)
         self.assertEqual("FULL", plan.target_key)
         self.assertEqual(2, plan.ticket_number)
+        self.assertTrue(plan.performance_hidden_present)
+        self.assertFalse(plan.product_hidden_present)
+        self.assertTrue(plan.quantity_limit_present)
+        self.assertTrue(plan.target_remaining_present)
         raw["rows"][0]["key"] = "MUTATED"
         self.assertEqual("FULL", snapshot.rows[0][0])
 
@@ -1268,3 +1278,66 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertIsNone(select_quantity_snapshot(
             dict(raw, quantity_limit_raw="1"), "其他票", 2
         ))
+
+    def test_general_quantity_plan_requires_a_supported_tenant_route(self):
+        valid_urls = (
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0202_?"
+                "GROUP_ID=&tracking=fixture&PERFORMANCE_PRICE_AREA_ID=A1&"
+                "PERFORMANCE_ID=P16D0B8Z"
+            ),
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+            (
+                "https://tix.wdragons.com/UTK0203_?"
+                "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+        )
+        for page_url in valid_urls:
+            with self.subTest(page_url=page_url):
+                raw = make_ctbc_quantity_snapshot(page_url=page_url)
+                self.assertIsNotNone(
+                    select_quantity_snapshot(raw, "全票", 2)
+                )
+
+        invalid_urls = (
+            "https://example.com/BROTHERS/UTK0203_?PERFORMANCE_ID=P16D0B8Z",
+            "https://tix.ctbcsports.com/UTK0203_?PERFORMANCE_ID=P16D0B8Z",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P16D0B8Z",
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P16D0B8Z#fragment"
+            ),
+        )
+        for page_url in invalid_urls:
+            with self.subTest(page_url=page_url):
+                raw = make_ctbc_quantity_snapshot(page_url=page_url)
+                self.assertIsNone(
+                    select_quantity_snapshot(raw, "全票", 2)
+                )
+
+    def test_general_quantity_plan_freezes_optional_identity_presence(self):
+        raw = make_ctbc_quantity_snapshot()
+        raw.update({
+            "performance_hidden_present": True,
+            "product_hidden_present": True,
+            "product_id": "PRODUCT_FIXTURE",
+            "group_hidden_present": False,
+            "price_area_hidden_present": True,
+            "quantity_limit_present": True,
+        })
+        plan = select_quantity_snapshot(raw, "全票", 2)
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan.performance_hidden_present)
+        self.assertTrue(plan.product_hidden_present)
+        self.assertFalse(plan.group_hidden_present)
+        self.assertTrue(plan.price_area_hidden_present)
+        self.assertTrue(plan.quantity_limit_present)
+        self.assertTrue(plan.target_remaining_present)
+
+        raw["product_id"] = ""
+        self.assertIsNone(select_quantity_snapshot(raw, "全票", 2))

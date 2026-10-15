@@ -3077,6 +3077,36 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
 
 
+async def _reduce_utiki_quantity_commit(
+    tab, config_dict, plan, commit_result, debug, label
+):
+    """Reduce one quantity commit without entering the submit workflow."""
+    if commit_result is CommitResult.STALE:
+        debug.log(
+            f"[CTBC {label}] Quantity state changed during commit; "
+            "waiting to reload"
+        )
+        await _reload_with_interval(
+            tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
+        )
+        return False
+    if commit_result is not CommitResult.COMMITTED:
+        outcome = (
+            commit_result.value
+            if isinstance(commit_result, CommitResult)
+            else "unknown"
+        )
+        debug.log(
+            f"[CTBC {label}] Quantity commit {outcome}; submit blocked"
+        )
+        return False
+    debug.log(
+        f"[CTBC {label}] Selected {plan.ticket_number} x "
+        f"{plan.target_name}"
+    )
+    return True
+
+
 async def _nodriver_utiki_quantity_main(
     tab, config_dict, ocr, page_type, expected_product_id=""
 ):
@@ -3148,25 +3178,10 @@ async def _nodriver_utiki_quantity_main(
             f"[CTBC {label}] Quantity commit outcome is unknown: {exc}"
         )
         return False
-    if commit_result is CommitResult.STALE:
-        debug.log(
-            f"[CTBC {label}] Quantity state changed during commit; "
-            "waiting to reload"
-        )
-        await _reload_with_interval(
-            tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
-        )
+    if not await _reduce_utiki_quantity_commit(
+        tab, config_dict, plan, commit_result, debug, label
+    ):
         return False
-    if commit_result is not CommitResult.COMMITTED:
-        debug.log(
-            f"[CTBC {label}] Quantity commit {commit_result.value}; "
-            "submit blocked"
-        )
-        return False
-    debug.log(
-        f"[CTBC {label}] Selected {plan.ticket_number} x "
-        f"{plan.target_name}"
-    )
     return await _ctbc_captcha_and_submit(
         tab, config_dict, ocr, quantity_plan=plan
     )
@@ -3432,9 +3447,6 @@ async def _ctbc_read_destination_state(tab, page_type):
         if page_type in {"seat", "server_assigned_quantity"}
         else "false"
     )
-    strict_identity_json = (
-        "true" if page_type == "server_assigned_quantity" else "false"
-    )
     raw_value = await tab.evaluate(f'''
         (() => new Promise(resolve => {{
             // __ticketsHunterCtbcDestinationState
@@ -3450,17 +3462,18 @@ async def _ctbc_read_destination_state(tab, page_type):
             const read = () => {{
                 const markers = {marker_json};
                 const markerReady = markers.every(selector => document.querySelector(selector));
-                const identityInput = selector => {{
+                const exactInput = selector => {{
                     const inputs = Array.from(document.querySelectorAll(selector));
-                    return {strict_identity_json} ?
-                        (inputs.length === 1 ? inputs[0] : null) :
-                        (inputs[0] || null);
+                    return inputs.length === 1 ? inputs[0] : null;
                 }};
-                const performanceInput = identityInput('#PERFORMANCE_ID');
-                const productInput = identityInput('#PRODUCT_ID');
-                const groupInput = identityInput('#GROUP_ID');
-                const priceAreaInput = identityInput({price_area_selector_json});
-                const groupReady = !{group_required_json} || !!groupInput;
+                const performanceInput = exactInput('#PERFORMANCE_ID');
+                const productInput = exactInput('#PRODUCT_ID');
+                const groupInputs = Array.from(
+                    document.querySelectorAll('#GROUP_ID'));
+                const groupInput = groupInputs[0] || null;
+                const priceAreaInput = exactInput({price_area_selector_json});
+                const groupReady = {group_required_json} ?
+                    groupInputs.length === 1 : groupInputs.length <= 1;
                 if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
                 finish({{ready: true, page_url: location.href,
                     document_id: `${{location.href}}|${{Number(
@@ -3644,8 +3657,21 @@ async def _ctbc_attest_pending_destination(
         debug.log(f"[CTBC NAV] Destination attestation failed: {exc}")
         return False
     current_url = str(state.get("page_url") or "") if isinstance(state, dict) else ""
-    if isinstance(state, dict) and state.get("ready") and _ctbc_fast_destination_is_valid(
-        pending, page_type, current_url, state
+    current_document = str(_state["last_document"].get(identity) or "")
+    state_document = str(state.get("document_id") or "") if isinstance(
+        state, dict
+    ) else ""
+    source_document = str(pending.get("source_document_id") or "")
+    if (
+        isinstance(state, dict)
+        and state.get("ready")
+        and state_document
+        and state_document == current_document
+        and source_document
+        and state_document != source_document
+        and _ctbc_fast_destination_is_valid(
+            pending, page_type, current_url, state
+        )
     ):
         current = _state["pending_navigation"].get(identity)
         if not current or current.get("nonce") != pending.get("nonce"):

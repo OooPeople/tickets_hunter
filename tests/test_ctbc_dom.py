@@ -490,6 +490,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
             "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
         )
+        source_document = f"{source}|1000"
+        destination_document = f"{destination}|2000"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
         button = FakeElement(
             "<button id='buy_btn'>購買</button>",
@@ -512,6 +514,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 "product_id": "P16ANF0L",
                 "group_id": "GROUP_FRONT",
                 "price_area_id": "PRICE_FRONT",
+                "document_id": destination_document,
             },
             on_fast_commit=lambda: observed.append(
                 _state["pending_navigation"][_ctbc_tab_identity(tab)]["kind"]
@@ -519,6 +522,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         )
 
         cfg = config(area_keyword='"109區前排"')
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = source_document
         self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
         self.assertEqual(["FAST"], observed)
         self.assertFalse(button.clicked)
@@ -529,8 +534,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertEqual(source, tab.session_marker["source"])
         self.assertEqual(destination, tab.session_marker["destination"])
 
+        _state["last_document"][identity] = destination_document
         self.assertTrue(await _ctbc_attest_fast_destination(tab, "seat", cfg))
-        self.assertNotIn(_ctbc_tab_identity(tab), _state["pending_navigation"])
+        self.assertNotIn(identity, _state["pending_navigation"])
         self.assertIsNone(tab.session_marker)
 
     async def test_rejected_fast_commit_compare_pops_pending_before_native_fallback(self):
@@ -676,11 +682,14 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "destination_url": destination, "route": "0205",
             "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
             "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+            "source_document_id": f"{source}|1000",
             "created_at": time.monotonic(),
         }
+        destination_document = f"{destination}|2000"
         dom_ids = {
             "performance_id": "P16D0B8Z", "product_id": "P16ANF0L",
             "group_id": "GROUP_FRONT", "price_area_id": "PRICE_FRONT",
+            "document_id": destination_document,
         }
         native = FakeTab(
             "", [], url=destination, semantic_navigation=True,
@@ -689,6 +698,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         native_pending = {**expected, "kind": "NATIVE"}
         native_identity = _ctbc_tab_identity(native)
         _state["pending_navigation"][native_identity] = native_pending
+        _state["last_document"][native_identity] = destination_document
         self.assertTrue(await _ctbc_attest_fast_destination(
             native, "seat", config()
         ))
@@ -701,6 +711,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         fast_pending = {**expected, "kind": "FAST", "nonce": "5" * 32}
         fast_identity = _ctbc_tab_identity(fast)
         _state["pending_navigation"][fast_identity] = fast_pending
+        _state["last_document"][fast_identity] = destination_document
         self.assertFalse(await _ctbc_attest_fast_destination(
             fast, "seat", config()
         ))
@@ -1067,6 +1078,8 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
             "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
         )
+        source_document = f"{CTBC_TEST_AREA_URL}|1000"
+        destination_document = f"{destination}|2000"
         tab = FakeTab(
             CTBC_AREA_ROW_SELECTOR, [], url=CTBC_TEST_AREA_URL,
             semantic_navigation=True,
@@ -1079,6 +1092,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 "product_id": "P16ANF0L",
                 "group_id": "GROUP_FRONT",
                 "price_area_id": "PRICE_FRONT",
+                "document_id": destination_document,
             },
             on_native_commit=lambda: setattr(tab, "session_marker", {
                 "version": 1,
@@ -1092,12 +1106,14 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             }),
         )
 
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = source_document
         self.assertFalse(await nodriver_ctbc_area_auto_select(
             tab, config(area_keyword='"109區前排"')
         ))
-        identity = _ctbc_tab_identity(tab)
         self.assertIn(identity, _state["pending_navigation"])
         self.assertIsNotNone(tab.session_marker)
+        _state["last_document"][identity] = destination_document
         self.assertTrue(await _ctbc_attest_fast_destination(
             tab, "seat", config(area_keyword='"109區前排"')
         ))

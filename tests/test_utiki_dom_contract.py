@@ -299,12 +299,13 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 tab = FakeTab("", [], url=destination_url)
                 identity = _ctbc_tab_identity(tab)
                 destination_document = f"{destination_url}|2000"
+                source_document = f"{CTBC_TEST_DATE_URL}|1000"
                 pending = {
                     "kind": "DATE_NATIVE",
                     "phase": "DISPATCH_UNKNOWN",
                     "nonce": ("a" if page_type == "seat" else "b") * 32,
                     "source_url": CTBC_TEST_DATE_URL,
-                    "source_document_id": f"{CTBC_TEST_DATE_URL}|1000",
+                    "source_document_id": source_document,
                     "area_url": "",
                     "product_id": "P16ANF0L",
                     "tenant_path": "/BROTHERS",
@@ -312,11 +313,13 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                     "action_kind": "structural_native",
                 }
                 _state["pending_navigation"][identity] = pending
-                _state["last_document"][identity] = destination_document
+                _state["last_document"][identity] = pending[
+                    "source_document_id"
+                ]
                 destination_state = {
                     "ready": True,
                     "page_url": destination_url,
-                    "document_id": destination_document,
+                    "document_id": pending["source_document_id"],
                     "performance_id": "P16D0B8Z",
                     "product_id": "P16ANF0L",
                     "group_id": group_id,
@@ -335,6 +338,24 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                         AsyncMock(return_value=destination_state),
                     ),
                 ):
+                    self.assertFalse(await _ctbc_attest_fast_destination(
+                        tab, page_type, config()
+                    ))
+                    self.assertIs(
+                        pending, _state["pending_navigation"][identity]
+                    )
+
+                    _state["last_document"][identity] = destination_document
+                    destination_state["document_id"] = destination_document
+                    pending["source_document_id"] = ""
+                    self.assertFalse(await _ctbc_attest_fast_destination(
+                        tab, page_type, config()
+                    ))
+                    self.assertIs(
+                        pending, _state["pending_navigation"][identity]
+                    )
+
+                    pending["source_document_id"] = source_document
                     self.assertTrue(await _ctbc_attest_fast_destination(
                         tab, page_type, config()
                     ))
@@ -705,6 +726,90 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         )
         self.assertEqual(1, dom_port.commit_count)
 
+    async def test_general_quantity_requires_attested_manual_route(self):
+        cases = (
+            ("unattested", False, "manual"),
+            ("computer-mode", True, "computer"),
+        )
+        for label, attested, selection_mode in cases:
+            with self.subTest(label=label):
+                tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+                cfg = config()
+                cfg["utiki"]["seat_selection_mode"] = selection_mode
+                cfg["ctbc"] = dict(cfg["utiki"])
+                with (
+                    patch(
+                        "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                        AsyncMock(return_value=attested),
+                    ) as attest,
+                    patch(
+                        "platforms.utiki.workflow.read_quantity_snapshot",
+                        AsyncMock(),
+                    ) as reader,
+                    patch(
+                        "platforms.utiki.workflow.commit_quantity",
+                        AsyncMock(),
+                    ) as commit,
+                    patch(
+                        "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                        AsyncMock(),
+                    ) as submit,
+                ):
+                    self.assertFalse(
+                        await nodriver_ctbc_general_admission_main(
+                            tab, cfg, ocr=None
+                        )
+                    )
+
+                attest.assert_awaited_once_with(
+                    tab, "general_admission", cfg
+                )
+                reader.assert_not_awaited()
+                commit.assert_not_awaited()
+                submit.assert_not_awaited()
+
+    async def test_rejected_quantity_commit_never_submits_or_reloads(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        dom_port = FakeUtikiQuantityDomPort(
+            snapshot, CommitResult.REJECTED
+        )
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
+        cfg = config()
+
+        with (
+            patch(
+                "platforms.utiki.workflow.read_quantity_snapshot",
+                side_effect=dom_port.read_quantity_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_quantity",
+                side_effect=dom_port.commit_quantity,
+            ),
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow._reload_with_interval",
+                AsyncMock(),
+            ) as reload_page,
+            patch(
+                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                AsyncMock(),
+            ) as submit,
+        ):
+            self.assertFalse(
+                await nodriver_ctbc_general_admission_main(
+                    tab, cfg, ocr=None
+                )
+            )
+
+        self.assertEqual(
+            ["inspect_quantity", "commit_quantity"], dom_port.events
+        )
+        reload_page.assert_not_awaited()
+        submit.assert_not_awaited()
+
     async def test_server_quantity_reuses_inspect_commit_submit_pipeline(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
             page_url=CTBC_TEST_SERVER_QUANTITY_URL,
@@ -1015,9 +1120,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         )
         submit.assert_not_awaited()
 
-    async def test_quantity_dispatch_is_not_purchase_success(self):
+    async def test_general_quantity_repeat_tick_dispatches_once(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
-        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        dom_port = FakeUtikiQuantityDomPort(
+            snapshot, CommitResult.COMMITTED
+        )
         tab = FakeSubmitTab(dialog="", url=CTBC_TEST_QUANTITY_URL)
         cfg = config()
         cfg["ocr_captcha"].update({
@@ -1025,22 +1132,45 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         })
         submit_key = _ctbc_purchase_state_key(tab)
 
-        with patch(
-            "platforms.utiki.workflow.dispatch_quantity_submit",
-            AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
-        ) as dispatch, patch(
-            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
-            AsyncMock(return_value=False),
-        ) as observe:
-            self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
-            ))
-            self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
-            ))
+        with (
+            patch(
+                "platforms.utiki.workflow.read_quantity_snapshot",
+                side_effect=dom_port.read_quantity_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_quantity",
+                side_effect=dom_port.commit_quantity,
+            ),
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow.dispatch_quantity_submit",
+                AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
+            ) as dispatch,
+            patch(
+                "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+                AsyncMock(return_value=False),
+            ) as observe,
+        ):
+            self.assertFalse(
+                await nodriver_ctbc_general_admission_main(
+                    tab, cfg, ocr=None
+                )
+            )
+            self.assertFalse(
+                await nodriver_ctbc_general_admission_main(
+                    tab, cfg, ocr=None
+                )
+            )
 
         self.assertEqual(1, dispatch.await_count)
         self.assertEqual(1, observe.await_count)
+        self.assertEqual(
+            ["inspect_quantity", "commit_quantity"],
+            dom_port.events[:2],
+        )
         self.assertEqual(
             "awaiting_result", _state["submitted"][submit_key]["phase"]
         )

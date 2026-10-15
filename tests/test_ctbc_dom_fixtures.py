@@ -12,11 +12,13 @@ import zendriver as uc
 
 from tests.ctbc_support import config
 
+from platforms.utiki.selection import (
+    classify_submit_dialog as _classify_ctbc_submit_dialog,
+    quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
+)
 from platforms.utiki.workflow import (
-    _classify_ctbc_submit_dialog,
     _ctbc_commit_fast_navigation,
     _ctbc_delete_fast_navigation_marker,
-    _ctbc_general_quantity_audit_is_valid,
     _ctbc_read_fast_navigation_marker,
     _dismiss_ctbc_dialog,
     _get_ctbc_visible_dialog_text,

@@ -60,6 +60,7 @@ a = Analysis(
         'platforms.utiki',
         'platforms.utiki.auth',
         'platforms.utiki.profiles',
+        'platforms.utiki.selection',
         'platforms.utiki.workflow',
         # Chrome downloader dependencies
         'requests',

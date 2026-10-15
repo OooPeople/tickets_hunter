@@ -77,6 +77,7 @@ hiddenimports=[
     'platforms.utiki',
     'platforms.utiki.auth',
     'platforms.utiki.profiles',
+    'platforms.utiki.selection',
     'platforms.utiki.workflow',
 ]
 ```

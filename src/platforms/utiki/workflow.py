@@ -48,6 +48,12 @@ from .profiles import (
     same_origin,
     unique_query,
 )
+from .selection import (
+    choose_candidate_index as _choose_candidate_index,
+    classify_submit_dialog as _classify_ctbc_submit_dialog,
+    quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
+    select_area_snapshot as _select_ctbc_area_snapshot,
+)
 
 
 __all__ = [
@@ -238,68 +244,26 @@ def _get_ctbc_page_type(url):
     return None if page_kind is PageKind.UNKNOWN else page_kind.value
 
 
-def _parse_keyword_groups(keyword_string):
-    """Parse the settings keyword format while accepting raw/semicolon input."""
-    raw = (keyword_string or "").strip()
-    if not raw:
-        return []
-
-    parsed = util.parse_keyword_string_to_array(raw)
-    if parsed:
-        return parsed
-
-    # Settings normally stores JSON fragments ("A","B"), but accepting raw
-    # values makes direct config editing and older profiles less surprising.
-    delimiter = ";" if ";" in raw else ","
-    return [item.strip().strip('"').strip("'") for item in raw.split(delimiter) if item.strip()]
-
-
-def _matches_keyword_group(text, keyword_group):
-    formatted_text = util.format_keyword_string(text or "")
-    if isinstance(keyword_group, (list, tuple)):
-        parts = [str(item).strip() for item in keyword_group if str(item).strip()]
-    else:
-        parts = [part for part in str(keyword_group or "").split(" ") if part]
-    return bool(parts) and all(util.format_keyword_string(part) in formatted_text for part in parts)
-
-
-def _choose_candidate_index(candidates, keyword_string, mode, allow_fallback=False):
-    """Choose an original candidate index, preserving keyword priority."""
-    if not candidates:
-        return None
-
-    indexed = list(enumerate(candidates))
-    keyword_groups = _parse_keyword_groups(keyword_string)
-    if keyword_groups:
-        for keyword_group in keyword_groups:
-            matched = [item for item in indexed if _matches_keyword_group(item[1].get("text", ""), keyword_group)]
-            if matched:
-                target = util.get_target_item_from_matched_list(matched, mode)
-                return target[0] if target else None
-        if not allow_fallback:
-            return None
-
-    target = util.get_target_item_from_matched_list(indexed, mode)
-    return target[0] if target else None
-
-
-def _ctbc_availability_has_tickets(status_text, ticket_number=1):
-    text = re.sub(r"\s+", "", status_text or "")
-    if not text or "售完" in text or text in {"0", "0張", "無"}:
-        return False
-
-    if re.fullmatch(r"\d+", text):
-        return int(text) >= int(ticket_number)
-
-    if any(marker in text for marker in ("剩餘", "尚餘", "剩", "餘")):
-        match = re.search(r"(\d+)", text)
-        if match and int(match.group(1)) < int(ticket_number):
-            return False
-    return True
-
-
 def _ctbc_unique_query(url):
     return unique_query(url)
+
+
+def _build_ctbc_destination_url(area_url, target):
+    if _get_ctbc_page_type(area_url) != "area":
+        return None
+    source = urlsplit(area_url)
+    if target.get("route") not in {"0202", "0205"}:
+        return None
+    area_query = _ctbc_unique_query(area_url)
+    if (area_query or {}).get("PERFORMANCE_ID") != target.get("performance_id"):
+        return None
+    path = f"{source.path.rsplit('/', 1)[0]}/UTK{target['route']}_"
+    query = urlencode({
+        "PERFORMANCE_ID": target["performance_id"],
+        "GROUP_ID": target["group_id"],
+        "PERFORMANCE_PRICE_AREA_ID": target["price_area_id"],
+    })
+    return urlunsplit(("https", source.netloc, path, query, ""))
 
 
 def _ctbc_same_origin(first, second):
@@ -638,214 +602,6 @@ async def _ctbc_commit_native_date_action(
         return true;
     }}''')
     return committed is True
-
-
-def _parse_ctbc_map_send(href, expected_performance_id):
-    """Parse the allowlisted five-argument Send call without evaluating JavaScript."""
-    match = re.fullmatch(
-        r"\s*javascript:\s*Send\(\s*"
-        r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
-        r"(?P<q2>['\"])(?P<performance>[A-Za-z0-9_-]+)(?P=q2)\s*,\s*"
-        r"(?P<q3>['\"])(?P<price_area>[A-Za-z0-9_-]+)(?P=q3)\s*,\s*"
-        r"(?P<q4>['\"])(?P<group>[A-Za-z0-9_-]*)(?P=q4)\s*,\s*"
-        r"(?P<q5>['\"])(?P<status>[^'\"]*)(?P=q5)\s*\)\s*;?\s*",
-        str(href or ""),
-    )
-    if not match or match.group("performance") != expected_performance_id:
-        return None
-    if match.group("route") == "0205" and not match.group("group"):
-        return None
-    return {
-        "action_name": "Send",
-        "route": match.group("route"),
-        "performance_id": match.group("performance"),
-        "price_area_id": match.group("price_area"),
-        "group_id": match.group("group"),
-        "stable_args": [
-            match.group("route"),
-            match.group("performance"),
-            match.group("price_area"),
-            match.group("group"),
-        ],
-        "status": match.group("status"),
-    }
-
-
-def _parse_ctbc_map_send_a(href, expected_performance_id):
-    """Parse the allowlisted seven-argument SendA call for native selection."""
-    match = re.fullmatch(
-        r"\s*javascript:\s*SendA\(\s*"
-        r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
-        r"(?P<q2>['\"])(?P<performance>[A-Za-z0-9_-]+)(?P=q2)\s*,\s*"
-        r"(?P<q3>['\"])(?P<group>[A-Za-z0-9_-]*)(?P=q3)\s*,\s*"
-        r"(?P<q4>['\"])(?P<price_area>[A-Za-z0-9_-]+)(?P=q4)\s*,\s*"
-        r"(?P<q5>['\"])(?P<area_group>[A-Za-z0-9_-]*)(?P=q5)\s*,\s*"
-        r"(?P<q6>['\"])(?P<area_id>[A-Za-z0-9_-]*)(?P=q6)\s*,\s*"
-        r"(?P<q7>['\"])(?P<status>[^'\"]*)(?P=q7)\s*\)\s*;?\s*",
-        str(href or ""),
-    )
-    if not match or match.group("performance") != expected_performance_id:
-        return None
-    if match.group("route") == "0205" and not match.group("group"):
-        return None
-    return {
-        "action_name": "SendA",
-        "route": match.group("route"),
-        "performance_id": match.group("performance"),
-        "price_area_id": match.group("price_area"),
-        "group_id": match.group("group"),
-        "stable_args": [
-            match.group("route"),
-            match.group("performance"),
-            match.group("group"),
-            match.group("price_area"),
-            match.group("area_group"),
-            match.group("area_id"),
-        ],
-        "status": match.group("status"),
-    }
-
-
-def _parse_ctbc_map_title(title):
-    match = re.fullmatch(
-        r"\s*票區\s*[:：]\s*(?P<area>.*?)\s+"
-        r"票價\s*[:：]\s*(?P<price>.*?)\s+"
-        r"尚餘\s*[:：]\s*(?P<status>.*?)\s*",
-        str(title or ""),
-    )
-    if not match:
-        return None
-    return {
-        "area": re.sub(r"\s+", "", match.group("area")),
-        "price": re.sub(r"[\s,$]", "", match.group("price")),
-        "status": re.sub(r"\s+", "", match.group("status")),
-    }
-
-
-def _ctbc_map_title_matches_available_row(map_title, area_text, price_text, ticket_number):
-    """Match stable row identity while evaluating map availability independently."""
-    return bool(
-        map_title
-        and map_title["area"] == re.sub(r"\s+", "", area_text)
-        and map_title["price"] == re.sub(r"[\s,$]", "", price_text)
-        and _ctbc_availability_has_tickets(map_title["status"], ticket_number)
-    )
-
-
-def _build_ctbc_destination_url(area_url, target):
-    if _get_ctbc_page_type(area_url) != "area":
-        return None
-    source = urlsplit(area_url)
-    if target.get("route") not in {"0202", "0205"}:
-        return None
-    area_query = _ctbc_unique_query(area_url)
-    if (area_query or {}).get("PERFORMANCE_ID") != target.get("performance_id"):
-        return None
-    path = f"{source.path.rsplit('/', 1)[0]}/UTK{target['route']}_"
-    query = urlencode({
-        "PERFORMANCE_ID": target["performance_id"],
-        "GROUP_ID": target["group_id"],
-        "PERFORMANCE_PRICE_AREA_ID": target["price_area_id"],
-    })
-    return urlunsplit(("https", source.netloc, path, query, ""))
-
-
-def _select_ctbc_area_snapshot(
-    snapshot, config_dict, expected_performance_id, require_direct_destination=True
-):
-    """Choose an area from one batched DOM/map snapshot using shared keyword semantics."""
-    if not isinstance(snapshot, dict):
-        return None
-    rows = snapshot.get("rows")
-    areas = snapshot.get("areas")
-    if not isinstance(rows, list) or not isinstance(areas, list):
-        return None
-    if not 0 < len(rows) <= 200 or not 0 < len(areas) <= 500:
-        return None
-
-    areas_by_id = {}
-    for area in areas:
-        if not isinstance(area, dict):
-            return None
-        area_id = str(area.get("id") or "")
-        href = str(area.get("href") or "")
-        title = str(area.get("title") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", area_id) or not href:
-            return None
-        areas_by_id.setdefault(area_id, []).append({"href": href, "title": title})
-
-    candidates = []
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    for row in rows:
-        if not isinstance(row, dict):
-            return None
-        area_text = re.sub(r"\s+", " ", str(row.get("area") or "")).strip()
-        price_text = re.sub(r"\s+", " ", str(row.get("price") or "")).strip()
-        status_text = re.sub(r"\s+", " ", str(row.get("status") or "")).strip()
-        rel_tokens = str(row.get("rel") or "").split()
-        if not area_text or not rel_tokens or not _ctbc_availability_has_tickets(status_text, ticket_number):
-            continue
-        if any(not re.fullmatch(r"[A-Za-z0-9_-]+", token) for token in rel_tokens):
-            continue
-        match_text = f"{area_text} {price_text}".strip()
-        if util.reset_row_text_if_match_keyword_exclude(config_dict, match_text):
-            continue
-
-        map_options = []
-        for rel in rel_tokens:
-            for map_area in areas_by_id.get(rel, []):
-                href = map_area["href"]
-                map_title = _parse_ctbc_map_title(map_area["title"])
-                if not _ctbc_map_title_matches_available_row(
-                    map_title, area_text, price_text, ticket_number
-                ):
-                    continue
-                parsed_send = _parse_ctbc_map_send(href, expected_performance_id)
-                if parsed_send and _ctbc_availability_has_tickets(
-                    parsed_send["status"], ticket_number
-                ):
-                    map_options.append((rel, parsed_send, parsed_send))
-                    continue
-                if require_direct_destination:
-                    continue
-                parsed_send_a = _parse_ctbc_map_send_a(href, expected_performance_id)
-                if parsed_send_a and _ctbc_availability_has_tickets(
-                    parsed_send_a["status"], ticket_number
-                ):
-                    map_options.append((rel, parsed_send_a, None))
-        if not map_options:
-            continue
-        if require_direct_destination:
-            identities = {
-                (
-                    option[2]["route"],
-                    option[2]["performance_id"],
-                    option[2]["price_area_id"],
-                    option[2]["group_id"],
-                )
-                for option in map_options
-            }
-            if len(identities) != 1:
-                continue
-        rel, map_action, destination = map_options[0]
-        candidates.append({
-            "text": match_text,
-            "area": area_text,
-            "price": price_text,
-            "status": status_text,
-            "rel": rel,
-            "map_action": map_action,
-            "destination": destination,
-        })
-
-    area_config = config_dict.get("area_auto_select", {})
-    target_index = _choose_candidate_index(
-        candidates,
-        area_config.get("area_keyword", "").strip(),
-        area_config.get("mode", "from top to bottom"),
-        config_dict.get("area_auto_fallback", False),
-    )
-    return candidates[target_index] if target_index is not None else None
 
 
 def _select_ctbc_seat_indexes(
@@ -2910,42 +2666,6 @@ async def _ctbc_login_fingerprint(tab):
     return hashlib.sha256(material).hexdigest()
 
 
-def _is_ctbc_auth_error(dialog_text):
-    return (
-        any(marker in (dialog_text or "") for marker in ("帳號", "密碼", "登入"))
-        and any(marker in (dialog_text or "") for marker in ("錯誤", "有誤", "失敗", "不正確", "不存在", "無效"))
-    )
-
-
-def _classify_ctbc_submit_dialog(dialog_text):
-    text = str(dialog_text or "").strip()
-    if not text:
-        return None
-    if _is_ctbc_auth_error(text):
-        return "auth"
-    if "驗證碼" in text and any(marker in text for marker in ("錯誤", "失敗", "不正確")):
-        return "captcha"
-    seat_conflict = "請再重新選取座位" in text or (
-        any(subject in text for subject in ("座位", "位置"))
-        and any(
-            marker in text
-            for marker in ("已被選走", "已被選取", "已被訂走", "已被預訂")
-        )
-    )
-    if seat_conflict:
-        return "seat_conflict"
-    quota_exceeded = (
-        "限購" in text and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
-    ) or (
-        "購買額度" in text and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
-    )
-    if quota_exceeded:
-        return "quota"
-    if "成功" in text and "加入購物車" in text:
-        return "success"
-    return "rejected"
-
-
 async def _get_ctbc_visible_dialog_text(tab):
     dialog_raw = await tab.evaluate('''
         (() => {
@@ -3561,24 +3281,6 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         return False
 
     return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
-
-
-def _ctbc_general_quantity_audit_is_valid(quantities, target_key, ticket_number):
-    if not isinstance(quantities, list) or not target_key:
-        return False
-    target_matches = [item for item in quantities if isinstance(item, dict) and item.get("key") == target_key]
-    if len(target_matches) != 1:
-        return False
-    try:
-        if int(target_matches[0].get("value", 0)) != int(ticket_number):
-            return False
-        return all(
-            item is target_matches[0] or int(item.get("value", 0)) == 0
-            for item in quantities
-            if isinstance(item, dict)
-        ) and all(isinstance(item, dict) for item in quantities)
-    except (TypeError, ValueError):
-        return False
 
 
 def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):

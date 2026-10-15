@@ -62,6 +62,7 @@ from .profiles import (
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
+    DialogSnapshot,
     QuantityPlan,
     QuantitySnapshot,
     choose_candidate_index as _choose_candidate_index,
@@ -2557,22 +2558,69 @@ async def _fill_ctbc_inline_login(tab, config_dict):
     return bool(result)
 
 
-async def _ctbc_login_fingerprint(tab):
-    raw = await tab.evaluate('''
-        (() => {
+async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
+    if expected_dialog is not None and not isinstance(
+        expected_dialog, DialogSnapshot
+    ):
+        return ""
+    expected_json = "null"
+    if expected_dialog is not None:
+        expected_json = json.dumps({
+            "pageUrl": expected_dialog.page_url,
+            "documentId": expected_dialog.document_id,
+            "text": expected_dialog.text,
+        }, ensure_ascii=False)
+    raw = await tab.evaluate(f'''
+        (() => {{
+            const expectedDialog = {expected_json};
+            if (expectedDialog) {{
+                if (location.href !== expectedDialog.pageUrl ||
+                    String(performance.timeOrigin) !==
+                        expectedDialog.documentId) {{
+                    return JSON.stringify({{ok: false}});
+                }}
+                const visible = element => {{
+                    if (!element || !element.isConnected || element.hidden ||
+                        element.getAttribute('aria-hidden') === 'true') {{
+                        return false;
+                    }}
+                    const style = getComputedStyle(element);
+                    return style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        element.getClientRects().length > 0;
+                }};
+                const dialogs = Array.from(
+                    document.querySelectorAll('#dialog-message'))
+                    .map(message => ({{
+                        message,
+                        wrapper: message.closest('.ui-dialog')
+                    }}))
+                    .filter(item =>
+                        visible(item.wrapper) && visible(item.message));
+                if (dialogs.length !== 1 ||
+                    (dialogs[0].message.textContent || '').trim() !==
+                        expectedDialog.text) {{
+                    return JSON.stringify({{ok: false}});
+                }}
+            }}
             const account = document.querySelector('#LOGIN_ID');
             const password = document.querySelector('#LOGIN_PWD');
-            return JSON.stringify({
+            return JSON.stringify({{
+                ok: true,
                 account: account ? account.value : '',
                 password: password ? password.value : ''
-            });
-        })()
+            }});
+        }})()
     ''')
     try:
         credentials = json.loads(raw) if isinstance(raw, str) else {}
     except (TypeError, ValueError):
         credentials = {}
-    if not credentials.get("account") or not credentials.get("password"):
+    if (
+        credentials.get("ok") is not True
+        or not credentials.get("account")
+        or not credentials.get("password")
+    ):
         return ""
     material = f"{credentials['account']}\0{credentials['password']}".encode("utf-8")
     return hashlib.sha256(material).hexdigest()
@@ -2716,12 +2764,24 @@ async def _handle_ctbc_submit_dialog(
             },
         )
     elif outcome == "auth":
-        login_fingerprint = await _ctbc_login_fingerprint(tab)
         identity = _ctbc_tab_identity(tab)
-        _state["auth_failure"][submit_key] = {
-            "fingerprint": login_fingerprint,
+        auth_failure = {
+            "fingerprint": "",
             "source_document_id": _state["last_document"].get(identity, ""),
         }
+        _state["auth_failure"][submit_key] = auth_failure
+        try:
+            login_fingerprint = await _ctbc_login_fingerprint(
+                tab, expected_dialog=dialog_snapshot
+            )
+        except Exception as exc:
+            debug.log(
+                "[CTBC LOGIN] Credential fingerprint observation failed; "
+                f"document-scoped blocker retained: {exc}"
+            )
+        else:
+            if _state["auth_failure"].get(submit_key) is auth_failure:
+                auth_failure["fingerprint"] = login_fingerprint
     elif outcome == "captcha":
         _state["submit_blocked"][submit_key] = "captcha_pending"
     elif outcome in ("quota", "rejected"):

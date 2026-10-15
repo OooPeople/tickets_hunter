@@ -33,6 +33,7 @@ from platforms.utiki.workflow import (
     _ctbc_commit_fast_navigation,
     _ctbc_captcha_and_submit,
     _ctbc_delete_fast_navigation_marker,
+    _ctbc_login_fingerprint,
     _ctbc_purchase_state_key,
     _ctbc_read_fast_navigation_marker,
     _ctbc_tab_identity,
@@ -682,6 +683,26 @@ async def _assert_dialog_fixture(browser):
     assert await tab.evaluate(
         "Number(document.body.dataset.dialogClicks || 0)"
     ) == 0
+    await tab.evaluate('''
+        (() => {
+            const account = document.createElement('input');
+            account.id = 'LOGIN_ID';
+            account.value = 'fixture-user';
+            const password = document.createElement('input');
+            password.id = 'LOGIN_PWD';
+            password.value = 'fixture-secret';
+            document.body.append(account, password);
+        })()
+    ''')
+    assert await _ctbc_login_fingerprint(
+        tab, expected_dialog=snapshot
+    )
+    assert await _ctbc_login_fingerprint(
+        tab,
+        expected_dialog=replace(
+            snapshot, document_id="different-document"
+        ),
+    ) == ""
     assert await dismiss_dialog(tab, snapshot) is CommitResult.COMMITTED
     assert (await read_dialog_snapshot(tab)).visible_count == 0
     assert await tab.evaluate(

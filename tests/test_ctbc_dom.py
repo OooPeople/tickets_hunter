@@ -1917,6 +1917,50 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertNotIn(submit_key, _state["auth_failure"])
         self.assertEqual(0, tab.button.click_count)
 
+    async def test_auth_fingerprint_failure_keeps_document_blocker(self):
+        tab = FakeSubmitTab(dialog="帳號或密碼錯誤")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+        identity = _ctbc_tab_identity(tab)
+        self.addCleanup(_state["last_document"].pop, identity, None)
+        _state["last_document"][identity] = "document-1"
+        _state["submitted"][submit_key] = 1.0
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_login_fingerprint",
+            AsyncMock(side_effect=RuntimeError("CDP read failed")),
+        ) as fingerprint:
+            self.assertEqual(
+                "auth", await _handle_ctbc_submit_dialog(tab, cfg)
+            )
+
+        fingerprint.assert_awaited_once()
+        expected_dialog = fingerprint.await_args.kwargs["expected_dialog"]
+        self.assertEqual(str(tab.target.url), expected_dialog.page_url)
+        self.assertEqual(tab.document_id, expected_dialog.document_id)
+        self.assertEqual("帳號或密碼錯誤", expected_dialog.text)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual({
+            "fingerprint": "",
+            "source_document_id": "document-1",
+        }, _state["auth_failure"][submit_key])
+
+        with patch(
+            "platforms.utiki.workflow._fill_ctbc_inline_login",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_login_fingerprint",
+            AsyncMock(return_value="current-credentials"),
+        ), patch(
+            "platforms.utiki.workflow._dispatch_ctbc_submit",
+            AsyncMock(),
+        ) as dispatch:
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None
+            ))
+        dispatch.assert_not_awaited()
+
     async def test_click_exception_after_dispatch_blocks_second_submit(self):
         tab = FakeSubmitTab(dialog="")
         cfg = config()

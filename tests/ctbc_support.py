@@ -562,7 +562,17 @@ class FakeSubmitTab:
     async def evaluate(self, script):
         if "#LOGIN_ID" in script:
             if "JSON.stringify" in script:
-                return '{"account":"user","password":"secret"}'
+                expected = _script_json_constant(
+                    script, "expectedDialog"
+                )
+                if expected and (
+                    expected.get("pageUrl") != self.target.url
+                    or expected.get("documentId") != self.document_id
+                    or not self.dialog_visible
+                    or expected.get("text") != self.dialog
+                ):
+                    return '{"ok":false}'
+                return '{"ok":true,"account":"user","password":"secret"}'
             return {"required": False}
         if "#CHK" in script:
             return self.captcha_input.value

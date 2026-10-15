@@ -26,6 +26,7 @@ from .profiles import PageKind, classify_utiki_page
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
+UTK_RELOAD_FINAL_OBSERVATION_SECONDS = 0.25
 UTK_EMERGENCY_MARKER_SECONDS = 6.0
 UTK_PAUSE_CLEANUP_RETRY_SECONDS = 0.5
 UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
@@ -223,6 +224,70 @@ def _reload_request_is_current(runtime, request):
     )
 
 
+def _reload_request_is_awaiting(request):
+    return bool(
+        request and request.get("phase") in {"awaiting_document", "completed"}
+    )
+
+
+def _mark_reload_awaiting(
+    runtime, request, *, reservation=None, allow_paused_ambiguous=False,
+):
+    if not _reload_request_is_current(runtime, request):
+        return False
+    if reservation is not None:
+        exact_reserved = _reserved_request_is_current(
+            runtime, request, reservation
+        )
+        paused_ambiguous = bool(
+            allow_paused_ambiguous
+            and request.get("phase") == "reserved"
+            and request.get("paused")
+            and not request.get("pause_cleanup_done")
+            and request.get("reservation_id") == reservation.reservation_id
+        )
+        if not exact_reserved and not paused_ambiguous:
+            return False
+    elif request.get("phase") != "queued":
+        return False
+    request.update({
+        "phase": "awaiting_document",
+        "reservation_id": "",
+        "shared_enqueued": False,
+        "dispatched_at": time.monotonic(),
+        "completed_document_token": "",
+    })
+    runtime["document"]["snapshot"] = None
+    return True
+
+
+def _reconcile_reload_document(runtime, snapshot):
+    request = runtime["refresh"]["reload_request"]
+    if not request or request.get("phase") != "awaiting_document":
+        return False
+    if snapshot.get("classification") not in {
+        "normal", "unverified", "blocked",
+    }:
+        return False
+    document_id = str(snapshot.get("document_id") or "")
+    source_token = str(request.get("source_document_token") or "")
+    if not source_token or not document_id or document_id == source_token:
+        return False
+    request["phase"] = "completed"
+    request["completed_document_token"] = document_id
+    return True
+
+
+def _consume_completed_reload(runtime, request):
+    if not (
+        _reload_request_is_current(runtime, request)
+        and request.get("phase") == "completed"
+    ):
+        return False
+    _pop_reload_request_if_token(runtime, request.get("request_token"))
+    return True
+
+
 def _reserved_request_is_current(runtime, request, reservation):
     return bool(
         _reload_request_is_current(runtime, request)
@@ -233,7 +298,11 @@ def _reserved_request_is_current(runtime, request, reservation):
 
 
 def _mark_paused_request_clean(runtime, request):
-    if not (_reload_request_is_current(runtime, request) and request.get("paused")):
+    if not (
+        _reload_request_is_current(runtime, request)
+        and request.get("paused")
+        and request.get("phase") in {"queued", "reserved"}
+    ):
         return False
     request.update({
         "phase": "queued", "reservation_id": "",
@@ -332,7 +401,7 @@ async def cancel_refresh(
 async def pause_refresh(
     tab, runtime, refresh_identity, cancel_tasks, reason="",
 ):
-    """Pause queued/reserved work without discarding its local intent."""
+    """Pause refresh work without discarding or rewinding its local intent."""
     del tab, reason
     refresh = runtime["refresh"]
     request = refresh["reload_request"]
@@ -342,13 +411,17 @@ async def pause_refresh(
     coordinator = get_shared_refresh_coordinator()
     changed = False
     if request is not None:
-        if not request.get("paused"):
+        if _reload_request_is_awaiting(request):
+            if not request.get("paused"):
+                request["paused"] = True
+                changed = True
+        elif not request.get("paused"):
             request["paused"] = True
             request["pause_cleanup_done"] = not request.get(
                 "shared_enqueued", False
             )
             request["pause_cleanup_retry_at"] = 0.0
-        if _pause_cleanup_due(request):
+        if not _reload_request_is_awaiting(request) and _pause_cleanup_due(request):
             token = request.get("request_token")
             reservation_id = str(request.get("reservation_id") or "")
             if request.get("phase") == "reserved" and reservation_id:
@@ -514,12 +587,27 @@ async def _utk_document_guard(
     document_id = snapshot.get("document_id")
     previous_document_id = document["last_document"]
     if document_id:
+        _reconcile_reload_document(runtime, snapshot)
         if previous_document_id and previous_document_id != document_id:
             refresh["reload_event"] = True
         document["last_document"] = document_id
     else:
         return "unknown", snapshot
     if not settings.get("enabled", True):
+        probe = refresh["recovery_probe"]
+        if probe is not None:
+            if not probe.get("abandon_requested"):
+                probe["abandon_requested"] = True
+                probe["pause_cleanup_done"] = False
+                probe["pause_cleanup_retry_at"] = 0.0
+            cleanup_pending, _ = await _retry_abandoned_probe_cleanup(
+                runtime, refresh_identity, cancel_tasks
+            )
+            if cleanup_pending:
+                return "unknown", snapshot
+        request = refresh["reload_request"]
+        if request and request.get("phase") == "awaiting_document":
+            return "unknown", snapshot
         return "disabled", snapshot
     probe_handled = await _finish_utk_recovery_probe(
         tab, runtime, refresh_identity, config_dict, snapshot
@@ -541,7 +629,9 @@ async def _utk_document_guard(
             request.get("document_id") != snapshot.get("document_id")
             or request.get("expected_url") != snapshot.get("url")
         )
-        if not request or not request.get("allow_blocked_recovery") or stale:
+        if not _reload_request_is_awaiting(request) and (
+            not request or not request.get("allow_blocked_recovery") or stale
+        ):
             await cancel_refresh(
                 tab, runtime, refresh_identity, cancel_tasks,
                 "HTTP 429", wait=True,
@@ -558,7 +648,7 @@ async def _utk_document_guard(
             )
         return "blocked", snapshot
     request = refresh["reload_request"]
-    if request and (
+    if request and not _reload_request_is_awaiting(request) and (
         request.get("expected_url") != snapshot.get("url")
         or request.get("document_id") != snapshot.get("document_id")
     ):
@@ -566,39 +656,94 @@ async def _utk_document_guard(
             tab, runtime, refresh_identity, cancel_tasks,
             "document changed", wait=True,
         )
+    if request and request.get("phase") == "awaiting_document":
+        return "unknown", snapshot
     return classification, snapshot
+
+
+async def _invoke_browser_reload(tab, debug):
+    try:
+        await asyncio.wait_for(
+            tab.reload(), timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        debug.log(f"[CTBC] Reload dispatch outcome is unknown: {exc}")
+    return False
+
+
+async def _detach_shared_reload_request(
+    runtime, refresh_identity, request, coordinator,
+):
+    if not request.get("shared_enqueued"):
+        return True
+    if time.monotonic() < float(request.get("pause_cleanup_retry_at") or 0.0):
+        return False
+    token = request.get("request_token")
+    reservation_id = str(request.get("reservation_id") or "")
+    if request.get("phase") == "reserved" and reservation_id:
+        changed = await coordinator.release_refresh(
+            UTK_SPORTS_SCOPE, refresh_identity, reservation_id,
+            request_token=token, drop_request=True,
+        )
+    else:
+        changed = await coordinator.cancel_request(
+            UTK_SPORTS_SCOPE, refresh_identity, request_token=token,
+        )
+    if changed and _reload_request_is_current(runtime, request):
+        request.update({
+            "phase": "queued", "reservation_id": "",
+            "shared_enqueued": False, "pause_cleanup_retry_at": 0.0,
+        })
+        return True
+    if _reload_request_is_current(runtime, request):
+        request["pause_cleanup_retry_at"] = (
+            time.monotonic() + UTK_PAUSE_CLEANUP_RETRY_SECONDS
+        )
+    return False
 
 
 async def _reload_without_shared_protection(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, debug,
-    apply_local_interval,
+    reason, apply_local_interval, snapshot, dispatch_deadline,
 ):
-    await cancel_refresh(
-        tab, runtime, refresh_identity, cancel_tasks,
-        "shared protection disabled", wait=True, abandon_probe=True,
+    del cancel_tasks
+    if not snapshot.get("document_id"):
+        return False
+    request = _get_reload_request(
+        runtime, snapshot, config_dict, reason,
+        apply_local_interval, False, dispatch_deadline, debug,
     )
-    interval = config_dict.get("advanced", {}).get(
-        "auto_reload_page_interval", 0.0
-    )
-    if apply_local_interval:
-        delay = float(interval) if interval and interval > 0 else 1.0
-        deadline = time.monotonic() + delay
-        while time.monotonic() < deadline:
-            if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
-                return False
-            await asyncio.sleep(min(0.25, deadline - time.monotonic()))
+    coordinator = get_shared_refresh_coordinator()
+    if not await _detach_shared_reload_request(
+        runtime, refresh_identity, request, coordinator
+    ):
+        return False
+    if (
+        request.get("document_id") != snapshot.get("document_id")
+        or request.get("expected_url") != snapshot.get("url")
+    ):
+        _pop_reload_request_if_token(runtime, request.get("request_token"))
+        return False
+    if request.get("paused"):
+        if await check_and_handle_pause(config_dict):
+            return False
+        request["paused"] = False
+    now = time.monotonic()
+    deadline = float(request.get("deadline_at") or 0.0)
+    if deadline and now >= deadline:
+        _pop_reload_request_if_token(runtime, request.get("request_token"))
+        return False
+    if now < float(request.get("eligible_at") or 0.0):
+        return False
     if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
         return False
     if _refresh_settings(force_refresh=True).get("enabled", True):
         return False
-    try:
-        await tab.reload()
-        runtime["document"]["snapshot"] = None
-        runtime["refresh"]["reload_event"] = True
-        return True
-    except Exception as exc:
-        debug.log(f"[CTBC] Reload failed: {exc}")
+    if not _mark_reload_awaiting(runtime, request):
         return False
+    return await _invoke_browser_reload(tab, debug)
 
 
 async def _guard_for_reload(
@@ -622,12 +767,61 @@ async def _guard_for_reload(
         return None
 
 
+async def _poll_committed_reload(
+    tab, runtime, refresh_identity, cancel_tasks, config_dict, request, deadline,
+):
+    if not _reload_request_is_awaiting(request):
+        return False, False
+    needs_observation = request.get("phase") == "awaiting_document" or (
+        request.get("phase") == "completed"
+        and runtime["refresh"]["recovery_probe"] is not None
+    )
+    if needs_observation:
+        if deadline and time.monotonic() >= deadline:
+            await _guard_for_reload(
+                tab, runtime, refresh_identity, cancel_tasks, config_dict,
+                time.monotonic() + UTK_RELOAD_FINAL_OBSERVATION_SECONDS,
+            )
+        else:
+            await _guard_for_reload(
+                tab, runtime, refresh_identity, cancel_tasks, config_dict,
+                deadline or None,
+            )
+    if not _reload_request_is_current(runtime, request):
+        return True, False
+    if request.get("phase") == "completed":
+        if runtime["refresh"]["recovery_probe"] is not None:
+            return True, False
+        if request.get("paused") and await check_and_handle_pause(config_dict):
+            return True, False
+        request["paused"] = False
+        return True, _consume_completed_reload(runtime, request)
+    if deadline and time.monotonic() >= deadline:
+        await cancel_refresh(
+            tab, runtime, refresh_identity, cancel_tasks,
+            "reload deadline expired", wait=True, abandon_probe=True,
+        )
+    return True, False
+
+
 def _tighten_reload_deadline(request, dispatch_deadline):
     new_deadline = float(dispatch_deadline or 0.0)
     old_deadline = float(request.get("deadline_at") or 0.0)
     if new_deadline > 0 and (old_deadline <= 0 or new_deadline < old_deadline):
         request["deadline_at"] = new_deadline
     return float(request.get("deadline_at") or 0.0)
+
+
+async def _resume_reload_request(config_dict, request):
+    if not request.get("paused"):
+        return True
+    if await check_and_handle_pause(config_dict):
+        return False
+    request.update({
+        "paused": False, "phase": "queued",
+        "pause_cleanup_done": False, "pause_cleanup_retry_at": 0.0,
+    })
+    return True
 
 
 def _get_reload_request(
@@ -867,11 +1061,30 @@ async def _commit_reserved_reload(
     request, preflight, debug,
 ):
     request_token = request.get("request_token")
-    decision = await coordinator.commit_refresh(
-        UTK_SPORTS_SCOPE, refresh_identity, reservation.reservation_id,
-        request_token=request_token,
-    )
+    try:
+        decision = await coordinator.commit_refresh(
+            UTK_SPORTS_SCOPE, refresh_identity, reservation.reservation_id,
+            request_token=request_token,
+        )
+    except BaseException as exc:
+        _mark_reload_awaiting(
+            runtime, request, reservation=reservation,
+            allow_paused_ambiguous=True,
+        )
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        debug.log(f"[UTK RATE] Shared commit outcome is unknown: {exc}")
+        return False
     if not _reserved_request_is_current(runtime, request, reservation):
+        if (
+            _reload_request_is_current(runtime, request)
+            and (decision.status == "already_committed" or decision.error)
+            and _mark_reload_awaiting(runtime, request)
+        ):
+            _install_recovery_probe(
+                runtime, refresh_identity, cancel_tasks, decision, preflight
+            )
+            return False
         if decision.granted and decision.is_recovery_probe:
             _install_abandoned_probe_cleanup(runtime, decision, preflight)
             await _retry_abandoned_probe_cleanup(
@@ -889,29 +1102,31 @@ async def _commit_reserved_reload(
             )
         return False
     if not decision.granted:
+        if decision.status == "already_committed" or decision.error:
+            if _mark_reload_awaiting(
+                runtime, request, reservation=reservation
+            ):
+                _install_recovery_probe(
+                    runtime, refresh_identity, cancel_tasks, decision, preflight
+                )
+            if decision.error:
+                debug.log(
+                    f"[UTK RATE] Shared commit failed closed: {decision.error}"
+                )
+            return False
         if decision.status != "already_committed":
             await _release_noncommit_reservation(
                 runtime, coordinator, refresh_identity, reservation, request
             )
-        else:
-            _pop_reload_request_if_token(runtime, request_token)
-        if decision.error:
-            debug.log(f"[UTK RATE] Shared commit failed closed: {decision.error}")
+        return False
+    if not _mark_reload_awaiting(
+        runtime, request, reservation=reservation
+    ):
         return False
     _install_recovery_probe(
         runtime, refresh_identity, cancel_tasks, decision, preflight
     )
-    _pop_reload_request_if_token(runtime, request_token)
-    try:
-        await asyncio.wait_for(
-            tab.reload(), timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
-        )
-        runtime["document"]["snapshot"] = None
-        runtime["refresh"]["reload_event"] = True
-        return True
-    except Exception as exc:
-        debug.log(f"[CTBC] Reload failed: {exc}")
-        return False
+    return await _invoke_browser_reload(tab, debug)
 
 
 async def _execute_reserved_reload(
@@ -969,10 +1184,11 @@ async def _execute_reserved_reload(
             reservation, request, preflight, debug,
         )
     except BaseException:
-        with contextlib.suppress(BaseException):
-            await asyncio.shield(_release_noncommit_reservation(
-                runtime, coordinator, refresh_identity, reservation, request,
-            ))
+        if not _reload_request_is_awaiting(request):
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(_release_noncommit_reservation(
+                    runtime, coordinator, refresh_identity, reservation, request,
+                ))
         raise
 
 
@@ -981,19 +1197,19 @@ async def reload(
     apply_local_interval=True, allow_unknown_document=False,
     allow_blocked_recovery=False, dispatch_deadline=None,
 ):
-    """Poll once and reload only after obtaining the shared one-shot permit."""
+    """Advance one reload intent; succeed only after observing its new document."""
     debug = util.create_debug_logger(config_dict)
-    settings = _refresh_settings()
-    if not settings.get("enabled", True):
-        return await _reload_without_shared_protection(
-            tab, runtime, refresh_identity, cancel_tasks, config_dict, debug,
-            apply_local_interval,
-        )
     existing = runtime["refresh"]["reload_request"]
     deadline = (
         _tighten_reload_deadline(existing, dispatch_deadline)
         if existing is not None else float(dispatch_deadline or 0.0)
     )
+    handled, completed = await _poll_committed_reload(
+        tab, runtime, refresh_identity, cancel_tasks, config_dict,
+        existing, deadline,
+    )
+    if handled:
+        return completed
     if existing is not None and deadline and time.monotonic() >= deadline:
         await cancel_refresh(
             tab, runtime, refresh_identity, cancel_tasks,
@@ -1007,6 +1223,14 @@ async def reload(
     if guarded is None:
         return False
     classification, snapshot = guarded
+    settings = _refresh_settings()
+    if not settings.get("enabled", True):
+        if runtime["refresh"]["recovery_probe"] is not None:
+            return False
+        return await _reload_without_shared_protection(
+            tab, runtime, refresh_identity, cancel_tasks, config_dict, debug,
+            reason, apply_local_interval, snapshot, deadline,
+        )
     probe = runtime["refresh"]["recovery_probe"]
     if probe and probe.get("abandon_requested"):
         return False
@@ -1019,13 +1243,8 @@ async def reload(
         allow_blocked_recovery, deadline, debug,
     )
     deadline = float(request.get("deadline_at") or 0.0)
-    if request.get("paused"):
-        if await check_and_handle_pause(config_dict):
-            return False
-        request["paused"] = False
-        request["phase"] = "queued"
-        request["pause_cleanup_done"] = False
-        request["pause_cleanup_retry_at"] = 0.0
+    if not await _resume_reload_request(config_dict, request):
+        return False
     if request.get("phase") == "reserved":
         return False
     now = time.monotonic()
@@ -1086,6 +1305,15 @@ async def reload_wait(
     last_heartbeat_at = 0.0
     while True:
         if time.monotonic() >= deadline:
+            request = runtime["refresh"]["reload_request"]
+            if _reload_request_is_awaiting(request) and await reload(
+                tab, runtime, refresh_identity, cancel_tasks, config_dict,
+                reason, apply_local_interval=apply_local_interval,
+                allow_unknown_document=allow_unknown_document,
+                allow_blocked_recovery=allow_blocked_recovery,
+                dispatch_deadline=deadline,
+            ):
+                return True
             await cancel_refresh(
                 tab, runtime, refresh_identity, cancel_tasks,
                 "shared reload wait timed out", wait=True, abandon_probe=True,
@@ -1126,7 +1354,8 @@ async def reload_wait(
             )
             return False
         current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-        if current_url != source_url:
+        request = runtime["refresh"]["reload_request"]
+        if current_url != source_url and not _reload_request_is_awaiting(request):
             await cancel_refresh(
                 tab, runtime, refresh_identity, cancel_tasks,
                 "navigation", wait=True, abandon_probe=True,

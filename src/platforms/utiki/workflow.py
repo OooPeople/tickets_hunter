@@ -2009,13 +2009,29 @@ async def _recover_ctbc_seat_conflict(tab, config_dict):
 
     if not _ctbc_conflict_is_current(tab, submit_key, pending):
         return False
-    reload_dispatched = await _reload_with_interval(
-        tab, config_dict, "selected seats were taken"
+    reload_reason = "selected seats were taken"
+    reload_completed = await _reload_with_interval(
+        tab, config_dict, reload_reason
     )
     if not _ctbc_conflict_is_current(tab, submit_key, pending):
         return False
-    if reload_dispatched:
-        pending["recovery_document_id"] = current_document_id
+    reload_request = runtime["refresh"]["reload_request"]
+    request_source_document = str(
+        reload_request.get("source_document_token")
+        if isinstance(reload_request, dict) else ""
+    )
+    request_dispatched = bool(
+        reload_request
+        and reload_request.get("reason") == reload_reason
+        and reload_request.get("phase") in {"awaiting_document", "completed"}
+        and request_source_document
+        and request_source_document == current_document_id
+    )
+    if reload_completed or request_dispatched:
+        pending["recovery_document_id"] = (
+            request_source_document if request_dispatched
+            else str(current_document_id or "")
+        )
         pending["reload_dispatched"] = True
     return True
 

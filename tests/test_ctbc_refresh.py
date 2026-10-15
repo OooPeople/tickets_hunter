@@ -21,6 +21,7 @@ from tests.ctbc_support import (
 
 from platforms.utiki.refresh import (
     _classify_utk_document_state,
+    _commit_reserved_reload,
     _finish_utk_recovery_probe,
     _guard_for_reload,
     _inspect_utk_document,
@@ -243,6 +244,54 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )
         self.assertEqual("unknown", disabled_state)
         self.assertEqual("123", runtime["document"]["last_document"])
+
+    async def test_awaiting_reload_needs_a_healthy_new_document_token(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tracked = source + "&utm_source=test#fragment"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        runtime = ctbc_identity_runtime(identity)
+        request = {
+            "request_token": "await-observation", "phase": "awaiting_document",
+            "source_document_token": "100", "paused": False,
+            "deadline_at": 0.0,
+        }
+        runtime["document"]["last_document"] = "100"
+        runtime["refresh"]["reload_request"] = request
+        snapshots = [
+            {"classification": "normal", "document_id": "100", "url": tracked},
+            {"classification": "unknown", "document_id": "", "url": tracked},
+            {"classification": "unknown", "document_id": "101", "url": source},
+            {"classification": "normal", "document_id": "101", "url": source},
+        ]
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=snapshots),
+        ):
+            for _ in range(3):
+                state, _ = await _utk_document_guard(
+                    tab, runtime, build_refresh_identity(identity),
+                    _state["cancel_tasks"], config(), source,
+                )
+                self.assertEqual("unknown", state)
+                self.assertEqual("awaiting_document", request["phase"])
+            state, _ = await _utk_document_guard(
+                tab, runtime, build_refresh_identity(identity),
+                _state["cancel_tasks"], config(), source,
+            )
+            self.assertEqual("normal", state)
+            self.assertEqual("completed", request["phase"])
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "observe completion", apply_local_interval=False
+            ))
+
+        self.assertIsNone(runtime["refresh"]["reload_request"])
+        self.assertTrue(nodriver_utk_sports_consume_reload_event(tab))
+        self.assertFalse(nodriver_utk_sports_consume_reload_event(tab))
 
     async def test_document_evaluate_failure_does_not_use_url_as_token(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -486,6 +535,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             "document_id": source + "|100",
             "url": source,
         }
+        destination = dict(snapshot, document_id=source + "|101")
         decision = types.SimpleNamespace(
             granted=True,
             status="granted",
@@ -499,7 +549,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         runtime = ctbc_identity_runtime(identity)
         try:
             with patch("platforms.utiki.refresh.load_global_settings", return_value=self.global_settings), \
-                    patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(
+                        side_effect=[snapshot, snapshot, destination]
+                    )), \
                     patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
                 reloaded = await nodriver_utk_sports_reload(
                     tab,
@@ -507,7 +559,16 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                     "scheduled refresh",
                     apply_local_interval=False,
                 )
-            self.assertTrue(reloaded)
+                self.assertFalse(reloaded)
+                request = runtime["refresh"]["reload_request"]
+                self.assertEqual("awaiting_document", request["phase"])
+                self.assertEqual("", request["reservation_id"])
+                self.assertFalse(request["shared_enqueued"])
+                self.assertFalse(nodriver_utk_sports_consume_reload_event(tab))
+                self.assertTrue(await nodriver_utk_sports_reload(
+                    tab, config(), "scheduled refresh",
+                    apply_local_interval=False,
+                ))
             self.assertTrue(tab.reloaded)
             self.assertTrue(nodriver_utk_sports_consume_reload_event(tab))
             self.assertFalse(nodriver_utk_sports_consume_reload_event(tab))
@@ -519,6 +580,298 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         finally:
             runtime["refresh"]["reload_request"] = None
             runtime["refresh"]["recovery_probe"] = None
+
+    async def test_reload_exception_stays_awaiting_until_new_document(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        initial = {
+            "classification": "normal", "document_id": "100", "url": source,
+        }
+        destination = dict(initial, document_id="101")
+        tab.reload = AsyncMock(side_effect=RuntimeError("CDP result unavailable"))
+        decision = types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="reload-unknown", is_recovery_probe=False, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=[initial, initial, initial, destination]),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "ambiguous reload", apply_local_interval=False
+            ))
+            request = runtime["refresh"]["reload_request"]
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "ambiguous reload", apply_local_interval=False
+            ))
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "ambiguous reload", apply_local_interval=False
+            ))
+
+        tab.reload.assert_awaited_once()
+        coordinator.reserve_refresh.assert_awaited_once()
+        coordinator.commit_refresh.assert_awaited_once()
+
+    async def test_cancel_after_browser_reload_starts_is_sticky_awaiting(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        current = {"document_id": "100"}
+        reload_started = asyncio.Event()
+
+        async def inspect(*_args, **_kwargs):
+            return {
+                "classification": "normal",
+                "document_id": current["document_id"], "url": source,
+            }
+
+        async def pending_reload():
+            reload_started.set()
+            await asyncio.Event().wait()
+
+        tab.reload = AsyncMock(side_effect=pending_reload)
+        decision = types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="cancelled-browser", is_recovery_probe=False, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=inspect),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ):
+            task = asyncio.create_task(nodriver_utk_sports_reload(
+                tab, config(), "cancelled browser", apply_local_interval=False
+            ))
+            await asyncio.wait_for(reload_started.wait(), timeout=1.0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            request = runtime["refresh"]["reload_request"]
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "cancelled browser", apply_local_interval=False
+            ))
+            current["document_id"] = "101"
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "cancelled browser", apply_local_interval=False
+            ))
+
+        tab.reload.assert_awaited_once()
+        coordinator.commit_refresh.assert_awaited_once()
+
+    async def test_commit_error_is_sticky_and_never_dispatches_browser_reload(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        snapshot = {
+            "classification": "normal", "document_id": "100", "url": source,
+        }
+        coordinator = self.coordinator_for(types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="unused", is_recovery_probe=False, error="",
+        ))
+        coordinator.commit_refresh = AsyncMock(
+            side_effect=RuntimeError("commit response lost")
+        )
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(return_value=snapshot),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "commit unknown", apply_local_interval=False
+            ))
+            request = runtime["refresh"]["reload_request"]
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "commit unknown", apply_local_interval=False
+            ))
+
+        self.assertFalse(tab.reloaded)
+        coordinator.commit_refresh.assert_awaited_once()
+
+    async def test_already_committed_waits_for_document_without_redispatch(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        initial = {
+            "classification": "normal", "document_id": "100", "url": source,
+        }
+        destination = dict(initial, document_id="101")
+        decision = types.SimpleNamespace(
+            granted=False, status="already_committed", retry_after_seconds=0.0,
+            permit_id="", is_recovery_probe=False, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+        coordinator.reserve_refresh.return_value = self.reservation("already")
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=[initial, initial, initial, destination]),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "already committed", apply_local_interval=False
+            ))
+            request = runtime["refresh"]["reload_request"]
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "already committed", apply_local_interval=False
+            ))
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "already committed", apply_local_interval=False
+            ))
+
+        self.assertFalse(tab.reloaded)
+        coordinator.commit_refresh.assert_awaited_once()
+
+    async def test_late_commit_replay_cannot_reopen_completed_request(self):
+        tab = FakeSubmitTab(dialog="")
+        runtime = ctbc_tab_runtime(tab)
+        reservation = self.reservation("late-replay", probe=True)
+        for phase, status, error in (
+            ("awaiting_document", "already_committed", ""),
+            ("completed", "already_committed", ""),
+            ("completed", "failed", "coordinator unavailable"),
+        ):
+            with self.subTest(phase=phase, status=status):
+                completed_token = "101" if phase == "completed" else ""
+                request = {
+                    "request_token": f"late-{phase}-{status}", "phase": phase,
+                    "source_document_token": "100",
+                    "completed_document_token": completed_token,
+                    "dispatched_at": 55.0, "paused": True,
+                    "reservation_id": "", "shared_enqueued": False,
+                }
+                runtime["refresh"].update({
+                    "reload_request": request, "recovery_probe": None,
+                })
+                decision = types.SimpleNamespace(
+                    granted=False, status=status, retry_after_seconds=0.0,
+                    permit_id="late-probe", is_recovery_probe=True, error=error,
+                )
+                coordinator = types.SimpleNamespace(
+                    commit_refresh=AsyncMock(return_value=decision),
+                    release_refresh=AsyncMock(return_value=False),
+                )
+
+                self.assertFalse(await _commit_reserved_reload(
+                    tab, runtime, "identity", _state["cancel_tasks"],
+                    coordinator, reservation, request,
+                    {"document_id": "100"},
+                    types.SimpleNamespace(log=lambda *_args: None),
+                ))
+
+                self.assertEqual(phase, request["phase"])
+                self.assertEqual(
+                    completed_token, request["completed_document_token"]
+                )
+                self.assertEqual(55.0, request["dispatched_at"])
+                self.assertTrue(request["paused"])
+                self.assertIsNone(runtime["refresh"]["recovery_probe"])
+
+    async def test_commit_exception_respects_exact_pause_release_result(self):
+        tab = FakeSubmitTab(dialog="")
+        runtime = ctbc_tab_runtime(tab)
+        reservation = self.reservation("pause-race")
+        for released in (True, False):
+            with self.subTest(released=released):
+                commit_started = asyncio.Event()
+                finish_commit = asyncio.Event()
+                deadline = time.monotonic() + 30.0
+                request = {
+                    "request_token": f"pause-race-{released}",
+                    "phase": "reserved", "document_id": "100",
+                    "source_document_token": "100",
+                    "expected_url": str(tab.target.url),
+                    "eligible_at": 0.0, "deadline_at": deadline,
+                    "next_poll_at": 0.0, "paused": False,
+                    "reservation_id": reservation.reservation_id,
+                    "shared_enqueued": True,
+                    "pause_cleanup_done": False,
+                    "pause_cleanup_retry_at": 0.0,
+                }
+                runtime["refresh"].update({
+                    "reload_request": request, "recovery_probe": None,
+                })
+
+                async def fail_commit(*_args, **_kwargs):
+                    commit_started.set()
+                    await asyncio.wait_for(finish_commit.wait(), timeout=1.0)
+                    raise RuntimeError("commit outcome unavailable")
+
+                coordinator = types.SimpleNamespace(
+                    commit_refresh=AsyncMock(side_effect=fail_commit),
+                    release_refresh=AsyncMock(return_value=released),
+                    cancel_request=AsyncMock(return_value=False),
+                )
+                with patch(
+                    "platforms.utiki.refresh.get_shared_refresh_coordinator",
+                    return_value=coordinator,
+                ):
+                    task = asyncio.create_task(_commit_reserved_reload(
+                        tab, runtime, "identity", _state["cancel_tasks"],
+                        coordinator, reservation, request,
+                        {"document_id": "100"},
+                        types.SimpleNamespace(log=lambda *_args: None),
+                    ))
+                    await asyncio.wait_for(commit_started.wait(), timeout=1.0)
+                    self.assertEqual(
+                        released, await nodriver_utk_sports_pause_refresh(tab)
+                    )
+                    finish_commit.set()
+                    self.assertFalse(await task)
+
+                self.assertEqual(f"pause-race-{released}", request["request_token"])
+                self.assertEqual(deadline, request["deadline_at"])
+                self.assertTrue(request["paused"])
+                expected_phase = "queued" if released else "awaiting_document"
+                self.assertEqual(expected_phase, request["phase"])
+                if released:
+                    self.assertTrue(request["pause_cleanup_done"])
+                else:
+                    self.assertFalse(request["pause_cleanup_done"])
+                    with patch(
+                        "platforms.utiki.refresh._utk_document_guard",
+                        AsyncMock(return_value=("unknown", {
+                            "classification": "unknown",
+                            "document_id": "100", "url": str(tab.target.url),
+                        })),
+                    ):
+                        self.assertFalse(await nodriver_utk_sports_reload(
+                            tab, config(), "pause race",
+                            apply_local_interval=False,
+                        ))
+                coordinator.commit_refresh.assert_awaited_once()
+                self.assertEqual(0, tab.reload_count)
 
     async def test_reload_orders_reserve_preflight_commit_then_network(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
@@ -574,10 +927,14 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                     patch("platforms.utiki.refresh._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(side_effect=inspect)), \
                     patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
-                self.assertTrue(await nodriver_utk_sports_reload(
+                self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "ordered reload", apply_local_interval=False
                 ))
             self.assertEqual(["reserve", "preflight", "commit", "reload"], events)
+            self.assertEqual(
+                "awaiting_document",
+                runtime["refresh"]["reload_request"]["phase"],
+            )
         finally:
             runtime["refresh"]["reload_request"] = None
             runtime["refresh"]["reload_event"] = False
@@ -623,9 +980,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 clock["now"] = request["eligible_at"] - 0.001
                 self.assertFalse(await reload_once())
                 clock["now"] = request["eligible_at"]
-                self.assertTrue(await reload_once())
+                self.assertFalse(await reload_once())
 
             self.assertEqual(1, tab.reload_count)
+            self.assertEqual("awaiting_document", request["phase"])
             self.assertEqual(1, coordinator.reserve_refresh.await_count)
             self.assertEqual(1, coordinator.commit_refresh.await_count)
         finally:
@@ -725,13 +1083,14 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             self.assertFalse(request["paused"])
             self.assertEqual(190.0, request["deadline_at"])
             clock["now"] = 105.1
-            self.assertTrue(await nodriver_utk_sports_reload(
+            self.assertFalse(await nodriver_utk_sports_reload(
                 tab, cfg, "paced recovery", dispatch_deadline=300.0
             ))
 
         self.assertEqual(2, coordinator.reserve_refresh.await_count)
         self.assertEqual(1, coordinator.commit_refresh.await_count)
         self.assertEqual(1, tab.reload_count)
+        self.assertEqual("awaiting_document", request["phase"])
 
     async def test_reserved_pause_releases_shared_work_but_keeps_intent(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -788,7 +1147,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             self.assertIs(request, runtime["refresh"]["reload_request"])
             self.assertEqual(token, request["request_token"])
             self.assertEqual(deadline, request["deadline_at"])
-            self.assertTrue(await nodriver_utk_sports_reload(
+            self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "reserved pause", apply_local_interval=False
             ))
 
@@ -798,6 +1157,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         )
         coordinator.commit_refresh.assert_awaited_once()
         self.assertTrue(tab.reloaded)
+        self.assertEqual("awaiting_document", request["phase"])
 
     async def test_pause_during_normal_commit_preserves_intent_until_resume(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -856,7 +1216,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             self.assertTrue(request["pause_cleanup_done"])
             self.assertFalse(tab.reloaded)
 
-            self.assertTrue(await nodriver_utk_sports_reload(
+            self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "commit pause", apply_local_interval=False
             ))
 
@@ -865,6 +1225,75 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertEqual(2, coordinator.reserve_refresh.await_count)
         self.assertEqual(2, coordinator.commit_refresh.await_count)
         self.assertTrue(tab.reloaded)
+        self.assertEqual("awaiting_document", request["phase"])
+
+    async def test_awaiting_pause_observes_then_consumes_only_after_resume(self):
+        tab = FakeSubmitTab(dialog="")
+        runtime = ctbc_tab_runtime(tab)
+        source = str(tab.target.url)
+        request = {
+            "request_token": "paused-awaiting", "phase": "awaiting_document",
+            "source_document_token": "100", "paused": False,
+            "deadline_at": 0.0,
+        }
+        runtime["document"]["last_document"] = "100"
+        runtime["refresh"]["reload_request"] = request
+        destination = {
+            "classification": "normal", "document_id": "101", "url": source,
+        }
+
+        with patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=types.SimpleNamespace(),
+        ):
+            self.assertTrue(await nodriver_utk_sports_pause_refresh(tab))
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(return_value=destination),
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_pause",
+            AsyncMock(side_effect=[True, False]),
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "paused observation", apply_local_interval=False
+            ))
+            self.assertEqual("completed", request["phase"])
+            self.assertTrue(request["paused"])
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "paused observation", apply_local_interval=False
+            ))
+
+        self.assertIsNone(runtime["refresh"]["reload_request"])
+
+    async def test_completed_probe_is_not_consumed_before_probe_completion(self):
+        tab = FakeSubmitTab(dialog="")
+        runtime = ctbc_tab_runtime(tab)
+        request = {
+            "request_token": "probe-awaiting-completion", "phase": "completed",
+            "source_document_token": "100", "completed_document_token": "101",
+            "paused": False, "deadline_at": 0.0,
+        }
+        runtime["refresh"]["reload_request"] = request
+        runtime["refresh"]["recovery_probe"] = {"permit_id": "probe"}
+        guard = AsyncMock(return_value=("normal", {
+            "classification": "normal", "document_id": "101",
+            "url": str(tab.target.url),
+        }))
+
+        with patch("platforms.utiki.refresh._utk_document_guard", guard):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "probe completion", apply_local_interval=False
+            ))
+            self.assertIs(request, runtime["refresh"]["reload_request"])
+            runtime["refresh"]["recovery_probe"] = None
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "probe completion", apply_local_interval=False
+            ))
+
+        guard.assert_awaited_once()
 
     async def test_paused_probe_commit_retries_cleanup_before_resume(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -960,12 +1389,15 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 await nodriver_utk_sports_health_check(tab, source, config()),
             )
             self.assertIsNone(runtime["refresh"]["recovery_probe"])
-            self.assertTrue(await nodriver_utk_sports_reload(
+            self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "probe cleanup complete",
                 apply_local_interval=False,
             ))
 
-        self.assertIsNone(runtime["refresh"]["reload_request"])
+        self.assertEqual(
+            "awaiting_document",
+            runtime["refresh"]["reload_request"]["phase"],
+        )
         self.assertEqual(2, coordinator.complete_recovery_probe.await_count)
         for call in coordinator.complete_recovery_probe.await_args_list:
             self.assertEqual("probe-permit", call.args[2])
@@ -1436,6 +1868,115 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         finally:
             refresh["reload_request"] = None
 
+    async def test_old_reload_completion_cannot_mutate_replacement_request(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        snapshot = {
+            "classification": "normal", "document_id": "100", "url": source,
+        }
+        reload_started = asyncio.Event()
+        finish_reload = asyncio.Event()
+
+        async def delayed_reload():
+            reload_started.set()
+            await asyncio.wait_for(finish_reload.wait(), timeout=1.0)
+
+        tab.reload = delayed_reload
+        decision = types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="old-coroutine", is_recovery_probe=False, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+        replacement = {"request_token": "replacement", "phase": "queued"}
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._utk_document_guard",
+            AsyncMock(return_value=("normal", snapshot)),
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(return_value=snapshot),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ):
+            task = asyncio.create_task(nodriver_utk_sports_reload(
+                tab, config(), "old coroutine", apply_local_interval=False
+            ))
+            await asyncio.wait_for(reload_started.wait(), timeout=1.0)
+            runtime["refresh"]["reload_request"] = replacement
+            finish_reload.set()
+            self.assertFalse(await task)
+
+        self.assertIs(replacement, runtime["refresh"]["reload_request"])
+
+    async def test_reload_wait_preserves_url_drift_until_new_document(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tracked = source + "&utm_source=test#fragment"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        current = {"document_id": "100"}
+        command_returned = asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        async def inspect(*_args, **_kwargs):
+            return {
+                "classification": "normal",
+                "document_id": current["document_id"],
+                "url": source,
+            }
+
+        async def browser_reload():
+            tab.reload_count += 1
+            tab.target.url = tracked
+            command_returned.set()
+
+        async def yield_once(_seconds):
+            await real_sleep(0)
+
+        tab.reload_count = 0
+        tab.reload = browser_reload
+        decision = types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="wait-production", is_recovery_probe=False, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=inspect),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_quit",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.refresh.asyncio.sleep", side_effect=yield_once,
+        ):
+            waiter = asyncio.create_task(nodriver_utk_sports_reload_wait(
+                tab, config(), "production waiter"
+            ))
+            await asyncio.wait_for(command_returned.wait(), timeout=1.0)
+            await real_sleep(0)
+            self.assertFalse(waiter.done())
+            request = ctbc_tab_runtime(tab)["refresh"]["reload_request"]
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertEqual("100", request["source_document_token"])
+            current["document_id"] = "101"
+            self.assertTrue(await asyncio.wait_for(waiter, timeout=1.0))
+
+        self.assertEqual(1, tab.reload_count)
+        coordinator.commit_refresh.assert_awaited_once()
+
     async def test_reload_wait_has_a_bounded_fail_closed_deadline(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
@@ -1574,7 +2115,11 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                     apply_local_interval=False,
                     allow_blocked_recovery=True,
                 )
-            self.assertTrue(reloaded)
+                self.assertFalse(reloaded)
+                self.assertEqual(
+                    "awaiting_document",
+                    runtime["refresh"]["reload_request"]["phase"],
+                )
             coordinator.report_rate_limited.assert_not_awaited()
         finally:
             runtime["refresh"].update({
@@ -1628,6 +2173,56 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             runtime["refresh"]["rate_limit_observation"] = None
             runtime["refresh"]["reload_request"] = None
             runtime["refresh"]["recovery_probe"] = None
+
+    async def test_recovery_probe_completes_only_after_production_observes_new_document(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        current = {"document_id": "100"}
+
+        async def inspect(*_args, **_kwargs):
+            return {
+                "classification": "normal",
+                "document_id": current["document_id"], "url": source,
+            }
+
+        decision = types.SimpleNamespace(
+            granted=True, status="granted", retry_after_seconds=0.0,
+            permit_id="real-probe", is_recovery_probe=True, error="",
+        )
+        coordinator = self.coordinator_for(decision)
+        coordinator.complete_recovery_probe = AsyncMock(return_value=
+            types.SimpleNamespace(accepted=True, recovery_required=False, error="")
+        )
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=self.global_settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=inspect),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "real recovery probe", apply_local_interval=False
+            ))
+            self.assertEqual(
+                "real-probe", runtime["refresh"]["recovery_probe"]["permit_id"]
+            )
+            coordinator.complete_recovery_probe.assert_not_awaited()
+            current["document_id"] = "101"
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "real recovery probe", apply_local_interval=False
+            ))
+
+        coordinator.complete_recovery_probe.assert_awaited_once_with(
+            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "real-probe", success=True,
+        )
+        self.assertIsNone(runtime["refresh"]["recovery_probe"])
+        self.assertIsNone(runtime["refresh"]["reload_request"])
 
     async def test_probe_lease_is_renewed_until_document_is_classified(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -1822,7 +2417,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 "platforms.utiki.refresh.get_shared_refresh_coordinator",
                 return_value=coordinator,
             ):
-                self.assertTrue(await nodriver_utk_sports_reload(
+                self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "probe lifecycle", apply_local_interval=False
                 ))
                 probe = runtime["refresh"]["recovery_probe"]
@@ -1912,6 +2507,39 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertIsNone(result)
         guard.assert_not_called()
 
+    async def test_awaiting_deadline_final_observation_is_bounded(self):
+        tab = FakeSubmitTab(dialog="")
+        runtime = ctbc_tab_runtime(tab)
+        runtime["refresh"]["reload_request"] = {
+            "request_token": "bounded-observation", "phase": "awaiting_document",
+            "source_document_token": "100", "paused": False,
+            "deadline_at": time.monotonic() - 1.0,
+        }
+        pending = asyncio.Event()
+
+        async def pending_guard(*_args, **_kwargs):
+            await pending.wait()
+
+        with patch(
+            "platforms.utiki.refresh.UTK_RELOAD_FINAL_OBSERVATION_SECONDS", 0.01,
+        ), patch(
+            "platforms.utiki.refresh._utk_document_guard",
+            AsyncMock(side_effect=pending_guard),
+        ), patch(
+            "platforms.utiki.refresh.cancel_refresh",
+            AsyncMock(return_value=True),
+        ) as cancel:
+            self.assertFalse(await asyncio.wait_for(
+                nodriver_utk_sports_reload(
+                    tab, config(), "bounded observation",
+                    apply_local_interval=False,
+                    dispatch_deadline=time.monotonic() - 1.0,
+                ),
+                timeout=0.2,
+            ))
+
+        cancel.assert_awaited_once()
+
     async def test_reenabled_switch_prevents_legacy_uncoordinated_reload(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
@@ -1935,6 +2563,168 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 )
             )
         self.assertFalse(tab.reloaded)
+
+    async def test_disabled_protection_completes_on_blocked_new_document(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        tab.reload = AsyncMock(side_effect=tab.reload)
+        runtime = ctbc_tab_runtime(tab)
+        disabled = {
+            "utk_sports": dict(self.global_settings["utk_sports"], enabled=False)
+        }
+        initial = {
+            "classification": "normal", "document_id": "100", "url": source,
+        }
+        destination = dict(
+            initial, classification="blocked", document_id="101"
+        )
+        coordinator = types.SimpleNamespace(
+            reserve_refresh=AsyncMock(), commit_refresh=AsyncMock(),
+        )
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=disabled,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=[initial, initial, destination]),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_quit",
+            AsyncMock(return_value=False),
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "disabled lifecycle", apply_local_interval=False
+            ))
+            request = runtime["refresh"]["reload_request"]
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "disabled lifecycle", apply_local_interval=False
+            ))
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "disabled lifecycle", apply_local_interval=False
+            ))
+
+        tab.reload.assert_awaited_once()
+        coordinator.reserve_refresh.assert_not_awaited()
+        coordinator.commit_refresh.assert_not_awaited()
+
+    async def test_disabled_protection_rejects_stale_queued_source(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["refresh"]["reload_request"] = {
+            "request_token": "disabled-stale", "phase": "queued",
+            "document_id": "100", "source_document_token": "100",
+            "expected_url": source, "shared_enqueued": False,
+            "paused": False, "deadline_at": 0.0,
+        }
+        disabled = {
+            "utk_sports": dict(self.global_settings["utk_sports"], enabled=False)
+        }
+        destination = {
+            "classification": "normal", "document_id": "101", "url": source,
+        }
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings",
+            return_value=disabled,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(return_value=destination),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=types.SimpleNamespace(),
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "stale disabled source",
+                apply_local_interval=False,
+            ))
+
+        self.assertIsNone(runtime["refresh"]["reload_request"])
+        self.assertFalse(tab.reloaded)
+
+    async def test_enabled_queue_hot_switches_to_disabled_without_new_intent(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        tab.reload = AsyncMock(side_effect=tab.reload)
+        runtime = ctbc_tab_runtime(tab)
+        current = {"document_id": "100"}
+        enabled = {"value": True}
+        deadline = time.monotonic() + 30.0
+
+        async def inspect(*_args, **_kwargs):
+            return {
+                "classification": "normal",
+                "document_id": current["document_id"], "url": source,
+            }
+
+        def settings(*_args, **_kwargs):
+            return {"utk_sports": dict(
+                self.global_settings["utk_sports"], enabled=enabled["value"]
+            )}
+
+        coordinator = types.SimpleNamespace(
+            reserve_refresh=AsyncMock(return_value=types.SimpleNamespace(
+                reserved=False, status="queued", retry_after_seconds=0.1,
+                reservation_id="", is_recovery_probe=False,
+                cooldown_until=0.0, error="",
+            )),
+            cancel_request=AsyncMock(return_value=True),
+        )
+
+        with patch(
+            "platforms.utiki.refresh.load_global_settings", side_effect=settings,
+        ), patch(
+            "platforms.utiki.refresh._inspect_utk_document",
+            AsyncMock(side_effect=inspect),
+        ), patch(
+            "platforms.utiki.refresh.get_shared_refresh_coordinator",
+            return_value=coordinator,
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.refresh.check_and_handle_quit",
+            AsyncMock(return_value=False),
+        ):
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "hot switch", apply_local_interval=False,
+                dispatch_deadline=deadline,
+            ))
+            request = runtime["refresh"]["reload_request"]
+            token = request["request_token"]
+            self.assertTrue(request["shared_enqueued"])
+            enabled["value"] = False
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "hot switch", apply_local_interval=False,
+                dispatch_deadline=deadline,
+            ))
+            self.assertIs(request, runtime["refresh"]["reload_request"])
+            self.assertEqual(token, request["request_token"])
+            self.assertEqual(deadline, request["deadline_at"])
+            self.assertEqual("awaiting_document", request["phase"])
+            self.assertFalse(await nodriver_utk_sports_reload(
+                tab, config(), "hot switch", apply_local_interval=False,
+                dispatch_deadline=deadline,
+            ))
+            current["document_id"] = "101"
+            self.assertTrue(await nodriver_utk_sports_reload(
+                tab, config(), "hot switch", apply_local_interval=False,
+                dispatch_deadline=deadline,
+            ))
+
+        coordinator.reserve_refresh.assert_awaited_once()
+        coordinator.cancel_request.assert_awaited_once_with(
+            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            request_token=token,
+        )
+        tab.reload.assert_awaited_once()
 
     async def test_disabled_guard_still_observes_document_changes(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"

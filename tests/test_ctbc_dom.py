@@ -2716,6 +2716,45 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         self.assertIsNone(self._outcome_for(tab, submit_key))
 
+    async def test_conflict_records_awaiting_reload_without_redispatch(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        pending = {
+            "kind": "seat_conflict", "source_url": CTBC_TEST_SEAT_URL,
+            "source_document_id": "document-1", "page_type": "seat",
+            "dialog_dismissed": True, "clear_phase": "done",
+            "clear_result": "committed", "reload_dispatched": False,
+            "recovery_document_id": "",
+        }
+        runtime["purchase"]["outcomes"][submit_key] = pending
+
+        async def dispatch_reload(*_args, **_kwargs):
+            runtime["refresh"]["reload_request"] = {
+                "request_token": "conflict-reload",
+                "reason": "selected seats were taken",
+                "phase": "awaiting_document",
+                "source_document_token": "document-1",
+            }
+            return False
+
+        with patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(side_effect=dispatch_reload),
+        ) as reload_page:
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            self.assertTrue(pending["reload_dispatched"])
+            self.assertEqual("document-1", pending["recovery_document_id"])
+            self.assertTrue(await _recover_ctbc_seat_conflict(tab, cfg))
+            reload_page.assert_awaited_once()
+
+            runtime["document"]["last_document"] = "document-2"
+            self.assertFalse(await _recover_ctbc_seat_conflict(tab, cfg))
+
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
     async def test_conflict_dismiss_failure_blocks_reload(self):
         tab = FakeSubmitTab(dialog="該位置已被選走")
         tab.dismiss_allowed = False

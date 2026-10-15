@@ -2117,7 +2117,8 @@ def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
 
     failed_fingerprint = str(failure.get("fingerprint") or "")
     if failed_fingerprint:
-        if failed_fingerprint == login_fingerprint:
+        current_fingerprint = str(login_fingerprint or "")
+        if not current_fingerprint or failed_fingerprint == current_fingerprint:
             return True
         outcomes.pop(submit_key, None)
         return False
@@ -2403,12 +2404,18 @@ async def _ctbc_captcha_and_submit(
     if isinstance(outcome, dict) and outcome.get("kind") != "auth":
         return False
 
-    login_ready = await _fill_ctbc_inline_login(tab, config_dict)
-    if not login_ready:
-        debug.log("[CTBC LOGIN] Waiting for login or CTBC account settings")
+    try:
+        login_ready = await _fill_ctbc_inline_login(tab, config_dict)
+        if not login_ready:
+            debug.log("[CTBC LOGIN] Waiting for login or CTBC account settings")
+            return False
+        login_fingerprint = await _ctbc_login_fingerprint(tab)
+    except Exception as exc:
+        debug.log(
+            "[CTBC LOGIN] Credential observation failed; "
+            f"previous authentication blocker retained: {exc}"
+        )
         return False
-
-    login_fingerprint = await _ctbc_login_fingerprint(tab)
     if _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
         debug.log("[CTBC LOGIN] Previous authentication failure; waiting for credentials to change")
         return False

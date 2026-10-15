@@ -2743,6 +2743,96 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             ))
         dispatch.assert_not_awaited()
 
+    async def test_known_auth_fingerprint_requires_observable_change(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        auth_outcome = {
+            "kind": "auth",
+            "fingerprint": "known-credentials",
+            "source_document_id": "document-1",
+        }
+        runtime["purchase"]["outcomes"][submit_key] = auth_outcome
+        fingerprint = AsyncMock(side_effect=[
+            "known-credentials",
+            "",
+            RuntimeError("credential DOM unavailable"),
+            "changed-credentials",
+        ])
+
+        with patch(
+            "platforms.utiki.workflow._fill_ctbc_inline_login",
+            AsyncMock(return_value=True),
+        ), patch(
+            "platforms.utiki.workflow._ctbc_login_fingerprint", fingerprint,
+        ), patch(
+            "platforms.utiki.workflow._dispatch_ctbc_submit",
+            AsyncMock(return_value=False),
+        ) as dispatch:
+            for _ in range(3):
+                self.assertFalse(await _ctbc_captcha_and_submit(
+                    tab, cfg, ocr=None
+                ))
+                self.assertIs(
+                    auth_outcome,
+                    runtime["purchase"]["outcomes"].get(submit_key),
+                )
+                dispatch.assert_not_awaited()
+
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None
+            ))
+
+        self.assertNotIn(submit_key, runtime["purchase"]["outcomes"])
+        dispatch.assert_awaited_once()
+        self.assertEqual(4, fingerprint.await_count)
+
+    async def test_inline_login_observation_exception_keeps_auth_blocker(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = self._track_submit_state(tab)
+        runtime = ctbc_tab_runtime(tab)
+        runtime["document"]["last_document"] = "document-1"
+        auth_outcome = {
+            "kind": "auth",
+            "fingerprint": "known-credentials",
+            "source_document_id": "document-1",
+        }
+        runtime["purchase"]["outcomes"][submit_key] = auth_outcome
+        fill_login = AsyncMock(side_effect=[
+            RuntimeError("login DOM unavailable"), asyncio.CancelledError(),
+        ])
+
+        with patch(
+            "platforms.utiki.workflow._fill_ctbc_inline_login", fill_login,
+        ), patch(
+            "platforms.utiki.workflow._ctbc_login_fingerprint", AsyncMock(),
+        ) as fingerprint, patch(
+            "platforms.utiki.workflow._dispatch_ctbc_submit", AsyncMock(),
+        ) as dispatch:
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None
+            ))
+            self.assertIs(
+                auth_outcome,
+                runtime["purchase"]["outcomes"].get(submit_key),
+            )
+            fingerprint.assert_not_awaited()
+            dispatch.assert_not_awaited()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await _ctbc_captcha_and_submit(tab, cfg, ocr=None)
+
+        self.assertIs(
+            auth_outcome, runtime["purchase"]["outcomes"].get(submit_key)
+        )
+        fingerprint.assert_not_awaited()
+        dispatch.assert_not_awaited()
+
     async def test_click_exception_after_dispatch_blocks_second_submit(self):
         tab = FakeSubmitTab(dialog="")
         cfg = config()

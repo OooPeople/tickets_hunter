@@ -144,6 +144,7 @@ async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
         PageKind.AREA: ".seats, #mapdata",
         PageKind.RESERVED_SEAT: "#TBL, .ticket",
         PageKind.GENERAL_ADMISSION: "#table_tickettype, .ticket",
+        PageKind.SERVER_ASSIGNED_QUANTITY: "#table_tickettype",
     }.get(classify_utiki_page(current_url))
     selector_expression = (
         f"!!document.querySelector({json.dumps(normal_selector)})"
@@ -326,8 +327,7 @@ async def _abandon_recovery_probe(
     if lease_task is not None and lease_task is not asyncio.current_task():
         if not lease_task.done():
             lease_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await lease_task
+        await asyncio.gather(lease_task, return_exceptions=True)
         cancel_tasks.discard(lease_task)
     completion = await coordinator.complete_recovery_probe(
         UTK_SPORTS_SCOPE, refresh_identity,
@@ -516,8 +516,23 @@ async def _report_utk_rate_limit(
     return report
 
 
+async def _clear_completed_recovery_probe(runtime, cancel_tasks, probe):
+    if runtime["refresh"]["recovery_probe"] is not probe:
+        return False
+    lease_task = probe.get("lease_task")
+    if lease_task is not None and lease_task is not asyncio.current_task():
+        if not lease_task.done():
+            lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
+        cancel_tasks.discard(lease_task)
+    if runtime["refresh"]["recovery_probe"] is not probe:
+        return False
+    runtime["refresh"]["recovery_probe"] = None
+    return True
+
+
 async def _finish_utk_recovery_probe(
-    tab, runtime, refresh_identity, config_dict, snapshot,
+    tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot,
 ):
     """Resolve a probe only after a different document becomes normal or 429."""
     refresh = runtime["refresh"]
@@ -533,9 +548,9 @@ async def _finish_utk_recovery_probe(
             UTK_SPORTS_SCOPE, refresh_identity,
             probe.get("permit_id", ""), success=False,
         )
-        current = refresh["recovery_probe"]
-        if current and current.get("permit_id") == probe.get("permit_id"):
-            refresh["recovery_probe"] = None
+        await _clear_completed_recovery_probe(
+            runtime, cancel_tasks, probe
+        )
         return True
     if not probe.get("lease_task") and now >= probe.get("next_renew_at", 0.0):
         renewed = await coordinator.renew_recovery_probe(
@@ -562,7 +577,9 @@ async def _finish_utk_recovery_probe(
             document_started_at=snapshot.get("document_started_at", 0.0),
         )
         if report and report.accepted:
-            refresh["recovery_probe"] = None
+            await _clear_completed_recovery_probe(
+                runtime, cancel_tasks, probe
+            )
         return True
     settings = _refresh_settings()
     if settings.get("enabled", True):
@@ -571,13 +588,17 @@ async def _finish_utk_recovery_probe(
             success=(classification == "normal"),
         )
         if completion.accepted:
-            refresh["recovery_probe"] = None
+            await _clear_completed_recovery_probe(
+                runtime, cancel_tasks, probe
+            )
             if classification == "normal":
                 util.create_debug_logger(config_dict).log(
                     "[UTK RATE] Recovery probe succeeded; shared refresh resumed"
                 )
         elif "not owned" in str(completion.error or ""):
-            refresh["recovery_probe"] = None
+            await _clear_completed_recovery_probe(
+                runtime, cancel_tasks, probe
+            )
         else:
             refresh["rate_limit_retry"] = time.monotonic() + 1.0
     return True
@@ -622,7 +643,7 @@ async def _utk_document_guard(
             return "unknown", snapshot
         return "disabled", snapshot
     probe_handled = await _finish_utk_recovery_probe(
-        tab, runtime, refresh_identity, config_dict, snapshot
+        tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot
     )
     classification = snapshot.get("classification", "unknown")
     if classification == "unknown":
@@ -1204,6 +1225,35 @@ async def _execute_reserved_reload(
         raise
 
 
+async def _poll_owned_reload(
+    tab, runtime, refresh_identity, cancel_tasks, config_dict,
+    existing, reason, dispatch_deadline,
+):
+    new_deadline = float(dispatch_deadline or 0.0)
+    existing_reason = str(existing.get("reason") or "") if existing else ""
+    reason_mismatch = bool(
+        existing and (
+            not existing_reason or existing_reason != str(reason or "")
+        )
+    )
+    if reason_mismatch and existing.get("phase") != "completed":
+        return True, False, existing, new_deadline
+    deadline = (
+        float(existing.get("deadline_at") or 0.0)
+        if reason_mismatch else (
+            _tighten_reload_deadline(existing, dispatch_deadline)
+            if existing is not None else new_deadline
+        )
+    )
+    handled, completed = await _poll_committed_reload(
+        tab, runtime, refresh_identity, cancel_tasks, config_dict,
+        existing, deadline,
+    )
+    if reason_mismatch and completed:
+        return False, False, None, new_deadline
+    return handled, completed, existing, deadline
+
+
 async def reload(
     tab, runtime, refresh_identity, cancel_tasks, config_dict, reason, *,
     apply_local_interval=True, allow_unknown_document=False,
@@ -1212,13 +1262,9 @@ async def reload(
     """Advance one reload intent; succeed only after observing its new document."""
     debug = util.create_debug_logger(config_dict)
     existing = runtime["refresh"]["reload_request"]
-    deadline = (
-        _tighten_reload_deadline(existing, dispatch_deadline)
-        if existing is not None else float(dispatch_deadline or 0.0)
-    )
-    handled, completed = await _poll_committed_reload(
+    handled, completed, existing, deadline = await _poll_owned_reload(
         tab, runtime, refresh_identity, cancel_tasks, config_dict,
-        existing, deadline,
+        existing, reason, dispatch_deadline,
     )
     if handled:
         return completed
@@ -1235,6 +1281,8 @@ async def reload(
     if guarded is None:
         return False
     classification, snapshot = guarded
+    if runtime["refresh"]["reload_request"] is not existing:
+        return False
     settings = _refresh_settings()
     if not settings.get("enabled", True):
         if runtime["refresh"]["recovery_probe"] is not None:
@@ -1382,6 +1430,19 @@ async def health_check(
     guard_state, _ = await _utk_document_guard(
         tab, runtime, refresh_identity, cancel_tasks, config_dict, url
     )
+    request = runtime["refresh"]["reload_request"]
+    if (
+        request is not None
+        and request.get("phase") == "completed"
+        and runtime["refresh"]["recovery_probe"] is None
+    ):
+        still_paused = bool(
+            request.get("paused")
+            and await check_and_handle_pause(config_dict)
+        )
+        if not still_paused:
+            request["paused"] = False
+            _consume_completed_reload(runtime, request)
     if guard_state == "blocked":
         await reload(
             tab, runtime, refresh_identity, cancel_tasks, config_dict,

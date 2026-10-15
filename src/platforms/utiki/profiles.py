@@ -106,6 +106,30 @@ def classify_utiki_page(url):
     if parsed.fragment:
         return PageKind.UNKNOWN
 
+    query = unique_query(url)
+    if query is None:
+        return PageKind.UNKNOWN
+
+    server_assignment_path = f"{profile.tenant_path}/UTK0201_001"
+    if parsed.path == server_assignment_path:
+        required_keys = {
+            "PERFORMANCE_ID",
+            "GROUP_ID",
+            "PERFORMANCE_PRICE_AREA_ID",
+            "ATYPE",
+        }
+        token_keys = required_keys - {"ATYPE"}
+        if (
+            set(query) == required_keys
+            and query.get("ATYPE") == "N"
+            and all(
+                re.fullmatch(r"[A-Za-z0-9_-]+", str(query.get(key) or ""))
+                for key in token_keys
+            )
+        ):
+            return PageKind.SERVER_ASSIGNED_QUANTITY
+        return PageKind.UNKNOWN
+
     route_specs = {
         f"{profile.tenant_path}/UTK0201_": (PageKind.DATE, "PRODUCT_ID"),
         f"{profile.tenant_path}/UTK0202_": (
@@ -124,8 +148,7 @@ def classify_utiki_page(url):
         f"{profile.tenant_path}/UTK0206_": (PageKind.CHECKOUT, None),
     }
     route = route_specs.get(parsed.path)
-    query = unique_query(url)
-    if route is None or query is None:
+    if route is None:
         return PageKind.UNKNOWN
     page_kind, required_key = route
     if required_key and not re.fullmatch(

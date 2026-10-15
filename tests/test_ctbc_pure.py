@@ -265,11 +265,23 @@ class CtbcPureSelectionTest(unittest.TestCase):
             (ctbc_root + "UTK0204_?PERFORMANCE_ID=P1", PageKind.AREA),
             (ctbc_root + "UTK0205_?PERFORMANCE_ID=P1", PageKind.RESERVED_SEAT),
             (ctbc_root + "UTK0202_?PERFORMANCE_ID=P1", PageKind.GENERAL_ADMISSION),
+            (
+                ctbc_root
+                + "UTK0201_001?PERFORMANCE_ID=P1&GROUP_ID=G1&"
+                "PERFORMANCE_PRICE_AREA_ID=A1&ATYPE=N",
+                PageKind.SERVER_ASSIGNED_QUANTITY,
+            ),
             (ctbc_root + "UTK0206_", PageKind.CHECKOUT),
             (dragons_root + "UTK0201_?PRODUCT_ID=P1", PageKind.DATE),
             (dragons_root + "UTK0204_?PERFORMANCE_ID=P1", PageKind.AREA),
             (dragons_root + "UTK0205_?PERFORMANCE_ID=P1", PageKind.RESERVED_SEAT),
             (dragons_root + "UTK0203_?PERFORMANCE_ID=P1", PageKind.GENERAL_ADMISSION),
+            (
+                dragons_root
+                + "UTK0201_001?PERFORMANCE_ID=P1&GROUP_ID=G1&"
+                "PERFORMANCE_PRICE_AREA_ID=A1&ATYPE=N",
+                PageKind.SERVER_ASSIGNED_QUANTITY,
+            ),
             (dragons_root + "UTK0206_", PageKind.CHECKOUT),
         )
         for url, expected in cases:
@@ -289,6 +301,28 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual("WDRAGONS", dragons.map_namespace)
         self.assertFalse(dragons.fast_area_prefetch)
         self.assertFalse(dragons.supports_server_assignment)
+
+        invalid_server_routes = (
+            ctbc_root
+            + "UTK0201_001?PERFORMANCE_ID=P1&GROUP_ID=G1&"
+            "PERFORMANCE_PRICE_AREA_ID=A1",
+            ctbc_root
+            + "UTK0201_001?PERFORMANCE_ID=P1&GROUP_ID=G1&"
+            "PERFORMANCE_PRICE_AREA_ID=A1&ATYPE=Y",
+            ctbc_root
+            + "UTK0201_001?PERFORMANCE_ID=P1&GROUP_ID=G1&"
+            "PERFORMANCE_PRICE_AREA_ID=A1&ATYPE=N&ATYPE=N",
+            ctbc_root
+            + "UTK0201_001/extra?PERFORMANCE_ID=P1&GROUP_ID=G1&"
+            "PERFORMANCE_PRICE_AREA_ID=A1&ATYPE=N",
+            ctbc_root
+            + "UTK0201_001?PERFORMANCE_ID=P1&GROUP_ID=&"
+            "PERFORMANCE_PRICE_AREA_ID=A1&ATYPE=N",
+        )
+        for url in invalid_server_routes:
+            with self.subTest(invalid_server_route=url):
+                self.assertEqual(PageKind.UNKNOWN, classify_utiki_page(url))
+                self.assertIsNone(_get_ctbc_page_type(url))
 
     def test_family_membership_is_independent_from_actionable_routes(self):
         homepage = "https://tix.ctbcsports.com/BROTHERS/"

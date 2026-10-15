@@ -139,6 +139,11 @@ CTBC_TEST_QUANTITY_URL = (
     "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
     "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
 )
+CTBC_TEST_SEAT_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+    "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+    "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+)
 CTBC_TEST_SERVER_QUANTITY_URL = (
     "https://tix.ctbcsports.com/BROTHERS/UTK0201_001?"
     "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
@@ -318,6 +323,56 @@ def make_ctbc_quantity_snapshot(
     }
 
 
+def make_ctbc_seat_snapshot(*, available=True, selected=()):
+    type_name = "全票"
+    seats = []
+    for index in range(3):
+        is_selected = index in selected
+        seats.append({
+            "fingerprint": ["seat", index, f"A區-1排-{index + 1}號"],
+            "title": f"A區-1排-{index + 1}號",
+            "row_index": 1,
+            "cell_index": index,
+            "center_x": 10 + index * 20,
+            "center_y": 10,
+            "width": 20,
+            "height": 20,
+            "available": bool(available and not is_selected),
+            "selected": is_selected,
+        })
+    return {
+        "ok": True,
+        "page_url": CTBC_TEST_SEAT_URL,
+        "document_id": "document-1",
+        "performance_id": "P16D0B8Z",
+        "group_id": "GROUP_FRONT",
+        "price_area_id": "PRICE_FRONT",
+        "product_id": "PRODUCT_FIXTURE",
+        "product_hidden_present": True,
+        "quantity_limit_present": True,
+        "quantity_limit_raw": "2",
+        "ticket_types": [{
+            "fingerprint": ["ticket", "FULL", "setType('FULL')"],
+            "text": "全票",
+            "disabled": False,
+            "type_id": "FULL",
+            "type_name": type_name,
+            "counter_present": True,
+            "counter_raw": str(len(selected)),
+        }],
+        "seats": seats,
+        "submitted_seats": [
+            {"A": "S", "Y": "FULL", "Z": type_name}
+            for _ in selected
+        ],
+        "counters": [
+            {"id": "FULL", "counter_raw": str(len(selected))},
+            {"id": "OTHER", "counter_raw": "0"},
+        ],
+        "visual_selected_count": len(selected),
+    }
+
+
 class FakeUtikiQuantityDomPort:
     def __init__(self, snapshot, commit_result):
         self.snapshot = snapshot
@@ -336,6 +391,36 @@ class FakeUtikiQuantityDomPort:
         assert plan.target_key == "FULL"
         assert plan.ticket_number == 2
         return self.commit_result
+
+
+class FakeUtikiSeatDomPort:
+    """Semantic reserved-seat reader/committer for workflow contracts."""
+
+    def __init__(self, snapshot, commit_results, *, expected_action="select"):
+        self.snapshot = snapshot
+        self.commit_results = list(
+            commit_results
+            if isinstance(commit_results, (list, tuple))
+            else [commit_results]
+        )
+        self.expected_action = expected_action
+        self.events = []
+        self.commit_count = 0
+
+    async def read_seat_snapshot(self, _tab):
+        self.events.append("inspect_seat")
+        return self.snapshot
+
+    async def commit_seat(self, _tab, snapshot, plan):
+        self.events.append("commit_seat")
+        self.commit_count += 1
+        assert snapshot is self.snapshot
+        assert plan.ticket_type_id == "FULL"
+        assert plan.ticket_number == 2
+        assert plan.action == self.expected_action
+        if len(self.commit_results) > 1:
+            return self.commit_results.pop(0)
+        return self.commit_results[0]
 
 
 class FakeElement:

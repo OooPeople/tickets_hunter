@@ -22,18 +22,22 @@ from platforms.utiki.dom import (
     commit_date_action,
     commit_server_assigned_area,
     commit_quantity,
+    commit_seat,
     dismiss_dialog,
     dispatch_quantity_submit,
     read_area_snapshot,
     read_date_snapshot,
     read_dialog_snapshot,
     read_quantity_snapshot,
+    read_seat_snapshot,
 )
 from platforms.utiki.selection import (
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     select_area_snapshot,
     select_date_snapshot,
     select_quantity_snapshot,
+    seat_selection_is_valid,
+    select_seat_snapshot,
 )
 from platforms.utiki.profiles import PageKind
 from platforms.utiki.workflow import (
@@ -46,10 +50,7 @@ from platforms.utiki.workflow import (
     _ctbc_tab_identity,
     _dismiss_ctbc_dialog,
     _state,
-    _validate_ctbc_seat_selection,
     nodriver_ctbc_general_admission_main,
-    nodriver_ctbc_seat_auto_select,
-    nodriver_ctbc_ticket_type_auto_select,
 )
 
 
@@ -91,7 +92,29 @@ async def _run_browser_fixtures():
             _assert_dialog_fixture,
             _assert_fast_marker_fixture,
         ):
-            if assertion is _assert_quantity_fixture:
+            if assertion is _assert_seat_fixture:
+                seat_path = str(
+                    (FIXTURE_ROOT / "UTK0205_seat.html").resolve()
+                )
+                fixture_routes = tuple(
+                    (origin, seat_path) for origin in ("file://", "null")
+                )
+                with (
+                    patch(
+                        "platforms.utiki.dom.classify_utiki_page",
+                        return_value=PageKind.RESERVED_SEAT,
+                    ),
+                    patch(
+                        "platforms.utiki.selection.classify_utiki_page",
+                        return_value=PageKind.RESERVED_SEAT,
+                    ),
+                    patch(
+                        "platforms.utiki.dom.CONST_RESERVED_SEAT_ROUTES",
+                        fixture_routes,
+                    ),
+                ):
+                    await assertion(browser)
+            elif assertion is _assert_quantity_fixture:
                 general_paths = tuple(
                     str((FIXTURE_ROOT / filename).resolve())
                     for filename in (
@@ -706,22 +729,201 @@ async def _assert_area_fixture(browser):
 
 
 async def _assert_seat_fixture(browser):
-    tab = await _open_fixture(
-        browser,
-        "UTK0205_seat.html",
-        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    query = (
+        "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+        "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
     )
     cfg = config()
 
-    assert await nodriver_ctbc_ticket_type_auto_select(tab, cfg)
-    assert await nodriver_ctbc_seat_auto_select(tab, cfg)
-    assert await _validate_ctbc_seat_selection(tab, cfg)
+    async def read_plan(tab):
+        snapshot = await read_seat_snapshot(tab)
+        plan, reason = select_seat_snapshot(
+            snapshot,
+            cfg["utiki"]["ticket_type_keyword"],
+            cfg["ticket_number"],
+            cfg["advanced"]["disable_adjacent_seat"],
+            cfg["utiki"]["seat_sorting"],
+        )
+        assert reason == ""
+        assert plan is not None
+        return snapshot, plan
+
+    async def click_counts(tab):
+        return await tab.evaluate('''({
+            ticketType: Number(document.body.dataset.ticketTypeClicks || 0),
+            seats: Number(document.body.dataset.seatClicks || 0)
+        })''')
+
+    tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    before_html = await tab.evaluate("document.body.innerHTML")
+    snapshot = await read_seat_snapshot(tab)
+    repeated = await read_seat_snapshot(tab)
+    assert snapshot == repeated
+    assert snapshot.ok
+    assert snapshot.page_url == await tab.evaluate("location.href")
+    assert await tab.evaluate("document.body.innerHTML") == before_html
+    assert await click_counts(tab) == {"ticketType": 0, "seats": 0}
+    plan, reason = select_seat_snapshot(
+        snapshot,
+        cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+        cfg["advanced"]["disable_adjacent_seat"],
+        cfg["utiki"]["seat_sorting"],
+    )
+    assert reason == ""
+    assert plan.action == "select"
+    assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
+    assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
+    committed_snapshot = await read_seat_snapshot(tab)
+    assert seat_selection_is_valid(
+        committed_snapshot,
+        plan.ticket_number,
+        plan.ticket_type_id,
+        plan.ticket_type_name,
+    )
+    ready_plan, reason = select_seat_snapshot(
+        committed_snapshot,
+        cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+        cfg["advanced"]["disable_adjacent_seat"],
+        cfg["utiki"]["seat_sorting"],
+    )
+    assert reason == ""
+    assert ready_plan.action == "ready"
+    assert await commit_seat(
+        tab, committed_snapshot, ready_plan
+    ) is CommitResult.COMMITTED
+    assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
     selected = await tab.evaluate(
         "Array.from(document.querySelectorAll('#TBL td[title]'))"
         ".filter(seat => seat.dataset.selected === '1')"
         ".map(seat => seat.title)"
     )
     assert selected == ["A區-1排-1號", "A區-1排-2號"]
+    assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
+    assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
+
+    clear_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    await clear_tab.evaluate(
+        "document.querySelector('#TBL td[data-seat-id=\"S1\"]').click()"
+    )
+    clear_snapshot, clear_plan = await read_plan(clear_tab)
+    assert clear_plan.action == "clear"
+    assert await commit_seat(
+        clear_tab, clear_snapshot, clear_plan
+    ) is CommitResult.COMMITTED
+    assert await click_counts(clear_tab) == {"ticketType": 0, "seats": 2}
+    assert await clear_tab.evaluate("Object.keys(window.seats).length") == 0
+    assert not await clear_tab.evaluate(
+        "document.documentElement.hasAttribute("
+        "'data-tickets-hunter-utiki-seat-commit')"
+    )
+    clean_snapshot, clean_plan = await read_plan(clear_tab)
+    assert clean_plan.action == "select"
+    assert await commit_seat(
+        clear_tab, clean_snapshot, clean_plan
+    ) is CommitResult.COMMITTED
+    assert await click_counts(clear_tab) == {"ticketType": 1, "seats": 4}
+    assert seat_selection_is_valid(
+        await read_seat_snapshot(clear_tab),
+        clean_plan.ticket_number,
+        clean_plan.ticket_type_id,
+        clean_plan.ticket_type_name,
+    )
+
+    route_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    route_snapshot, route_plan = await read_plan(route_tab)
+    await route_tab.evaluate('''(() => {
+        const url = new URL(location.href);
+        url.searchParams.set('PERFORMANCE_ID', 'OTHER');
+        history.replaceState({}, '', url.href);
+    })()''')
+    assert await commit_seat(
+        route_tab, route_snapshot, route_plan
+    ) is CommitResult.REJECTED
+    assert await click_counts(route_tab) == {"ticketType": 0, "seats": 0}
+
+    document_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    document_snapshot, document_plan = await read_plan(document_tab)
+    forged_document = f"{document_snapshot.document_id}-old"
+    assert await commit_seat(
+        document_tab,
+        replace(document_snapshot, document_id=forged_document),
+        replace(document_plan, document_id=forged_document),
+    ) is CommitResult.REJECTED
+    assert await click_counts(document_tab) == {
+        "ticketType": 0, "seats": 0,
+    }
+
+    identity_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    identity_snapshot, identity_plan = await read_plan(identity_tab)
+    await identity_tab.evaluate(
+        "document.querySelector('#PRODUCT_ID').value = 'OTHER_PRODUCT'"
+    )
+    assert await commit_seat(
+        identity_tab, identity_snapshot, identity_plan
+    ) is CommitResult.REJECTED
+    assert await click_counts(identity_tab) == {
+        "ticketType": 0, "seats": 0,
+    }
+
+    ticket_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    ticket_snapshot, ticket_plan = await read_plan(ticket_tab)
+    await ticket_tab.evaluate(
+        "document.querySelector('.ticket button').disabled = true"
+    )
+    assert await commit_seat(
+        ticket_tab, ticket_snapshot, ticket_plan
+    ) is CommitResult.STALE
+    assert await click_counts(ticket_tab) == {
+        "ticketType": 0, "seats": 0,
+    }
+
+    seat_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    seat_snapshot, seat_plan = await read_plan(seat_tab)
+    await seat_tab.evaluate('''document.querySelector(
+        '#TBL td[data-seat-id="S1"]'
+    ).setAttribute('title', 'A區-9排-9號')''')
+    assert await commit_seat(
+        seat_tab, seat_snapshot, seat_plan
+    ) is CommitResult.REJECTED
+    assert await click_counts(seat_tab) == {"ticketType": 0, "seats": 0}
+
+    geometry_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    geometry_snapshot, geometry_plan = await read_plan(geometry_tab)
+    assert geometry_plan.require_physical_adjacency
+    await geometry_tab.evaluate('''document.querySelector(
+        '#TBL td[data-seat-id="S2"]'
+    ).style.transform = 'translateX(120px)' ''')
+    assert await commit_seat(
+        geometry_tab, geometry_snapshot, geometry_plan
+    ) in {CommitResult.REJECTED, CommitResult.STALE}
+    assert await click_counts(geometry_tab) == {
+        "ticketType": 0, "seats": 0,
+    }
+
+    race_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
+    await race_tab.evaluate('''(() => {
+        const first = document.querySelector(
+            '#TBL td[data-seat-id="S1"]');
+        first.setAttribute('onclick',
+            "toggleSeat(this, 'S1');" +
+            "const second=document.querySelector('[data-seat-id=\\"S2\\"]');" +
+            "second.style.cursor='default';" +
+            "second.style.backgroundImage='none';");
+    })()''')
+    race_snapshot, race_plan = await read_plan(race_tab)
+    assert await commit_seat(
+        race_tab, race_snapshot, race_plan
+    ) is CommitResult.STALE
+    assert await click_counts(race_tab) == {"ticketType": 1, "seats": 1}
+    race_live = await read_seat_snapshot(race_tab)
+    assert not seat_selection_is_valid(
+        race_live,
+        race_plan.ticket_number,
+        race_plan.ticket_type_id,
+        race_plan.ticket_type_name,
+    )
 
 
 async def _assert_quantity_fixture(browser):

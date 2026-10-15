@@ -6,6 +6,7 @@ from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
     CTBC_TEST_DATE_URL,
     CTBC_TEST_QUANTITY_URL,
+    CTBC_TEST_SEAT_URL,
     CTBC_TEST_SERVER_QUANTITY_URL,
     CtbcStateIsolationMixin,
     FakeSubmitTab,
@@ -13,10 +14,12 @@ from tests.ctbc_support import (
     FakeUtikiDateDomPort,
     FakeUtikiDomPort,
     FakeUtikiQuantityDomPort,
+    FakeUtikiSeatDomPort,
     config,
     make_ctbc_area_snapshot,
     make_ctbc_date_snapshot,
     make_ctbc_quantity_snapshot,
+    make_ctbc_seat_snapshot,
 )
 
 from platforms.utiki.dom import (
@@ -30,10 +33,12 @@ from platforms.utiki.selection import (
     parse_area_snapshot,
     parse_date_snapshot,
     parse_quantity_snapshot,
+    parse_seat_snapshot,
     select_area_snapshot,
     select_quantity_snapshot,
 )
 from platforms.utiki.workflow import (
+    CTBC_SEAT_STALE_RELOAD_REASON,
     _ctbc_attest_fast_destination,
     _ctbc_captcha_and_submit,
     _handle_ctbc_submit_dialog,
@@ -44,6 +49,7 @@ from platforms.utiki.workflow import (
     nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
+    nodriver_ctbc_seat_main,
     nodriver_utiki_server_assigned_quantity_main,
 )
 
@@ -686,6 +692,292 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 tab, snapshot, plan, 2, "b" * 32,
                 "ticketsHunter.ctbc.fast-navigation.v1",
             )
+
+    async def test_reserved_seat_requires_attested_manual_mode(self):
+        for label, attested, selection_mode in (
+            ("unattested", False, "manual"),
+            ("computer-mode", True, "computer"),
+        ):
+            with self.subTest(label=label):
+                tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+                cfg = config()
+                cfg["utiki"]["seat_selection_mode"] = selection_mode
+                cfg["ctbc"] = dict(cfg["utiki"])
+                with (
+                    patch(
+                        "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                        AsyncMock(return_value=attested),
+                    ) as attest,
+                    patch(
+                        "platforms.utiki.workflow.read_seat_snapshot",
+                        AsyncMock(),
+                    ) as reader,
+                    patch(
+                        "platforms.utiki.workflow.commit_seat",
+                        AsyncMock(),
+                    ) as commit,
+                ):
+                    self.assertFalse(await nodriver_ctbc_seat_main(
+                        tab, cfg, ocr=None
+                    ))
+
+                attest.assert_awaited_once_with(tab, "seat", cfg)
+                reader.assert_not_awaited()
+                commit.assert_not_awaited()
+
+    async def test_reserved_seat_repeat_tick_submits_once(self):
+        snapshot = parse_seat_snapshot(make_ctbc_seat_snapshot())
+        dom_port = FakeUtikiSeatDomPort(snapshot, CommitResult.COMMITTED)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True,
+            "force_submit": True,
+        })
+        submit_key = _ctbc_purchase_state_key(tab)
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow.read_seat_snapshot",
+                side_effect=dom_port.read_seat_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_seat",
+                side_effect=dom_port.commit_seat,
+            ),
+            patch(
+                "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+                AsyncMock(),
+            ),
+            patch(
+                "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+                AsyncMock(return_value=False),
+            ) as observe,
+        ):
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+
+        self.assertEqual(
+            ["inspect_seat", "commit_seat"], dom_port.events[:2]
+        )
+        self.assertEqual(1, tab.button.click_count)
+        observe.assert_awaited_once()
+        self.assertEqual(
+            "awaiting_result", _state["submitted"][submit_key]["phase"]
+        )
+
+    async def test_reserved_seat_clear_commit_never_submits_or_reloads(self):
+        snapshot = parse_seat_snapshot(
+            make_ctbc_seat_snapshot(selected=(0,))
+        )
+        dom_port = FakeUtikiSeatDomPort(
+            snapshot, CommitResult.COMMITTED, expected_action="clear"
+        )
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow.read_seat_snapshot",
+                side_effect=dom_port.read_seat_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_seat",
+                side_effect=dom_port.commit_seat,
+            ),
+            patch(
+                "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+                AsyncMock(),
+            ) as cancel_refresh,
+            patch(
+                "platforms.utiki.workflow._reload_with_interval",
+                AsyncMock(),
+            ) as reload_page,
+            patch(
+                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                AsyncMock(),
+            ) as submit,
+        ):
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+
+        self.assertEqual(
+            ["inspect_seat", "commit_seat"], dom_port.events
+        )
+        cancel_refresh.assert_awaited_once_with(
+            tab, "reserved-seat plan ready"
+        )
+        reload_page.assert_not_awaited()
+        submit.assert_not_awaited()
+
+    async def test_reserved_seat_unknown_commit_paces_reload_without_submit(self):
+        snapshot = parse_seat_snapshot(make_ctbc_seat_snapshot())
+        dom_port = FakeUtikiSeatDomPort(snapshot, CommitResult.COMMITTED)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow.read_seat_snapshot",
+                side_effect=dom_port.read_seat_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_seat",
+                AsyncMock(side_effect=RuntimeError("unknown commit")),
+            ) as commit,
+            patch(
+                "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+                AsyncMock(),
+            ),
+            patch(
+                "platforms.utiki.workflow._reload_with_interval",
+                AsyncMock(return_value=False),
+            ) as reload_page,
+            patch(
+                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                AsyncMock(),
+            ) as submit,
+        ):
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+
+        self.assertEqual(["inspect_seat"], dom_port.events)
+        commit.assert_awaited_once()
+        reload_page.assert_awaited_once_with(
+            tab, cfg, CTBC_SEAT_STALE_RELOAD_REASON
+        )
+        submit.assert_not_awaited()
+
+    async def test_stale_seat_commit_polls_one_reload_without_reselection(self):
+        snapshot = parse_seat_snapshot(make_ctbc_seat_snapshot())
+        dom_port = FakeUtikiSeatDomPort(snapshot, CommitResult.STALE)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+        cfg["advanced"]["auto_reload_page_interval"] = 7
+        reload_calls = 0
+
+        async def reload_effect(reload_tab, _config, reason):
+            nonlocal reload_calls
+            reload_calls += 1
+            identity = _ctbc_tab_identity(reload_tab)
+            if reload_calls == 1:
+                _state["reload_request"][identity] = {"reason": reason}
+                return False
+            _state["reload_request"].pop(identity, None)
+            return True
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow.read_seat_snapshot",
+                side_effect=dom_port.read_seat_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_seat",
+                side_effect=dom_port.commit_seat,
+            ),
+            patch(
+                "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+                AsyncMock(),
+            ),
+            patch(
+                "platforms.utiki.workflow._reload_with_interval",
+                AsyncMock(side_effect=reload_effect),
+            ) as reload_page,
+            patch(
+                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                AsyncMock(),
+            ) as submit,
+        ):
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+
+        self.assertEqual(
+            ["inspect_seat", "commit_seat"], dom_port.events
+        )
+        self.assertEqual(2, reload_page.await_count)
+        reload_page.assert_awaited_with(
+            tab, cfg, CTBC_SEAT_STALE_RELOAD_REASON
+        )
+        submit.assert_not_awaited()
+
+    async def test_unavailable_seats_poll_reload_without_committing(self):
+        snapshot = parse_seat_snapshot(
+            make_ctbc_seat_snapshot(available=False)
+        )
+        dom_port = FakeUtikiSeatDomPort(snapshot, CommitResult.COMMITTED)
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        cfg = config()
+        reload_calls = 0
+
+        async def reload_effect(reload_tab, _config, reason):
+            nonlocal reload_calls
+            reload_calls += 1
+            identity = _ctbc_tab_identity(reload_tab)
+            if reload_calls == 1:
+                _state["reload_request"][identity] = {"reason": reason}
+                return False
+            _state["reload_request"].pop(identity, None)
+            return True
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "platforms.utiki.workflow.read_seat_snapshot",
+                side_effect=dom_port.read_seat_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_seat",
+                side_effect=dom_port.commit_seat,
+            ) as commit,
+            patch(
+                "platforms.utiki.workflow._reload_with_interval",
+                AsyncMock(side_effect=reload_effect),
+            ) as reload_page,
+            patch(
+                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                AsyncMock(),
+            ) as submit,
+        ):
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+            self.assertFalse(await nodriver_ctbc_seat_main(
+                tab, cfg, ocr=None
+            ))
+
+        self.assertEqual(["inspect_seat"], dom_port.events)
+        commit.assert_not_awaited()
+        self.assertEqual(2, reload_page.await_count)
+        submit.assert_not_awaited()
 
     async def test_quantity_workflow_uses_inspect_commit_submit_order(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())

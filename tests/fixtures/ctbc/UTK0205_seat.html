@@ -9,6 +9,10 @@
 </head>
 <body>
   <!-- Page kind: seat. Fixture date: 2026-10-15. Synthetic/deidentified. -->
+  <input id="PERFORMANCE_ID" value="P16D0B8Z" hidden>
+  <input id="PRODUCT_ID" value="PRODUCT_FIXTURE" hidden>
+  <input id="GROUP_ID" value="GROUP_FRONT" hidden>
+  <input id="PRICE_AREA_ID" value="PRICE_FRONT" hidden>
   <input id="QUANTITY_LIMIT" value="2">
   <div class="ticket">
     <button type="button" onclick="setType('FULL')">
@@ -35,9 +39,15 @@
   <script>
     window.seats = {};
     function setType(value) {
+      document.body.dataset.ticketTypeClicks = String(
+        Number(document.body.dataset.ticketTypeClicks || 0) + 1
+      );
       document.body.dataset.ticketType = value;
     }
     function toggleSeat(cell, seatId) {
+      document.body.dataset.seatClicks = String(
+        Number(document.body.dataset.seatClicks || 0) + 1
+      );
       const selected = cell.dataset.selected === '1';
       if (selected) {
         cell.dataset.selected = '0';

@@ -2,6 +2,7 @@ import subprocess
 import sys
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from platforms.utiki.profiles import (
 )
 from platforms.utiki.selection import (
     DateActionPlan,
+    SeatActionPlan,
     availability_has_tickets as _ctbc_availability_has_tickets,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
@@ -39,10 +41,15 @@ from platforms.utiki.selection import (
     parse_keyword_groups as _parse_keyword_groups,
     parse_map_title as _parse_ctbc_map_title,
     parse_quantity_snapshot,
+    parse_seat_snapshot,
     quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
+    seat_plan_matches_snapshot,
+    seat_selection_is_valid,
     select_date_snapshot,
     select_area_snapshot as _select_ctbc_area_snapshot,
     select_quantity_snapshot,
+    select_seat_indexes as _select_ctbc_seat_indexes,
+    select_seat_snapshot,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
@@ -50,11 +57,9 @@ from platforms.utiki.workflow import (
     _ctbc_fast_destination_is_valid,
     _ctbc_purchase_state_key,
     _ctbc_submit_reached_checkout,
-    _ctbc_seat_audit_is_valid,
     _get_ctbc_page_type,
     _get_utiki_behavior,
     _normalize_ctbc_captcha_answer,
-    _select_ctbc_seat_indexes,
     is_utk_sports_url,
     parse_ctbc_cookie_string,
 )
@@ -96,6 +101,58 @@ def _select_date_action(source_url, control, row_text="9/10 一般場"):
         [{"text": row_text, "controls": [control]}],
     )
     return select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+
+
+def _seat_snapshot(*, selected=(), submitted=None, counters=None):
+    type_name = "內野全票-NT$400"
+    seats = []
+    for index in range(3):
+        is_selected = index in selected
+        seats.append({
+            "fingerprint": ["seat", index, f"A區-1排-{index + 1}號"],
+            "title": f"A區-1排-{index + 1}號",
+            "row_index": 1,
+            "cell_index": index,
+            "center_x": 10 + index * 20,
+            "center_y": 10,
+            "width": 20,
+            "height": 20,
+            "available": not is_selected,
+            "selected": is_selected,
+        })
+    return {
+        "ok": True,
+        "page_url": (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        ),
+        "document_id": "document-1",
+        "performance_id": "P1",
+        "group_id": "G1",
+        "price_area_id": "A1",
+        "product_id": "PRODUCT1",
+        "product_hidden_present": True,
+        "quantity_limit_present": True,
+        "quantity_limit_raw": "4",
+        "ticket_types": [{
+            "fingerprint": ["ticket", "FULL", "setType('FULL')"],
+            "text": "全票",
+            "disabled": False,
+            "type_id": "FULL",
+            "type_name": type_name,
+            "counter_present": True,
+            "counter_raw": str(len(selected)),
+        }],
+        "seats": seats,
+        "submitted_seats": submitted if submitted is not None else [
+            {"A": "S", "Y": "FULL", "Z": type_name} for _ in selected
+        ],
+        "counters": counters if counters is not None else [
+            {"id": "FULL", "counter_raw": str(len(selected))},
+            {"id": "HALF", "counter_raw": "0"},
+        ],
+        "visual_selected_count": len(selected),
+    }
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
@@ -1186,6 +1243,111 @@ class CtbcPureSelectionTest(unittest.TestCase):
             ),
         )
 
+    def test_seat_planner_freezes_identity_and_selects_one_block(self):
+        raw = _seat_snapshot()
+        snapshot = parse_seat_snapshot(raw)
+        raw["seats"][0]["fingerprint"][0] = "mutated"
+
+        plan, reason = select_seat_snapshot(snapshot, "全票", 2)
+
+        self.assertEqual("", reason)
+        self.assertIsInstance(plan, SeatActionPlan)
+        self.assertEqual("select", plan.action)
+        self.assertEqual(("seat", 0, "A區-1排-1號"), plan.target_seat_fingerprints[0])
+        self.assertEqual("G1", plan.group_id)
+        self.assertEqual("A1", plan.price_area_id)
+        self.assertEqual("PRODUCT1", plan.product_id)
+        self.assertTrue(plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(snapshot, plan))
+        non_adjacent_plan, reason = select_seat_snapshot(
+            snapshot, "全票", 2, allow_non_adjacent=True
+        )
+        self.assertEqual("", reason)
+        self.assertFalse(non_adjacent_plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(
+            snapshot, non_adjacent_plan
+        ))
+        self.assertFalse(seat_plan_matches_snapshot(
+            snapshot, replace(plan, group_id="OTHER")
+        ))
+        self.assertFalse(seat_plan_matches_snapshot(
+            snapshot, replace(plan, product_id="OTHER")
+        ))
+
+    def test_seat_planner_distinguishes_type_and_seat_unavailability(self):
+        snapshot = parse_seat_snapshot(_seat_snapshot())
+        self.assertEqual(
+            (None, "ticket-type-unavailable"),
+            select_seat_snapshot(snapshot, "敬老票", 2),
+        )
+        unavailable = _seat_snapshot()
+        for seat in unavailable["seats"]:
+            seat["available"] = False
+        self.assertEqual(
+            (None, "seats-unavailable"),
+            select_seat_snapshot(unavailable, "全票", 2),
+        )
+
+    def test_seat_planner_keyword_selects_the_second_ticket_type(self):
+        raw = _seat_snapshot()
+        raw["ticket_types"].append({
+            "fingerprint": [
+                "ticket", "DISABILITY", "setType('DISABILITY')",
+            ],
+            "text": "身心障礙票及陪同票",
+            "disabled": False,
+            "type_id": "DISABILITY",
+            "type_name": "身心障礙票-NT$200",
+            "counter_present": True,
+            "counter_raw": "0",
+        })
+        raw["counters"].append({
+            "id": "DISABILITY", "counter_raw": "0",
+        })
+
+        plan, reason = select_seat_snapshot(raw, "身心", 2)
+
+        self.assertEqual("", reason)
+        self.assertEqual("DISABILITY", plan.ticket_type_id)
+        self.assertEqual("身心障礙票-NT$200", plan.ticket_type_name)
+
+    def test_seat_planner_clears_invalid_selection_then_accepts_valid_one(self):
+        invalid = _seat_snapshot(
+            selected=(0,),
+            submitted=[{"A": "S", "Y": "HALF", "Z": "內野半票"}],
+        )
+        clear_plan, reason = select_seat_snapshot(invalid, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("clear", clear_plan.action)
+        self.assertTrue(seat_plan_matches_snapshot(invalid, clear_plan))
+
+        ready = _seat_snapshot(selected=(0, 1))
+        ready_plan, reason = select_seat_snapshot(ready, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("ready", ready_plan.action)
+        self.assertTrue(seat_plan_matches_snapshot(ready, ready_plan))
+
+    def test_seat_planner_requires_reserved_identity_and_quantity_limit(self):
+        missing_limit = _seat_snapshot()
+        missing_limit["quantity_limit_present"] = False
+        self.assertEqual(
+            (None, "invalid-snapshot"),
+            select_seat_snapshot(missing_limit, "全票", 2),
+        )
+
+        wrong_group = _seat_snapshot()
+        wrong_group["group_id"] = "OTHER"
+        self.assertEqual(
+            (None, "invalid-snapshot"),
+            select_seat_snapshot(wrong_group, "全票", 2),
+        )
+
+        tracked = _seat_snapshot()
+        tracked["page_url"] += "&campaign=opening"
+        plan, reason = select_seat_snapshot(tracked, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("select", plan.action)
+
     def test_visible_captcha_is_preferred_over_hidden_dom_match(self):
         candidates = [
             {"image_id": "chk_pic", "visible": False, "order": 0},
@@ -1199,20 +1361,24 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual("chk_pic", ordered[0]["image_id"])
 
     def test_seat_audit_rejects_extra_or_mixed_ticket_types(self):
-        target = {"id": "FULL", "name": "內野全票-NT$400"}
-        good_seat = {"A": "S", "Y": "FULL", "Z": target["name"]}
-        valid = {
-            "submitted_seats": [good_seat, dict(good_seat)],
-            "counters": [{"id": "FULL", "count": 2}, {"id": "HALF", "count": 0}],
-            "visual_count": 2,
-        }
-        self.assertTrue(_ctbc_seat_audit_is_valid(valid, 2, target))
+        target_name = "內野全票-NT$400"
+        valid = _seat_snapshot(selected=(0, 1))
+        self.assertTrue(seat_selection_is_valid(
+            valid, 2, "FULL", target_name
+        ))
 
-        extra = dict(valid, submitted_seats=valid["submitted_seats"] + [dict(good_seat)], visual_count=3)
-        self.assertFalse(_ctbc_seat_audit_is_valid(extra, 2, target))
+        extra = _seat_snapshot(selected=(0, 1, 2))
+        self.assertFalse(seat_selection_is_valid(
+            extra, 2, "FULL", target_name
+        ))
 
-        mixed = dict(valid, submitted_seats=[good_seat, {"A": "S", "Y": "HALF", "Z": "內野半票"}])
-        self.assertFalse(_ctbc_seat_audit_is_valid(mixed, 2, target))
+        mixed = _seat_snapshot(selected=(0, 1), submitted=[
+            {"A": "S", "Y": "FULL", "Z": target_name},
+            {"A": "S", "Y": "HALF", "Z": "內野半票"},
+        ])
+        self.assertFalse(seat_selection_is_valid(
+            mixed, 2, "FULL", target_name
+        ))
 
     def test_general_quantity_audit_requires_the_target_and_zeros_others(self):
         self.assertTrue(_ctbc_general_quantity_audit_is_valid(

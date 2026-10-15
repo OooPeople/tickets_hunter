@@ -116,6 +116,44 @@ class QuantityPlan:
 
 
 @dataclass(frozen=True)
+class SeatSnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    performance_id: str = ""
+    group_id: str = ""
+    price_area_id: str = ""
+    product_id: str = ""
+    product_hidden_present: bool = False
+    quantity_limit_present: bool = False
+    quantity_limit_raw: str = ""
+    ticket_types: tuple = ()
+    seats: tuple = ()
+    submitted_seats: tuple = ()
+    counters: tuple = ()
+    visual_selected_count: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class SeatActionPlan:
+    page_url: str
+    document_id: str
+    performance_id: str
+    group_id: str
+    price_area_id: str
+    product_id: str
+    action: str
+    ticket_number: int
+    ticket_type_fingerprint: tuple
+    ticket_type_id: str
+    ticket_type_name: str
+    selected_seat_fingerprints: tuple = ()
+    target_seat_fingerprints: tuple = ()
+    require_physical_adjacency: bool = False
+
+
+@dataclass(frozen=True)
 class DialogSnapshot:
     page_url: str
     document_id: str
@@ -292,6 +330,125 @@ def parse_quantity_snapshot(raw_snapshot):
         product_id=str(raw_snapshot.get("product_id") or ""),
         **_quantity_presence_fields(raw_snapshot),
     )
+
+
+def _freeze_scalar_tuple(value):
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if any(not isinstance(item, (str, int, float, bool)) for item in value):
+        return None
+    return tuple(value)
+
+
+def _freeze_ticket_type(raw_type):
+    if not isinstance(raw_type, dict):
+        return None
+    fingerprint = _freeze_scalar_tuple(raw_type.get("fingerprint"))
+    string_fields = ("text", "type_id", "type_name", "counter_raw")
+    if fingerprint is None or any(
+        not isinstance(raw_type.get(field), str) for field in string_fields
+    ):
+        return None
+    if type(raw_type.get("disabled")) is not bool or type(
+        raw_type.get("counter_present")
+    ) is not bool:
+        return None
+    return (
+        fingerprint, raw_type["text"], raw_type["disabled"],
+        raw_type["type_id"], raw_type["type_name"],
+        raw_type["counter_present"], raw_type["counter_raw"],
+    )
+
+
+def _freeze_seat(raw_seat):
+    if not isinstance(raw_seat, dict):
+        return None
+    fingerprint = _freeze_scalar_tuple(raw_seat.get("fingerprint"))
+    integer_fields = ("row_index", "cell_index")
+    geometry_fields = ("center_x", "center_y", "width", "height")
+    if fingerprint is None or not isinstance(raw_seat.get("title"), str):
+        return None
+    if any(type(raw_seat.get(field)) is not int for field in integer_fields):
+        return None
+    if any(
+        isinstance(raw_seat.get(field), bool)
+        or not isinstance(raw_seat.get(field), (int, float))
+        for field in geometry_fields
+    ):
+        return None
+    if any(type(raw_seat.get(field)) is not bool for field in ("available", "selected")):
+        return None
+    return (
+        fingerprint, raw_seat["title"], raw_seat["row_index"],
+        raw_seat["cell_index"], raw_seat["center_x"], raw_seat["center_y"],
+        raw_seat["width"], raw_seat["height"], raw_seat["available"],
+        raw_seat["selected"],
+    )
+
+
+def _freeze_submitted_seat(raw_seat):
+    if not isinstance(raw_seat, dict):
+        return None
+    if any(not isinstance(raw_seat.get(field), str) for field in ("A", "Y", "Z")):
+        return None
+    return raw_seat["A"], raw_seat["Y"], raw_seat["Z"]
+
+
+def _freeze_seat_counter(raw_counter):
+    if not isinstance(raw_counter, dict):
+        return None
+    if not isinstance(raw_counter.get("id"), str) or not isinstance(
+        raw_counter.get("counter_raw"), str
+    ):
+        return None
+    return raw_counter["id"], raw_counter["counter_raw"]
+
+
+def parse_seat_snapshot(raw_snapshot):
+    """Freeze one combined ticket-type and reserved-seat observation."""
+    if isinstance(raw_snapshot, SeatSnapshot):
+        return raw_snapshot
+    if not isinstance(raw_snapshot, dict):
+        return None
+    if raw_snapshot.get("ok") is False:
+        return SeatSnapshot(
+            ok=False,
+            page_url=str(raw_snapshot.get("page_url") or ""),
+            document_id=str(raw_snapshot.get("document_id") or ""),
+            reason=str(raw_snapshot.get("reason") or "invalid-result"),
+        )
+    collections = {}
+    parsers = {
+        "ticket_types": _freeze_ticket_type,
+        "seats": _freeze_seat,
+        "submitted_seats": _freeze_submitted_seat,
+        "counters": _freeze_seat_counter,
+    }
+    for name, parser in parsers.items():
+        raw_items = raw_snapshot.get(name)
+        if not isinstance(raw_items, list):
+            return None
+        items = tuple(parser(item) for item in raw_items)
+        if any(item is None for item in items):
+            return None
+        collections[name] = items
+    scalar_types = {
+        "page_url": str, "document_id": str, "performance_id": str,
+        "group_id": str, "price_area_id": str, "product_id": str,
+        "product_hidden_present": bool,
+        "quantity_limit_present": bool, "quantity_limit_raw": str,
+        "visual_selected_count": int,
+    }
+    if any(
+        type(raw_snapshot.get(name)) is not expected
+        for name, expected in scalar_types.items()
+    ):
+        return None
+    if raw_snapshot["visual_selected_count"] < 0:
+        return None
+    return SeatSnapshot(ok=True, **collections, **{
+        name: raw_snapshot[name] for name in scalar_types
+    })
 
 
 def parse_dialog_snapshot(raw_snapshot):
@@ -830,6 +987,432 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
         action_status=action["status"],
         direct_destination=target["destination"] is not None,
     )
+
+
+def seats_are_physically_adjacent(first, second):
+    """Support horizontal and rotated vertical uTiki seat maps."""
+    geometry = ("center_x", "center_y", "width", "height")
+    if all(
+        isinstance(seat.get(field), (int, float))
+        for seat in (first, second) for field in geometry
+    ):
+        dx = abs(first["center_x"] - second["center_x"])
+        dy = abs(first["center_y"] - second["center_y"])
+        seat_size = max(
+            first["width"], first["height"], second["width"], second["height"]
+        )
+        if seat_size > 0:
+            aligned = min(dx, dy) <= max(2.0, seat_size * 0.35)
+            close = max(dx, dy) <= seat_size * 1.6
+            distinct = max(dx, dy) >= seat_size * 0.35
+            return aligned and close and distinct
+    row_delta = abs(first.get("row_index", 0) - second.get("row_index", 0))
+    cell_delta = abs(first.get("cell_index", 0) - second.get("cell_index", 0))
+    return (row_delta == 0 and cell_delta == 1) or (
+        row_delta == 1 and cell_delta == 0
+    )
+
+
+def _seat_number(seat):
+    match = re.search(r"-(\d+)排-(\d+)號\s*$", str(seat.get("title") or ""))
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _seat_row_edges(seats, strict_titles):
+    edges = {}
+    for seat in seats:
+        numbers = _seat_number(seat)
+        if numbers is None:
+            if strict_titles and str(seat.get("title") or "").strip():
+                return None
+            continue
+        row_number, seat_number = numbers
+        row_edges = edges.setdefault(row_number, [seat_number, seat_number])
+        row_edges[0] = min(row_edges[0], seat_number)
+        row_edges[1] = max(row_edges[1], seat_number)
+    return edges
+
+
+def _seat_block_candidates(available, needed, row_edges):
+    rows = {}
+    for seat in available:
+        numbers = _seat_number(seat)
+        if numbers is None:
+            continue
+        parsed = dict(seat, _row_number=numbers[0], _seat_number=numbers[1])
+        rows.setdefault(numbers[0], []).append(parsed)
+    candidates = []
+    for row_number, row in rows.items():
+        ordered = sorted(row, key=lambda item: item["_seat_number"])
+        for start in range(len(ordered) - needed + 1):
+            block = ordered[start:start + needed]
+            if not all(
+                seats_are_physically_adjacent(block[index], block[index + 1])
+                for index in range(len(block) - 1)
+            ):
+                continue
+            low = min(item["_seat_number"] for item in block)
+            high = max(item["_seat_number"] for item in block)
+            candidates.append({
+                "seats": block, "row_number": row_number,
+                "min_seat_number": low, "max_seat_number": high,
+                "dom_index": min(item.get("index", 0) for item in block),
+                "touches_aisle": low == row_edges[row_number][0]
+                or high == row_edges[row_number][1],
+            })
+    return candidates
+
+
+def _sort_seat_blocks(candidates, seat_sorting):
+    if seat_sorting == "row_asc_aisle":
+        candidates = [item for item in candidates if item["touches_aisle"]]
+        key = lambda item: (item["row_number"], item["dom_index"])
+    elif seat_sorting == "display":
+        key = lambda item: item["dom_index"]
+    elif seat_sorting == "row_asc_seat_desc":
+        key = lambda item: (
+            item["row_number"], -item["max_seat_number"], item["dom_index"]
+        )
+    elif seat_sorting == "row_desc_seat_asc":
+        key = lambda item: (
+            -item["row_number"], item["min_seat_number"], item["dom_index"]
+        )
+    else:
+        key = lambda item: (
+            item["row_number"], item["min_seat_number"], item["dom_index"]
+        )
+    return sorted(candidates, key=key)
+
+
+def _numeric_seat_key(seat, seat_sorting):
+    numbers = _seat_number(seat)
+    if numbers is None:
+        return (1, 0, 0, seat.get("row_index", 0), seat.get("cell_index", 0))
+    row_number, seat_number = numbers
+    if seat_sorting == "row_asc_seat_desc":
+        seat_number = -seat_number
+    elif seat_sorting == "row_desc_seat_asc":
+        row_number = -row_number
+    return (
+        0, row_number, seat_number,
+        seat.get("row_index", 0), seat.get("cell_index", 0),
+    )
+
+
+def select_seat_indexes(seats, needed, allow_non_adjacent=False,
+                        seat_sorting="row_seat"):
+    """Choose reserved-seat indexes while preserving legacy priorities."""
+    if needed <= 0:
+        return []
+    numeric_sortings = {
+        "row_seat", "row_asc_aisle", "row_asc_seat_desc",
+        "row_desc_seat_asc",
+    }
+    if seat_sorting not in numeric_sortings | {"display"}:
+        seat_sorting = "row_seat"
+    row_edges = _seat_row_edges(seats, seat_sorting == "row_asc_aisle")
+    if row_edges is None:
+        return []
+    available = [
+        seat for seat in seats
+        if seat.get("available") and not seat.get("selected")
+    ]
+    if len(available) < needed:
+        return []
+    blocks = _sort_seat_blocks(
+        _seat_block_candidates(available, needed, row_edges), seat_sorting
+    )
+    if blocks:
+        target = sorted(blocks[0]["seats"], key=lambda item: item.get("index", 0))
+        return [seat["index"] for seat in target]
+    if seat_sorting == "row_asc_aisle" or not allow_non_adjacent:
+        return []
+    if seat_sorting in numeric_sortings:
+        available = sorted(
+            available, key=lambda seat: _numeric_seat_key(seat, seat_sorting)
+        )
+    return [seat["index"] for seat in available[:needed]]
+
+
+def _seat_snapshot_route_is_valid(snapshot):
+    query = unique_query(snapshot.page_url)
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    identities = {
+        "PERFORMANCE_ID": snapshot.performance_id,
+        "GROUP_ID": snapshot.group_id,
+        "PERFORMANCE_PRICE_AREA_ID": snapshot.price_area_id,
+    }
+    return bool(
+        snapshot.ok and snapshot.document_id and query is not None
+        and classify_utiki_page(snapshot.page_url) == PageKind.RESERVED_SEAT
+        and all(token.fullmatch(value) for value in identities.values())
+        and all(query.get(key) == value for key, value in identities.items())
+        and snapshot.product_hidden_present
+        and token.fullmatch(snapshot.product_id)
+    )
+
+
+def _counter_value(raw_value):
+    if not re.fullmatch(r"\d+", str(raw_value or "")):
+        return None
+    return int(raw_value)
+
+
+def _seat_snapshot_structure_is_valid(snapshot):
+    if not _seat_snapshot_route_is_valid(snapshot):
+        return False
+    if not snapshot.quantity_limit_present or _counter_value(
+        snapshot.quantity_limit_raw
+    ) is None:
+        return False
+    if not 0 < len(snapshot.ticket_types) <= 100 or len(snapshot.seats) > 5000:
+        return False
+    seat_fingerprints = [seat[0] for seat in snapshot.seats]
+    counter_ids = [counter[0] for counter in snapshot.counters]
+    if len(set(seat_fingerprints)) != len(seat_fingerprints):
+        return False
+    if any(not item for item in counter_ids) or len(set(counter_ids)) != len(counter_ids):
+        return False
+    if any(_counter_value(raw) is None for _type_id, raw in snapshot.counters):
+        return False
+    selected = [seat for seat in snapshot.seats if seat[9]]
+    return (
+        all(not (seat[8] and seat[9]) for seat in snapshot.seats)
+        and len(selected) == snapshot.visual_selected_count
+        and len(snapshot.submitted_seats) <= len(snapshot.seats)
+    )
+
+
+def _target_seat_ticket_type(snapshot, keyword):
+    candidates = []
+    seen_fingerprints = set()
+    seen_type_ids = set()
+    counter_map = dict(snapshot.counters)
+    for ticket_type in snapshot.ticket_types:
+        fingerprint, text, disabled, type_id, type_name, present, raw = ticket_type
+        if fingerprint in seen_fingerprints:
+            return None, "invalid-snapshot"
+        seen_fingerprints.add(fingerprint)
+        if disabled:
+            continue
+        if (
+            not text or not type_id or not type_name or not present
+            or type_id in seen_type_ids or _counter_value(raw) is None
+            or counter_map.get(type_id) != raw
+        ):
+            return None, "invalid-snapshot"
+        seen_type_ids.add(type_id)
+        candidates.append({"text": text, "ticket_type": ticket_type})
+    target_index = choose_candidate_index(
+        candidates, keyword, "from top to bottom", allow_fallback=False
+    )
+    if target_index is None:
+        return None, "ticket-type-unavailable"
+    return candidates[target_index]["ticket_type"], ""
+
+
+def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
+                            ticket_type_name):
+    """Audit visual seats, submitted payload and every ticket counter."""
+    snapshot = parse_seat_snapshot(snapshot)
+    try:
+        requested = int(ticket_number)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok or requested <= 0:
+        return False
+    selected = [seat for seat in snapshot.seats if seat[9]]
+    if len(selected) != requested or snapshot.visual_selected_count != requested:
+        return False
+    if len(snapshot.submitted_seats) != requested or any(
+        payload != ("S", ticket_type_id, ticket_type_name)
+        for payload in snapshot.submitted_seats
+    ):
+        return False
+    counts = [(type_id, _counter_value(raw)) for type_id, raw in snapshot.counters]
+    if any(value is None for _type_id, value in counts):
+        return False
+    targets = [value for type_id, value in counts if type_id == ticket_type_id]
+    return (
+        len(targets) == 1 and targets[0] == requested
+        and sum(value for _type_id, value in counts) == requested
+    )
+
+
+def _seat_request(snapshot, ticket_number):
+    try:
+        requested = int(ticket_number)
+    except (TypeError, ValueError):
+        return None
+    limit = _counter_value(snapshot.quantity_limit_raw)
+    if requested <= 0 or limit is None or (limit and requested > limit):
+        return None
+    return requested
+
+
+def _seat_dicts(snapshot):
+    return [
+        {
+            "index": index, "title": seat[1], "row_index": seat[2],
+            "cell_index": seat[3], "center_x": seat[4], "center_y": seat[5],
+            "width": seat[6], "height": seat[7], "available": seat[8],
+            "selected": seat[9],
+        }
+        for index, seat in enumerate(snapshot.seats)
+    ]
+
+
+def _seat_targets_are_adjacent(snapshot, fingerprints):
+    by_fingerprint = dict(zip(
+        (seat[0] for seat in snapshot.seats), _seat_dicts(snapshot)
+    ))
+    targets = [by_fingerprint.get(fingerprint) for fingerprint in fingerprints]
+    return bool(all(targets)) and all(
+        seats_are_physically_adjacent(targets[index], targets[index + 1])
+        for index in range(len(targets) - 1)
+    )
+
+
+def _make_seat_plan(snapshot, ticket_type, action, requested,
+                    selected=(), targets=(), require_adjacency=False):
+    return SeatActionPlan(
+        page_url=snapshot.page_url,
+        document_id=snapshot.document_id,
+        performance_id=snapshot.performance_id,
+        group_id=snapshot.group_id,
+        price_area_id=snapshot.price_area_id,
+        product_id=snapshot.product_id,
+        action=action,
+        ticket_number=requested,
+        ticket_type_fingerprint=ticket_type[0],
+        ticket_type_id=ticket_type[3],
+        ticket_type_name=ticket_type[4],
+        selected_seat_fingerprints=tuple(selected),
+        target_seat_fingerprints=tuple(targets),
+        require_physical_adjacency=require_adjacency,
+    )
+
+
+def _seat_state_is_clean(snapshot):
+    return (
+        snapshot.visual_selected_count == 0
+        and not snapshot.submitted_seats
+        and not any(seat[9] for seat in snapshot.seats)
+        and all(_counter_value(raw) == 0 for _type_id, raw in snapshot.counters)
+    )
+
+
+def select_seat_snapshot(snapshot, keyword, ticket_number,
+                         allow_non_adjacent=False, seat_sorting="row_seat"):
+    """Plan one clear, select or ready action from a reserved-seat snapshot."""
+    snapshot = parse_seat_snapshot(snapshot)
+    if not isinstance(snapshot, SeatSnapshot) or not _seat_snapshot_structure_is_valid(snapshot):
+        return None, "invalid-snapshot"
+    requested = _seat_request(snapshot, ticket_number)
+    if requested is None:
+        return None, "seats-unavailable"
+    ticket_type, reason = _target_seat_ticket_type(snapshot, keyword)
+    if ticket_type is None:
+        return None, reason
+    selected = tuple(seat[0] for seat in snapshot.seats if seat[9])
+    if seat_selection_is_valid(
+        snapshot, requested, ticket_type[3], ticket_type[4]
+    ):
+        return _make_seat_plan(
+            snapshot, ticket_type, "ready", requested, selected=selected
+        ), ""
+    if selected:
+        return _make_seat_plan(
+            snapshot, ticket_type, "clear", requested, selected=selected
+        ), ""
+    if not _seat_state_is_clean(snapshot):
+        return None, "invalid-snapshot"
+    seats = _seat_dicts(snapshot)
+    indexes = select_seat_indexes(
+        seats, requested, allow_non_adjacent, seat_sorting
+    )
+    if len(indexes) != requested:
+        return None, "seats-unavailable"
+    targets = tuple(snapshot.seats[index][0] for index in indexes)
+    return _make_seat_plan(
+        snapshot, ticket_type, "select", requested, targets=targets,
+        require_adjacency=(
+            not allow_non_adjacent or seat_sorting == "row_asc_aisle"
+        ),
+    ), ""
+
+
+def _seat_plan_identity_matches(snapshot, plan):
+    if (
+        plan.page_url != snapshot.page_url
+        or plan.document_id != snapshot.document_id
+        or plan.performance_id != snapshot.performance_id
+        or plan.group_id != snapshot.group_id
+        or plan.price_area_id != snapshot.price_area_id
+        or plan.product_id != snapshot.product_id
+        or plan.action not in {"clear", "select", "ready"}
+        or type(plan.require_physical_adjacency) is not bool
+    ):
+        return False
+    matching_types = [
+        item for item in snapshot.ticket_types
+        if item[0] == plan.ticket_type_fingerprint
+    ]
+    counter_map = dict(snapshot.counters)
+    return bool(
+        len(matching_types) == 1
+        and matching_types[0][3] == plan.ticket_type_id
+        and matching_types[0][4] == plan.ticket_type_name
+        and not matching_types[0][2]
+        and matching_types[0][5]
+        and _counter_value(matching_types[0][6]) is not None
+        and counter_map.get(plan.ticket_type_id) == matching_types[0][6]
+    )
+
+
+def seat_plan_matches_snapshot(snapshot, plan):
+    """Verify action grammar before the browser-side atomic revalidation."""
+    snapshot = parse_seat_snapshot(snapshot)
+    if (
+        not isinstance(snapshot, SeatSnapshot)
+        or not isinstance(plan, SeatActionPlan)
+        or not _seat_snapshot_structure_is_valid(snapshot)
+        or not _seat_plan_identity_matches(snapshot, plan)
+        or _seat_request(snapshot, plan.ticket_number) is None
+    ):
+        return False
+    selected = tuple(seat[0] for seat in snapshot.seats if seat[9])
+    if plan.selected_seat_fingerprints != selected:
+        return False
+    valid = seat_selection_is_valid(
+        snapshot, plan.ticket_number, plan.ticket_type_id, plan.ticket_type_name
+    )
+    if plan.action == "ready":
+        return (
+            valid and not plan.target_seat_fingerprints
+            and not plan.require_physical_adjacency
+        )
+    if plan.action == "clear":
+        return bool(
+            selected and not valid and not plan.target_seat_fingerprints
+            and not plan.require_physical_adjacency
+        )
+    if selected or not _seat_state_is_clean(snapshot):
+        return False
+    by_fingerprint = {seat[0]: seat for seat in snapshot.seats}
+    targets = plan.target_seat_fingerprints
+    targets_match = bool(
+        len(targets) == plan.ticket_number == len(set(targets))
+        and all(
+            fingerprint in by_fingerprint
+            and by_fingerprint[fingerprint][8]
+            and not by_fingerprint[fingerprint][9]
+            for fingerprint in targets
+        )
+    )
+    if not targets_match or not plan.require_physical_adjacency:
+        return targets_match
+    return _seat_targets_are_adjacent(snapshot, targets)
 
 
 def quantity_audit_is_valid(quantities, target_key, ticket_number):

@@ -43,6 +43,7 @@ from .dom import (
     SubmitDispatchResult,
     commit_area,
     commit_date_action,
+    commit_seat,
     commit_server_assigned_area,
     commit_quantity,
     dismiss_dialog,
@@ -51,6 +52,7 @@ from .dom import (
     read_date_snapshot,
     read_dialog_snapshot,
     read_quantity_snapshot,
+    read_seat_snapshot,
 )
 from .profiles import (
     CTBC_MAP_DOMAIN,
@@ -70,11 +72,12 @@ from .selection import (
     DialogSnapshot,
     QuantityPlan,
     QuantitySnapshot,
-    choose_candidate_index as _choose_candidate_index,
+    SeatSnapshot,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     select_area_snapshot as _select_ctbc_area_snapshot,
     select_date_snapshot,
     select_quantity_snapshot,
+    select_seat_snapshot,
 )
 
 
@@ -101,6 +104,7 @@ CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
 CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
 CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
+CTBC_SEAT_STALE_RELOAD_REASON = "requested seats are unavailable"
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
@@ -114,7 +118,6 @@ _state = {
     "seat_conflict_pending": {},
     "submit_blocked": {},
     "checkout_notified": set(),
-    "ticket_type": {},
     "auth_failure": {},
     "captcha_reset": {},
     "pending_navigation": {},
@@ -416,174 +419,6 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
         )
         and _get_ctbc_page_type(destination_url) == "checkout"
         and _ctbc_same_origin(source, destination)
-    )
-
-
-def _select_ctbc_seat_indexes(
-    seats,
-    needed,
-    allow_non_adjacent=False,
-    seat_sorting="row_seat",
-):
-    """Return seat indexes using an explicit display or numeric priority."""
-    if needed <= 0:
-        return []
-
-    numeric_sortings = {
-        "row_seat",
-        "row_asc_aisle",
-        "row_asc_seat_desc",
-        "row_desc_seat_asc",
-    }
-    if seat_sorting not in numeric_sortings | {"display"}:
-        seat_sorting = "row_seat"
-
-    full_row_edges = {}
-    for seat in seats:
-        title = str(seat.get("title", "") or "").strip()
-        match = re.search(r"-(\d+)排-(\d+)號\s*$", title)
-        if not match:
-            if seat_sorting == "row_asc_aisle" and title:
-                return []
-            continue
-        row_number = int(match.group(1))
-        seat_number = int(match.group(2))
-        row_edges = full_row_edges.setdefault(
-            row_number,
-            {"min_seat_number": seat_number, "max_seat_number": seat_number},
-        )
-        row_edges["min_seat_number"] = min(
-            row_edges["min_seat_number"], seat_number
-        )
-        row_edges["max_seat_number"] = max(
-            row_edges["max_seat_number"], seat_number
-        )
-
-    available = [seat for seat in seats if seat.get("available") and not seat.get("selected")]
-    if len(available) < needed:
-        return []
-
-    rows = {}
-    for seat in available:
-        title = seat.get("title", "")
-        match = re.search(r"-(\d+)排-(\d+)號\s*$", title)
-        if not match:
-            continue
-        row_number = int(match.group(1))
-        seat_number = int(match.group(2))
-        parsed_seat = dict(seat)
-        parsed_seat["_row_number"] = row_number
-        parsed_seat["_seat_number"] = seat_number
-        rows.setdefault(row_number, []).append(parsed_seat)
-
-    block_candidates = []
-    for row_number, seats_in_row in rows.items():
-        row_seats = sorted(seats_in_row, key=lambda item: item["_seat_number"])
-        for start in range(0, len(row_seats) - needed + 1):
-            block = row_seats[start:start + needed]
-            if all(
-                _ctbc_seats_are_physically_adjacent(block[offset], block[offset + 1])
-                for offset in range(len(block) - 1)
-            ):
-                row_edges = full_row_edges[row_number]
-                min_seat_number = min(item["_seat_number"] for item in block)
-                max_seat_number = max(item["_seat_number"] for item in block)
-                block_candidates.append({
-                    "seats": block,
-                    "row_number": row_number,
-                    "min_seat_number": min_seat_number,
-                    "max_seat_number": max_seat_number,
-                    "dom_index": min(item.get("index", 0) for item in block),
-                    "touches_aisle": (
-                        min_seat_number == row_edges["min_seat_number"]
-                        or max_seat_number == row_edges["max_seat_number"]
-                    ),
-                })
-
-    if block_candidates:
-        if seat_sorting == "row_asc_aisle":
-            block_candidates = [
-                item for item in block_candidates if item["touches_aisle"]
-            ]
-            if not block_candidates:
-                return []
-            block_candidates.sort(key=lambda item: (
-                item["row_number"], item["dom_index"],
-            ))
-        elif seat_sorting == "display":
-            block_candidates.sort(key=lambda item: item["dom_index"])
-        elif seat_sorting == "row_seat":
-            block_candidates.sort(key=lambda item: (
-                item["row_number"], item["min_seat_number"],
-                item["dom_index"],
-            ))
-        elif seat_sorting == "row_asc_seat_desc":
-            block_candidates.sort(key=lambda item: (
-                item["row_number"], -item["max_seat_number"],
-                item["dom_index"],
-            ))
-        elif seat_sorting == "row_desc_seat_asc":
-            block_candidates.sort(key=lambda item: (
-                -item["row_number"], item["min_seat_number"],
-                item["dom_index"],
-            ))
-        target_seats = sorted(
-            block_candidates[0]["seats"], key=lambda item: item.get("index", 0)
-        )
-        return [seat["index"] for seat in target_seats]
-
-    if seat_sorting == "row_asc_aisle" or not allow_non_adjacent:
-        return []
-
-    ordered_available = available
-    if seat_sorting in numeric_sortings:
-        def numeric_seat_key(seat):
-            match = re.search(r"-(\d+)排-(\d+)號\s*$", seat.get("title", ""))
-            if not match:
-                return (1, 0, 0, seat.get("row_index", 0), seat.get("cell_index", 0))
-            row_number = int(match.group(1))
-            seat_number = int(match.group(2))
-            if seat_sorting == "row_asc_seat_desc":
-                row_number, seat_number = row_number, -seat_number
-            elif seat_sorting == "row_desc_seat_asc":
-                row_number, seat_number = -row_number, seat_number
-            return (
-                0,
-                row_number,
-                seat_number,
-                seat.get("row_index", 0),
-                seat.get("cell_index", 0),
-            )
-
-        ordered_available = sorted(available, key=numeric_seat_key)
-
-    chosen = ordered_available[:needed]
-    return [seat["index"] for seat in chosen]
-
-
-def _ctbc_seats_are_physically_adjacent(first, second):
-    """Support both horizontal and rotated vertical UTK seat-map layouts."""
-    coordinate_fields = ("center_x", "center_y", "width", "height")
-    if all(
-        isinstance(seat.get(field), (int, float))
-        for seat in (first, second)
-        for field in coordinate_fields
-    ):
-        dx = abs(first["center_x"] - second["center_x"])
-        dy = abs(first["center_y"] - second["center_y"])
-        seat_size = max(
-            first["width"], first["height"], second["width"], second["height"]
-        )
-        if seat_size > 0:
-            aligned = min(dx, dy) <= max(2.0, seat_size * 0.35)
-            close = max(dx, dy) <= seat_size * 1.6
-            distinct = max(dx, dy) >= seat_size * 0.35
-            return aligned and close and distinct
-
-    row_delta = abs(first.get("row_index", 0) - second.get("row_index", 0))
-    cell_delta = abs(first.get("cell_index", 0) - second.get("cell_index", 0))
-    return (row_delta == 0 and cell_delta == 1) or (
-        row_delta == 1 and cell_delta == 0
     )
 
 
@@ -1379,6 +1214,15 @@ async def _poll_ctbc_quantity_reload(tab, config_dict):
     return True
 
 
+async def _poll_ctbc_seat_reload(tab, config_dict):
+    """Continue one queued reserved-seat recovery without resetting its interval."""
+    request = _state["reload_request"].get(_ctbc_tab_identity(tab))
+    if not request or request.get("reason") != CTBC_SEAT_STALE_RELOAD_REASON:
+        return False
+    await _reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
+    return True
+
+
 async def nodriver_utk_sports_health_check(tab, url, config_dict):
     """Run only rate-limit recovery, without selecting any ticket control."""
     guard_state, _ = await _utk_document_guard(tab, config_dict, url)
@@ -1392,14 +1236,6 @@ async def nodriver_utk_sports_health_check(tab, url, config_dict):
             allow_blocked_recovery=True,
         )
     return guard_state
-
-
-async def _element_text(element):
-    try:
-        html = await element.get_html()
-        return re.sub(r"\s+", " ", util.remove_html_tags(html)).strip()
-    except Exception:
-        return ""
 
 
 def _decode_ctbc_json_result(raw_value):
@@ -2092,146 +1928,6 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         return False
 
 
-async def nodriver_ctbc_ticket_type_auto_select(tab, config_dict):
-    debug = util.create_debug_logger(config_dict)
-    buttons = []
-    for _ in range(10):
-        try:
-            buttons = await tab.query_selector_all('.ticket button[onclick*="setType"]')
-        except Exception:
-            buttons = []
-        if buttons:
-            break
-        await tab.sleep(0.2)
-
-    candidates = []
-    for button in buttons or []:
-        try:
-            disabled = await button.apply('function(el) { return !!el.disabled; }')
-            text = await _element_text(button)
-            if disabled or not text:
-                continue
-            candidates.append({"text": text, "element": button})
-        except Exception as exc:
-            debug.log(f"[CTBC TICKET TYPE] Failed to inspect button: {exc}")
-
-    keyword = _get_utiki_behavior(config_dict, "ticket_type_keyword", "全票")
-    target_index = _choose_candidate_index(candidates, keyword, "from top to bottom", False)
-    if target_index is None:
-        debug.log(f"[CTBC TICKET TYPE] No ticket type matched: {keyword}")
-        return False
-
-    try:
-        target = candidates[target_index]
-        await target["element"].click()
-        counter = await target["element"].query_selector('.checkNum')
-        if not counter:
-            return False
-        type_id = await counter.apply('function(el) { return el.id || ""; }')
-        type_name = await counter.apply('function(el) { return el.getAttribute("val") || ""; }')
-        if not type_id or not type_name:
-            return False
-        _state["ticket_type"][_ctbc_tab_state_key(tab)] = {
-            "id": type_id,
-            "name": type_name,
-        }
-        debug.log(f"[CTBC TICKET TYPE] Selected: {target['text']}")
-        return True
-    except Exception as exc:
-        debug.log(f"[CTBC TICKET TYPE] Click failed: {exc}")
-        return False
-
-
-async def nodriver_ctbc_seat_auto_select(tab, config_dict):
-    debug = util.create_debug_logger(config_dict)
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    seat_elements = []
-    for _ in range(12):
-        try:
-            seat_elements = await tab.query_selector_all('#TBL td[title]')
-        except Exception:
-            seat_elements = []
-        if seat_elements:
-            break
-        await tab.sleep(0.2)
-
-    raw_state = await tab.evaluate('''
-        (() => {
-            const seats = Array.from(document.querySelectorAll('#TBL td[title]'));
-            const metadata = seats.map((seat, index) => {
-                const style = (seat.getAttribute('style') || '').toLowerCase();
-                const selected = style.includes('icon_chair_select');
-                const available = !selected &&
-                    (style.includes('seat-empty') || getComputedStyle(seat).cursor === 'pointer');
-                const rect = seat.getBoundingClientRect();
-                return {
-                    index: index,
-                    title: seat.getAttribute('title') || '',
-                    row_index: seat.parentElement ? seat.parentElement.rowIndex : 0,
-                    cell_index: seat.cellIndex,
-                    center_x: rect.left + rect.width / 2,
-                    center_y: rect.top + rect.height / 2,
-                    width: rect.width,
-                    height: rect.height,
-                    selected: selected,
-                    available: available
-                };
-            });
-            const limitInput = document.querySelector('#QUANTITY_LIMIT');
-            return {
-                seats: metadata,
-                selected_count: metadata.filter(seat => seat.selected).length,
-                quantity_limit: limitInput ? parseInt(limitInput.value || '0', 10) : 0
-            };
-        })()
-    ''')
-    state = util.parse_nodriver_result(raw_state)
-    if not isinstance(state, dict):
-        return False
-
-    selected_count = int(state.get("selected_count", 0) or 0)
-    if selected_count >= ticket_number:
-        return await _validate_ctbc_seat_selection(tab, config_dict)
-
-    quantity_limit = int(state.get("quantity_limit", 0) or 0)
-    if quantity_limit and ticket_number > quantity_limit:
-        debug.log(f"[CTBC SEAT] Requested {ticket_number}, limit is {quantity_limit}")
-        return False
-
-    needed = ticket_number - selected_count
-    indexes = _select_ctbc_seat_indexes(
-        state.get("seats", []),
-        needed,
-        config_dict.get("advanced", {}).get("disable_adjacent_seat", False),
-        _get_utiki_behavior(config_dict, "seat_sorting", "row_seat"),
-    )
-    if len(indexes) != needed:
-        debug.log(f"[CTBC SEAT] No suitable block for {needed} seat(s)")
-        return False
-
-    clicked = 0
-    for index in indexes:
-        if index < 0 or index >= len(seat_elements):
-            continue
-        try:
-            await seat_elements[index].click()
-            clicked += 1
-        except Exception:
-            try:
-                await seat_elements[index].apply('function(el) { el.click(); }')
-                clicked += 1
-            except Exception as exc:
-                debug.log(f"[CTBC SEAT] Click failed at index {index}: {exc}")
-
-    if clicked != needed:
-        return False
-
-    await tab.sleep(0.2)
-    verified = await _validate_ctbc_seat_selection(tab, config_dict)
-    debug.log(f"[CTBC SEAT] Selected {clicked} seat(s), verified={verified}")
-    return verified
-
-
 async def _get_ctbc_selected_seat_titles(tab):
     raw = await tab.evaluate('''
         (() => JSON.stringify(
@@ -2267,83 +1963,6 @@ async def _clear_ctbc_selected_seats(tab, config_dict):
     if selected:
         await tab.sleep(0.2)
     return len(await _get_ctbc_selected_seat_titles(tab)) == 0
-
-
-async def _validate_ctbc_seat_selection(tab, config_dict):
-    """Mirror CTBC's cart payload and fail closed on mixed/extra seats."""
-    debug = util.create_debug_logger(config_dict)
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    type_info = _state["ticket_type"].get(_ctbc_tab_state_key(tab))
-    if not type_info:
-        return False
-
-    raw = await tab.evaluate(f'''
-        (() => {{
-            const targetId = {json.dumps(type_info["id"])};
-            const target = document.getElementById(targetId);
-            if (!target || !window.seats) return JSON.stringify({{reason: 'state-missing'}});
-
-            const counters = Array.from(document.querySelectorAll('.ticket .checkNum')).map(el => ({{
-                id: el.id || '',
-                count: Number((el.textContent || '').trim() || 0)
-            }}));
-            const submittedSeats = Object.values(window.seats).filter(
-                seat => seat && String(seat.A || '') !== ''
-            ).map(seat => ({{A: seat.A || '', Y: seat.Y || '', Z: seat.Z || ''}}));
-            const visualCount = Array.from(document.querySelectorAll('#TBL td[title]')).filter(
-                seat => getComputedStyle(seat).backgroundImage.includes('icon_chair_select_')
-            ).length;
-            return JSON.stringify({{
-                submitted_seats: submittedSeats,
-                counters: counters,
-                visual_count: visualCount
-            }});
-        }})()
-    ''')
-    try:
-        audit = json.loads(raw) if isinstance(raw, str) else {}
-    except (TypeError, ValueError):
-        audit = {}
-    is_valid = _ctbc_seat_audit_is_valid(audit, ticket_number, type_info)
-    if not is_valid:
-        debug.log(f"[CTBC SEAT] Strict selection audit failed: {audit}")
-    return is_valid
-
-
-def _ctbc_seat_audit_is_valid(audit, ticket_number, type_info):
-    if not isinstance(audit, dict) or not isinstance(type_info, dict):
-        return False
-    submitted_seats = audit.get("submitted_seats")
-    counters = audit.get("counters")
-    if not isinstance(submitted_seats, list) or not isinstance(counters, list):
-        return False
-    if len(submitted_seats) != ticket_number or audit.get("visual_count") != ticket_number:
-        return False
-    if any(
-        seat.get("A") != "S"
-        or seat.get("Y") != type_info.get("id")
-        or seat.get("Z") != type_info.get("name")
-        for seat in submitted_seats
-        if isinstance(seat, dict)
-    ) or any(not isinstance(seat, dict) for seat in submitted_seats):
-        return False
-
-    target_count = None
-    other_count = 0
-    total_count = 0
-    for counter in counters:
-        if not isinstance(counter, dict):
-            return False
-        try:
-            count = int(counter.get("count", 0))
-        except (TypeError, ValueError):
-            return False
-        total_count += count
-        if counter.get("id") == type_info.get("id"):
-            target_count = count
-        else:
-            other_count += count
-    return target_count == ticket_number and other_count == 0 and total_count == ticket_number
 
 
 async def _fill_ctbc_inline_login(tab, config_dict):
@@ -3056,25 +2675,87 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
         return False
     if dialog_outcome is not None:
         return False
-
-    selected_titles = await _get_ctbc_selected_seat_titles(tab)
-    if not await nodriver_ctbc_ticket_type_auto_select(tab, config_dict):
+    if await _poll_ctbc_seat_reload(tab, config_dict):
         return False
 
-    selection_ready = await _validate_ctbc_seat_selection(tab, config_dict)
-    if not selection_ready:
-        if selected_titles and not await _clear_ctbc_selected_seats(tab, config_dict):
-            return False
-        if not await nodriver_ctbc_seat_auto_select(tab, config_dict):
-            await _reload_with_interval(tab, config_dict, "requested seats are unavailable")
-            return False
+    debug = util.create_debug_logger(config_dict)
+    try:
+        snapshot = await read_seat_snapshot(tab)
+    except Exception as exc:
+        debug.log(f"[CTBC SEAT] Seat snapshot failed: {exc}")
+        return False
+    if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok:
+        reason = (
+            snapshot.reason
+            if isinstance(snapshot, SeatSnapshot)
+            else "invalid-result"
+        )
+        debug.log(f"[CTBC SEAT] Reserved-seat page was not ready: {reason}")
+        return False
 
-    await nodriver_utk_sports_cancel_refresh(tab, "requested seats selected")
-    # Audit again immediately before captcha/submit to block mixed or stale state.
-    if not await _validate_ctbc_seat_selection(tab, config_dict):
+    ticket_number = int(config_dict.get("ticket_number", 1))
+    keyword = _get_utiki_behavior(
+        config_dict, "ticket_type_keyword", "全票"
+    )
+    plan, reason = select_seat_snapshot(
+        snapshot,
+        keyword,
+        ticket_number,
+        config_dict.get("advanced", {}).get("disable_adjacent_seat", False),
+        _get_utiki_behavior(config_dict, "seat_sorting", "row_seat"),
+    )
+    if plan is None:
+        if reason == "seats-unavailable":
+            await _reload_with_interval(
+                tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON
+            )
+        elif reason == "ticket-type-unavailable":
+            debug.log(f"[CTBC SEAT] No ticket type matched: {keyword}")
+        else:
+            debug.log(f"[CTBC SEAT] Reserved-seat snapshot rejected: {reason}")
+        return False
+
+    await nodriver_utk_sports_cancel_refresh(tab, "reserved-seat plan ready")
+    try:
+        commit_result = await commit_seat(tab, snapshot, plan)
+    except Exception as exc:
+        debug.log(f"[CTBC SEAT] Seat commit outcome is unknown: {exc}")
+        await _reload_with_interval(
+            tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON
+        )
+        return False
+    if not await _reduce_utiki_seat_commit(
+        tab, config_dict, plan, commit_result, debug
+    ):
         return False
 
     return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
+
+
+async def _reduce_utiki_seat_commit(
+    tab, config_dict, plan, commit_result, debug
+):
+    """Reduce one reserved-seat commit without entering submit prematurely."""
+    if commit_result in {CommitResult.STALE, CommitResult.REJECTED}:
+        outcome = commit_result.value
+        debug.log(
+            f"[CTBC SEAT] Seat commit {outcome}; waiting to reload"
+        )
+        await _reload_with_interval(
+            tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON
+        )
+        return False
+    if commit_result is not CommitResult.COMMITTED:
+        debug.log("[CTBC SEAT] Seat commit outcome was unknown; submit blocked")
+        return False
+    if plan.action == "clear":
+        debug.log("[CTBC SEAT] Cleared an invalid reserved-seat selection")
+        return False
+    debug.log(
+        f"[CTBC SEAT] Reserved-seat selection ready: "
+        f"{plan.ticket_number} x {plan.ticket_type_name}"
+    )
+    return True
 
 
 async def _reduce_utiki_quantity_commit(

@@ -14,11 +14,15 @@ from .selection import (
     DialogSnapshot,
     QuantityPlan,
     QuantitySnapshot,
+    SeatActionPlan,
+    SeatSnapshot,
     date_plan_matches_snapshot,
     parse_area_snapshot,
     parse_date_snapshot,
     parse_dialog_snapshot,
     parse_quantity_snapshot,
+    parse_seat_snapshot,
+    seat_plan_matches_snapshot,
 )
 from .profiles import (
     PageKind,
@@ -37,6 +41,10 @@ CONST_GENERAL_ADMISSION_ROUTES = tuple(
     (f"https://{profile.host}", f"{profile.tenant_path}/UTK020{route}_")
     for profile in TENANT_PROFILES.values()
     for route in (2, 3)
+)
+CONST_RESERVED_SEAT_ROUTES = tuple(
+    (f"https://{profile.host}", f"{profile.tenant_path}/UTK0205_")
+    for profile in TENANT_PROFILES.values()
 )
 
 
@@ -886,6 +894,529 @@ async def commit_server_assigned_area(
         raise RuntimeError(
             "server-assigned area commit outcome is unknown"
         )
+
+
+CONST_SEAT_SNAPSHOT_SCRIPT = r'''
+        (() => {
+            // __ticketsHunterUtikiSeatSnapshot
+            const pageUrl = location.href;
+            const documentId = String(performance.timeOrigin);
+            const result = (ok, reason, values = {}) => JSON.stringify({
+                ok, reason, page_url: pageUrl, document_id: documentId,
+                ...values
+            });
+            const visible = element => {
+                if (!element || !element.isConnected ||
+                    element.closest('[hidden], [inert], [aria-hidden="true"]')) {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            };
+            const normalize = value => String(value || '')
+                .replace(/\s+/g, ' ').trim();
+            const query = new URLSearchParams(location.search);
+            const queryValue = key => {
+                const values = query.getAll(key);
+                return values.length === 1 ? values[0] : null;
+            };
+            const performanceId = queryValue('PERFORMANCE_ID');
+            const groupId = queryValue('GROUP_ID');
+            const priceAreaId = queryValue('PERFORMANCE_PRICE_AREA_ID');
+            const token = /^[A-Za-z0-9_-]+$/;
+            if (![performanceId, groupId, priceAreaId].every(
+                value => typeof value === 'string' && token.test(value))) {
+                return result(false, 'identity');
+            }
+            const exactHidden = (selector, expected) => {
+                const inputs = Array.from(document.querySelectorAll(selector));
+                return inputs.length === 1 &&
+                    (inputs[0].value || '') === expected;
+            };
+            const productInputs = Array.from(
+                document.querySelectorAll('#PRODUCT_ID'));
+            const productId = productInputs.length === 1 ?
+                (productInputs[0].value || '') : '';
+            const limitInputs = Array.from(
+                document.querySelectorAll('#QUANTITY_LIMIT'));
+            const limitRaw = limitInputs.length === 1 ?
+                normalize(limitInputs[0].value) : '';
+            if (!exactHidden('#PERFORMANCE_ID', performanceId) ||
+                !exactHidden('#GROUP_ID', groupId) ||
+                !exactHidden('#PRICE_AREA_ID', priceAreaId) ||
+                productInputs.length !== 1 || !token.test(productId) ||
+                limitInputs.length !== 1 || !/^\d+$/.test(limitRaw)) {
+                return result(false, 'identity');
+            }
+            const seatRoots = Array.from(document.querySelectorAll('#TBL'));
+            const ticketRoots = Array.from(
+                document.querySelectorAll('.ticket'));
+            if (seatRoots.length !== 1 || !visible(seatRoots[0]) ||
+                ticketRoots.length !== 1 || !visible(ticketRoots[0])) {
+                return result(false, 'scope');
+            }
+            if (!window.seats || typeof window.seats !== 'object' ||
+                Array.isArray(window.seats)) {
+                return result(false, 'state');
+            }
+            const ticketLabel = button => {
+                const clone = button.cloneNode(true);
+                clone.querySelectorAll('.checkNum').forEach(node => node.remove());
+                return normalize(clone.textContent);
+            };
+            const ticketTypes = Array.from(ticketRoots[0].querySelectorAll(
+                'button[onclick*="setType"]')).map((button, index) => {
+                const counters = Array.from(
+                    button.querySelectorAll('.checkNum'));
+                const counter = counters.length === 1 ? counters[0] : null;
+                const text = ticketLabel(button);
+                const typeId = counter ? (counter.id || '') : '';
+                const typeName = counter ?
+                    (counter.getAttribute('val') || '') : '';
+                return {
+                    fingerprint: [
+                        index, button.tagName.toLowerCase(), button.id || '',
+                        button.getAttribute('type') || '',
+                        button.getAttribute('name') || '',
+                        button.getAttribute('value') || '',
+                        button.getAttribute('onclick') || '', text,
+                        typeId, typeName
+                    ],
+                    text,
+                    disabled: !!button.disabled || !visible(button) ||
+                        button.getAttribute('aria-disabled') === 'true',
+                    type_id: typeId,
+                    type_name: typeName,
+                    counter_present: counters.length === 1,
+                    counter_raw: counter ? normalize(counter.textContent) : ''
+                };
+            });
+            if (!ticketTypes.length) return result(false, 'not-ready');
+            const seatNodes = Array.from(
+                seatRoots[0].querySelectorAll('td[title]'));
+            const seats = seatNodes.map((seat, index) => {
+                const inline = (seat.getAttribute('style') || '').toLowerCase();
+                const style = getComputedStyle(seat);
+                const background = (style.backgroundImage || '').toLowerCase();
+                const selected = inline.includes('icon_chair_select') ||
+                    background.includes('icon_chair_select');
+                const available = !selected && (
+                    inline.includes('seat-empty') ||
+                    background.includes('seat-empty') ||
+                    style.cursor === 'pointer');
+                const rect = seat.getBoundingClientRect();
+                const title = normalize(seat.getAttribute('title'));
+                const rowIndex = seat.parentElement ? seat.parentElement.rowIndex : -1;
+                const cellIndex = seat.cellIndex;
+                return {
+                    fingerprint: [
+                        index, title, rowIndex, cellIndex, seat.id || '',
+                        seat.getAttribute('onclick') || '',
+                        seat.getAttribute('data-seat-id') || ''
+                    ],
+                    title,
+                    row_index: rowIndex,
+                    cell_index: cellIndex,
+                    center_x: rect.left + rect.width / 2,
+                    center_y: rect.top + rect.height / 2,
+                    width: rect.width,
+                    height: rect.height,
+                    available,
+                    selected
+                };
+            });
+            const counters = Array.from(ticketRoots[0].querySelectorAll(
+                '.checkNum')).map(counter => ({
+                id: counter.id || '',
+                counter_raw: normalize(counter.textContent)
+            }));
+            const submitted = Object.values(window.seats)
+                .filter(seat => seat && String(seat.A || '') !== '')
+                .map(seat => ({
+                    A: String(seat.A || ''),
+                    Y: String(seat.Y || ''),
+                    Z: String(seat.Z || '')
+                }));
+            return result(true, '', {
+                performance_id: performanceId,
+                group_id: groupId,
+                price_area_id: priceAreaId,
+                product_id: productId,
+                product_hidden_present: true,
+                quantity_limit_present: true,
+                quantity_limit_raw: limitRaw,
+                ticket_types: ticketTypes,
+                seats,
+                submitted_seats: submitted,
+                counters,
+                visual_selected_count: seats.filter(seat => seat.selected).length
+            });
+        })()
+    '''
+
+
+async def read_seat_snapshot(tab):
+    """Read one combined ticket-type and reserved-seat snapshot."""
+    raw_value = await tab.evaluate(CONST_SEAT_SNAPSHOT_SCRIPT)
+    snapshot = parse_seat_snapshot(_decode_json_result(raw_value))
+    if (
+        isinstance(snapshot, SeatSnapshot)
+        and snapshot.ok
+        and classify_utiki_page(snapshot.page_url) != PageKind.RESERVED_SEAT
+    ):
+        return parse_seat_snapshot({
+            "ok": False,
+            "reason": "route",
+            "page_url": snapshot.page_url,
+            "document_id": snapshot.document_id,
+        })
+    return snapshot
+
+
+CONST_SEAT_COMMIT_SCRIPT = r'''
+        (() => {
+            // __ticketsHunterUtikiSeatCommit
+            const plan = __TICKETS_HUNTER_PLAN_JSON__;
+            const markerName = 'data-tickets-hunter-utiki-seat-commit';
+            const normalize = value => String(value || '')
+                .replace(/\s+/g, ' ').trim();
+            const same = (first, second) =>
+                JSON.stringify(first) === JSON.stringify(second);
+            const key = value => JSON.stringify(value);
+            const exactSet = (actual, expected) => {
+                const left = actual.map(key).sort();
+                const right = expected.map(key).sort();
+                return same(left, right);
+            };
+            const visible = element => {
+                if (!element || !element.isConnected ||
+                    element.closest('[hidden], [inert], [aria-hidden="true"]')) {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            };
+            const ticketLabel = button => {
+                const clone = button.cloneNode(true);
+                clone.querySelectorAll('.checkNum').forEach(node => node.remove());
+                return normalize(clone.textContent);
+            };
+            const ticketFingerprint = (button, index, counter) => [
+                index, button.tagName.toLowerCase(), button.id || '',
+                button.getAttribute('type') || '',
+                button.getAttribute('name') || '',
+                button.getAttribute('value') || '',
+                button.getAttribute('onclick') || '', ticketLabel(button),
+                counter ? (counter.id || '') : '',
+                counter ? (counter.getAttribute('val') || '') : ''
+            ];
+            const seatFingerprint = (seat, index) => [
+                index, normalize(seat.getAttribute('title')),
+                seat.parentElement ? seat.parentElement.rowIndex : -1,
+                seat.cellIndex, seat.id || '',
+                seat.getAttribute('onclick') || '',
+                seat.getAttribute('data-seat-id') || ''
+            ];
+            const inspect = () => {
+                if (location.href !== plan.pageUrl ||
+                    String(performance.timeOrigin) !== plan.documentId ||
+                    !plan.routes.some(route => location.origin === route[0] &&
+                        location.pathname === route[1])) {
+                    return {status: 'stale'};
+                }
+                const query = new URLSearchParams(location.search);
+                const exactQuery = (name, expected) => {
+                    const values = query.getAll(name);
+                    return values.length === 1 && values[0] === expected;
+                };
+                const exactHidden = (selector, expected) => {
+                    const inputs = Array.from(
+                        document.querySelectorAll(selector));
+                    return inputs.length === 1 &&
+                        (inputs[0].value || '') === expected;
+                };
+                const limitInputs = Array.from(
+                    document.querySelectorAll('#QUANTITY_LIMIT'));
+                if (!exactQuery('PERFORMANCE_ID', plan.performanceId) ||
+                    !exactQuery('GROUP_ID', plan.groupId) ||
+                    !exactQuery(
+                        'PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) ||
+                    !exactHidden('#PERFORMANCE_ID', plan.performanceId) ||
+                    !exactHidden('#GROUP_ID', plan.groupId) ||
+                    !exactHidden('#PRICE_AREA_ID', plan.priceAreaId) ||
+                    !exactHidden('#PRODUCT_ID', plan.productId) ||
+                    limitInputs.length !== 1 ||
+                    normalize(limitInputs[0].value) !== plan.quantityLimitRaw) {
+                    return {status: 'stale'};
+                }
+                const seatRoots = Array.from(document.querySelectorAll('#TBL'));
+                const ticketRoots = Array.from(
+                    document.querySelectorAll('.ticket'));
+                if (seatRoots.length !== 1 || !visible(seatRoots[0]) ||
+                    ticketRoots.length !== 1 || !visible(ticketRoots[0]) ||
+                    !window.seats ||
+                    typeof window.seats !== 'object' ||
+                    Array.isArray(window.seats)) {
+                    return {status: 'stale'};
+                }
+                const buttons = Array.from(ticketRoots[0].querySelectorAll(
+                    'button[onclick*="setType"]'));
+                const tickets = buttons.map((button, index) => {
+                    const matches = Array.from(
+                        button.querySelectorAll('.checkNum'));
+                    const counter = matches.length === 1 ? matches[0] : null;
+                    return {
+                        button,
+                        fingerprint: ticketFingerprint(button, index, counter),
+                        disabled: !!button.disabled || !visible(button) ||
+                            button.getAttribute('aria-disabled') === 'true',
+                        typeId: counter ? (counter.id || '') : '',
+                        typeName: counter ?
+                            (counter.getAttribute('val') || '') : '',
+                        counterCount: matches.length
+                    };
+                });
+                const seatNodes = Array.from(
+                    seatRoots[0].querySelectorAll('td[title]'));
+                const seats = seatNodes.map((seat, index) => {
+                    const inline = (seat.getAttribute('style') || '')
+                        .toLowerCase();
+                    const style = getComputedStyle(seat);
+                    const background = (style.backgroundImage || '')
+                        .toLowerCase();
+                    const selected = inline.includes('icon_chair_select') ||
+                        background.includes('icon_chair_select');
+                    const rect = seat.getBoundingClientRect();
+                    return {
+                        element: seat,
+                        fingerprint: seatFingerprint(seat, index),
+                        rowIndex: seat.parentElement ?
+                            seat.parentElement.rowIndex : -1,
+                        cellIndex: seat.cellIndex,
+                        centerX: rect.left + rect.width / 2,
+                        centerY: rect.top + rect.height / 2,
+                        width: rect.width,
+                        height: rect.height,
+                        selected,
+                        available: !selected && (
+                            inline.includes('seat-empty') ||
+                            background.includes('seat-empty') ||
+                            style.cursor === 'pointer')
+                    };
+                });
+                const counters = Array.from(ticketRoots[0].querySelectorAll(
+                    '.checkNum')).map(counter => ({
+                    id: counter.id || '', raw: normalize(counter.textContent)
+                }));
+                const counterIds = counters.map(counter => counter.id);
+                const seatKeys = seats.map(seat => key(seat.fingerprint));
+                const ticketKeys = tickets.map(ticket => key(ticket.fingerprint));
+                if (!tickets.length || counterIds.some(id => !id) ||
+                    new Set(counterIds).size !== counterIds.length ||
+                    counters.some(counter => !/^\d+$/.test(counter.raw)) ||
+                    new Set(seatKeys).size !== seatKeys.length ||
+                    new Set(ticketKeys).size !== ticketKeys.length) {
+                    return {status: 'stale'};
+                }
+                const submitted = Object.values(window.seats)
+                    .filter(seat => seat && String(seat.A || '') !== '')
+                    .map(seat => ({
+                        A: String(seat.A || ''),
+                        Y: String(seat.Y || ''),
+                        Z: String(seat.Z || '')
+                    }));
+                return {status: 'ok', tickets, seats, counters, submitted};
+            };
+            const targetTicket = live => live.tickets.filter(ticket =>
+                same(ticket.fingerprint, plan.ticketTypeFingerprint) &&
+                ticket.typeId === plan.ticketTypeId &&
+                ticket.typeName === plan.ticketTypeName &&
+                ticket.counterCount === 1 && !ticket.disabled);
+            const targetSeats = (live, fingerprints) => fingerprints.map(
+                fingerprint => live.seats.filter(seat =>
+                    same(seat.fingerprint, fingerprint)));
+            const physicallyAdjacent = (first, second) => {
+                const dx = Math.abs(first.centerX - second.centerX);
+                const dy = Math.abs(first.centerY - second.centerY);
+                const size = Math.max(
+                    first.width, first.height, second.width, second.height);
+                if ([dx, dy, size].every(Number.isFinite) && size > 0) {
+                    const aligned = Math.min(dx, dy) <=
+                        Math.max(2, size * 0.35);
+                    const close = Math.max(dx, dy) <= size * 1.6;
+                    const distinct = Math.max(dx, dy) >= size * 0.35;
+                    return aligned && close && distinct;
+                }
+                const rowDelta = Math.abs(first.rowIndex - second.rowIndex);
+                const cellDelta = Math.abs(first.cellIndex - second.cellIndex);
+                return (rowDelta === 0 && cellDelta === 1) ||
+                    (rowDelta === 1 && cellDelta === 0);
+            };
+            const targetsAdjacent = live => {
+                if (!plan.requirePhysicalAdjacency) return true;
+                const matches = targetSeats(
+                    live, plan.targetSeatFingerprints);
+                if (matches.some(items => items.length !== 1)) return false;
+                const targets = matches.map(items => items[0]);
+                return targets.slice(1).every((seat, index) =>
+                    physicallyAdjacent(targets[index], seat));
+            };
+            const countersValid = (live, expected) => {
+                const values = live.counters.map(counter => ({
+                    id: counter.id, value: Number(counter.raw)
+                }));
+                const target = values.filter(
+                    counter => counter.id === plan.ticketTypeId);
+                return target.length === 1 && target[0].value === expected &&
+                    values.every(counter => counter.value ===
+                        (counter.id === plan.ticketTypeId ? expected : 0));
+            };
+            const selectedValid = (live, fingerprints) => {
+                const selected = live.seats.filter(seat => seat.selected);
+                return exactSet(
+                    selected.map(seat => seat.fingerprint), fingerprints);
+            };
+            const payloadValid = (live, expected) =>
+                live.submitted.length === expected &&
+                live.submitted.every(seat => seat.A === 'S' &&
+                    seat.Y === plan.ticketTypeId &&
+                    seat.Z === plan.ticketTypeName);
+            const selectionValid = (live, fingerprints) =>
+                live.status === 'ok' && targetTicket(live).length === 1 &&
+                selectedValid(live, fingerprints) && targetsAdjacent(live) &&
+                payloadValid(live, fingerprints.length) &&
+                countersValid(live, fingerprints.length);
+            const cleanValid = live => live.status === 'ok' &&
+                !live.seats.some(seat => seat.selected) &&
+                live.submitted.length === 0 && countersValid(live, 0);
+            const expectedFingerprints = plan.action === 'select' ?
+                plan.targetSeatFingerprints : plan.selectedSeatFingerprints;
+            const intent = JSON.stringify([
+                plan.action === 'clear' ? 'clear' : 'selection',
+                plan.ticketTypeFingerprint, plan.ticketTypeId,
+                plan.ticketTypeName, plan.ticketNumber, expectedFingerprints
+            ]);
+            let marker = document.documentElement.getAttribute(markerName);
+            let live = inspect();
+            if (plan.action === 'ready') {
+                if (marker && marker !== intent) return 'stale';
+                return selectionValid(live, expectedFingerprints) ?
+                    'committed' : 'rejected';
+            }
+            if (marker) {
+                if (plan.action === 'select' && marker === intent &&
+                    selectionValid(live, expectedFingerprints)) {
+                    return 'committed';
+                }
+                return 'stale';
+            }
+            if (live.status !== 'ok') return 'rejected';
+            if (plan.action === 'select' && !cleanValid(live)) return 'rejected';
+            const planned = targetSeats(live, expectedFingerprints);
+            if (planned.some(matches => matches.length !== 1)) return 'rejected';
+            if (!targetsAdjacent(live)) return 'rejected';
+            if (plan.action === 'select' && planned.some(
+                matches => !matches[0].available || matches[0].selected)) {
+                return 'rejected';
+            }
+            if (plan.action === 'clear' && (
+                !selectedValid(live, expectedFingerprints) ||
+                planned.some(matches => !matches[0].selected))) {
+                return 'rejected';
+            }
+            document.documentElement.setAttribute(markerName, intent);
+            if (document.documentElement.getAttribute(markerName) !== intent) {
+                return 'stale';
+            }
+            if (plan.action === 'select') {
+                const tickets = targetTicket(live);
+                if (tickets.length !== 1) return 'stale';
+                tickets[0].button.click();
+            }
+            const completed = [];
+            for (let index = 0; index < expectedFingerprints.length; index += 1) {
+                live = inspect();
+                if (live.status !== 'ok' ||
+                    document.documentElement.getAttribute(markerName) !== intent ||
+                    !targetsAdjacent(live)) {
+                    return 'stale';
+                }
+                const remaining = expectedFingerprints.slice(index);
+                const remainingSeats = targetSeats(live, remaining);
+                if (remainingSeats.some(matches => matches.length !== 1)) {
+                    return 'stale';
+                }
+                if (plan.action === 'select') {
+                    if (!selectionValid(live, completed) ||
+                        remainingSeats.some(matches =>
+                            !matches[0].available || matches[0].selected)) {
+                        return 'stale';
+                    }
+                } else {
+                    const selected = live.seats.filter(seat => seat.selected);
+                    if (!exactSet(
+                        selected.map(seat => seat.fingerprint), remaining
+                    ) || remainingSeats.some(matches => !matches[0].selected)) {
+                        return 'stale';
+                    }
+                }
+                remainingSeats[0][0].element.click();
+                completed.push(expectedFingerprints[index]);
+            }
+            live = inspect();
+            if (plan.action === 'select') {
+                return selectionValid(live, expectedFingerprints) ?
+                    'committed' : 'stale';
+            }
+            if (!cleanValid(live) ||
+                document.documentElement.getAttribute(markerName) !== intent) {
+                return 'stale';
+            }
+            document.documentElement.removeAttribute(markerName);
+            return document.documentElement.hasAttribute(markerName) ?
+                'stale' : 'committed';
+        })()'''
+
+
+async def commit_seat(tab, snapshot, plan):
+    """Atomically clear, select or audit one reserved-seat intent."""
+    if (
+        not isinstance(snapshot, SeatSnapshot)
+        or not isinstance(plan, SeatActionPlan)
+        or not seat_plan_matches_snapshot(snapshot, plan)
+        or classify_utiki_page(plan.page_url) != PageKind.RESERVED_SEAT
+    ):
+        return CommitResult.REJECTED
+    plan_json = json.dumps({
+        "pageUrl": plan.page_url,
+        "documentId": plan.document_id,
+        "performanceId": plan.performance_id,
+        "groupId": plan.group_id,
+        "priceAreaId": plan.price_area_id,
+        "productId": plan.product_id,
+        "quantityLimitRaw": snapshot.quantity_limit_raw,
+        "action": plan.action,
+        "ticketNumber": plan.ticket_number,
+        "ticketTypeFingerprint": plan.ticket_type_fingerprint,
+        "ticketTypeId": plan.ticket_type_id,
+        "ticketTypeName": plan.ticket_type_name,
+        "selectedSeatFingerprints": plan.selected_seat_fingerprints,
+        "targetSeatFingerprints": plan.target_seat_fingerprints,
+        "requirePhysicalAdjacency": plan.require_physical_adjacency,
+        "routes": CONST_RESERVED_SEAT_ROUTES,
+    }, ensure_ascii=False)
+    script = CONST_SEAT_COMMIT_SCRIPT.replace(
+        "__TICKETS_HUNTER_PLAN_JSON__", plan_json, 1
+    )
+    raw_result = await tab.evaluate(script)
+    try:
+        return CommitResult(raw_result)
+    except (TypeError, ValueError):
+        raise RuntimeError("seat commit outcome is unknown")
 
 
 CONST_QUANTITY_SNAPSHOT_SCRIPT = r'''

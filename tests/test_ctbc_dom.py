@@ -40,7 +40,6 @@ from platforms.utiki.workflow import (
     nodriver_ctbc_general_admission_main,
     nodriver_ctbc_inject_cookies,
     nodriver_ctbc_seat_main,
-    nodriver_ctbc_ticket_type_auto_select,
 )
 
 
@@ -208,87 +207,6 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         set_commands = [command for command in commands if command[0] == "set"]
         self.assertEqual(1, len(set_commands))
         self.assertEqual("tix.ctbcsports.com", set_commands[0][1]["domain"])
-
-    async def test_explicit_ticket_type_keyword_overrides_global_exclusions(self):
-        full_counter = FakeElement(attrs={"id": "FULL", "val": "內野全票-NT$800"})
-        disability_counter = FakeElement(
-            attrs={"id": "DISABILITY", "val": "身心障礙票(及陪同票)-NT$400"}
-        )
-        full_button = FakeElement(
-            "<button>內野全票-NT$800<div class='checkNum'>0</div></button>",
-            children={".checkNum": full_counter},
-        )
-        disability_button = FakeElement(
-            "<button>身心障礙票(及陪同票)-NT$400<div class='checkNum'>0</div></button>",
-            children={".checkNum": disability_counter},
-        )
-        selector = '.ticket button[onclick*="setType"]'
-        tab = FakeTab(
-            selector,
-            [full_button, disability_button],
-            url="https://tix.wdragons.com/UTK0205_?PERFORMANCE_ID=P1",
-        )
-        cfg = config()
-        cfg["utiki"]["ticket_type_keyword"] = "身心"
-        cfg["keyword_exclude"] = '"輪椅","身障","身心","障礙"'
-
-        state_key = _ctbc_tab_state_key(tab)
-        try:
-            self.assertTrue(await nodriver_ctbc_ticket_type_auto_select(tab, cfg))
-            self.assertFalse(full_button.clicked)
-            self.assertTrue(disability_button.clicked)
-            self.assertEqual(
-                {"id": "DISABILITY", "name": "身心障礙票(及陪同票)-NT$400"},
-                _state["ticket_type"][state_key],
-            )
-        finally:
-            _state["ticket_type"].pop(state_key, None)
-
-    async def test_manual_reserved_flow_revalidates_and_submits_once(self):
-        tab = FakeSubmitTab()
-        events = []
-        audits = iter((False, True))
-
-        async def record(name, result=True):
-            events.append(name)
-            return result
-
-        def record_effect(name):
-            async def effect(*_args, **_kwargs):
-                return await record(name)
-            return effect
-
-        async def audit(*_args, **_kwargs):
-            result = next(audits)
-            events.append("audit")
-            return result
-
-        with patch(
-            "platforms.utiki.workflow._ctbc_attest_fast_destination",
-            AsyncMock(side_effect=record_effect("attest")),
-        ), patch(
-            "platforms.utiki.workflow.nodriver_ctbc_ticket_type_auto_select",
-            AsyncMock(side_effect=record_effect("ticket_type")),
-        ), patch(
-            "platforms.utiki.workflow._validate_ctbc_seat_selection",
-            AsyncMock(side_effect=audit),
-        ), patch(
-            "platforms.utiki.workflow.nodriver_ctbc_seat_auto_select",
-            AsyncMock(side_effect=record_effect("seat")),
-        ), patch(
-            "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
-            AsyncMock(side_effect=record_effect("cancel")),
-        ), patch(
-            "platforms.utiki.workflow._ctbc_captcha_and_submit",
-            AsyncMock(side_effect=record_effect("submit")),
-        ) as submit:
-            self.assertTrue(await nodriver_ctbc_seat_main(tab, config(), ocr=None))
-
-        self.assertEqual(
-            ["attest", "ticket_type", "audit", "seat", "cancel", "audit", "submit"],
-            events,
-        )
-        submit.assert_awaited_once()
 
     async def test_captcha_capture_prefers_native_canvas_bytes(self):
         expected = b"native-png"
@@ -1542,9 +1460,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=False),
         ) as reload_page, patch(
-            "platforms.utiki.workflow.nodriver_ctbc_ticket_type_auto_select",
-            AsyncMock(return_value=True),
-        ) as select_type, patch(
+            "platforms.utiki.workflow.read_seat_snapshot",
+            AsyncMock(),
+        ) as read_seat, patch(
             "platforms.utiki.workflow._ctbc_captcha_and_submit",
             AsyncMock(return_value=True),
         ) as submit:
@@ -1555,7 +1473,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertIn(submit_key, _state["seat_conflict_pending"])
         self.assertEqual("", tab.captcha_input.value)
         reload_page.assert_awaited_once_with(tab, cfg, "selected seats were taken")
-        select_type.assert_not_awaited()
+        read_seat.assert_not_awaited()
         submit.assert_not_awaited()
 
     async def test_submit_outcome_timeout_never_clicks_twice(self):
@@ -2162,16 +2080,16 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page, patch(
-            "platforms.utiki.workflow.nodriver_ctbc_ticket_type_auto_select",
-            AsyncMock(return_value=True),
-        ) as select_type:
+            "platforms.utiki.workflow.read_seat_snapshot",
+            AsyncMock(),
+        ) as read_seat:
             self.assertFalse(await nodriver_ctbc_seat_main(tab, cfg, ocr=None))
 
         self.assertFalse(
             _state["seat_conflict_pending"][submit_key]["dialog_dismissed"]
         )
         reload_page.assert_not_awaited()
-        select_type.assert_not_awaited()
+        read_seat.assert_not_awaited()
 
     async def test_conflict_click_without_close_blocks_reload(self):
         tab = FakeSubmitTab(dialog="該位置已被選走")

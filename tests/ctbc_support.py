@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -82,9 +83,23 @@ class CtbcStateIsolationMixin:
         self.addCleanup(self._clear_ctbc_test_state)
 
     def _clear_ctbc_test_state(self):
-        for bucket in (self.ctbc_state or {}).values():
-            if isinstance(bucket, (dict, list, set)):
-                bucket.clear()
+        state = self.ctbc_state or {}
+        state.get("tabs", {}).clear()
+        state.get("cancel_tasks", set()).clear()
+
+
+def ctbc_tab_runtime(tab):
+    """Return the production-owned canonical runtime for one semantic fake."""
+    from platforms.utiki.workflow import _ctbc_tab_runtime
+
+    return _ctbc_tab_runtime(tab)
+
+
+def ctbc_identity_runtime(identity):
+    """Return the production-owned canonical runtime for an observed identity."""
+    from platforms.utiki.workflow import _ctbc_runtime_for_identity
+
+    return _ctbc_runtime_for_identity(identity)
 
 
 class FakeUtikiDomPort:
@@ -126,6 +141,10 @@ class FakeUtikiDomPort:
 
 
 CTBC_TEST_PERFORMANCE_ID = "P16D0B8Z"
+CTBC_TEST_DATE_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0201_?"
+    "PRODUCT_ID=P16ANF0L"
+)
 CTBC_TEST_AREA_URL = (
     "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
     "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
@@ -135,11 +154,112 @@ CTBC_TEST_QUANTITY_URL = (
     "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
     "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
 )
+CTBC_TEST_SEAT_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+    "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+    "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+)
 CTBC_TEST_SERVER_QUANTITY_URL = (
     "https://tix.ctbcsports.com/BROTHERS/UTK0201_001?"
     "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
     "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&ATYPE=N"
 )
+
+
+def make_ctbc_date_snapshot(*, page_url=CTBC_TEST_DATE_URL):
+    return {
+        "ok": True,
+        "page_url": page_url,
+        "document_id": "document-1",
+        "rows": [
+            {
+                "text": "2026/09/10（四）18:35 測試場次 購買",
+                "controls": [{
+                    "actionable": True,
+                    "tag_name": "BUTTON",
+                    "id": "buy_btn",
+                    "href": "",
+                    "resolved_href": "",
+                    "role": "",
+                    "type": "button",
+                    "target": "",
+                    "download": "",
+                    "ping": "",
+                    "formaction": "",
+                    "has_form": False,
+                    "onclick": (
+                        "location.href='UTK0204_?"
+                        "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
+                    ),
+                }],
+            },
+            {
+                "text": "2026/09/11（五）18:35 測試場次 已售完",
+                "controls": [{
+                    "actionable": False,
+                    "tag_name": "BUTTON",
+                    "id": "buy_btn",
+                    "href": "",
+                    "resolved_href": "",
+                    "role": "",
+                    "type": "button",
+                    "target": "",
+                    "download": "",
+                    "ping": "",
+                    "formaction": "",
+                    "has_form": False,
+                    "onclick": "",
+                }],
+            },
+        ],
+    }
+
+
+class FakeUtikiDateDomPort:
+    """Semantic date reader/committer used by workflow contract tests."""
+
+    def __init__(self, snapshot, commit_results):
+        self.snapshot = snapshot
+        self.commit_results = list(
+            commit_results
+            if isinstance(commit_results, (list, tuple))
+            else [commit_results]
+        )
+        self.events = []
+        self.commit_count = 0
+        self.committed_count = 0
+        self.nonces = []
+
+    async def read_date_snapshot(self, _tab):
+        self.events.append("inspect_date")
+        return self.snapshot
+
+    async def commit_date_action(
+        self,
+        _tab,
+        snapshot,
+        plan,
+        navigation_nonce,
+        fast_destination_url="",
+        fast_marker_key="",
+        fast_marker_ttl_ms=0,
+    ):
+        from platforms.utiki.dom import CommitResult
+
+        self.events.append("commit_date")
+        self.commit_count += 1
+        self.nonces.append(navigation_nonce)
+        assert snapshot is self.snapshot
+        assert plan.text.startswith("2026/09/10")
+        assert plan.action_kind == "normal"
+        assert re.fullmatch(r"[a-f0-9]{32}", navigation_nonce)
+        assert fast_destination_url == ""
+        assert fast_marker_key == ""
+        assert fast_marker_ttl_ms == 0
+        result = self.commit_results.pop(0)
+        if result is CommitResult.COMMITTED:
+            self.committed_count += 1
+        return result
 
 
 def make_ctbc_area_snapshot(
@@ -218,6 +338,118 @@ def make_ctbc_quantity_snapshot(
     }
 
 
+def make_ctbc_seat_snapshot(*, available=True, selected=()):
+    type_name = "全票"
+    seats = []
+    for index in range(3):
+        is_selected = index in selected
+        seats.append({
+            "fingerprint": ["seat", index, f"A區-1排-{index + 1}號"],
+            "title": f"A區-1排-{index + 1}號",
+            "row_index": 1,
+            "cell_index": index,
+            "center_x": 10 + index * 20,
+            "center_y": 10,
+            "width": 20,
+            "height": 20,
+            "available": bool(available and not is_selected),
+            "selected": is_selected,
+        })
+    return {
+        "ok": True,
+        "page_url": CTBC_TEST_SEAT_URL,
+        "document_id": "document-1",
+        "performance_id": "P16D0B8Z",
+        "group_id": "GROUP_FRONT",
+        "price_area_id": "PRICE_FRONT",
+        "product_id": "PRODUCT_FIXTURE",
+        "product_hidden_present": True,
+        "quantity_limit_present": True,
+        "quantity_limit_raw": "2",
+        "ticket_types": [{
+            "fingerprint": ["ticket", "FULL", "setType('FULL')"],
+            "text": "全票",
+            "disabled": False,
+            "type_id": "FULL",
+            "type_name": type_name,
+            "counter_present": True,
+            "counter_raw": str(len(selected)),
+        }],
+        "seats": seats,
+        "submitted_seats": [
+            {"A": "S", "Y": "FULL", "Z": type_name}
+            for _ in selected
+        ],
+        "counters": [
+            {"id": "FULL", "counter_raw": str(len(selected))},
+            {"id": "OTHER", "counter_raw": "0"},
+        ],
+        "visual_selected_count": len(selected),
+    }
+
+
+def make_ctbc_submit_plan(page_url=CTBC_TEST_SEAT_URL):
+    """Build a production-valid final-submit plan for state-machine tests."""
+    from platforms.utiki.profiles import PageKind, classify_utiki_page
+    from platforms.utiki.selection import (
+        build_submit_plan,
+        parse_quantity_snapshot,
+        parse_seat_snapshot,
+        select_quantity_snapshot,
+        select_seat_snapshot,
+    )
+
+    query = parse_qs(urlsplit(page_url).query, keep_blank_values=True)
+    page_kind = classify_utiki_page(page_url)
+    performance_id = query.get("PERFORMANCE_ID", ["P1"])[0] or "P1"
+    group_id = query.get("GROUP_ID", ["G1"])[0]
+    price_area_id = (
+        query.get("PERFORMANCE_PRICE_AREA_ID", ["A1"])[0] or "A1"
+    )
+    if page_kind is PageKind.RESERVED_SEAT:
+        raw = make_ctbc_seat_snapshot(selected=(0, 1))
+        raw.update({
+            "page_url": page_url,
+            "performance_id": performance_id,
+            "group_id": group_id or "G1",
+            "price_area_id": price_area_id,
+        })
+        selection_plan, reason = select_seat_snapshot(
+            parse_seat_snapshot(raw), "全票", 2
+        )
+    elif page_kind in (
+        PageKind.GENERAL_ADMISSION,
+        PageKind.SERVER_ASSIGNED_QUANTITY,
+    ):
+        is_server = page_kind is PageKind.SERVER_ASSIGNED_QUANTITY
+        raw = make_ctbc_quantity_snapshot(
+            page_url=page_url,
+            group_id=(group_id or "GROUP_FRONT") if is_server else group_id,
+            product_id="PRODUCT_FIXTURE" if is_server else "",
+        )
+        raw.update({
+            "performance_id": performance_id,
+            "price_area_id": price_area_id,
+        })
+        selection_plan = select_quantity_snapshot(
+            parse_quantity_snapshot(raw),
+            "全票",
+            2,
+            page_type=(
+                "server_assigned_quantity" if is_server
+                else "general_admission"
+            ),
+        )
+        reason = ""
+    else:
+        return None
+    if selection_plan is None:
+        return None
+    submit_plan = build_submit_plan(selection_plan)
+    assert submit_plan is not None
+    return submit_plan
+
+
 class FakeUtikiQuantityDomPort:
     def __init__(self, snapshot, commit_result):
         self.snapshot = snapshot
@@ -236,6 +468,36 @@ class FakeUtikiQuantityDomPort:
         assert plan.target_key == "FULL"
         assert plan.ticket_number == 2
         return self.commit_result
+
+
+class FakeUtikiSeatDomPort:
+    """Semantic reserved-seat reader/committer for workflow contracts."""
+
+    def __init__(self, snapshot, commit_results, *, expected_action="select"):
+        self.snapshot = snapshot
+        self.commit_results = list(
+            commit_results
+            if isinstance(commit_results, (list, tuple))
+            else [commit_results]
+        )
+        self.expected_action = expected_action
+        self.events = []
+        self.commit_count = 0
+
+    async def read_seat_snapshot(self, _tab):
+        self.events.append("inspect_seat")
+        return self.snapshot
+
+    async def commit_seat(self, _tab, snapshot, plan):
+        self.events.append("commit_seat")
+        self.commit_count += 1
+        assert snapshot is self.snapshot
+        assert plan.ticket_type_id == "FULL"
+        assert plan.ticket_number == 2
+        assert plan.action == self.expected_action
+        if len(self.commit_results) > 1:
+            return self.commit_results.pop(0)
+        return self.commit_results[0]
 
 
 class FakeElement:
@@ -267,7 +529,6 @@ class FakeElement:
         self.tag_name = tag_name
         self.commit_attrs = commit_attrs
         self.commit_tag_name = commit_tag_name
-        self._date_snapshot_fingerprint = None
         self.clicked = False
         self.click_count = 0
         self.apply_count = 0
@@ -287,67 +548,6 @@ class FakeElement:
         if 'el.value = ""' in script:
             self.value = ""
             return None
-        if "__ticketsHunterDateControlSnapshot" in script:
-            aria_disabled = self.attrs.get("aria-disabled") == "true"
-            actionable = (
-                self.visible and self.connected and self.in_purchase_cell
-                and not self.disabled and not aria_disabled
-            )
-            fingerprint = {
-                "tag_name": str(self.tag_name or "").upper(),
-                "href": self.attrs.get("href", ""),
-                "resolved_href": self.attrs.get(
-                    "resolved_href", self.attrs.get("href", "")
-                ),
-                "role": self.attrs.get("role", ""),
-                "type": self.attrs.get("type", ""),
-                "target": self.attrs.get("target", ""),
-                "download": self.attrs.get("download", ""),
-                "ping": self.attrs.get("ping", ""),
-                "formaction": self.attrs.get("formaction", ""),
-                "has_form": bool(self.attrs.get("has_form", False)),
-                "onclick": self.attrs.get("onclick", ""),
-            }
-            self._date_snapshot_fingerprint = dict(fingerprint)
-            return json.dumps({
-                "actionable": actionable,
-                "connected": self.connected,
-                "visible": self.visible,
-                "disabled": self.disabled or aria_disabled,
-                "in_purchase_cell": self.in_purchase_cell,
-                **fingerprint,
-                "text": self.html,
-            })
-        if "__ticketsHunterCommitNativeDateAction" in script:
-            if self.commit_attrs:
-                self.attrs.update(self.commit_attrs)
-            if self.commit_tag_name is not None:
-                self.tag_name = self.commit_tag_name
-            aria_disabled = self.attrs.get("aria-disabled") == "true"
-            current_fingerprint = {
-                "tag_name": str(self.tag_name or "").upper(),
-                "href": self.attrs.get("href", ""),
-                "resolved_href": self.attrs.get(
-                    "resolved_href", self.attrs.get("href", "")
-                ),
-                "role": self.attrs.get("role", ""),
-                "type": self.attrs.get("type", ""),
-                "target": self.attrs.get("target", ""),
-                "download": self.attrs.get("download", ""),
-                "ping": self.attrs.get("ping", ""),
-                "formaction": self.attrs.get("formaction", ""),
-                "has_form": bool(self.attrs.get("has_form", False)),
-                "onclick": self.attrs.get("onclick", ""),
-            }
-            if not (
-                self.native_commit_allowed and self.visible and self.connected
-                and self.in_purchase_cell and not self.disabled and not aria_disabled
-                and current_fingerprint == self._date_snapshot_fingerprint
-            ):
-                return False
-            self.clicked = True
-            self.click_count += 1
-            return True
         if "el.disabled" in script:
             return self.disabled
         if "getAttribute" in script and "rel" in script:
@@ -370,8 +570,14 @@ class FakeElement:
 
 
 def _script_json_constant(script, name):
-    match = re.search(rf"const {re.escape(name)} = (.+?);", script)
-    return json.loads(match.group(1)) if match else None
+    marker = f"const {name} = "
+    start = script.find(marker)
+    if start < 0:
+        return None
+    value, _end = json.JSONDecoder().raw_decode(
+        script[start + len(marker):].lstrip()
+    )
+    return value
 
 
 class FakeTab:
@@ -423,6 +629,8 @@ class FakeTab:
         self.on_destination_state = on_destination_state
         self.on_native_commit = on_native_commit
         self.on_raw_marker_delete = on_raw_marker_delete
+        self.date_document_id = "document-1"
+        self.date_commit_nonce = None
 
     def _marker_raw(self):
         if self.session_marker_raw is not None:
@@ -446,6 +654,10 @@ class FakeTab:
 
     async def evaluate(self, script, **_kwargs):
         self.evaluate_scripts.append(script)
+        if "__ticketsHunterUtikiDateSnapshot" in script:
+            return json.dumps(self._date_snapshot())
+        if "__ticketsHunterUtikiDateCommit" in script:
+            return await self._commit_date(script)
         if self.semantic_navigation or "CtbcFastMarker" in script or (
             "CtbcMalformedMarker" in script
         ):
@@ -455,29 +667,137 @@ class FakeTab:
         self.evaluate_count += 1
         return self.evaluate_results.pop(0) if self.evaluate_results else None
 
-    async def _evaluate_navigation(self, script):
-        if "__ticketsHunterCtbcFastCommit" in script:
+    @staticmethod
+    def _date_row_text(row):
+        return re.sub(
+            r"\s+", " ", re.sub(r"<[^>]*>", " ", row.html or "")
+        ).strip()
+
+    @staticmethod
+    def _date_controls(row):
+        controls = []
+        for items in row.child_lists.values():
+            for control in items:
+                if control is not None and control not in controls:
+                    controls.append(control)
+        if not controls:
+            for control in row.children.values():
+                if control is not None and control not in controls:
+                    controls.append(control)
+        return controls
+
+    @staticmethod
+    def _date_control_fingerprint(control):
+        return {
+            "tag_name": str(control.tag_name or "").upper(),
+            "id": control.attrs.get("id", ""),
+            "href": control.attrs.get("href", ""),
+            "resolved_href": control.attrs.get(
+                "resolved_href", control.attrs.get("href", "")
+            ),
+            "role": control.attrs.get("role", ""),
+            "type": control.attrs.get("type", ""),
+            "target": control.attrs.get("target", ""),
+            "download": control.attrs.get("download", ""),
+            "ping": control.attrs.get("ping", ""),
+            "formaction": control.attrs.get("formaction", ""),
+            "has_form": bool(control.attrs.get("has_form", False)),
+            "onclick": control.attrs.get("onclick", ""),
+        }
+
+    @staticmethod
+    def _date_control_actionable(control):
+        return bool(
+            control.visible and control.connected and control.in_purchase_cell
+            and not control.disabled
+            and control.attrs.get("aria-disabled") != "true"
+        )
+
+    def _date_snapshot(self):
+        self.last_selector = self.selector
+        rows = []
+        for row in self.elements if self.selector else []:
+            rows.append({
+                "text": self._date_row_text(row),
+                "controls": [
+                    {
+                        "actionable": self._date_control_actionable(control),
+                        **self._date_control_fingerprint(control),
+                    }
+                    for control in self._date_controls(row)
+                ],
+            })
+        return {
+            "ok": bool(rows),
+            "reason": "" if rows else "not-ready",
+            "page_url": self.target.url,
+            "document_id": self.date_document_id,
+            "rows": rows,
+        }
+
+    async def _commit_date(self, script):
+        intent = _script_json_constant(script, "intent") or {}
+        if (
+            intent.get("pageUrl") != self.target.url
+            or intent.get("documentId") != self.date_document_id
+        ):
+            return "stale"
+        nonce = intent.get("navigationNonce")
+        if self.date_commit_nonce:
+            return "committed" if self.date_commit_nonce == nonce else "stale"
+        try:
+            row = self.elements[intent["rowIndex"]]
+            controls = self._date_controls(row)
+            control = controls[intent["controlIndex"]]
+        except (IndexError, KeyError, TypeError):
+            return "rejected"
+        if control.commit_attrs:
+            control.attrs.update(control.commit_attrs)
+        if control.commit_tag_name is not None:
+            control.tag_name = control.commit_tag_name
+        actionable = [
+            item for item in controls if self._date_control_actionable(item)
+        ]
+        if (
+            self._date_row_text(row) != intent.get("rowText")
+            or len(actionable) != 1 or actionable[0] is not control
+            or self._date_control_fingerprint(control) != intent.get("fingerprint")
+            or not control.native_commit_allowed
+        ):
+            return "stale"
+
+        fast_destination = intent.get("fastDestinationUrl") or ""
+        if fast_destination:
             if self.on_fast_commit:
                 self.on_fast_commit()
             if not self.storage_available or self.fast_commit_outcome == "rejected":
                 return "rejected"
-            if self.fast_commit_outcome == "pending" or (
-                isinstance(self.session_marker, dict)
-                and self.session_marker.get("expires_at", 0) > time.time() * 1000
-            ):
-                return "pending"
+            if self.fast_commit_outcome == "pending" or self.session_marker:
+                return "stale"
             self.session_marker = {
                 "version": 1,
-                "nonce": _script_json_constant(script, "navigationNonce"),
-                "source": _script_json_constant(script, "sourceUrl"),
-                "destination": _script_json_constant(script, "destinationUrl"),
-                "expires_at": time.time() * 1000 + 15000,
+                "nonce": nonce,
+                "source": intent.get("pageUrl"),
+                "destination": fast_destination,
+                "expires_at": time.time() * 1000 + int(
+                    intent.get("fastMarkerTtlMs") or 0
+                ),
             }
             self.session_marker_raw = None
-            self.target.url = self.session_marker["destination"]
+
+        self.date_commit_nonce = nonce
+        if fast_destination:
+            self.target.url = fast_destination
             if self.fast_commit_outcome == "throw_after_dispatch":
                 raise RuntimeError("execution context destroyed")
-            return "dispatched"
+        else:
+            control.clicked = True
+            control.click_count += 1
+            if self.native_commit_outcome == "throw_after_dispatch":
+                raise RuntimeError("execution context destroyed")
+        return "committed"
+
+    async def _evaluate_navigation(self, script):
         if "__ticketsHunterCtbcFastMarkerRead" in script:
             if self.on_marker_read:
                 self.on_marker_read()
@@ -582,6 +902,9 @@ class FakeSubmitTab:
         self.reload_count = 0
 
     async def evaluate(self, script):
+        if "__ticketsHunterUtikiSubmit" in script:
+            await self.button.click()
+            return "dispatched"
         if "#LOGIN_ID" in script:
             if "JSON.stringify" in script:
                 expected = _script_json_constant(

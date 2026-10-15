@@ -2,6 +2,7 @@ import subprocess
 import sys
 import types
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from tests.ctbc_support import (
     FakeSubmitTab,
     config,
     make_ctbc_area_snapshot,
+    make_ctbc_quantity_snapshot,
 )
 
 import platforms.ctbc as legacy_ctbc
@@ -27,40 +29,146 @@ from platforms.utiki.profiles import (
     is_utiki_sports_url,
 )
 from platforms.utiki.selection import (
+    DateActionPlan,
+    SeatActionPlan,
+    SubmitPlan,
     availability_has_tickets as _ctbc_availability_has_tickets,
+    build_submit_plan,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     parse_area_send_action as _parse_ctbc_map_send,
     parse_area_send_a_action as _parse_ctbc_map_send_a,
+    parse_date_snapshot,
     parse_dialog_snapshot,
     parse_keyword_groups as _parse_keyword_groups,
     parse_map_title as _parse_ctbc_map_title,
     parse_quantity_snapshot,
+    parse_seat_snapshot,
     quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
+    seat_plan_matches_snapshot,
+    seat_selection_is_valid,
+    select_date_snapshot,
     select_area_snapshot as _select_ctbc_area_snapshot,
     select_quantity_snapshot,
+    select_seat_indexes as _select_ctbc_seat_indexes,
+    select_seat_snapshot,
+    submit_plan_is_valid,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
-    _classify_ctbc_date_action,
+    _ctbc_captcha_image_token,
     _ctbc_fast_destination_is_valid,
     _ctbc_purchase_state_key,
     _ctbc_submit_reached_checkout,
-    _ctbc_seat_audit_is_valid,
     _get_ctbc_page_type,
     _get_utiki_behavior,
     _normalize_ctbc_captcha_answer,
-    _parse_ctbc_date_target,
-    _parse_ctbc_vip_date_action,
-    _select_ctbc_seat_indexes,
     is_utk_sports_url,
     parse_ctbc_cookie_string,
 )
 from settings import get_default_config, migrate_config
 
 
+def _date_control(onclick="", **overrides):
+    control = {
+        "actionable": True,
+        "tag_name": "BUTTON",
+        "id": "buy_btn",
+        "href": "",
+        "resolved_href": "",
+        "role": "",
+        "type": "button",
+        "target": "",
+        "download": "",
+        "ping": "",
+        "formaction": "",
+        "has_form": False,
+        "onclick": onclick,
+    }
+    control.update(overrides)
+    return control
+
+
+def _date_snapshot(source_url, rows):
+    return {
+        "ok": True,
+        "page_url": source_url,
+        "document_id": "document-1",
+        "rows": rows,
+    }
+
+
+def _select_date_action(source_url, control, row_text="9/10 一般場"):
+    snapshot = _date_snapshot(
+        source_url,
+        [{"text": row_text, "controls": [control]}],
+    )
+    return select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+
+
+def _seat_snapshot(*, selected=(), submitted=None, counters=None):
+    type_name = "內野全票-NT$400"
+    seats = []
+    for index in range(3):
+        is_selected = index in selected
+        seats.append({
+            "fingerprint": ["seat", index, f"A區-1排-{index + 1}號"],
+            "title": f"A區-1排-{index + 1}號",
+            "row_index": 1,
+            "cell_index": index,
+            "center_x": 10 + index * 20,
+            "center_y": 10,
+            "width": 20,
+            "height": 20,
+            "available": not is_selected,
+            "selected": is_selected,
+        })
+    return {
+        "ok": True,
+        "page_url": (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?"
+            "PERFORMANCE_ID=P1&GROUP_ID=G1&PERFORMANCE_PRICE_AREA_ID=A1"
+        ),
+        "document_id": "document-1",
+        "performance_id": "P1",
+        "group_id": "G1",
+        "price_area_id": "A1",
+        "product_id": "PRODUCT1",
+        "product_hidden_present": True,
+        "quantity_limit_present": True,
+        "quantity_limit_raw": "4",
+        "ticket_types": [{
+            "fingerprint": ["ticket", "FULL", "setType('FULL')"],
+            "text": "全票",
+            "disabled": False,
+            "type_id": "FULL",
+            "type_name": type_name,
+            "counter_present": True,
+            "counter_raw": str(len(selected)),
+        }],
+        "seats": seats,
+        "submitted_seats": submitted if submitted is not None else [
+            {"A": "S", "Y": "FULL", "Z": type_name} for _ in selected
+        ],
+        "counters": counters if counters is not None else [
+            {"id": "FULL", "counter_raw": str(len(selected))},
+            {"id": "HALF", "counter_raw": "0"},
+        ],
+        "visual_selected_count": len(selected),
+    }
+
+
 class CtbcPureSelectionTest(unittest.TestCase):
+    def test_captcha_image_token_is_stable_and_nonempty_only_for_bytes(self):
+        first = _ctbc_captcha_image_token(b"synthetic-captcha")
+
+        self.assertEqual(64, len(first))
+        self.assertEqual(first, _ctbc_captcha_image_token(b"synthetic-captcha"))
+        self.assertNotEqual(first, _ctbc_captcha_image_token(b"changed"))
+        self.assertEqual("", _ctbc_captcha_image_token(b""))
+        self.assertEqual("", _ctbc_captcha_image_token("raw-image"))
+
     def test_legacy_facade_shares_the_canonical_workflow(self):
         for name in legacy_ctbc.__all__:
             with self.subTest(name=name):
@@ -400,66 +508,137 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertFalse(_ctbc_availability_has_tickets("剩餘 1", 2))
         self.assertTrue(_ctbc_availability_has_tickets("熱賣中", 2))
 
+    def test_date_snapshot_is_immutable_and_rejects_ambiguous_controls(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        onclick = "location.href='UTK0204_?PERFORMANCE_ID=A1&PRODUCT_ID=P1'"
+        raw = _date_snapshot(source, [{
+            "text": "9/10 一般場",
+            "controls": [_date_control(onclick)],
+        }])
+        snapshot = parse_date_snapshot(raw)
+        raw["rows"][0]["text"] = "mutated"
+        raw["rows"][0]["controls"][0]["onclick"] = "alert('x')"
+        plan = select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+        self.assertEqual("9/10 一般場", plan.text)
+        self.assertEqual(onclick, plan.onclick)
+
+        ambiguous = _date_snapshot(source, [{
+            "text": "9/10 一般場",
+            "controls": [_date_control(onclick), _date_control(onclick)],
+        }])
+        self.assertIsNone(select_date_snapshot(
+            ambiguous, config(date_keyword='"9/10"')
+        ))
+
+    def test_date_selection_preserves_keyword_exclude_mode_and_fallback(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        snapshot = _date_snapshot(source, [
+            {
+                "text": "9/10 一般場",
+                "controls": [_date_control(
+                    "location.href='UTK0204_?PERFORMANCE_ID=A1&PRODUCT_ID=P1'"
+                )],
+            },
+            {
+                "text": "9/11 家庭場",
+                "controls": [_date_control(
+                    "location.href='UTK0204_?PERFORMANCE_ID=A2&PRODUCT_ID=P1'"
+                )],
+            },
+        ])
+        cfg = config(date_keyword='"家庭場","一般場"')
+        self.assertEqual(1, select_date_snapshot(snapshot, cfg).row_index)
+
+        cfg["keyword_exclude"] = '"家庭場"'
+        self.assertEqual(0, select_date_snapshot(snapshot, cfg).row_index)
+        cfg["date_auto_select"]["date_keyword"] = '"不存在"'
+        self.assertIsNone(select_date_snapshot(snapshot, cfg))
+        cfg["date_auto_fallback"] = True
+        self.assertEqual(0, select_date_snapshot(snapshot, cfg).row_index)
+        cfg["date_auto_select"]["date_keyword"] = ""
+        cfg["date_auto_select"]["mode"] = "from bottom to top"
+        cfg["keyword_exclude"] = ""
+        self.assertEqual(1, select_date_snapshot(snapshot, cfg).row_index)
+
     def test_date_target_parser_only_accepts_the_same_tenant_and_product(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
-        target = _parse_ctbc_date_target(onclick, source)
-        self.assertEqual("P16D0B8Z", target["performance_id"])
-        self.assertEqual("P16ANF0L", target["product_id"])
-        self.assertIsNone(_parse_ctbc_date_target(
+        target = _select_date_action(source, _date_control(onclick))
+        self.assertIsInstance(target, DateActionPlan)
+        self.assertEqual("normal", target.action_kind)
+        self.assertEqual("P16D0B8Z", target.performance_id)
+        self.assertEqual("P16ANF0L", target.product_id)
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='https://evil.example/UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'",
-            source,
-        ))
-        self.assertIsNone(_parse_ctbc_date_target(
+        )))
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=OTHER'",
-            source,
-        ))
-        self.assertIsNone(_parse_ctbc_date_target(
+        )))
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='https://tix.ctbcsports.com:444/BROTHERS/UTK0204_?"
             "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'",
-            source,
-        ))
-        self.assertIsNone(_parse_ctbc_date_target(
+        )))
+        self.assertIsNone(_select_date_action(source, _date_control(
             "location.href='https://user@tix.ctbcsports.com/BROTHERS/UTK0204_?"
             "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'",
-            source,
-        ))
+        )))
 
         dragons_source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P16MXT0U"
-        dragons_target = _parse_ctbc_date_target(
+        dragons_target = _select_date_action(dragons_source, _date_control(
             "location.href='UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'",
-            dragons_source,
-        )
-        self.assertEqual("tix.wdragons.com", dragons_target["host"])
-        self.assertEqual("WDRAGONS", dragons_target["map_namespace"])
-        self.assertFalse(dragons_target["fast_area_prefetch"])
-        self.assertIsNone(_parse_ctbc_date_target(
-            "location.href='https://tix.ctbcsports.com/UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'",
-            dragons_source,
         ))
+        self.assertEqual("tix.wdragons.com", dragons_target.host)
+        self.assertEqual("WDRAGONS", dragons_target.map_namespace)
+        self.assertFalse(dragons_target.fast_area_prefetch)
+        self.assertIsNone(_select_date_action(dragons_source, _date_control(
+            "location.href='https://tix.ctbcsports.com/UTK0204_?PERFORMANCE_ID=P16DRAGON&PRODUCT_ID=P16MXT0U'",
+        )))
 
     def test_date_action_classifier_supports_vip_and_safe_structural_fallback(self):
         source = (
             "https://tix.ctbcsports.com/BROTHERS/UTK0201_?"
             "PRODUCT_ID=P16ANF0P&STARTDATE=2026/09/18"
         )
-        vip = _parse_ctbc_vip_date_action("VipSellCheck('P1DN7WJI');", source)
-        self.assertEqual("vip_native", vip["kind"])
-        self.assertEqual("P1DN7WJI", vip["token"])
+        vip = _select_date_action(
+            source, _date_control("VipSellCheck('P1DN7WJI');")
+        )
+        self.assertEqual("vip_native", vip.action_kind)
+        self.assertEqual("P1DN7WJI", vip.action_token)
         self.assertEqual(
             "structural_native",
-            _classify_ctbc_date_action("DragonMemberCheck('P1DRAGON')", source)["kind"],
+            _select_date_action(
+                source, _date_control("DragonMemberCheck('P1DRAGON')")
+            ).action_kind,
         )
         self.assertEqual(
             "structural_native",
-            _classify_ctbc_date_action("", source)["kind"],
+            _select_date_action(source, _date_control()).action_kind,
         )
-        self.assertIsNone(_classify_ctbc_date_action(
-            "location.href='https://evil.example/'", source
+        self.assertIsNone(_select_date_action(
+            source, _date_control("location.href='https://evil.example/'")
         ))
-        self.assertIsNone(_classify_ctbc_date_action(
-            "DragonMemberCheck('P1'); alert('x')", source
+        self.assertIsNone(_select_date_action(
+            source, _date_control("DragonMemberCheck('P1'); alert('x')")
         ))
+        self.assertIsNone(_select_date_action(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P1",
+            _date_control(),
+        ))
+
+        anchor_url = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+            "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0P"
+        )
+        anchor = _select_date_action(source, _date_control(
+            tag_name="A", id="", type="", href=anchor_url,
+            resolved_href=anchor_url,
+        ))
+        self.assertEqual("anchor_native", anchor.action_kind)
+        self.assertEqual(anchor_url, anchor.target_url)
+        self.assertIsNone(_select_date_action(source, _date_control(
+            tag_name="A", id="", type="", href=anchor_url,
+            resolved_href=anchor_url, target="_blank",
+        )))
 
     def test_map_send_parser_is_anchored_and_builds_the_official_url(self):
         href = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','熱賣中')"
@@ -1077,6 +1256,166 @@ class CtbcPureSelectionTest(unittest.TestCase):
             ),
         )
 
+    def test_seat_planner_freezes_identity_and_selects_one_block(self):
+        raw = _seat_snapshot()
+        snapshot = parse_seat_snapshot(raw)
+        raw["seats"][0]["fingerprint"][0] = "mutated"
+
+        plan, reason = select_seat_snapshot(snapshot, "全票", 2)
+
+        self.assertEqual("", reason)
+        self.assertIsInstance(plan, SeatActionPlan)
+        self.assertEqual("select", plan.action)
+        self.assertEqual(("seat", 0, "A區-1排-1號"), plan.target_seat_fingerprints[0])
+        self.assertEqual("G1", plan.group_id)
+        self.assertEqual("A1", plan.price_area_id)
+        self.assertEqual("PRODUCT1", plan.product_id)
+        self.assertTrue(plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(snapshot, plan))
+        non_adjacent_plan, reason = select_seat_snapshot(
+            snapshot, "全票", 2, allow_non_adjacent=True
+        )
+        self.assertEqual("", reason)
+        self.assertFalse(non_adjacent_plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(
+            snapshot, non_adjacent_plan
+        ))
+        self.assertFalse(seat_plan_matches_snapshot(
+            snapshot, replace(plan, group_id="OTHER")
+        ))
+        self.assertFalse(seat_plan_matches_snapshot(
+            snapshot, replace(plan, product_id="OTHER")
+        ))
+
+    def test_seat_planner_distinguishes_type_and_seat_unavailability(self):
+        snapshot = parse_seat_snapshot(_seat_snapshot())
+        self.assertEqual(
+            (None, "ticket-type-unavailable"),
+            select_seat_snapshot(snapshot, "敬老票", 2),
+        )
+        unavailable = _seat_snapshot()
+        for seat in unavailable["seats"]:
+            seat["available"] = False
+        self.assertEqual(
+            (None, "seats-unavailable"),
+            select_seat_snapshot(unavailable, "全票", 2),
+        )
+
+    def test_seat_planner_keyword_selects_the_second_ticket_type(self):
+        raw = _seat_snapshot()
+        raw["ticket_types"].append({
+            "fingerprint": [
+                "ticket", "DISABILITY", "setType('DISABILITY')",
+            ],
+            "text": "身心障礙票及陪同票",
+            "disabled": False,
+            "type_id": "DISABILITY",
+            "type_name": "身心障礙票-NT$200",
+            "counter_present": True,
+            "counter_raw": "0",
+        })
+        raw["counters"].append({
+            "id": "DISABILITY", "counter_raw": "0",
+        })
+
+        plan, reason = select_seat_snapshot(raw, "身心", 2)
+
+        self.assertEqual("", reason)
+        self.assertEqual("DISABILITY", plan.ticket_type_id)
+        self.assertEqual("身心障礙票-NT$200", plan.ticket_type_name)
+
+    def test_seat_planner_clears_invalid_selection_then_accepts_valid_one(self):
+        invalid = _seat_snapshot(
+            selected=(0,),
+            submitted=[{"A": "S", "Y": "HALF", "Z": "內野半票"}],
+        )
+        clear_plan, reason = select_seat_snapshot(invalid, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("clear", clear_plan.action)
+        self.assertTrue(seat_plan_matches_snapshot(invalid, clear_plan))
+
+        ready = _seat_snapshot(selected=(0, 1))
+        ready_plan, reason = select_seat_snapshot(ready, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("ready", ready_plan.action)
+        self.assertTrue(seat_plan_matches_snapshot(ready, ready_plan))
+
+    def test_submit_plan_freezes_only_ready_reserved_seat_intent(self):
+        ready = parse_seat_snapshot(_seat_snapshot(selected=(0, 1)))
+        ready_plan, reason = select_seat_snapshot(ready, "全票", 2)
+        self.assertEqual("", reason)
+
+        submit_plan = build_submit_plan(ready_plan)
+
+        self.assertIsInstance(submit_plan, SubmitPlan)
+        self.assertIs(PageKind.RESERVED_SEAT, submit_plan.page_kind)
+        self.assertEqual("seat", submit_plan.payload_fingerprint[0])
+        self.assertTrue(submit_plan_is_valid(submit_plan))
+        self.assertFalse(submit_plan_is_valid(replace(
+            submit_plan,
+            payload_fingerprint=("seat", "forged"),
+        )))
+
+        partial = parse_seat_snapshot(_seat_snapshot(selected=(0,)))
+        clear_plan, reason = select_seat_snapshot(partial, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("clear", clear_plan.action)
+        self.assertIsNone(build_submit_plan(clear_plan))
+
+    def test_submit_plan_preserves_general_quantity_page_kind(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        quantity_plan = select_quantity_snapshot(snapshot, "全票", 2)
+
+        submit_plan = build_submit_plan(quantity_plan)
+
+        self.assertIsInstance(submit_plan, SubmitPlan)
+        self.assertIs(PageKind.GENERAL_ADMISSION, submit_plan.page_kind)
+        self.assertEqual("quantity", submit_plan.payload_fingerprint[0])
+        self.assertTrue(submit_plan_is_valid(submit_plan))
+
+    def test_strict_seat_planner_clears_valid_non_adjacent_selection(self):
+        snapshot = parse_seat_snapshot(_seat_snapshot(selected=(0, 2)))
+
+        clear_plan, reason = select_seat_snapshot(snapshot, "全票", 2)
+
+        self.assertEqual("", reason)
+        self.assertEqual("clear", clear_plan.action)
+        self.assertTrue(clear_plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(snapshot, clear_plan))
+        self.assertFalse(seat_plan_matches_snapshot(
+            snapshot,
+            replace(clear_plan, require_physical_adjacency=False),
+        ))
+
+        ready_plan, reason = select_seat_snapshot(
+            snapshot, "全票", 2, allow_non_adjacent=True
+        )
+        self.assertEqual("", reason)
+        self.assertEqual("ready", ready_plan.action)
+        self.assertFalse(ready_plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(snapshot, ready_plan))
+
+    def test_seat_planner_requires_reserved_identity_and_quantity_limit(self):
+        missing_limit = _seat_snapshot()
+        missing_limit["quantity_limit_present"] = False
+        self.assertEqual(
+            (None, "invalid-snapshot"),
+            select_seat_snapshot(missing_limit, "全票", 2),
+        )
+
+        wrong_group = _seat_snapshot()
+        wrong_group["group_id"] = "OTHER"
+        self.assertEqual(
+            (None, "invalid-snapshot"),
+            select_seat_snapshot(wrong_group, "全票", 2),
+        )
+
+        tracked = _seat_snapshot()
+        tracked["page_url"] += "&campaign=opening"
+        plan, reason = select_seat_snapshot(tracked, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("select", plan.action)
+
     def test_visible_captcha_is_preferred_over_hidden_dom_match(self):
         candidates = [
             {"image_id": "chk_pic", "visible": False, "order": 0},
@@ -1090,20 +1429,24 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual("chk_pic", ordered[0]["image_id"])
 
     def test_seat_audit_rejects_extra_or_mixed_ticket_types(self):
-        target = {"id": "FULL", "name": "內野全票-NT$400"}
-        good_seat = {"A": "S", "Y": "FULL", "Z": target["name"]}
-        valid = {
-            "submitted_seats": [good_seat, dict(good_seat)],
-            "counters": [{"id": "FULL", "count": 2}, {"id": "HALF", "count": 0}],
-            "visual_count": 2,
-        }
-        self.assertTrue(_ctbc_seat_audit_is_valid(valid, 2, target))
+        target_name = "內野全票-NT$400"
+        valid = _seat_snapshot(selected=(0, 1))
+        self.assertTrue(seat_selection_is_valid(
+            valid, 2, "FULL", target_name
+        ))
 
-        extra = dict(valid, submitted_seats=valid["submitted_seats"] + [dict(good_seat)], visual_count=3)
-        self.assertFalse(_ctbc_seat_audit_is_valid(extra, 2, target))
+        extra = _seat_snapshot(selected=(0, 1, 2))
+        self.assertFalse(seat_selection_is_valid(
+            extra, 2, "FULL", target_name
+        ))
 
-        mixed = dict(valid, submitted_seats=[good_seat, {"A": "S", "Y": "HALF", "Z": "內野半票"}])
-        self.assertFalse(_ctbc_seat_audit_is_valid(mixed, 2, target))
+        mixed = _seat_snapshot(selected=(0, 1), submitted=[
+            {"A": "S", "Y": "FULL", "Z": target_name},
+            {"A": "S", "Y": "HALF", "Z": "內野半票"},
+        ])
+        self.assertFalse(seat_selection_is_valid(
+            mixed, 2, "FULL", target_name
+        ))
 
     def test_general_quantity_audit_requires_the_target_and_zeros_others(self):
         self.assertTrue(_ctbc_general_quantity_audit_is_valid(
@@ -1128,6 +1471,11 @@ class CtbcPureSelectionTest(unittest.TestCase):
             "performance_id": "P1",
             "group_id": "",
             "price_area_id": "A1",
+            "performance_hidden_present": True,
+            "product_hidden_present": False,
+            "group_hidden_present": True,
+            "price_area_hidden_present": True,
+            "quantity_limit_present": True,
             "quantity_limit_raw": "4",
             "rows": [
                 {
@@ -1146,6 +1494,10 @@ class CtbcPureSelectionTest(unittest.TestCase):
         plan = select_quantity_snapshot(snapshot, "全票", 2)
         self.assertEqual("FULL", plan.target_key)
         self.assertEqual(2, plan.ticket_number)
+        self.assertTrue(plan.performance_hidden_present)
+        self.assertFalse(plan.product_hidden_present)
+        self.assertTrue(plan.quantity_limit_present)
+        self.assertTrue(plan.target_remaining_present)
         raw["rows"][0]["key"] = "MUTATED"
         self.assertEqual("FULL", snapshot.rows[0][0])
 
@@ -1160,3 +1512,66 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertIsNone(select_quantity_snapshot(
             dict(raw, quantity_limit_raw="1"), "其他票", 2
         ))
+
+    def test_general_quantity_plan_requires_a_supported_tenant_route(self):
+        valid_urls = (
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0202_?"
+                "GROUP_ID=&tracking=fixture&PERFORMANCE_PRICE_AREA_ID=A1&"
+                "PERFORMANCE_ID=P16D0B8Z"
+            ),
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+            (
+                "https://tix.wdragons.com/UTK0203_?"
+                "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+        )
+        for page_url in valid_urls:
+            with self.subTest(page_url=page_url):
+                raw = make_ctbc_quantity_snapshot(page_url=page_url)
+                self.assertIsNotNone(
+                    select_quantity_snapshot(raw, "全票", 2)
+                )
+
+        invalid_urls = (
+            "https://example.com/BROTHERS/UTK0203_?PERFORMANCE_ID=P16D0B8Z",
+            "https://tix.ctbcsports.com/UTK0203_?PERFORMANCE_ID=P16D0B8Z",
+            "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P16D0B8Z",
+            (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P16D0B8Z#fragment"
+            ),
+        )
+        for page_url in invalid_urls:
+            with self.subTest(page_url=page_url):
+                raw = make_ctbc_quantity_snapshot(page_url=page_url)
+                self.assertIsNone(
+                    select_quantity_snapshot(raw, "全票", 2)
+                )
+
+    def test_general_quantity_plan_freezes_optional_identity_presence(self):
+        raw = make_ctbc_quantity_snapshot()
+        raw.update({
+            "performance_hidden_present": True,
+            "product_hidden_present": True,
+            "product_id": "PRODUCT_FIXTURE",
+            "group_hidden_present": False,
+            "price_area_hidden_present": True,
+            "quantity_limit_present": True,
+        })
+        plan = select_quantity_snapshot(raw, "全票", 2)
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan.performance_hidden_present)
+        self.assertTrue(plan.product_hidden_present)
+        self.assertFalse(plan.group_hidden_present)
+        self.assertTrue(plan.price_area_hidden_present)
+        self.assertTrue(plan.quantity_limit_present)
+        self.assertTrue(plan.target_remaining_present)
+
+        raw["product_id"] = ""
+        self.assertIsNone(select_quantity_snapshot(raw, "全票", 2))

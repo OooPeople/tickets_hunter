@@ -11,8 +11,10 @@ from .workflow import (
     nodriver_ctbc_inject_cookies,
     nodriver_ctbc_main,
     nodriver_utk_sports_cancel_refresh,
+    nodriver_utk_sports_cleanup_tab,
     nodriver_utk_sports_consume_reload_event,
     nodriver_utk_sports_health_check,
+    nodriver_utk_sports_pause_refresh,
     nodriver_utk_sports_reload,
     nodriver_utk_sports_reload_wait,
 )
@@ -31,8 +33,10 @@ __all__ = [
     "nodriver_ctbc_inject_cookies",
     "nodriver_utiki_main",
     "nodriver_utk_sports_cancel_refresh",
+    "nodriver_utk_sports_cleanup_tab",
     "nodriver_utk_sports_consume_reload_event",
     "nodriver_utk_sports_health_check",
+    "nodriver_utk_sports_pause_refresh",
     "nodriver_utk_sports_reload",
     "nodriver_utk_sports_reload_wait",
 ]

@@ -1,7 +1,7 @@
 # 函式結構分析與平台索引
 
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
-**最後更新**：2026-10-15
+**最後更新**：2026-10-16
 
 ---
 
@@ -73,7 +73,7 @@
 - **platforms/ibon.py** - iBon + Tour iBon 平台（25 函式）
 - **platforms/kham.py** - KHAM + ticket.com.tw + UDN 平台（21 函式）
 - **platforms/hkticketing.py** - HKTicketing + GalaxyMacau + Ticketek 平台（30 函式）
-- **platforms/utiki/** - uTiki2 職棒售票家族（tenant profile、路由、登入與 workflow）
+- **platforms/utiki/** - uTiki2 職棒售票家族（tenant profile、路由、登入、refresh infrastructure 與 workflow）
 - **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade，新邏輯不得加在此檔
 
 ### 🌐 支援平台清單
@@ -398,12 +398,14 @@ platforms/utiki/
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
 ├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
-└── workflow.py   # 唯一的瀏覽器副作用與 runtime state owner
+├── refresh.py    # document health、429 與跨程序刷新協調；不持有 runtime
+└── workflow.py   # 唯一的 per-tab runtime owner 與購票流程編排
 
 platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 ```
 
 - 已驗證 tenant：中信育樂、味全龍。
+- `workflow.py` 單向傳入 canonical runtime、tab identity 與 cancel-task registry 給 `refresh.py`；refresh 不得反向 import workflow 或建立 mirror state。
 - 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
 - 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，分階段拆分見 [uTiki2 重構計劃](utiki-refactor-plan.md)。

@@ -28,6 +28,8 @@ class TenantProfile:
     supports_server_assignment: bool = False
 
     def as_legacy_dict(self):
+        """將租戶設定轉成舊版呼叫端使用的字典。"""
+
         return {
             "name": self.name,
             "host": self.host,
@@ -64,7 +66,7 @@ TENANT_PROFILES = MappingProxyType({profile.host: profile for profile in _TENANT
 
 
 def get_utiki_tenant_profile(url):
-    """Return a tenant for an exact secure family origin, independent of route."""
+    """依精確的安全來源取得對應 uTiki 租戶。"""
     try:
         parsed = urlsplit(str(url or ""))
         host = (parsed.hostname or "").lower()
@@ -81,11 +83,13 @@ def get_utiki_tenant_profile(url):
 
 
 def is_utiki_sports_url(url):
+    """判斷網址是否屬於支援的 uTiki 棒球售票站。"""
+
     return get_utiki_tenant_profile(url) is not None
 
 
 def unique_query(url):
-    """Return a query dict only when every key occurs exactly once."""
+    """僅在每個查詢鍵都唯一時回傳查詢參數字典。"""
     try:
         pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
     except ValueError:
@@ -96,6 +100,8 @@ def unique_query(url):
 
 
 def classify_utiki_page(url):
+    """依網址判別 uTiki 售票頁面類型。"""
+
     profile = get_utiki_tenant_profile(url)
     if profile is None:
         return PageKind.UNKNOWN
@@ -159,7 +165,7 @@ def classify_utiki_page(url):
 
 
 def same_origin(first, second):
-    """Compare parsed origins while rejecting embedded credentials."""
+    """拒絕內嵌憑證後比較兩個網址是否同源。"""
     if first.username or first.password or second.username or second.password:
         return False
     try:

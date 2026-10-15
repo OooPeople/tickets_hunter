@@ -189,7 +189,7 @@ observe -> parse/reconcile -> gate -> plan -> commit -> reduce
 
 ```text
 _state["tabs"][tab_identity]
-  document      URL、document token、PageKind
+  document      URL、canonical 非零 performance time-origin token、PageKind
   action        pending/committed local intent guard、attempt count
   transition    fast navigation、submit outcome、conflict/reload 等跨 document 狀態
   purchase      CAPTCHA、submit、dialog、checkout 狀態
@@ -199,7 +199,7 @@ _state["tabs"][tab_identity]
 - `PurchaseKey` 由 tenant、session/account fingerprint、performance、group、price-area 或 selection mode 組成；不得以完整 raw URL 取代。
 - 所有程式自動觸發的跨頁動作先建立 `PendingNavigation`，記錄 `NATIVE`／`FAST`、source document、預期 route 與 identifiers；`FAST` 另在 browser session 寫入短期、非敏感 provenance marker，包含 nonce、source、expected destination 與 expiry，避免 Python state 遺失後被誤當成手動 native 抵達。marker 只對 exact destination 生效，成功 attest、確認安全返回 area 或 expiry 時都以 nonce compare-and-delete；有效 `NATIVE` pending 優先於 stale／不相符的 FAST marker。
 - tab 關閉、離開已知 tenant 或 identity 改變時清理，runtime 不得強持有 tab 造成記憶體洩漏。
-- document token 改變時，先用新 document 事件 reduce／attest `transition`，再清除 source-document snapshot、action guard 與頁面級 throttle；不得先清掉 `PendingNavigation`、submit awaiting、conflict wait-new-document 或 reload probe。
+- canonical document token 是 `String(performance.timeOrigin || navigationStart)` 的非零值；URL／query／PageKind 必須分欄驗證，不得拼入 token，也不得在讀取失敗時以 URL 冒充新 document。token 改變時，先用新 document 事件 reduce／attest `transition`，再清除 source-document snapshot、action guard 與頁面級 throttle；不得先清掉 `PendingNavigation`、submit awaiting、conflict wait-new-document 或 reload probe。
 - cross-document transition 完成、拒絕或超時後才清理；PurchaseKey 的 quota／unknown blocker 及 tenant session 級資料不隨一般換頁消失。
 - 設定 fingerprint 改變時只重設受影響決策，不清除無關限流資訊。
 - quota／unknown 依 PurchaseKey sticky；auth 依 tenant、session 與 credential fingerprint sticky；只有對應 key／session 改變或使用者明確處理後解除。

@@ -26,6 +26,9 @@
 **每個 PR 都必須先有對應的 Issue，並在 PR 內容連結該 Issue。**
 沒有連結 Issue 的 PR 不會進入審查。
 
+Issue 的標題、內文與後續留言使用繁體中文；程式識別字、網址、產品名稱與
+必要的技術術語可保留原文。
+
 #### 為什麼這樣要求
 
 - **審查需要脈絡**：搶票邏輯高度依賴各平台的 DOM 與流程細節，光看 diff 看不出為何要這樣改。
@@ -122,6 +125,9 @@ git checkout -b fix/123-ticketplus-date-list
 <type>(<scope>): <description>
 ```
 
+`type` 與 `scope` 保留英文關鍵字或模組名稱，`description`、內文與 footer 使用
+繁體中文。完整規則見 [`GIT_COMMIT_RULES.md`](GIT_COMMIT_RULES.md)。
+
 | Type | 用途 |
 |------|------|
 | `feat` | 新功能 |
@@ -135,9 +141,9 @@ git checkout -b fix/123-ticketplus-date-list
 
 **範例：**
 ```
-feat(kktix): add zendriver area auto select
-fix(tixcraft): fix OCR captcha overwriting user input
-refactor(fansigo): consolidate tracker blocking into global block list
+feat(kktix): 新增 zendriver 自動選區
+fix(tixcraft): 避免 OCR 驗證碼覆蓋使用者輸入
+refactor(fansigo): 將追蹤器封鎖規則整合至全域清單
 ```
 
 ### 5. 提交 Pull Request

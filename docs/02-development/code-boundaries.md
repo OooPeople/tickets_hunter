@@ -1,6 +1,6 @@
 **文件說明**：Tickets Hunter 的程式碼邊界規範，定義模組職責、依賴方向、命名慣例與禁止模式。提交 PR 前請先閱讀。
 
-**最後更新**：2026-10-15
+**最後更新**：2026-10-16
 
 ---
 
@@ -15,7 +15,8 @@
 - **`nodriver_tixcraft.py`** — 主迴圈與路由：URL 分派、瀏覽器啟動、設定熱重載。平台邏輯已全數拆至 `platforms/`。禁止：通用 DOM 工具（屬 `nodriver_common.py`）、設定 CRUD（屬 `settings.py`）。
 - **`nodriver_common.py`** — 共用瀏覽器基礎設施：DOM 操作、暫停機制、Cloudflare、瀏覽器初始化、OCR 工廠、通知。禁止：平台業務邏輯、import `platforms/*` 或 `nodriver_tixcraft`。
 - **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔；legacy facade 只可明示轉接到同一家族 package，不得持有狀態或流程邏輯。禁止：跨平台 import、import `nodriver_tixcraft`。
-- **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是瀏覽器副作用與模組 `_state` 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。不得只因網站外觀相似就納入同一家族。
+- **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是模組 `_state` 與 per-tab runtime 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。離開家族 route、關閉瀏覽器或 handler 終止時，由 workflow 以 non-allocating lookup 精確移除該 tab runtime；checkout 只取消 refresh work，必須保留 runtime 的通知去重狀態。不得只因網站外觀相似就納入同一家族。
+- **`platforms/utiki/refresh.py`** — uTiki document inspection、429 circuit breaker、跨程序 refresh reservation／commit／wait／pause／cancel 與 reload event。queued／reserved pause 會以節流的 exact-token cleanup 釋放共享工作；commit 後的 request 必須保留到觀察到不同的 canonical document token，URL 漂移或 browser command 回傳不得視為完成，也不得重送。每個 request 必須有非空 reason 與唯一 token；一個 intent 的 completion 不得回傳給另一個 caller，terminal recovery probe 也必須同步停止其 lease task。logical request 仍由 workflow 的 canonical per-tab runtime 持有，resume 不得重算 eligibility、延長 deadline 或回捲 committed phase。只能由 workflow 傳入 runtime、tab identity 與 cancel-task registry；禁止 import workflow、持有 `_state`、建立 mirror runtime，或處理購票選擇／提交。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
 - **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
 - **`global_settings.py`** — 跨 profile 的全域設定驗證與原子化檔案存取。僅允許 import `util`。
@@ -29,7 +30,10 @@
 nodriver_tixcraft  -->  nodriver_common, platforms/*, platforms/{family}, util, settings
 platforms/*        -->  nodriver_common, global_settings, refresh_coordinator, util
 platforms/{family}/workflow
-                   -->  同 package 葉節點, nodriver_common,
+                   -->  同 package 葉節點與核准 infrastructure 模組,
+                        nodriver_common, util
+platforms/utiki/refresh
+                   -->  platforms/utiki/profiles, nodriver_common,
                         global_settings, refresh_coordinator, util
 platforms/{family}/葉節點
                    -->  同 package 更底層葉節點, Python 標準函式庫
@@ -41,7 +45,9 @@ util               -->  (無專案內部匯入)
 ```
 
 禁止反向依賴。不同平台／家族之間禁止互相 import；legacy facade 只能單向 import
-其 canonical family package。package 內不得 import legacy facade。
+其 canonical family package。package 內不得 import legacy facade。`utiki/refresh.py`
+不得反向 import `utiki/workflow.py`；runtime ownership 必須維持 workflow → refresh
+單向傳入。
 
 ---
 
@@ -102,6 +108,7 @@ async def nodriver_xxx_main(tab, url, config_dict):
 - 散落的 `global some_bool`（難追蹤、不可測試）
 - 主迴圈預初始化平台 dict（平台自己管理自己的狀態）
 - family workflow、facade 各自建立一份 state 或同時執行 handler
+- infrastructure 模組保存 workflow runtime 的 mirror、fallback 或第二份 tab registry
 
 ---
 

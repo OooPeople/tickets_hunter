@@ -224,8 +224,8 @@ fake 應表達操作語意，例如 `read_snapshot()`、`commit_selection()`，�
 fixture 應來自脫敏後的真實頁面片段，並由 production reader 在真正 DOM 環境中解析。
 不得由待測程式產生 fixture 再驗證自己。
 
-目前 repository 尚未提供 DOM fixture runner，因此本節是新 runner 的驗收要求，不是現行可宣稱已通過的測試。
-引入 runner 的變更必須同時記錄目錄、啟動／skip 規則、精確命令與環境需求；瀏覽器測試不得在一般 unittest discover 中無提示啟動。
+目前 runner 位於 `tests/test_ctbc_dom_fixtures.py`，並依 4.4 節的環境變數與
+`browser` marker 明確啟用；瀏覽器測試不得在一般 unittest discover 中無提示啟動。
 
 fixture 必須：
 

@@ -80,6 +80,7 @@ hiddenimports=[
     'platforms.utiki.profiles',
     'platforms.utiki.selection',
     'platforms.utiki.workflow',
+    'platforms.utiki.refresh',
 ]
 ```
 

@@ -118,6 +118,7 @@ _state = {
     "auth_failure": {},
     "captcha_reset": {},
     "pending_navigation": {},
+    "server_assignment_authorized": {},
     "reload_request": {},
     "rate_limit_observation": {},
     "rate_limit_retry": {},
@@ -350,7 +351,13 @@ def _ctbc_purchase_state_key(tab):
     page_type = _get_ctbc_page_type(purchase_url)
     query = _ctbc_unique_query(purchase_url)
     profile = _get_utk_sports_profile(purchase_url)
-    if page_type not in ("seat", "general_admission") or query is None or not profile:
+    if (
+        page_type not in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
+        or query is None
+        or not profile
+    ):
         return None
 
     performance_id = query.get("PERFORMANCE_ID")
@@ -362,7 +369,7 @@ def _ctbc_purchase_state_key(tab):
         or not token_pattern.fullmatch(str(price_area_id or ""))
         or group_id is None
         or (group_id and not token_pattern.fullmatch(str(group_id)))
-        or (page_type == "seat" and not group_id)
+        or (page_type in {"seat", "server_assigned_quantity"} and not group_id)
     ):
         return None
 
@@ -374,6 +381,7 @@ def _ctbc_purchase_state_key(tab):
         performance_id,
         group_id,
         price_area_id,
+        query.get("ATYPE", ""),
     )
 
 
@@ -389,7 +397,9 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
         (source.scheme, source.netloc, source.path, source.query, "")
     )
     return (
-        _get_ctbc_page_type(source_without_fragment) in ("seat", "general_admission")
+        _get_ctbc_page_type(source_without_fragment) in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
         and _get_ctbc_page_type(destination_url) == "checkout"
         and _ctbc_same_origin(source, destination)
     )
@@ -3022,7 +3032,9 @@ async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key)
     destination_page_type = _get_ctbc_page_type(destination_url)
     if (
         destination_key != submit_key
-        or destination_page_type not in ("seat", "general_admission")
+        or destination_page_type not in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
     ):
         submitted.pop(submit_key, None)
         _state["submit_blocked"][submit_key] = "unknown"
@@ -3180,6 +3192,16 @@ async def _dispatch_ctbc_submit(
     return True
 
 
+def _ctbc_submit_plan_matches_page(page_type, quantity_plan):
+    if page_type == "seat":
+        return quantity_plan is None
+    return bool(
+        page_type in {"general_admission", "server_assigned_quantity"}
+        and isinstance(quantity_plan, QuantityPlan)
+        and quantity_plan.page_type == page_type
+    )
+
+
 async def _ctbc_captcha_and_submit(
     tab, config_dict, ocr, *, quantity_plan=None
 ):
@@ -3189,16 +3211,13 @@ async def _ctbc_captcha_and_submit(
     page_type = _get_ctbc_page_type(current_url)
     if (
         submit_key is None
-        or page_type not in ("seat", "general_admission")
+        or page_type not in (
+            "seat", "general_admission", "server_assigned_quantity"
+        )
     ):
         debug.log("[CTBC] Purchase identity is incomplete; automatic submit is blocked")
         return False
-    if (
-        (page_type == "general_admission" and not isinstance(
-            quantity_plan, QuantityPlan
-        ))
-        or (page_type == "seat" and quantity_plan is not None)
-    ):
+    if not _ctbc_submit_plan_matches_page(page_type, quantity_plan):
         debug.log("[CTBC] Submit plan does not match the purchase page")
         return False
 
@@ -3280,6 +3299,10 @@ async def _ctbc_captcha_and_submit(
 async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
         return False
+    if _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    ) != "manual":
+        return False
 
     submit_key = _ctbc_purchase_state_key(tab)
     if submit_key is None:
@@ -3316,13 +3339,16 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
     return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
 
 
-async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
-    """Select quantity on the unnumbered-seat UTK0203 page."""
+async def _nodriver_utiki_quantity_main(
+    tab, config_dict, ocr, page_type, expected_product_id=""
+):
+    """Run the shared quantity-page workflow after route attestation."""
     debug = util.create_debug_logger(config_dict)
-    if not await _ctbc_attest_fast_destination(
-        tab, "general_admission", config_dict
-    ):
-        return False
+    label = (
+        "SERVER ASSIGNMENT"
+        if page_type == "server_assigned_quantity"
+        else "GENERAL"
+    )
     submit_key = _ctbc_purchase_state_key(tab)
     if submit_key is None:
         return False
@@ -3343,7 +3369,7 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
     try:
         snapshot = await read_quantity_snapshot(tab)
     except Exception as exc:
-        debug.log(f"[CTBC GENERAL] Quantity snapshot failed: {exc}")
+        debug.log(f"[CTBC {label}] Quantity snapshot failed: {exc}")
         return False
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
         reason = (
@@ -3351,17 +3377,28 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
             if isinstance(snapshot, QuantitySnapshot)
             else "invalid-result"
         )
-        debug.log(f"[CTBC GENERAL] Quantity page was not ready: {reason}")
+        debug.log(f"[CTBC {label}] Quantity page was not ready: {reason}")
+        return False
+    if (
+        page_type == "server_assigned_quantity"
+        and snapshot.product_id != expected_product_id
+    ):
+        debug.log(
+            "[CTBC SERVER ASSIGNMENT] Product identity changed after "
+            "destination attestation"
+        )
         return False
 
     ticket_number = int(config_dict.get("ticket_number", 1))
     keyword = _get_utiki_behavior(
         config_dict, "ticket_type_keyword", "全票"
     )
-    plan = select_quantity_snapshot(snapshot, keyword, ticket_number)
+    plan = select_quantity_snapshot(
+        snapshot, keyword, ticket_number, page_type=page_type
+    )
     if plan is None:
         debug.log(
-            f"[CTBC GENERAL] No available ticket type matched: {keyword}"
+            f"[CTBC {label}] No available ticket type matched: {keyword}"
         )
         return False
 
@@ -3369,11 +3406,13 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
     try:
         commit_result = await commit_quantity(tab, snapshot, plan)
     except Exception as exc:
-        debug.log(f"[CTBC GENERAL] Quantity commit outcome is unknown: {exc}")
+        debug.log(
+            f"[CTBC {label}] Quantity commit outcome is unknown: {exc}"
+        )
         return False
     if commit_result is CommitResult.STALE:
         debug.log(
-            "[CTBC GENERAL] Quantity state changed during commit; "
+            f"[CTBC {label}] Quantity state changed during commit; "
             "waiting to reload"
         )
         await _reload_with_interval(
@@ -3382,12 +3421,12 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         return False
     if commit_result is not CommitResult.COMMITTED:
         debug.log(
-            f"[CTBC GENERAL] Quantity commit {commit_result.value}; "
+            f"[CTBC {label}] Quantity commit {commit_result.value}; "
             "submit blocked"
         )
         return False
     debug.log(
-        f"[CTBC GENERAL] Selected {plan.ticket_number} x "
+        f"[CTBC {label}] Selected {plan.ticket_number} x "
         f"{plan.target_name}"
     )
     return await _ctbc_captcha_and_submit(
@@ -3395,12 +3434,111 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
     )
 
 
+async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
+    """Select quantity on an unnumbered-seat UTK0202/UTK0203 page."""
+    if not await _ctbc_attest_fast_destination(
+        tab, "general_admission", config_dict
+    ):
+        return False
+    if _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    ) != "manual":
+        return False
+    return await _nodriver_utiki_quantity_main(
+        tab, config_dict, ocr, "general_admission"
+    )
+
+
+def _ctbc_server_assignment_pending_is_expected(pending):
+    return bool(
+        pending
+        and pending.get("kind") == "NATIVE"
+        and pending.get("route") == "0201_001"
+        and pending.get("selection_mode") == "computer"
+        and re.fullmatch(
+            r"[A-Za-z0-9_-]+", str(pending.get("product_id") or "")
+        )
+    )
+
+
+def _ctbc_server_assignment_is_authorized(tab):
+    identity = _ctbc_tab_identity(tab)
+    purchase_key = _ctbc_purchase_state_key(tab)
+    authorized = _state["server_assignment_authorized"].get(identity)
+    if (
+        purchase_key is not None
+        and isinstance(authorized, dict)
+        and authorized.get("purchase_key") == purchase_key
+        and re.fullmatch(
+            r"[A-Za-z0-9_-]+",
+            str(authorized.get("product_id") or ""),
+        )
+    ):
+        return authorized
+    _state["server_assignment_authorized"].pop(identity, None)
+    return None
+
+
+async def nodriver_utiki_server_assigned_quantity_main(
+    tab, config_dict, ocr
+):
+    """Select quantity after an attested native computer-area click."""
+    identity = _ctbc_tab_identity(tab)
+    current_url = str(tab.target.url)
+    profile = _get_utk_sports_profile(current_url)
+    if (
+        _get_utiki_behavior(
+            config_dict, "seat_selection_mode", "manual"
+        ) != "computer"
+        or not profile
+        or not profile.get("supports_server_assignment", False)
+    ):
+        _state["server_assignment_authorized"].pop(identity, None)
+        return False
+    pending = _state["pending_navigation"].get(identity)
+    authorization = _ctbc_server_assignment_is_authorized(tab)
+    if pending:
+        if not _ctbc_server_assignment_pending_is_expected(pending):
+            _state["server_assignment_authorized"].pop(identity, None)
+            return False
+        if not await _ctbc_attest_fast_destination(
+            tab, "server_assigned_quantity", config_dict
+        ):
+            return False
+        purchase_key = _ctbc_purchase_state_key(tab)
+        if purchase_key is None:
+            return False
+        authorization = {
+            "purchase_key": purchase_key,
+            "product_id": pending["product_id"],
+        }
+        _state["server_assignment_authorized"][identity] = authorization
+    elif authorization is None:
+        return False
+    return await _nodriver_utiki_quantity_main(
+        tab, config_dict, ocr, "server_assigned_quantity",
+        expected_product_id=authorization["product_id"],
+    )
+
+
 def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
     if not isinstance(expected, dict) or not isinstance(dom_ids, dict):
         return False
     route = expected.get("route")
-    expected_page_type = "seat" if route == "0205" else "general_admission" if route == "0202" else None
+    expected_page_type = {
+        "0205": "seat",
+        "0202": "general_admission",
+        "0201_001": "server_assigned_quantity",
+    }.get(route)
     if expected_page_type is None or page_type != expected_page_type:
+        return False
+    if (
+        (route == "0201_001" and expected.get("selection_mode") != "computer")
+        or (
+            route != "0201_001"
+            and expected.get("selection_mode", "manual") != "manual"
+        )
+    ):
         return False
     area_url = str(expected.get("area_url") or "")
     if (
@@ -3425,7 +3563,12 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
     ):
         return False
     query = _ctbc_unique_query(current_url)
-    if query is None or set(query) != {"PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"}:
+    expected_query_keys = {
+        "PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"
+    }
+    if route == "0201_001":
+        expected_query_keys.add("ATYPE")
+    if query is None or set(query) != expected_query_keys:
         return False
     checks = {
         "PERFORMANCE_ID": expected.get("performance_id"),
@@ -3433,6 +3576,8 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
         "PERFORMANCE_PRICE_AREA_ID": expected.get("price_area_id"),
     }
     if any(query.get(key) != value for key, value in checks.items()):
+        return False
+    if route == "0201_001" and query.get("ATYPE") != "N":
         return False
     return (
         str(dom_ids.get("performance_id") or "") == expected.get("performance_id")
@@ -3446,7 +3591,9 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
     area_url = str(expected.get("area_url") or "")
     if (
         _get_ctbc_page_type(area_url) != "area"
-        or _get_ctbc_page_type(source_url) not in {"seat", "general_admission"}
+        or _get_ctbc_page_type(source_url) not in {
+            "seat", "general_admission", "server_assigned_quantity"
+        }
     ):
         return False
     area_url_json = json.dumps(area_url)
@@ -3480,7 +3627,14 @@ async def _ctbc_read_destination_state(tab, page_type):
     price_area_selector_json = json.dumps(
         "#PRICE_AREA_ID" if page_type == "seat" else "#PERFORMANCE_PRICE_AREA_ID"
     )
-    group_required_json = "true" if page_type == "seat" else "false"
+    group_required_json = (
+        "true"
+        if page_type in {"seat", "server_assigned_quantity"}
+        else "false"
+    )
+    strict_identity_json = (
+        "true" if page_type == "server_assigned_quantity" else "false"
+    )
     raw_value = await tab.evaluate(f'''
         (() => new Promise(resolve => {{
             // __ticketsHunterCtbcDestinationState
@@ -3496,10 +3650,16 @@ async def _ctbc_read_destination_state(tab, page_type):
             const read = () => {{
                 const markers = {marker_json};
                 const markerReady = markers.every(selector => document.querySelector(selector));
-                const performanceInput = document.querySelector('#PERFORMANCE_ID');
-                const productInput = document.querySelector('#PRODUCT_ID');
-                const groupInput = document.querySelector('#GROUP_ID');
-                const priceAreaInput = document.querySelector({price_area_selector_json});
+                const identityInput = selector => {{
+                    const inputs = Array.from(document.querySelectorAll(selector));
+                    return {strict_identity_json} ?
+                        (inputs.length === 1 ? inputs[0] : null) :
+                        (inputs[0] || null);
+                }};
+                const performanceInput = identityInput('#PERFORMANCE_ID');
+                const productInput = identityInput('#PRODUCT_ID');
+                const groupInput = identityInput('#GROUP_ID');
+                const priceAreaInput = identityInput({price_area_selector_json});
                 const groupReady = !{group_required_json} || !!groupInput;
                 if (!markerReady || !performanceInput || !productInput || !groupReady || !priceAreaInput) return false;
                 finish({{ready: true, page_url: location.href,
@@ -3773,6 +3933,11 @@ async def _handle_ctbc_checkout(tab, config_dict):
 
 
 async def nodriver_ctbc_main(tab, url, config_dict, ocr):
+    page_type = _get_ctbc_page_type(url)
+    if page_type != "server_assigned_quantity":
+        _state["server_assignment_authorized"].pop(
+            _ctbc_tab_identity(tab), None
+        )
     if await check_and_handle_pause(config_dict):
         await nodriver_utk_sports_cancel_refresh(
             tab, "paused", wait=True, abandon_probe=True
@@ -3785,7 +3950,6 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
     if guard_state == "unknown":
         return tab
 
-    page_type = _get_ctbc_page_type(url)
     if page_type == "date" and config_dict.get("date_auto_select", {}).get("enable", False):
         await nodriver_ctbc_date_auto_select(tab, config_dict)
     elif page_type == "area":
@@ -3797,6 +3961,10 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
         await nodriver_ctbc_seat_main(tab, config_dict, ocr)
     elif page_type == "general_admission":
         await nodriver_ctbc_general_admission_main(tab, config_dict, ocr)
+    elif page_type == "server_assigned_quantity":
+        await nodriver_utiki_server_assigned_quantity_main(
+            tab, config_dict, ocr
+        )
     elif page_type == "checkout":
         await nodriver_utk_sports_cancel_refresh(
             tab, "checkout reached", wait=True, abandon_probe=True

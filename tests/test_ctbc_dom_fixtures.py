@@ -82,6 +82,7 @@ async def _run_browser_fixtures():
             _assert_area_fixture,
             _assert_seat_fixture,
             _assert_quantity_fixture,
+            _assert_server_assigned_quantity_fixture,
             _assert_dialog_fixture,
             _assert_fast_marker_fixture,
         ):
@@ -112,6 +113,15 @@ async def _open_fixture(browser, filename, query=""):
             return tab
         await tab.sleep(0.02)
     raise AssertionError(f"fixture did not finish loading: {filename}")
+
+
+async def _open_fixture_url(browser, url):
+    tab = await browser.get(url)
+    for _ in range(50):
+        if await tab.evaluate("document.readyState === 'complete'"):
+            return tab
+        await tab.sleep(0.02)
+    raise AssertionError(f"fixture did not finish loading: {url}")
 
 
 async def _assert_date_fixture(browser):
@@ -955,6 +965,183 @@ async def _read_fixture_quantities(tab):
         "document.querySelectorAll('input.numbox[key]')"
         ").map(input => [input.getAttribute('key'), input.value]))"
     )
+
+
+async def _assert_server_assigned_quantity_fixture(browser):
+    class QuantityHandler(SimpleHTTPRequestHandler):
+        def log_message(self, _format, *_args):
+            return
+
+        def do_GET(self):
+            routes = (
+                "/BROTHERS/UTK0201_001",
+                "/BROTHERS/nested/UTK0201_001",
+            )
+            for route in routes:
+                if self.path == route or self.path.startswith(route + "?"):
+                    self.path = "/UTK0201_001" + self.path[len(route):]
+                    break
+            super().do_GET()
+
+        def guess_type(self, path):
+            if path.endswith("/UTK0201_001"):
+                return "text/html"
+            return super().guess_type(path)
+
+    handler = partial(QuantityHandler, directory=str(FIXTURE_ROOT))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    query = (
+        "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+        "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&ATYPE=N"
+    )
+    url = (
+        f"http://127.0.0.1:{server.server_port}"
+        f"/BROTHERS/UTK0201_001{query}"
+    )
+    try:
+        tab = await _open_fixture_url(browser, url)
+        snapshot = await read_quantity_snapshot(tab)
+        plan = select_quantity_snapshot(
+            snapshot, "全票", 2, page_type="server_assigned_quantity"
+        )
+        assert plan is not None, snapshot
+        assert await commit_quantity(
+            tab, snapshot, plan
+        ) is CommitResult.COMMITTED
+        assert await _read_fixture_quantities(tab) == {
+            "FULL": "2", "OTHER": "0"
+        }
+        assert await dispatch_quantity_submit(
+            tab, plan
+        ) is SubmitDispatchResult.DISPATCHED
+        assert await tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 1
+
+        hidden_only = await _open_fixture_url(browser, url)
+        hidden_snapshot = await read_quantity_snapshot(hidden_only)
+        hidden_plan = select_quantity_snapshot(
+            hidden_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            hidden_only, hidden_snapshot, hidden_plan
+        ) is CommitResult.COMMITTED
+        await hidden_only.evaluate("document.querySelector('#CHK').remove()")
+        assert await dispatch_quantity_submit(
+            hidden_only, hidden_plan
+        ) is SubmitDispatchResult.REJECTED
+        assert await hidden_only.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 0
+
+        invalid_form = await _open_fixture_url(browser, url)
+        invalid_snapshot = await read_quantity_snapshot(invalid_form)
+        invalid_plan = select_quantity_snapshot(
+            invalid_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            invalid_form, invalid_snapshot, invalid_plan
+        ) is CommitResult.COMMITTED
+        await invalid_form.evaluate(
+            "document.querySelector('form').setAttribute('method', 'get')"
+        )
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+        await invalid_form.evaluate('''
+            (() => {
+                const form = document.querySelector('form');
+                const button = document.querySelector('#addcart');
+                form.setAttribute('method', 'post');
+                form.setAttribute(
+                    'action', 'UTK0201_001/ADD_SHOPPING_CAR');
+                button.setAttribute('formmethod', '');
+            })()
+        ''')
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+        await invalid_form.evaluate('''
+            (() => {
+                const button = document.querySelector('#addcart');
+                button.removeAttribute('formmethod');
+                button.setAttribute('formaction', '');
+            })()
+        ''')
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+        assert await invalid_form.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 0
+        await invalid_form.evaluate('''
+            (() => {
+                const form = document.querySelector('form');
+                const button = document.querySelector('#addcart');
+                button.removeAttribute('formaction');
+                form.setAttribute('method', 'post');
+                form.setAttribute('action', 'OTHER_ACTION');
+            })()
+        ''')
+        assert await dispatch_quantity_submit(
+            invalid_form, invalid_plan
+        ) is SubmitDispatchResult.REJECTED
+
+        product_drift = await _open_fixture_url(browser, url)
+        product_snapshot = await read_quantity_snapshot(product_drift)
+        product_plan = select_quantity_snapshot(
+            product_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        await product_drift.evaluate('''
+            document.querySelector('form').insertAdjacentHTML(
+                'afterbegin',
+                '<input id="PRODUCT_ID" value="PRODUCT_FIXTURE" hidden>'
+            )
+        ''')
+        assert await commit_quantity(
+            product_drift, product_snapshot, product_plan
+        ) is CommitResult.STALE
+
+        nested_url = url.replace(
+            "/BROTHERS/UTK0201_001",
+            "/BROTHERS/nested/UTK0201_001",
+        )
+        nested_tab = await _open_fixture_url(browser, nested_url)
+        nested_snapshot = await read_quantity_snapshot(nested_tab)
+        nested_plan = select_quantity_snapshot(
+            nested_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            nested_tab, nested_snapshot, nested_plan
+        ) is CommitResult.REJECTED
+        assert await nested_tab.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        ) == 0
+
+        wrong_atype = await _open_fixture_url(
+            browser, url.replace("ATYPE=N", "ATYPE=Y")
+        )
+        wrong_snapshot = await read_quantity_snapshot(wrong_atype)
+        wrong_plan = select_quantity_snapshot(
+            wrong_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert await commit_quantity(
+            wrong_atype, wrong_snapshot, wrong_plan
+        ) is CommitResult.STALE
+        assert await wrong_atype.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        ) == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 async def _assert_dialog_fixture(browser):

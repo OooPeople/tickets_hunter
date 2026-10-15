@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
     CTBC_TEST_QUANTITY_URL,
+    CTBC_TEST_SERVER_QUANTITY_URL,
     CtbcStateIsolationMixin,
     FakeSubmitTab,
     FakeTab,
@@ -36,6 +37,7 @@ from platforms.utiki.workflow import (
     _state,
     nodriver_ctbc_area_auto_select,
     nodriver_ctbc_general_admission_main,
+    nodriver_utiki_server_assigned_quantity_main,
 )
 
 
@@ -132,7 +134,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         with (
             patch(
                 "platforms.utiki.workflow._get_utk_sports_profile",
-                return_value={"supports_server_assignment": True},
+                return_value={
+                    "supports_server_assignment": True,
+                    "host": "tix.ctbcsports.com",
+                    "tenant_path": "/BROTHERS",
+                },
             ),
             patch(
                 "platforms.utiki.workflow.read_area_snapshot",
@@ -330,6 +336,260 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         )
         self.assertEqual(1, dom_port.commit_count)
 
+    async def test_server_quantity_reuses_inspect_commit_submit_pipeline(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
+            page_url=CTBC_TEST_SERVER_QUANTITY_URL,
+            group_id="GROUP_FRONT",
+            product_id="PRODUCT_FIXTURE",
+        ))
+        dom_port = FakeUtikiQuantityDomPort(
+            snapshot, CommitResult.COMMITTED
+        )
+        tab = FakeSubmitTab(
+            dialog="", url=CTBC_TEST_SERVER_QUANTITY_URL
+        )
+        cfg = config()
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+        _state["pending_navigation"][_ctbc_tab_identity(tab)] = {
+            "kind": "NATIVE",
+            "route": "0201_001",
+            "selection_mode": "computer",
+            "product_id": "PRODUCT_FIXTURE",
+        }
+        submit_calls = 0
+
+        async def attest_effect(*_args):
+            _state["pending_navigation"].pop(_ctbc_tab_identity(tab), None)
+            return True
+
+        async def submit_effect(*_args, **kwargs):
+            nonlocal submit_calls
+            submit_calls += 1
+            dom_port.events.append("submit")
+            self.assertEqual(
+                "server_assigned_quantity",
+                kwargs["quantity_plan"].page_type,
+            )
+            return submit_calls == 2
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                AsyncMock(side_effect=attest_effect),
+            ) as attest,
+            patch(
+                "platforms.utiki.workflow._get_utk_sports_profile",
+                return_value={
+                    "supports_server_assignment": True,
+                    "host": "tix.ctbcsports.com",
+                    "tenant_path": "/BROTHERS",
+                },
+            ),
+            patch(
+                "platforms.utiki.workflow.read_quantity_snapshot",
+                side_effect=dom_port.read_quantity_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_quantity",
+                side_effect=dom_port.commit_quantity,
+            ),
+            patch(
+                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                AsyncMock(side_effect=submit_effect),
+            ),
+        ):
+            self.assertFalse(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+            self.assertTrue(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+
+        self.assertEqual(
+            [
+                "inspect_quantity", "commit_quantity", "submit",
+                "inspect_quantity", "commit_quantity", "submit",
+            ],
+            dom_port.events,
+        )
+        self.assertEqual(1, attest.await_count)
+
+    async def test_server_quantity_requires_pending_and_capability(self):
+        tab = FakeSubmitTab(
+            dialog="", url=CTBC_TEST_SERVER_QUANTITY_URL
+        )
+        cfg = config()
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ) as attest, patch(
+            "platforms.utiki.workflow._get_utk_sports_profile",
+            return_value={
+                "supports_server_assignment": True,
+                "host": "tix.ctbcsports.com",
+                "tenant_path": "/BROTHERS",
+            },
+        ), patch(
+            "platforms.utiki.workflow.read_quantity_snapshot", AsyncMock()
+        ) as reader:
+            self.assertFalse(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+        reader.assert_not_awaited()
+        attest.assert_not_awaited()
+
+        _state["pending_navigation"][_ctbc_tab_identity(tab)] = {
+            "kind": "NATIVE",
+            "route": "0201_001",
+            "selection_mode": "computer",
+            "product_id": "PRODUCT_FIXTURE",
+        }
+        mismatched = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
+            page_url=CTBC_TEST_SERVER_QUANTITY_URL,
+            group_id="GROUP_FRONT",
+            product_id="OTHER_PRODUCT",
+        ))
+
+        async def attest_effect(*_args):
+            _state["pending_navigation"].pop(_ctbc_tab_identity(tab), None)
+            return True
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(side_effect=attest_effect),
+        ), patch(
+            "platforms.utiki.workflow._get_utk_sports_profile",
+            return_value={
+                "supports_server_assignment": True,
+                "host": "tix.ctbcsports.com",
+                "tenant_path": "/BROTHERS",
+            },
+        ), patch(
+            "platforms.utiki.workflow.read_quantity_snapshot",
+            AsyncMock(return_value=mismatched),
+        ), patch(
+            "platforms.utiki.workflow.commit_quantity", AsyncMock()
+        ) as commit:
+            self.assertFalse(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+        commit.assert_not_awaited()
+
+        _state["pending_navigation"][_ctbc_tab_identity(tab)] = {
+            "kind": "NATIVE",
+            "route": "0201_001",
+            "selection_mode": "computer",
+            "product_id": "PRODUCT_FIXTURE",
+        }
+        with patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(return_value=True),
+        ) as attest, patch(
+            "platforms.utiki.workflow.read_quantity_snapshot", AsyncMock()
+        ) as reader:
+            self.assertFalse(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+        reader.assert_not_awaited()
+        attest.assert_not_awaited()
+
+    async def test_server_quantity_conflict_uses_paced_reload_not_seat_clear(self):
+        tab = FakeSubmitTab(
+            dialog="該位置已被選走", url=CTBC_TEST_SERVER_QUANTITY_URL
+        )
+        cfg = config()
+        cfg["advanced"]["auto_reload_page_interval"] = 7
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+        identity = _ctbc_tab_identity(tab)
+        _state["last_document"][identity] = "document-1"
+        _state["pending_navigation"][identity] = {
+            "kind": "NATIVE",
+            "route": "0201_001",
+            "selection_mode": "computer",
+            "product_id": "PRODUCT_FIXTURE",
+        }
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
+            page_url=CTBC_TEST_SERVER_QUANTITY_URL,
+            group_id="GROUP_FRONT",
+            product_id="PRODUCT_FIXTURE",
+        ))
+        dom_port = FakeUtikiQuantityDomPort(
+            snapshot, CommitResult.COMMITTED
+        )
+
+        async def attest_effect(*_args):
+            _state["pending_navigation"].pop(identity, None)
+            return True
+
+        with patch(
+            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            AsyncMock(side_effect=attest_effect),
+        ) as attest, patch(
+            "platforms.utiki.workflow._get_utk_sports_profile",
+            return_value={
+                "supports_server_assignment": True,
+                "host": "tix.ctbcsports.com",
+                "tenant_path": "/BROTHERS",
+            },
+        ), patch(
+            "platforms.utiki.workflow._clear_ctbc_selected_seats",
+            AsyncMock(),
+        ) as clear_seats, patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=True),
+        ) as reload_page, patch(
+            "platforms.utiki.workflow.read_quantity_snapshot",
+            side_effect=dom_port.read_quantity_snapshot,
+        ), patch(
+            "platforms.utiki.workflow.commit_quantity",
+            side_effect=dom_port.commit_quantity,
+        ), patch(
+            "platforms.utiki.workflow._ctbc_captcha_and_submit",
+            AsyncMock(return_value=True),
+        ) as submit:
+            self.assertFalse(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+            self.assertFalse(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+            self.assertEqual([], dom_port.events)
+            _state["last_document"][identity] = "document-2"
+            self.assertTrue(
+                await nodriver_utiki_server_assigned_quantity_main(
+                    tab, cfg, ocr=None
+                )
+            )
+
+        self.assertEqual(1, attest.await_count)
+        clear_seats.assert_not_awaited()
+        reload_page.assert_awaited_once_with(
+            tab, cfg, "selected seats were taken"
+        )
+        self.assertEqual(
+            ["inspect_quantity", "commit_quantity"], dom_port.events
+        )
+        submit.assert_awaited_once()
+
     async def test_stale_quantity_commit_reloads_without_submitting(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
         dom_port = FakeUtikiQuantityDomPort(snapshot, CommitResult.STALE)
@@ -416,6 +676,36 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             "awaiting_result", _state["submitted"][submit_key]["phase"]
         )
         self.assertNotIn(submit_key, _state["submit_blocked"])
+
+    async def test_server_quantity_plan_reaches_shared_submit_dispatch(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot(
+            page_url=CTBC_TEST_SERVER_QUANTITY_URL,
+            group_id="GROUP_FRONT",
+            product_id="PRODUCT_FIXTURE",
+        ))
+        plan = select_quantity_snapshot(
+            snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        tab = FakeSubmitTab(
+            dialog="", url=CTBC_TEST_SERVER_QUANTITY_URL
+        )
+        cfg = config()
+        cfg["ocr_captcha"].update({
+            "enable": True, "force_submit": True,
+        })
+
+        with patch(
+            "platforms.utiki.workflow.dispatch_quantity_submit",
+            AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
+        ) as dispatch, patch(
+            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            AsyncMock(return_value=False),
+        ):
+            self.assertFalse(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None, quantity_plan=plan
+            ))
+        dispatch.assert_awaited_once_with(tab, plan)
 
     async def test_unknown_quantity_dispatch_is_sticky(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())

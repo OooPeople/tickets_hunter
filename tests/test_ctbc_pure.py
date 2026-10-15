@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from tests.ctbc_support import (
     CTBC_TEST_PERFORMANCE_ID,
+    CTBC_TEST_SERVER_QUANTITY_URL,
+    FakeSubmitTab,
     config,
     make_ctbc_area_snapshot,
 )
@@ -43,6 +45,8 @@ from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
     _classify_ctbc_date_action,
     _ctbc_fast_destination_is_valid,
+    _ctbc_purchase_state_key,
+    _ctbc_submit_reached_checkout,
     _ctbc_seat_audit_is_valid,
     _get_ctbc_page_type,
     _get_utiki_behavior,
@@ -688,6 +692,35 @@ class CtbcPureSelectionTest(unittest.TestCase):
             general_expected, "general_admission", general_direct_url, general_ids
         ))
 
+        server_expected = dict(
+            expected,
+            route="0201_001",
+            selection_mode="computer",
+            group_id="GROUP_FRONT",
+            price_area_id="PRICE_FRONT",
+        )
+        server_ids = dict(
+            ids, group_id="GROUP_FRONT", price_area_id="PRICE_FRONT"
+        )
+        self.assertTrue(_ctbc_fast_destination_is_valid(
+            server_expected,
+            "server_assigned_quantity",
+            CTBC_TEST_SERVER_QUANTITY_URL,
+            server_ids,
+        ))
+        self.assertFalse(_ctbc_fast_destination_is_valid(
+            dict(server_expected, selection_mode="manual"),
+            "server_assigned_quantity",
+            CTBC_TEST_SERVER_QUANTITY_URL,
+            server_ids,
+        ))
+        self.assertFalse(_ctbc_fast_destination_is_valid(
+            server_expected,
+            "server_assigned_quantity",
+            CTBC_TEST_SERVER_QUANTITY_URL.replace("ATYPE=N", "ATYPE=Y"),
+            server_ids,
+        ))
+
         dragons_expected = dict(
             expected,
             performance_id="P16DRAGON",
@@ -706,6 +739,24 @@ class CtbcPureSelectionTest(unittest.TestCase):
         ))
         self.assertFalse(_ctbc_fast_destination_is_valid(
             dragons_expected, "seat", url, dragons_ids
+        ))
+
+    def test_server_quantity_purchase_key_includes_assignment_mode(self):
+        key = _ctbc_purchase_state_key(FakeSubmitTab(
+            url=CTBC_TEST_SERVER_QUANTITY_URL
+        ))
+        self.assertIsNotNone(key)
+        self.assertEqual("server_assigned_quantity", key[3])
+        self.assertEqual("N", key[-1])
+
+    def test_server_quantity_checkout_requires_same_tenant_origin(self):
+        checkout = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        self.assertTrue(_ctbc_submit_reached_checkout(
+            CTBC_TEST_SERVER_QUANTITY_URL, checkout
+        ))
+        self.assertFalse(_ctbc_submit_reached_checkout(
+            CTBC_TEST_SERVER_QUANTITY_URL,
+            "https://tix.wdragons.com/UTK0206_",
         ))
 
     def test_fast_destination_rejects_noncanonical_origin_route_and_query(self):

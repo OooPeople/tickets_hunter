@@ -135,6 +135,11 @@ CTBC_TEST_QUANTITY_URL = (
     "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
     "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
 )
+CTBC_TEST_SERVER_QUANTITY_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0201_001?"
+    "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=GROUP_FRONT&"
+    "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&ATYPE=N"
+)
 
 
 def make_ctbc_area_snapshot(
@@ -186,13 +191,16 @@ def make_ctbc_area_snapshot(
     }
 
 
-def make_ctbc_quantity_snapshot():
+def make_ctbc_quantity_snapshot(
+    *, page_url=CTBC_TEST_QUANTITY_URL, group_id="", product_id=""
+):
     return {
         "ok": True,
-        "page_url": CTBC_TEST_QUANTITY_URL,
+        "page_url": page_url,
         "document_id": "document-1",
         "performance_id": "P16D0B8Z",
-        "group_id": "",
+        "product_id": product_id,
+        "group_id": group_id,
         "price_area_id": "PRICE_FRONT",
         "quantity_limit_raw": "4",
         "rows": [

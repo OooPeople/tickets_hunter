@@ -43,6 +43,7 @@ class QuantitySnapshot:
     price_area_id: str
     quantity_limit_raw: str
     rows: tuple
+    product_id: str = ""
     reason: str = ""
 
 
@@ -57,6 +58,8 @@ class QuantityPlan:
     target_key: str
     target_name: str
     ticket_number: int
+    page_type: str = "general_admission"
+    product_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,7 @@ def parse_quantity_snapshot(raw_snapshot):
             )
             for row in rows
         ),
+        product_id=str(raw_snapshot.get("product_id") or ""),
     )
 
 
@@ -532,10 +536,18 @@ def _quantity_candidates(snapshot, requested):
 
 
 def select_quantity_snapshot(snapshot, keyword, ticket_number,
-                             mode="from top to bottom"):
+                             mode="from top to bottom",
+                             page_type="general_admission"):
     """Choose one live quantity row from an immutable page snapshot."""
     snapshot = parse_quantity_snapshot(snapshot)
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
+        return None
+    if page_type not in {"general_admission", "server_assigned_quantity"}:
+        return None
+    if (
+        page_type == "server_assigned_quantity"
+        and not re.fullmatch(r"[A-Za-z0-9_-]+", snapshot.product_id)
+    ):
         return None
     request = _parse_quantity_request(snapshot, ticket_number)
     if request is None:
@@ -560,6 +572,8 @@ def select_quantity_snapshot(snapshot, keyword, ticket_number,
         target_key=target["key"],
         target_name=target["text"],
         ticket_number=requested,
+        page_type=page_type,
+        product_id=snapshot.product_id,
     )
 
 

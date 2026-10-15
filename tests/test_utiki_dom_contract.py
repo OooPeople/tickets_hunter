@@ -1,4 +1,5 @@
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, patch
 
 from tests.ctbc_support import (
@@ -119,6 +120,104 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             "DISPATCH_UNKNOWN",
             _state["pending_navigation"][_ctbc_tab_identity(tab)]["phase"],
         )
+
+    async def test_computer_area_uses_same_planner_and_server_committer(self):
+        snapshot = parse_area_snapshot(make_ctbc_area_snapshot())
+        dom_port = FakeUtikiDomPort(snapshot, CommitResult.COMMITTED)
+        tab = FakeTab("", [], url=CTBC_TEST_AREA_URL)
+        cfg = config(area_keyword='"109區前排"')
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with (
+            patch(
+                "platforms.utiki.workflow._get_utk_sports_profile",
+                return_value={"supports_server_assignment": True},
+            ),
+            patch(
+                "platforms.utiki.workflow.read_area_snapshot",
+                side_effect=dom_port.read_area_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_server_assigned_area",
+                side_effect=dom_port.commit_server_assigned_area,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_area", AsyncMock()
+            ) as manual_commit,
+        ):
+            self.assertTrue(await nodriver_ctbc_area_auto_select(tab, cfg))
+
+        self.assertEqual(
+            ["inspect_area", "commit_server_assigned_area"],
+            dom_port.events,
+        )
+        manual_commit.assert_not_awaited()
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("computer", pending["selection_mode"])
+        self.assertEqual("0201_001", pending["route"])
+        destination = urlsplit(pending["destination_url"])
+        self.assertEqual("/BROTHERS/UTK0201_001", destination.path)
+        self.assertEqual({
+            "PERFORMANCE_ID": ["P16D0B8Z"],
+            "GROUP_ID": ["GROUP_FRONT"],
+            "PERFORMANCE_PRICE_AREA_ID": ["PRICE_FRONT"],
+            "ATYPE": ["N"],
+        }, parse_qs(destination.query, keep_blank_values=True))
+
+    async def test_computer_area_stale_keeps_navigation_provenance(self):
+        snapshot = parse_area_snapshot(
+            make_ctbc_area_snapshot(include_back=False)
+        )
+        dom_port = FakeUtikiDomPort(snapshot, CommitResult.STALE)
+        tab = FakeTab("", [], url=CTBC_TEST_AREA_URL)
+        cfg = config(area_keyword='"109區前排"')
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with (
+            patch(
+                "platforms.utiki.workflow._get_utk_sports_profile",
+                return_value={"supports_server_assignment": True},
+            ),
+            patch(
+                "platforms.utiki.workflow.read_area_snapshot",
+                side_effect=dom_port.read_area_snapshot,
+            ),
+            patch(
+                "platforms.utiki.workflow.commit_server_assigned_area",
+                side_effect=dom_port.commit_server_assigned_area,
+            ),
+        ):
+            self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
+
+        pending = _state["pending_navigation"][_ctbc_tab_identity(tab)]
+        self.assertEqual("DISPATCH_UNKNOWN", pending["phase"])
+        self.assertEqual("computer", pending["selection_mode"])
+
+    async def test_computer_area_without_capability_has_no_side_effects(self):
+        tab = FakeTab("", [], url=CTBC_TEST_AREA_URL)
+        cfg = config(area_keyword='"109區前排"')
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with (
+            patch(
+                "platforms.utiki.workflow.read_area_snapshot", AsyncMock()
+            ) as reader,
+            patch(
+                "platforms.utiki.workflow.commit_server_assigned_area",
+                AsyncMock(),
+            ) as server_commit,
+            patch(
+                "platforms.utiki.workflow.commit_area", AsyncMock()
+            ) as manual_commit,
+        ):
+            self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
+
+        reader.assert_not_awaited()
+        server_commit.assert_not_awaited()
+        manual_commit.assert_not_awaited()
 
     async def test_rejected_area_commit_does_not_leave_pending_success(self):
         snapshot = parse_area_snapshot(

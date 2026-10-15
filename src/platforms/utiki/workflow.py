@@ -42,6 +42,7 @@ from .dom import (
     CommitResult,
     SubmitDispatchResult,
     commit_area,
+    commit_server_assigned_area,
     commit_quantity,
     dismiss_dialog,
     dispatch_quantity_submit,
@@ -295,6 +296,39 @@ def _build_ctbc_destination_url(area_url, target):
         "PERFORMANCE_PRICE_AREA_ID": target["price_area_id"],
     })
     return urlunsplit(("https", source.netloc, path, query, ""))
+
+
+def _build_utiki_server_assignment_destination_url(area_url, target):
+    if _get_ctbc_page_type(area_url) != "area":
+        return None
+    try:
+        source = urlsplit(area_url)
+    except ValueError:
+        return None
+    area_query = _ctbc_unique_query(area_url)
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    performance_id = str(target.get("performance_id") or "")
+    group_id = str(target.get("group_id") or "")
+    price_area_id = str(target.get("price_area_id") or "")
+    if (
+        area_query is None
+        or area_query.get("PERFORMANCE_ID") != performance_id
+        or not all(token.fullmatch(value) for value in (
+            performance_id, group_id, price_area_id
+        ))
+    ):
+        return None
+    path = f"{source.path.rsplit('/', 1)[0]}/UTK0201_001"
+    query = urlencode({
+        "PERFORMANCE_ID": performance_id,
+        "GROUP_ID": group_id,
+        "PERFORMANCE_PRICE_AREA_ID": price_area_id,
+        "ATYPE": "N",
+    })
+    destination = urlunsplit(("https", source.netloc, path, query, ""))
+    if _get_ctbc_page_type(destination) != "server_assigned_quantity":
+        return None
+    return destination
 
 
 def _ctbc_same_origin(first, second):
@@ -1636,6 +1670,9 @@ def _ctbc_selection_config_fingerprint(config_dict):
         "area_enable": area_config.get("enable", False),
         "area_keyword": area_config.get("area_keyword", ""),
         "area_mode": area_config.get("mode", "from top to bottom"),
+        "seat_selection_mode": _get_utiki_behavior(
+            config_dict, "seat_selection_mode", "manual"
+        ),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1670,9 +1707,19 @@ def _ctbc_navigation_urls_match(first_url, second_url):
 
 
 def _ctbc_new_pending_navigation(
-    tab, kind, source_url, area_url, target, config_dict
+    tab, kind, source_url, area_url, target, config_dict,
+    selection_mode="manual",
 ):
-    destination_url = _build_ctbc_destination_url(area_url, target)
+    if selection_mode == "computer":
+        destination_url = _build_utiki_server_assignment_destination_url(
+            area_url, target
+        )
+        route = "0201_001"
+    elif selection_mode == "manual":
+        destination_url = _build_ctbc_destination_url(area_url, target)
+        route = target.get("route")
+    else:
+        return None
     area_query = _ctbc_unique_query(area_url)
     if (
         not destination_url
@@ -1690,7 +1737,8 @@ def _ctbc_new_pending_navigation(
         "source_document_id": _state["last_document"].get(identity, ""),
         "area_url": area_url,
         "destination_url": destination_url,
-        "route": target.get("route"),
+        "route": route,
+        "selection_mode": selection_mode,
         "performance_id": target.get("performance_id"),
         "product_id": area_query.get("PRODUCT_ID"),
         "group_id": target.get("group_id"),
@@ -2087,6 +2135,17 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         tab, current_url, "date", config_dict
     ):
         return False
+    seat_selection_mode = _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    )
+    if seat_selection_mode == "computer":
+        profile = _get_utk_sports_profile(current_url)
+        if not profile or not profile.get("supports_server_assignment", False):
+            debug.log(
+                "[UTK SPORTS] Website computer assignment is not enabled "
+                "for this platform"
+            )
+            return False
     rows = []
     for _ in range(10):
         try:
@@ -2156,7 +2215,11 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
     try:
         action = target["action"]
         date_target = action.get("date_target") if action.get("kind") == "normal" else None
-        if date_target and config_dict.get("area_auto_select", {}).get("enable", False):
+        if (
+            seat_selection_mode == "manual"
+            and date_target
+            and config_dict.get("area_auto_select", {}).get("enable", False)
+        ):
             if await _ctbc_try_fast_area_navigation(
                 tab, config_dict, date_target, target["onclick"], current_url
             ):
@@ -2188,6 +2251,17 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         tab, current_url, config_dict
     ):
         return False
+    seat_selection_mode = _get_utiki_behavior(
+        config_dict, "seat_selection_mode", "manual"
+    )
+    if seat_selection_mode == "computer":
+        profile = _get_utk_sports_profile(current_url)
+        if not profile or not profile.get("supports_server_assignment", False):
+            debug.log(
+                "[UTK SPORTS] Website computer assignment is not enabled "
+                "for this platform"
+            )
+            return False
     try:
         snapshot = await read_area_snapshot(tab)
     except Exception as exc:
@@ -2221,20 +2295,42 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
     pending = _ctbc_new_pending_navigation(
         tab, "NATIVE", page_url, page_url,
         _ctbc_area_action_payload(target), config_dict,
+        selection_mode=seat_selection_mode,
     )
     if not pending:
         return False
     _state["pending_navigation"][identity] = pending
     try:
-        commit_result = await commit_area(
+        committer = (
+            commit_server_assigned_area
+            if seat_selection_mode == "computer"
+            else commit_area
+        )
+        commit_result = await committer(
             tab, snapshot, target, config_dict.get("ticket_number", 1),
             pending["nonce"], CTBC_FAST_MARKER_KEY,
         )
-        if commit_result in {CommitResult.REJECTED, CommitResult.STALE}:
+        if (
+            commit_result is CommitResult.REJECTED
+            or (
+                seat_selection_mode == "manual"
+                and commit_result is CommitResult.STALE
+            )
+        ):
             _pop_pending_navigation_if_nonce(identity, pending["nonce"])
             debug.log(
                 "[CTBC AREA] Area commit "
-                f"{commit_result.value}; no click was sent"
+                f"{commit_result.value}; no navigation row click was sent"
+            )
+            return False
+        if (
+            seat_selection_mode == "computer"
+            and commit_result is CommitResult.STALE
+        ):
+            pending["phase"] = "DISPATCH_UNKNOWN"
+            debug.log(
+                "[CTBC AREA] Computer-assignment preparation changed "
+                "document; navigation outcome is unknown"
             )
             return False
         if commit_result is not CommitResult.COMMITTED:

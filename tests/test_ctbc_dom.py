@@ -30,6 +30,7 @@ from platforms.utiki.workflow import (
     _ctbc_pending_from_fast_marker,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
+    _ctbc_selection_config_fingerprint,
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
     _get_ctbc_captcha_image_bytes,
@@ -376,6 +377,99 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertTrue(await nodriver_ctbc_date_auto_select(tab, config()))
         self.assertTrue(button.clicked)
         self.assertEqual(1, tab.evaluate_count)
+
+    async def test_computer_mode_skips_date_fast_path(self):
+        source = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?"
+            "PRODUCT_ID=P16ANF0L"
+        )
+        onclick = (
+            "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&"
+            "PRODUCT_ID=P16ANF0L'"
+        )
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>", attrs={"onclick": onclick}
+        )
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td>"
+            "<td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
+        cfg = config()
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with (
+            patch(
+                "platforms.utiki.workflow._get_utk_sports_profile",
+                return_value={
+                    "name": "CTBC Sports",
+                    "host": "tix.ctbcsports.com",
+                    "tenant_path": "/BROTHERS",
+                    "map_namespace": "CTBC_SPORTS",
+                    "fast_area_prefetch": True,
+                    "supports_server_assignment": True,
+                },
+            ),
+            patch(
+                "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                AsyncMock(),
+            ) as fast_path,
+        ):
+            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        fast_path.assert_not_awaited()
+        self.assertTrue(button.clicked)
+
+    async def test_computer_mode_without_capability_does_not_select_date(self):
+        source = (
+            "https://tix.ctbcsports.com/BROTHERS/UTK0201_?"
+            "PRODUCT_ID=P16ANF0L"
+        )
+        onclick = (
+            "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&"
+            "PRODUCT_ID=P16ANF0L'"
+        )
+        button = FakeElement(
+            "<button id='buy_btn'>購買</button>", attrs={"onclick": onclick}
+        )
+        row = FakeElement(
+            "<tr><td>2026/09/10(四)18:35</td><td>一般席</td>"
+            "<td><button>購買</button></td></tr>",
+            children={"button#buy_btn": button},
+        )
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
+        cfg = config()
+        cfg["utiki"]["seat_selection_mode"] = "computer"
+        cfg["ctbc"] = dict(cfg["utiki"])
+
+        with (
+            patch(
+                "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                AsyncMock(),
+            ) as fast_path,
+            patch(
+                "platforms.utiki.workflow._ctbc_commit_native_date_action",
+                AsyncMock(),
+            ) as native_commit,
+        ):
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+
+        fast_path.assert_not_awaited()
+        native_commit.assert_not_awaited()
+        self.assertFalse(button.clicked)
+
+    def test_seat_selection_mode_changes_navigation_fingerprint(self):
+        manual = config()
+        computer = config()
+        computer["utiki"]["seat_selection_mode"] = "computer"
+        computer["ctbc"] = dict(computer["utiki"])
+
+        self.assertNotEqual(
+            _ctbc_selection_config_fingerprint(manual),
+            _ctbc_selection_config_fingerprint(computer),
+        )
 
     async def test_fast_navigation_installs_pending_before_dispatch_exception(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"

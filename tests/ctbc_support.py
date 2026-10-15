@@ -57,6 +57,7 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
     utiki_behavior = {
         "ticket_type_keyword": "全票",
         "seat_sorting": "row_seat",
+        "seat_selection_mode": "manual",
     }
     config_dict["utiki"].update(utiki_behavior)
     config_dict["ctbc"].update(utiki_behavior)
@@ -102,6 +103,19 @@ class FakeUtikiDomPort:
     async def commit_area(self, _tab, snapshot, plan, ticket_number,
                           navigation_nonce, fast_marker_key):
         self.events.append("commit_area")
+        self.commit_count += 1
+        assert snapshot is self.area_snapshot
+        assert plan.rel == "front"
+        assert ticket_number == 2
+        assert re.fullmatch(r"[a-f0-9]{32}", navigation_nonce)
+        assert fast_marker_key == "ticketsHunter.ctbc.fast-navigation.v1"
+        return self.commit_result
+
+    async def commit_server_assigned_area(
+        self, _tab, snapshot, plan, ticket_number, navigation_nonce,
+        fast_marker_key,
+    ):
+        self.events.append("commit_server_assigned_area")
         self.commit_count += 1
         assert snapshot is self.area_snapshot
         assert plan.rel == "front"

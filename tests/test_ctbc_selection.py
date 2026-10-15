@@ -48,7 +48,6 @@ from platforms.ctbc import (  # noqa: E402
     _get_ctbc_captcha_image_bytes,
     _build_ctbc_destination_url,
     _ctbc_fast_destination_is_valid,
-    _ctbc_native_map_href_is_allowed,
     _ctbc_seat_audit_is_valid,
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
@@ -62,6 +61,7 @@ from platforms.ctbc import (  # noqa: E402
     _parse_ctbc_date_target,
     _parse_ctbc_vip_date_action,
     _parse_ctbc_map_send,
+    _parse_ctbc_map_send_a,
     _parse_ctbc_map_title,
     _pop_reload_request_if_token,
     _inspect_utk_document,
@@ -110,6 +110,61 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
             "auto_reload_page_interval": 0,
             "disable_adjacent_seat": False,
         },
+    }
+
+
+CTBC_TEST_PERFORMANCE_ID = "P16D0B8Z"
+CTBC_TEST_AREA_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+    "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
+)
+
+
+def make_ctbc_area_snapshot(
+    *,
+    front_row_status="40",
+    front_title_status="45",
+    front_action_status="45",
+    front_title_price="1600",
+    include_back=True,
+):
+    rows = [{
+        "area": "109區前排",
+        "price": "1600",
+        "status": front_row_status,
+        "rel": "front",
+    }]
+    areas = [{
+        "id": "front",
+        "href": (
+            "javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+            f"'GROUP_FRONT','{front_action_status}')"
+        ),
+        "title": (
+            f"票區:109區前排 票價：{front_title_price} "
+            f"尚餘：{front_title_status}"
+        ),
+    }]
+    if include_back:
+        rows.append({
+            "area": "109區後排",
+            "price": "1300",
+            "status": "熱賣中",
+            "rel": "back",
+        })
+        areas.append({
+            "id": "back",
+            "href": (
+                "javascript:Send('0205','P16D0B8Z','PRICE_BACK',"
+                "'GROUP_BACK','熱賣中')"
+            ),
+            "title": "票區:109區後排 票價：1300 尚餘：熱賣中",
+        })
+    return {
+        "ok": True,
+        "page_url": CTBC_TEST_AREA_URL,
+        "rows": rows,
+        "areas": areas,
     }
 
 
@@ -473,11 +528,24 @@ class CtbcPureSelectionTest(unittest.TestCase):
             "javascript:Send('0202','P16D0B8Z','P16D12ZY','','熱賣中');", "P16D0B8Z"
         )
         self.assertEqual("", general["group_id"])
-        self.assertTrue(_ctbc_native_map_href_is_allowed(href, "P16D0B8Z"))
-        self.assertFalse(_ctbc_native_map_href_is_allowed(href + ";alert(1)", "P16D0B8Z"))
         send_a = "javascript:SendA('0205','P16D0B8Z','35','P16D12YO','AG1','AI1','熱賣中');"
-        self.assertTrue(_ctbc_native_map_href_is_allowed(send_a, "P16D0B8Z"))
-        self.assertFalse(_ctbc_native_map_href_is_allowed(send_a + "alert(1)", "P16D0B8Z"))
+        send_a_target = _parse_ctbc_map_send_a(send_a, "P16D0B8Z")
+        self.assertEqual("SendA", send_a_target["action_name"])
+        self.assertEqual("0205", send_a_target["route"])
+        self.assertEqual("P16D0B8Z", send_a_target["performance_id"])
+        self.assertEqual("35", send_a_target["group_id"])
+        self.assertEqual("P16D12YO", send_a_target["price_area_id"])
+        self.assertEqual(
+            ["0205", "P16D0B8Z", "35", "P16D12YO", "AG1", "AI1"],
+            send_a_target["stable_args"],
+        )
+        self.assertEqual("熱賣中", send_a_target["status"])
+        self.assertIsNone(_parse_ctbc_map_send_a(send_a, "OTHER"))
+        self.assertIsNone(_parse_ctbc_map_send_a(send_a + "alert(1)", "P16D0B8Z"))
+        self.assertIsNone(_parse_ctbc_map_send_a(
+            "javascript:SendA('0205','P16D0B8Z','','P16D12YO','AG1','AI1','熱賣中')",
+            "P16D0B8Z",
+        ))
         dragons_target = _parse_ctbc_map_send(
             "javascript:Send('0205','P16DRAGON','PRICE1','GROUP1','熱賣中')", "P16DRAGON"
         )
@@ -489,14 +557,14 @@ class CtbcPureSelectionTest(unittest.TestCase):
             ),
         )
 
-    def test_map_title_is_a_second_area_price_and_status_fingerprint(self):
+    def test_map_title_parses_area_price_and_availability(self):
         self.assertEqual(
             {"area": "內野南A區下層", "price": "400", "status": "熱賣中"},
             _parse_ctbc_map_title("票區:內野南A區下層 票價：400 尚餘：熱賣中"),
         )
         self.assertIsNone(_parse_ctbc_map_title("內野南A區下層 400 熱賣中"))
 
-    def test_prefetched_area_requires_consistent_row_and_map_availability(self):
+    def test_direct_area_rejects_unavailable_action_and_wrong_identity(self):
         snapshot = {
             "rows": [
                 {"area": "內野南A區下層", "price": "400", "status": "熱賣中", "rel": "a35"},
@@ -507,13 +575,129 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 {"id": "a36", "href": "javascript:Send('0205','P16D0B8Z','P16D12YP','36','0')", "title": "票區:內野北A區下層 票價：400 尚餘：0"},
             ],
         }
-        target = _select_ctbc_area_snapshot(snapshot, config(), "P16D0B8Z", strict_map=True)
+        target = _select_ctbc_area_snapshot(
+            snapshot, config(), "P16D0B8Z", require_direct_destination=True
+        )
         self.assertEqual("a35", target["rel"])
         snapshot["areas"][0]["href"] = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','0')"
-        self.assertIsNone(_select_ctbc_area_snapshot(snapshot, config(), "P16D0B8Z", strict_map=True))
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            snapshot, config(), "P16D0B8Z", require_direct_destination=True
+        ))
         snapshot["areas"][0]["href"] = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','熱賣中')"
         snapshot["areas"][0]["title"] = "票區:內野南B區下層 票價：400 尚餘：熱賣中"
-        self.assertIsNone(_select_ctbc_area_snapshot(snapshot, config(), "P16D0B8Z", strict_map=True))
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            snapshot, config(), "P16D0B8Z", require_direct_destination=True
+        ))
+
+    def test_available_status_skew_keeps_exact_and_broad_keyword_priority(self):
+        snapshot = make_ctbc_area_snapshot()
+        for require_direct_destination in (False, True):
+            for keyword in ('"109區前排"', '"109"'):
+                with self.subTest(
+                    require_direct_destination=require_direct_destination,
+                    keyword=keyword,
+                ):
+                    target = _select_ctbc_area_snapshot(
+                        snapshot,
+                        config(area_keyword=keyword),
+                        CTBC_TEST_PERFORMANCE_ID,
+                        require_direct_destination=require_direct_destination,
+                    )
+                    self.assertIsNotNone(target)
+                    self.assertEqual("front", target["rel"])
+                    if require_direct_destination:
+                        self.assertEqual("PRICE_FRONT", target["destination"]["price_area_id"])
+
+    def test_area_selection_rejects_unavailable_status_from_each_source(self):
+        unavailable_by_source = (
+            ("row", "front_row_status", "售完"),
+            ("title", "front_title_status", "0"),
+            ("action", "front_action_status", "1"),
+        )
+        for source, argument, unavailable in unavailable_by_source:
+            with self.subTest(source=source):
+                statuses = {
+                    "front_row_status": "2",
+                    "front_title_status": "2",
+                    "front_action_status": "2",
+                    argument: unavailable,
+                }
+                self.assertIsNone(_select_ctbc_area_snapshot(
+                    make_ctbc_area_snapshot(include_back=False, **statuses),
+                    config(area_keyword='"109區前排"'),
+                    CTBC_TEST_PERFORMANCE_ID,
+                    require_direct_destination=True,
+                ))
+
+    def test_direct_and_native_area_safety_boundaries(self):
+        cfg = config(area_keyword='"109區前排"')
+        wrong_price = make_ctbc_area_snapshot(
+            front_title_status="40",
+            front_action_status="40",
+            front_title_price="1300",
+            include_back=False,
+        )
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            wrong_price, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=True
+        ))
+
+        wrong_performance = make_ctbc_area_snapshot(
+            front_title_status="40",
+            front_action_status="40",
+            include_back=False,
+        )
+        wrong_performance["areas"][0]["href"] = (
+            "javascript:Send('0205','OTHER','PRICE_FRONT','GROUP_FRONT','40')"
+        )
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            wrong_performance,
+            cfg,
+            CTBC_TEST_PERFORMANCE_ID,
+            require_direct_destination=True,
+        ))
+
+        send_a = make_ctbc_area_snapshot(
+            front_row_status="40",
+            front_title_status="40",
+            include_back=False,
+        )
+        send_a["areas"][0]["href"] = (
+            "javascript:SendA('0205','P16D0B8Z','GROUP_FRONT','PRICE_FRONT',"
+            "'AG1','AI1','40');"
+        )
+        native_target = _select_ctbc_area_snapshot(
+            send_a, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=False
+        )
+        self.assertIsNotNone(native_target)
+        self.assertIsNone(native_target["destination"])
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            send_a, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=True
+        ))
+        send_a["areas"][0]["href"] = send_a["areas"][0]["href"].replace(
+            "'40');", "'1');"
+        )
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            send_a, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=False
+        ))
+
+        ambiguous = make_ctbc_area_snapshot(
+            front_row_status="40",
+            front_title_status="40",
+            front_action_status="40",
+            include_back=False,
+        )
+        ambiguous["rows"][0]["rel"] = "front alternate"
+        ambiguous["areas"].append({
+            "id": "alternate",
+            "href": (
+                "javascript:Send('0205','P16D0B8Z','PRICE_OTHER',"
+                "'GROUP_OTHER','40')"
+            ),
+            "title": "票區:109區前排 票價：1600 尚餘：40",
+        })
+        self.assertIsNone(_select_ctbc_area_snapshot(
+            ambiguous, cfg, CTBC_TEST_PERFORMANCE_ID, require_direct_destination=True
+        ))
 
     def test_fast_destination_attestation_checks_url_and_all_hidden_ids(self):
         expected = {
@@ -941,7 +1125,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(available_button.clicked)
         self.assertFalse(sold_button.clicked)
 
-    async def test_date_fast_path_prefetches_one_area_and_skips_area_page_click(self):
+    async def test_date_fast_path_accepts_available_area_status_skew(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         onclick = "location.href='UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L'"
         button = FakeElement("<button id='buy_btn'>立即選位》</button>", attrs={"onclick": onclick})
@@ -949,21 +1133,26 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
             "<tr><td>2026/09/10(四)18:35</td><td>一般席</td><td><button>立即選位》</button></td></tr>",
             children={"button#buy_btn": button},
         )
-        snapshot = json.dumps({
-            "ok": True,
+        snapshot = make_ctbc_area_snapshot(include_back=False)
+        snapshot.update({
             "elapsed_ms": 120,
             "map_url": "https://imgs2.utiki.com.tw/Data/CTBC_SPORTS/Images/Temp/P16D0B8Z/1_P16D0B8Z_live.map?v=12345678",
-            "rows": [{"area": "內野南A區下層", "price": "400", "status": "熱賣中", "rel": "a35"}],
-            "areas": [{"id": "a35", "href": "javascript:Send('0205','P16D0B8Z','P16D12YO','35','熱賣中')", "title": "票區:內野南A區下層 票價：400 尚餘：熱賣中"}],
         })
-        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source, evaluate_results=[snapshot, True])
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR,
+            [row],
+            url=source,
+            evaluate_results=[json.dumps(snapshot), True],
+        )
         try:
-            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, config()))
+            self.assertTrue(await nodriver_ctbc_date_auto_select(
+                tab, config(area_keyword='"109區前排"')
+            ))
             self.assertFalse(button.clicked)
             self.assertEqual(2, tab.evaluate_count)
             self.assertNotIn("includes('購買')", tab.evaluate_scripts[-1])
             expected = _state["fast_target"][_ctbc_tab_identity(tab)]
-            self.assertEqual("P16D12YO", expected["price_area_id"])
+            self.assertEqual("PRICE_FRONT", expected["price_area_id"])
         finally:
             _state["fast_target"].pop(_ctbc_tab_identity(tab), None)
 
@@ -1272,24 +1461,49 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(button.clicked)
         self.assertEqual(0, tab.evaluate_count)
 
-    async def test_area_uses_sale_rows_and_skips_sold_out_match(self):
-        url = "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
-        snapshot = json.dumps({
-            "ok": True,
-            "page_url": url,
-            "rows": [
-                {"area": "內野南A區下層", "price": "400", "status": "售完", "rel": "a1"},
-                {"area": "內野南A區上層", "price": "400", "status": "熱賣中", "rel": "a35"},
-            ],
-            "areas": [
-                {"id": "a1", "href": "javascript:Send('0205','P16D0B8Z','P16D12YX','1','0')", "title": "票區:內野南A區下層 票價：400 尚餘：0"},
-                {"id": "a35", "href": "javascript:Send('0205','P16D0B8Z','P16D12YO','35','熱賣中')", "title": "票區:內野南A區上層 票價：400 尚餘：熱賣中"},
-            ],
-        })
-        tab = FakeTab(CTBC_AREA_ROW_SELECTOR, [], url=url, evaluate_results=[snapshot, True])
+    async def test_native_area_path_accepts_available_status_skew(self):
+        snapshot = make_ctbc_area_snapshot(include_back=False)
+        tab = FakeTab(
+            CTBC_AREA_ROW_SELECTOR,
+            [],
+            url=CTBC_TEST_AREA_URL,
+            evaluate_results=[json.dumps(snapshot), True],
+        )
 
-        self.assertTrue(await nodriver_ctbc_area_auto_select(tab, config()))
+        self.assertTrue(await nodriver_ctbc_area_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
         self.assertEqual(2, tab.evaluate_count)
+
+    async def test_native_area_commit_is_quantity_aware_and_fails_closed(self):
+        snapshot = make_ctbc_area_snapshot(
+            front_title_status="40",
+            front_action_status="40",
+            include_back=False,
+        )
+        tab = FakeTab(
+            CTBC_AREA_ROW_SELECTOR,
+            [],
+            url=CTBC_TEST_AREA_URL,
+            evaluate_results=[json.dumps(snapshot), False],
+        )
+        self.assertFalse(await nodriver_ctbc_area_auto_select(
+            tab, config(area_keyword='"109區前排"')
+        ))
+        commit_script = tab.evaluate_scripts[-1]
+        self.assertIn("const ticketNumber = 2;", commit_script)
+        self.assertIn("action.stableArgs.some", commit_script)
+        self.assertIn("hasTickets(action.status)", commit_script)
+        self.assertIn("hasTickets(mapTitle.status)", commit_script)
+        self.assertIn("hasTickets(status)", commit_script)
+        self.assertIn("root.hasAttribute(commitMarker)", commit_script)
+        self.assertIn("root.setAttribute(commitMarker, '1')", commit_script)
+        self.assertIn("area.click();", commit_script)
+        self.assertNotIn("setTimeout", commit_script)
+        self.assertNotIn("expectedHref", commit_script)
+        self.assertNotIn("expectedTitle", commit_script)
+        self.assertNotIn("window.__ticketsHunterCtbcAreaCommit", commit_script)
+        self.assertNotIn("status !== expectedStatus", commit_script)
 
     async def test_failed_fast_destination_remains_fail_closed_until_area_page(self):
         seat_url = "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=35&PERFORMANCE_PRICE_AREA_ID=P16D12YO"

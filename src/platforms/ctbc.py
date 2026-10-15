@@ -632,10 +632,52 @@ def _parse_ctbc_map_send(href, expected_performance_id):
     if match.group("route") == "0205" and not match.group("group"):
         return None
     return {
+        "action_name": "Send",
         "route": match.group("route"),
         "performance_id": match.group("performance"),
         "price_area_id": match.group("price_area"),
         "group_id": match.group("group"),
+        "stable_args": [
+            match.group("route"),
+            match.group("performance"),
+            match.group("price_area"),
+            match.group("group"),
+        ],
+        "status": match.group("status"),
+    }
+
+
+def _parse_ctbc_map_send_a(href, expected_performance_id):
+    """Parse the allowlisted seven-argument SendA call for native selection."""
+    match = re.fullmatch(
+        r"\s*javascript:\s*SendA\(\s*"
+        r"(?P<q1>['\"])(?P<route>0202|0205)(?P=q1)\s*,\s*"
+        r"(?P<q2>['\"])(?P<performance>[A-Za-z0-9_-]+)(?P=q2)\s*,\s*"
+        r"(?P<q3>['\"])(?P<group>[A-Za-z0-9_-]*)(?P=q3)\s*,\s*"
+        r"(?P<q4>['\"])(?P<price_area>[A-Za-z0-9_-]+)(?P=q4)\s*,\s*"
+        r"(?P<q5>['\"])(?P<area_group>[A-Za-z0-9_-]*)(?P=q5)\s*,\s*"
+        r"(?P<q6>['\"])(?P<area_id>[A-Za-z0-9_-]*)(?P=q6)\s*,\s*"
+        r"(?P<q7>['\"])(?P<status>[^'\"]*)(?P=q7)\s*\)\s*;?\s*",
+        str(href or ""),
+    )
+    if not match or match.group("performance") != expected_performance_id:
+        return None
+    if match.group("route") == "0205" and not match.group("group"):
+        return None
+    return {
+        "action_name": "SendA",
+        "route": match.group("route"),
+        "performance_id": match.group("performance"),
+        "price_area_id": match.group("price_area"),
+        "group_id": match.group("group"),
+        "stable_args": [
+            match.group("route"),
+            match.group("performance"),
+            match.group("group"),
+            match.group("price_area"),
+            match.group("area_group"),
+            match.group("area_id"),
+        ],
         "status": match.group("status"),
     }
 
@@ -656,17 +698,14 @@ def _parse_ctbc_map_title(title):
     }
 
 
-def _ctbc_native_map_href_is_allowed(href, expected_performance_id):
-    if _parse_ctbc_map_send(href, expected_performance_id):
-        return True
-    match = re.fullmatch(
-        r"\s*javascript:\s*SendA\(\s*"
-        r"(?P<q1>['\"])(?:0202|0205)(?P=q1)\s*,\s*"
-        r"(?P<q2>['\"])(?P<performance>[A-Za-z0-9_-]+)(?P=q2)\s*"
-        r"(?:,\s*['\"][^'\"]*['\"]\s*){5}\)\s*;?\s*",
-        str(href or ""),
+def _ctbc_map_title_matches_available_row(map_title, area_text, price_text, ticket_number):
+    """Match stable row identity while evaluating map availability independently."""
+    return bool(
+        map_title
+        and map_title["area"] == re.sub(r"\s+", "", area_text)
+        and map_title["price"] == re.sub(r"[\s,$]", "", price_text)
+        and _ctbc_availability_has_tickets(map_title["status"], ticket_number)
     )
-    return bool(match and match.group("performance") == expected_performance_id)
 
 
 def _build_ctbc_destination_url(area_url, target):
@@ -684,7 +723,9 @@ def _build_ctbc_destination_url(area_url, target):
     return urlunsplit(("https", source.netloc, path, query, ""))
 
 
-def _select_ctbc_area_snapshot(snapshot, config_dict, expected_performance_id, strict_map=True):
+def _select_ctbc_area_snapshot(
+    snapshot, config_dict, expected_performance_id, require_direct_destination=True
+):
     """Choose an area from one batched DOM/map snapshot using shared keyword semantics."""
     if not isinstance(snapshot, dict):
         return None
@@ -728,41 +769,45 @@ def _select_ctbc_area_snapshot(snapshot, config_dict, expected_performance_id, s
             for map_area in areas_by_id.get(rel, []):
                 href = map_area["href"]
                 map_title = _parse_ctbc_map_title(map_area["title"])
-                fingerprint_matches = bool(
-                    map_title
-                    and map_title["area"] == re.sub(r"\s+", "", area_text)
-                    and map_title["price"] == re.sub(r"[\s,$]", "", price_text)
-                    and map_title["status"] == re.sub(r"\s+", "", status_text)
-                )
-                if not fingerprint_matches:
+                if not _ctbc_map_title_matches_available_row(
+                    map_title, area_text, price_text, ticket_number
+                ):
                     continue
-                parsed = _parse_ctbc_map_send(href, expected_performance_id)
-                if parsed:
-                    status_matches = (
-                        re.sub(r"\s+", "", parsed["status"])
-                        == re.sub(r"\s+", "", status_text)
-                    )
-                    if _ctbc_availability_has_tickets(parsed["status"], ticket_number) and (
-                        status_matches or not strict_map
-                    ):
-                        map_options.append((rel, href, parsed))
-                elif not strict_map and _ctbc_native_map_href_is_allowed(href, expected_performance_id):
-                    map_options.append((rel, href, None))
+                parsed_send = _parse_ctbc_map_send(href, expected_performance_id)
+                if parsed_send and _ctbc_availability_has_tickets(
+                    parsed_send["status"], ticket_number
+                ):
+                    map_options.append((rel, parsed_send, parsed_send))
+                    continue
+                if require_direct_destination:
+                    continue
+                parsed_send_a = _parse_ctbc_map_send_a(href, expected_performance_id)
+                if parsed_send_a and _ctbc_availability_has_tickets(
+                    parsed_send_a["status"], ticket_number
+                ):
+                    map_options.append((rel, parsed_send_a, None))
         if not map_options:
             continue
-        if strict_map:
+        if require_direct_destination:
             identities = {
-                (option[2]["route"], option[2]["performance_id"], option[2]["price_area_id"], option[2]["group_id"])
+                (
+                    option[2]["route"],
+                    option[2]["performance_id"],
+                    option[2]["price_area_id"],
+                    option[2]["group_id"],
+                )
                 for option in map_options
             }
             if len(identities) != 1:
                 continue
-        rel, map_href, destination = map_options[0]
+        rel, map_action, destination = map_options[0]
         candidates.append({
             "text": match_text,
+            "area": area_text,
+            "price": price_text,
             "status": status_text,
             "rel": rel,
-            "map_href": map_href,
+            "map_action": map_action,
             "destination": destination,
         })
 
@@ -1886,7 +1931,7 @@ async def _ctbc_try_fast_area_navigation(tab, config_dict, date_target, onclick,
         return False
 
     target = _select_ctbc_area_snapshot(
-        snapshot, config_dict, date_target["performance_id"], strict_map=True
+        snapshot, config_dict, date_target["performance_id"], require_direct_destination=True
     )
     if not target or not target.get("destination"):
         debug.log("[CTBC FAST] Native area-page fallback: no attested area matched")
@@ -2091,6 +2136,89 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
         return False
 
 
+async def _ctbc_commit_native_area_action(tab, page_url, target, ticket_number):
+    page_url_json = json.dumps(page_url)
+    rel_json = json.dumps(target["rel"])
+    area_json = json.dumps(target["area"])
+    price_json = json.dumps(target["price"])
+    action_name_json = json.dumps(target["map_action"]["action_name"])
+    action_args_json = json.dumps(target["map_action"]["stable_args"])
+    ticket_number_json = json.dumps(int(ticket_number))
+    committed = await tab.evaluate(f'''
+        (() => {{
+            const pageUrl = {page_url_json};
+            const areaId = {rel_json};
+            const expectedArea = {area_json};
+            const expectedPrice = {price_json};
+            const expectedActionName = {action_name_json};
+            const expectedActionArgs = {action_args_json};
+            const ticketNumber = {ticket_number_json};
+            const normalizeArea = value => (value || '').replace(/\\s+/g, '');
+            const normalizePrice = value => (value || '').replace(/[\\s,$]/g, '');
+            const hasTickets = value => {{
+                const text = (value || '').replace(/\\s+/g, '');
+                if (!text || text.includes('售完') || /^(0|0張|無)$/.test(text)) return false;
+                if (/^\\d+$/.test(text)) return Number(text) >= ticketNumber;
+                if (/(?:剩餘|尚餘|剩|餘)/.test(text)) {{
+                    const count = text.match(/(\\d+)/);
+                    if (count && Number(count[1]) < ticketNumber) return false;
+                }}
+                return true;
+            }};
+            const parseAction = value => {{
+                const match = (value || '').match(
+                    /^\\s*javascript:\\s*(Send|SendA)\\(\\s*(.*?)\\s*\\)\\s*;?\\s*$/);
+                if (!match) return null;
+                const args = [];
+                let remaining = match[2];
+                while (remaining) {{
+                    const argument = remaining.match(
+                        /^\\s*(?:'([^'\"]*)'|"([^'\"]*)")\\s*(?:,\\s*|$)/);
+                    if (!argument) return null;
+                    args.push(argument[1] !== undefined ? argument[1] : argument[2]);
+                    remaining = remaining.slice(argument[0].length);
+                }}
+                const expectedLength = match[1] === 'Send' ? 5 : 7;
+                if (args.length !== expectedLength) return null;
+                return {{name: match[1], stableArgs: args.slice(0, -1), status: args.at(-1)}};
+            }};
+            const parseTitle = value => {{
+                const match = (value || '').match(
+                    /^\\s*票區\\s*[:：]\\s*(.*?)\\s+票價\\s*[:：]\\s*(.*?)\\s+尚餘\\s*[:：]\\s*(.*?)\\s*$/);
+                if (!match) return null;
+                return {{area: normalizeArea(match[1]), price: normalizePrice(match[2]), status: match[3]}};
+            }};
+            const root = document.documentElement;
+            const commitMarker = 'data-tickets-hunter-ctbc-area-commit';
+            if (location.href !== pageUrl || root.hasAttribute(commitMarker)) return false;
+            const area = document.querySelector(`#mapdata area#${{CSS.escape(areaId)}}`);
+            if (!area) return false;
+            const action = parseAction(area.getAttribute('href'));
+            const mapTitle = parseTitle(area.getAttribute('title'));
+            if (!action || !mapTitle || action.name !== expectedActionName ||
+                action.stableArgs.length !== expectedActionArgs.length ||
+                action.stableArgs.some((value, index) => value !== expectedActionArgs[index]) ||
+                mapTitle.area !== normalizeArea(expectedArea) ||
+                mapTitle.price !== normalizePrice(expectedPrice) ||
+                !hasTickets(action.status) || !hasTickets(mapTitle.status)) return false;
+            const rows = Array.from(document.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
+            const matchingRows = rows.filter(row => {{
+                if (!(row.getAttribute('rel') || '').split(/\\s+/).includes(areaId)) return false;
+                const currentArea = row.querySelector('td[data-title^="票區"]')?.textContent;
+                const currentPrice = row.querySelector('td[data-title^="票價"]')?.textContent;
+                const status = row.querySelector('td[data-title^="空位"]')?.textContent;
+                return normalizeArea(currentArea) === normalizeArea(expectedArea) &&
+                    normalizePrice(currentPrice) === normalizePrice(expectedPrice) && hasTickets(status);
+            }});
+            if (!matchingRows.length) return false;
+            root.setAttribute(commitMarker, '1');
+            area.click();
+            return true;
+        }})()
+    ''')
+    return committed is True
+
+
 async def nodriver_ctbc_area_auto_select(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
     try:
@@ -2109,7 +2237,7 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", performance_id):
         return False
     target = _select_ctbc_area_snapshot(
-        snapshot, config_dict, performance_id, strict_map=False
+        snapshot, config_dict, performance_id, require_direct_destination=False
     )
     if target is None:
         await _reload_with_interval(tab, config_dict, "no available area matched")
@@ -2117,31 +2245,10 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
 
     await nodriver_utk_sports_cancel_refresh(tab, "available area found")
     try:
-        page_url_json = json.dumps(page_url)
-        rel_json = json.dumps(target["rel"])
-        map_href_json = json.dumps(target["map_href"])
-        status_json = json.dumps(target["status"])
-        committed = await tab.evaluate(f'''
-            (() => {{
-                const pageUrl = {page_url_json};
-                const areaId = {rel_json};
-                const expectedHref = {map_href_json};
-                const expectedStatus = {status_json};
-                const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
-                if (location.href !== pageUrl || window.__ticketsHunterCtbcAreaCommit) return false;
-                const area = document.querySelector(`#mapdata area#${{CSS.escape(areaId)}}`);
-                if (!area || (area.getAttribute('href') || '') !== expectedHref) return false;
-                const rows = Array.from(document.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
-                const matchingRows = rows.filter(row => (row.getAttribute('rel') || '').split(/\\s+/).includes(areaId));
-                if (!matchingRows.length) return false;
-                const status = normalize(matchingRows[0].querySelector('td[data-title^="空位"]')?.textContent);
-                if (status !== expectedStatus || status.includes('售完') || /^(0|0張|無)$/.test(status)) return false;
-                window.__ticketsHunterCtbcAreaCommit = {{pageUrl, areaId, expectedHref}};
-                setTimeout(() => area.click(), 0);
-                return true;
-            }})()
-        ''')
-        if committed is not True:
+        committed = await _ctbc_commit_native_area_action(
+            tab, page_url, target, config_dict.get("ticket_number", 1)
+        )
+        if not committed:
             debug.log("[CTBC AREA] Area changed before commit; no click was sent")
             return False
         debug.log(f"[CTBC AREA] Selected: {target['text']} ({target['status']})")

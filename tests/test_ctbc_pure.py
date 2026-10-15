@@ -31,7 +31,9 @@ from platforms.utiki.profiles import (
 from platforms.utiki.selection import (
     DateActionPlan,
     SeatActionPlan,
+    SubmitPlan,
     availability_has_tickets as _ctbc_availability_has_tickets,
+    build_submit_plan,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     parse_area_send_action as _parse_ctbc_map_send,
@@ -50,6 +52,7 @@ from platforms.utiki.selection import (
     select_quantity_snapshot,
     select_seat_indexes as _select_ctbc_seat_indexes,
     select_seat_snapshot,
+    submit_plan_is_valid,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
@@ -1326,6 +1329,61 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual("", reason)
         self.assertEqual("ready", ready_plan.action)
         self.assertTrue(seat_plan_matches_snapshot(ready, ready_plan))
+
+    def test_submit_plan_freezes_only_ready_reserved_seat_intent(self):
+        ready = parse_seat_snapshot(_seat_snapshot(selected=(0, 1)))
+        ready_plan, reason = select_seat_snapshot(ready, "全票", 2)
+        self.assertEqual("", reason)
+
+        submit_plan = build_submit_plan(ready_plan)
+
+        self.assertIsInstance(submit_plan, SubmitPlan)
+        self.assertIs(PageKind.RESERVED_SEAT, submit_plan.page_kind)
+        self.assertEqual("seat", submit_plan.payload_fingerprint[0])
+        self.assertTrue(submit_plan_is_valid(submit_plan))
+        self.assertFalse(submit_plan_is_valid(replace(
+            submit_plan,
+            payload_fingerprint=("seat", "forged"),
+        )))
+
+        partial = parse_seat_snapshot(_seat_snapshot(selected=(0,)))
+        clear_plan, reason = select_seat_snapshot(partial, "全票", 2)
+        self.assertEqual("", reason)
+        self.assertEqual("clear", clear_plan.action)
+        self.assertIsNone(build_submit_plan(clear_plan))
+
+    def test_submit_plan_preserves_general_quantity_page_kind(self):
+        snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
+        quantity_plan = select_quantity_snapshot(snapshot, "全票", 2)
+
+        submit_plan = build_submit_plan(quantity_plan)
+
+        self.assertIsInstance(submit_plan, SubmitPlan)
+        self.assertIs(PageKind.GENERAL_ADMISSION, submit_plan.page_kind)
+        self.assertEqual("quantity", submit_plan.payload_fingerprint[0])
+        self.assertTrue(submit_plan_is_valid(submit_plan))
+
+    def test_strict_seat_planner_clears_valid_non_adjacent_selection(self):
+        snapshot = parse_seat_snapshot(_seat_snapshot(selected=(0, 2)))
+
+        clear_plan, reason = select_seat_snapshot(snapshot, "全票", 2)
+
+        self.assertEqual("", reason)
+        self.assertEqual("clear", clear_plan.action)
+        self.assertTrue(clear_plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(snapshot, clear_plan))
+        self.assertFalse(seat_plan_matches_snapshot(
+            snapshot,
+            replace(clear_plan, require_physical_adjacency=False),
+        ))
+
+        ready_plan, reason = select_seat_snapshot(
+            snapshot, "全票", 2, allow_non_adjacent=True
+        )
+        self.assertEqual("", reason)
+        self.assertEqual("ready", ready_plan.action)
+        self.assertFalse(ready_plan.require_physical_adjacency)
+        self.assertTrue(seat_plan_matches_snapshot(snapshot, ready_plan))
 
     def test_seat_planner_requires_reserved_identity_and_quantity_limit(self):
         missing_limit = _seat_snapshot()

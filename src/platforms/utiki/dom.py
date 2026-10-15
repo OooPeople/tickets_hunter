@@ -16,6 +16,7 @@ from .selection import (
     QuantitySnapshot,
     SeatActionPlan,
     SeatSnapshot,
+    SubmitPlan,
     date_plan_matches_snapshot,
     parse_area_snapshot,
     parse_date_snapshot,
@@ -23,6 +24,7 @@ from .selection import (
     parse_quantity_snapshot,
     parse_seat_snapshot,
     seat_plan_matches_snapshot,
+    submit_plan_is_valid,
 )
 from .profiles import (
     PageKind,
@@ -1259,7 +1261,7 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
             const targetsAdjacent = live => {
                 if (!plan.requirePhysicalAdjacency) return true;
                 const matches = targetSeats(
-                    live, plan.targetSeatFingerprints);
+                    live, expectedFingerprints);
                 if (matches.some(items => items.length !== 1)) return false;
                 const targets = matches.map(items => items[0]);
                 return targets.slice(1).every((seat, index) =>
@@ -1298,7 +1300,8 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
             const intent = JSON.stringify([
                 plan.action === 'clear' ? 'clear' : 'selection',
                 plan.ticketTypeFingerprint, plan.ticketTypeId,
-                plan.ticketTypeName, plan.ticketNumber, expectedFingerprints
+                plan.ticketTypeName, plan.ticketNumber, expectedFingerprints,
+                plan.requirePhysicalAdjacency
             ]);
             let marker = document.documentElement.getAttribute(markerName);
             let live = inspect();
@@ -1318,7 +1321,13 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
             if (plan.action === 'select' && !cleanValid(live)) return 'rejected';
             const planned = targetSeats(live, expectedFingerprints);
             if (planned.some(matches => matches.length !== 1)) return 'rejected';
-            if (!targetsAdjacent(live)) return 'rejected';
+            if (
+                plan.action === 'clear' &&
+                plan.requirePhysicalAdjacency && targetsAdjacent(live)
+            ) return 'rejected';
+            if (plan.action !== 'clear' && !targetsAdjacent(live)) {
+                return 'rejected';
+            }
             if (plan.action === 'select' && planned.some(
                 matches => !matches[0].available || matches[0].selected)) {
                 return 'rejected';
@@ -1342,7 +1351,7 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
                 live = inspect();
                 if (live.status !== 'ok' ||
                     document.documentElement.getAttribute(markerName) !== intent ||
-                    !targetsAdjacent(live)) {
+                    (plan.action !== 'clear' && !targetsAdjacent(live))) {
                     return 'stale';
                 }
                 const remaining = expectedFingerprints.slice(index);
@@ -1786,37 +1795,30 @@ async def commit_quantity(tab, snapshot, plan):
         raise RuntimeError("quantity commit outcome is unknown")
 
 
-def _valid_quantity_submit_input(plan):
-    token = r"[A-Za-z0-9_-]+"
-    return bool(
-        isinstance(plan, QuantityPlan)
-        and plan.page_url
-        and plan.document_id
-        and re.fullmatch(token, plan.performance_id)
-        and re.fullmatch(token, plan.price_area_id)
-        and (not plan.group_id or re.fullmatch(token, plan.group_id))
-        and re.fullmatch(token, plan.target_key)
-        and plan.page_type in {
-            "general_admission", "server_assigned_quantity"
-        }
-        and _quantity_plan_route_is_valid(plan)
-        and (
-            plan.page_type != "server_assigned_quantity"
-            or (bool(plan.group_id) and re.fullmatch(token, plan.product_id))
-        )
-        and (
-            not plan.product_hidden_present
-            or re.fullmatch(token, plan.product_id)
-        )
-        and plan.ticket_number > 0
-        and plan.quantity_limit >= 0
-    )
-
-
-CONST_QUANTITY_SUBMIT_SCRIPT = r'''
+CONST_SUBMIT_SCRIPT = r'''
         (() => {
-            // __ticketsHunterUtikiQuantitySubmit
+            // __ticketsHunterUtikiSubmit
             const plan = __TICKETS_HUNTER_PLAN_JSON__;
+            const normalize = value => String(value || '')
+                .replace(/\s+/g, ' ').trim();
+            const same = (first, second) =>
+                JSON.stringify(first) === JSON.stringify(second);
+            const key = value => JSON.stringify(value);
+            const exactSet = (actual, expected) => {
+                const left = actual.map(key).sort();
+                const right = expected.map(key).sort();
+                return same(left, right);
+            };
+            const visible = element => {
+                if (!element || !element.isConnected || element.hidden ||
+                    element.closest('[hidden], [inert], [aria-hidden="true"]')) {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            };
             if (location.href !== plan.pageUrl ||
                 String(performance.timeOrigin) !== plan.documentId) {
                 return 'stale';
@@ -1840,19 +1842,19 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
                 return inputs.length === 1 &&
                     (inputs[0].value || '') === expected;
             };
-            const queryKeys = Array.from(query.keys());
-            const routeValid =
-                (plan.pageType === 'general_admission' &&
-                    plan.generalRoutes.some(route =>
-                        location.origin === route[0] &&
-                        location.pathname === route[1])) ||
-                (plan.pageType === 'server_assigned_quantity' &&
-                    plan.routePaths.includes(location.pathname) &&
-                    queryKeys.length === 4 &&
-                    new Set(queryKeys).size === 4 &&
-                    exactQuery('ATYPE', 'N'));
-            const hiddenIdentityValid =
-                plan.pageType === 'general_admission' ?
+            const quantityIdentityValid = () => {
+                const queryKeys = Array.from(query.keys());
+                const routeValid =
+                    (plan.pageType === 'general_admission' &&
+                        plan.generalRoutes.some(route =>
+                            location.origin === route[0] &&
+                            location.pathname === route[1])) ||
+                    (plan.pageType === 'server_assigned_quantity' &&
+                        plan.quantityRoutePaths.includes(location.pathname) &&
+                        queryKeys.length === 4 &&
+                        new Set(queryKeys).size === 4 &&
+                        exactQuery('ATYPE', 'N'));
+                const hiddenValid = plan.pageType === 'general_admission' ?
                     optionalHiddenMatches(
                         '#PERFORMANCE_ID', plan.performanceId,
                         plan.performanceHiddenPresent) &&
@@ -1865,131 +1867,275 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
                     optionalHiddenMatches(
                         '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId,
                         plan.priceAreaHiddenPresent) :
-                    exactHiddenMatches(
-                        '#PERFORMANCE_ID', plan.performanceId) &&
+                    exactHiddenMatches('#PERFORMANCE_ID', plan.performanceId) &&
                     exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
                     exactHiddenMatches('#GROUP_ID', plan.groupId) &&
                     exactHiddenMatches(
                         '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId);
-            if (!exactQuery('PERFORMANCE_ID', plan.performanceId) ||
-                !exactQuery('GROUP_ID', plan.groupId) ||
-                !exactQuery(
-                    'PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) ||
-                !hiddenIdentityValid || !routeValid) {
-                return 'stale';
-            }
-            const quantityIntent = JSON.stringify([
-                plan.targetKey, plan.ticketNumber]);
-            if (document.documentElement.getAttribute(
-                'data-tickets-hunter-utiki-quantity-commit'
-            ) !== quantityIntent) return 'stale';
-            const roots = Array.from(document.querySelectorAll(
-                '[id="table_tickettype"]'));
-            const scoped = Array.from(new Set(roots.flatMap(root =>
-                Array.from(root.querySelectorAll('input.numbox[key]')))));
-            const inputs = Array.from(document.querySelectorAll(
-                'input.numbox[key]'));
-            const scopedSet = new Set(scoped);
-            const keys = inputs.map(input =>
-                input.getAttribute('key') || '');
-            if (!roots.length || !inputs.length ||
-                inputs.length !== scoped.length ||
-                inputs.some(input => !scopedSet.has(input)) ||
-                keys.some(key => !/^[A-Za-z0-9_-]+$/.test(key)) ||
-                new Set(keys).size !== keys.length) return 'stale';
-            const targets = scoped.filter(input =>
-                input.getAttribute('key') === plan.targetKey);
-            if (targets.length !== 1) return 'stale';
-            const limitInputs = Array.from(
-                document.querySelectorAll('#QUANTITY_LIMIT'));
-            if (limitInputs.length !==
-                (plan.quantityLimitPresent ? 1 : 0)) return 'stale';
-            const limitInput = limitInputs[0] || null;
-            const limitRaw = limitInput ?
-                (limitInput.value || '').trim() : '';
-            if (limitRaw && !/^\d+$/.test(limitRaw)) return 'stale';
-            const liveLimit = limitRaw ? Number(limitRaw) : 0;
-            if (liveLimit !== plan.quantityLimit ||
-                (liveLimit && plan.ticketNumber > liveLimit)) {
-                return 'stale';
-            }
-            const target = targets[0];
-            const row = target.closest('tr') ||
-                target.closest('[id="table_tickettype"]');
-            const name = (row.querySelector('td.fill')?.textContent || '')
-                .trim();
-            const text = (row.innerText || row.textContent || '')
-                .replace(/\s+/g, ' ').trim();
-            const remaining = Array.from(
-                row.querySelectorAll('input[key="LAST_AMOUNT"]'));
-            if (name !== plan.targetName || text.includes('售完') ||
-                target.disabled ||
-                target.getAttribute('aria-disabled') === 'true' ||
-                remaining.length !==
-                    (plan.targetRemainingPresent ? 1 : 0)) return 'stale';
-            if (remaining.length === 1) {
-                const raw = (remaining[0].value || '').trim();
-                if (!/^\d+$/.test(raw) ||
-                    Number(raw) < plan.ticketNumber) return 'stale';
-            }
-            const quantitiesValid = inputs.every(input =>
-                Number(input.value || 0) ===
-                    (input === target ? plan.ticketNumber : 0));
-            if (!quantitiesValid) return 'stale';
-            const visible = element => {
-                if (!element || !element.isConnected || element.hidden ||
-                    element.getAttribute('aria-hidden') === 'true') return false;
-                const style = getComputedStyle(element);
-                return style.display !== 'none' &&
-                    style.visibility !== 'hidden' &&
-                    element.getClientRects().length > 0;
+                return routeValid && hiddenValid &&
+                    exactQuery('PERFORMANCE_ID', plan.performanceId) &&
+                    exactQuery('GROUP_ID', plan.groupId) &&
+                    exactQuery(
+                        'PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId);
             };
-            const dialogs = Array.from(
-                document.querySelectorAll('#dialog-message'))
-                .map(message => ({
-                    message,
-                    wrapper: message.closest('.ui-dialog')
-                }))
-                .filter(item =>
-                    visible(item.wrapper) && visible(item.message));
-            if (dialogs.length) return 'rejected';
-            const loginIds = Array.from(
-                document.querySelectorAll('#LOGIN_ID')).filter(visible);
-            const loginPasswords = Array.from(
-                document.querySelectorAll('#LOGIN_PWD')).filter(visible);
-            if (loginIds.length || loginPasswords.length) {
-                if (loginIds.length !== 1 || loginPasswords.length !== 1 ||
-                    !(loginIds[0].value || '').trim() ||
-                    !(loginPasswords[0].value || '')) return 'rejected';
-            }
-            const captchas = Array.from(
-                document.querySelectorAll('input#CHK')).filter(visible);
-            if (captchas.length !== 1 ||
-                captchas[0].disabled ||
-                captchas[0].getAttribute('aria-disabled') === 'true' ||
-                captchas[0].readOnly ||
-                (captchas[0].value || '').trim().length !== 4) {
-                return 'rejected';
-            }
-            const buttons = Array.from(
-                document.querySelectorAll('button#addcart')).filter(visible);
-            if (buttons.length !== 1 || buttons[0].disabled ||
-                buttons[0].getAttribute('aria-disabled') === 'true') {
-                return 'rejected';
-            }
+            const quantityValid = () => {
+                if (!quantityIdentityValid()) return false;
+                const intent = JSON.stringify([
+                    plan.targetKey, plan.ticketNumber]);
+                if (document.documentElement.getAttribute(
+                    'data-tickets-hunter-utiki-quantity-commit'
+                ) !== intent) return false;
+                const roots = Array.from(document.querySelectorAll(
+                    '[id="table_tickettype"]'));
+                const scoped = Array.from(new Set(roots.flatMap(root =>
+                    Array.from(root.querySelectorAll('input.numbox[key]')))));
+                const inputs = Array.from(document.querySelectorAll(
+                    'input.numbox[key]'));
+                const scopedSet = new Set(scoped);
+                const keys = inputs.map(input =>
+                    input.getAttribute('key') || '');
+                if (!roots.length || !inputs.length ||
+                    inputs.length !== scoped.length ||
+                    inputs.some(input => !scopedSet.has(input)) ||
+                    keys.some(item => !/^[A-Za-z0-9_-]+$/.test(item)) ||
+                    new Set(keys).size !== keys.length) return false;
+                const targets = scoped.filter(input =>
+                    input.getAttribute('key') === plan.targetKey);
+                const limitInputs = Array.from(
+                    document.querySelectorAll('#QUANTITY_LIMIT'));
+                if (targets.length !== 1 || limitInputs.length !==
+                    (plan.quantityLimitPresent ? 1 : 0)) return false;
+                const limitRaw = limitInputs[0] ?
+                    normalize(limitInputs[0].value) : '';
+                const liveLimit = /^\d+$/.test(limitRaw) ? Number(limitRaw) : 0;
+                if ((limitRaw && !/^\d+$/.test(limitRaw)) ||
+                    liveLimit !== plan.quantityLimit ||
+                    (liveLimit && plan.ticketNumber > liveLimit)) return false;
+                const target = targets[0];
+                const row = target.closest('tr') ||
+                    target.closest('[id="table_tickettype"]');
+                const text = normalize(row.innerText || row.textContent);
+                const remaining = Array.from(
+                    row.querySelectorAll('input[key="LAST_AMOUNT"]'));
+                if (normalize(row.querySelector('td.fill')?.textContent) !==
+                    plan.targetName || text.includes('售完') ||
+                    target.disabled ||
+                    target.getAttribute('aria-disabled') === 'true' ||
+                    remaining.length !==
+                        (plan.targetRemainingPresent ? 1 : 0)) return false;
+                if (remaining.length === 1 &&
+                    (!/^\d+$/.test(normalize(remaining[0].value)) ||
+                        Number(normalize(remaining[0].value)) <
+                            plan.ticketNumber)) return false;
+                return inputs.every(input => Number(input.value || 0) ===
+                    (input === target ? plan.ticketNumber : 0));
+            };
+            const ticketLabel = button => {
+                const clone = button.cloneNode(true);
+                clone.querySelectorAll('.checkNum').forEach(node => node.remove());
+                return normalize(clone.textContent);
+            };
+            const ticketFingerprint = (button, index, counter) => [
+                index, button.tagName.toLowerCase(), button.id || '',
+                button.getAttribute('type') || '',
+                button.getAttribute('name') || '',
+                button.getAttribute('value') || '',
+                button.getAttribute('onclick') || '', ticketLabel(button),
+                counter ? (counter.id || '') : '',
+                counter ? (counter.getAttribute('val') || '') : ''
+            ];
+            const seatFingerprint = (seat, index) => [
+                index, normalize(seat.getAttribute('title')),
+                seat.parentElement ? seat.parentElement.rowIndex : -1,
+                seat.cellIndex, seat.id || '',
+                seat.getAttribute('onclick') || '',
+                seat.getAttribute('data-seat-id') || ''
+            ];
+            const readSeatState = () => {
+                const seatRoots = Array.from(document.querySelectorAll('#TBL'));
+                const ticketRoots = Array.from(
+                    document.querySelectorAll('.ticket'));
+                if (seatRoots.length !== 1 || !visible(seatRoots[0]) ||
+                    ticketRoots.length !== 1 || !visible(ticketRoots[0]) ||
+                    !window.seats || typeof window.seats !== 'object' ||
+                    Array.isArray(window.seats)) return null;
+                const tickets = Array.from(ticketRoots[0].querySelectorAll(
+                    'button[onclick*="setType"]')).map((button, index) => {
+                    const matches = Array.from(
+                        button.querySelectorAll('.checkNum'));
+                    const counter = matches.length === 1 ? matches[0] : null;
+                    return {
+                        fingerprint: ticketFingerprint(button, index, counter),
+                        disabled: !!button.disabled || !visible(button) ||
+                            button.getAttribute('aria-disabled') === 'true',
+                        typeId: counter ? (counter.id || '') : '',
+                        typeName: counter ?
+                            (counter.getAttribute('val') || '') : '',
+                        counterCount: matches.length
+                    };
+                });
+                const seats = Array.from(seatRoots[0].querySelectorAll(
+                    'td[title]')).map((seat, index) => {
+                    const inline = (seat.getAttribute('style') || '')
+                        .toLowerCase();
+                    const style = getComputedStyle(seat);
+                    const background = (style.backgroundImage || '')
+                        .toLowerCase();
+                    const rect = seat.getBoundingClientRect();
+                    return {
+                        fingerprint: seatFingerprint(seat, index),
+                        rowIndex: seat.parentElement ?
+                            seat.parentElement.rowIndex : -1,
+                        cellIndex: seat.cellIndex,
+                        centerX: rect.left + rect.width / 2,
+                        centerY: rect.top + rect.height / 2,
+                        width: rect.width, height: rect.height,
+                        selected: inline.includes('icon_chair_select') ||
+                            background.includes('icon_chair_select')
+                    };
+                });
+                const counters = Array.from(ticketRoots[0].querySelectorAll(
+                    '.checkNum')).map(counter => ({
+                    id: counter.id || '', raw: normalize(counter.textContent)
+                }));
+                const submitted = Object.values(window.seats)
+                    .filter(seat => seat && String(seat.A || '') !== '')
+                    .map(seat => ({
+                        A: String(seat.A || ''), Y: String(seat.Y || ''),
+                        Z: String(seat.Z || '')
+                    }));
+                return {tickets, seats, counters, submitted};
+            };
+            const physicallyAdjacent = (first, second) => {
+                const dx = Math.abs(first.centerX - second.centerX);
+                const dy = Math.abs(first.centerY - second.centerY);
+                const size = Math.max(
+                    first.width, first.height, second.width, second.height);
+                if ([dx, dy, size].every(Number.isFinite) && size > 0) {
+                    return Math.min(dx, dy) <= Math.max(2, size * 0.35) &&
+                        Math.max(dx, dy) <= size * 1.6 &&
+                        Math.max(dx, dy) >= size * 0.35;
+                }
+                const rowDelta = Math.abs(first.rowIndex - second.rowIndex);
+                const cellDelta = Math.abs(first.cellIndex - second.cellIndex);
+                return (rowDelta === 0 && cellDelta === 1) ||
+                    (rowDelta === 1 && cellDelta === 0);
+            };
+            const seatIdentityValid = () => {
+                const limitInputs = Array.from(
+                    document.querySelectorAll('#QUANTITY_LIMIT'));
+                const limitRaw = limitInputs.length === 1 ?
+                    normalize(limitInputs[0].value) : '';
+                return plan.reservedRoutes.some(route =>
+                    location.origin === route[0] &&
+                    location.pathname === route[1]) &&
+                    exactQuery('PERFORMANCE_ID', plan.performanceId) &&
+                    exactQuery('GROUP_ID', plan.groupId) &&
+                    exactQuery(
+                        'PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId) &&
+                    exactHiddenMatches('#PERFORMANCE_ID', plan.performanceId) &&
+                    exactHiddenMatches('#GROUP_ID', plan.groupId) &&
+                    exactHiddenMatches('#PRICE_AREA_ID', plan.priceAreaId) &&
+                    exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
+                    /^\d+$/.test(limitRaw) &&
+                    (Number(limitRaw) === 0 ||
+                        Number(limitRaw) >= plan.ticketNumber);
+            };
+            const seatValid = () => {
+                if (!seatIdentityValid()) return false;
+                const live = readSeatState();
+                if (!live || !live.tickets.length) return false;
+                const ticketKeys = live.tickets.map(item =>
+                    key(item.fingerprint));
+                const seatKeys = live.seats.map(item => key(item.fingerprint));
+                const counterIds = live.counters.map(item => item.id);
+                if (new Set(ticketKeys).size !== ticketKeys.length ||
+                    new Set(seatKeys).size !== seatKeys.length ||
+                    counterIds.some(id => !id) ||
+                    new Set(counterIds).size !== counterIds.length ||
+                    live.counters.some(item => !/^\d+$/.test(item.raw))) {
+                    return false;
+                }
+                const tickets = live.tickets.filter(ticket =>
+                    same(ticket.fingerprint, plan.ticketTypeFingerprint) &&
+                    ticket.typeId === plan.ticketTypeId &&
+                    ticket.typeName === plan.ticketTypeName &&
+                    ticket.counterCount === 1 && !ticket.disabled);
+                const selected = live.seats.filter(seat => seat.selected);
+                const matches = plan.expectedSeatFingerprints.map(
+                    fingerprint => live.seats.filter(seat =>
+                        same(seat.fingerprint, fingerprint)));
+                const countersValid = live.counters.every(counter =>
+                    Number(counter.raw) ===
+                        (counter.id === plan.ticketTypeId ?
+                            plan.ticketNumber : 0));
+                const payloadValid =
+                    live.submitted.length === plan.ticketNumber &&
+                    live.submitted.every(seat => seat.A === 'S' &&
+                        seat.Y === plan.ticketTypeId &&
+                        seat.Z === plan.ticketTypeName);
+                const adjacent = !plan.requirePhysicalAdjacency || (
+                    matches.every(items => items.length === 1) &&
+                    matches.slice(1).every((items, index) =>
+                        physicallyAdjacent(matches[index][0], items[0])));
+                const intent = JSON.stringify([
+                    'selection', plan.ticketTypeFingerprint,
+                    plan.ticketTypeId, plan.ticketTypeName,
+                    plan.ticketNumber, plan.expectedSeatFingerprints,
+                    plan.requirePhysicalAdjacency
+                ]);
+                const marker = document.documentElement.getAttribute(
+                    'data-tickets-hunter-utiki-seat-commit');
+                return tickets.length === 1 &&
+                    exactSet(selected.map(seat => seat.fingerprint),
+                        plan.expectedSeatFingerprints) &&
+                    matches.every(items => items.length === 1) &&
+                    countersValid && payloadValid && adjacent &&
+                    (!marker || marker === intent);
+            };
+            const commonControls = () => {
+                const messages = Array.from(
+                    document.querySelectorAll('#dialog-message'))
+                    .filter(visible);
+                if (messages.length) return null;
+                const loginIds = Array.from(
+                    document.querySelectorAll('#LOGIN_ID')).filter(visible);
+                const loginPasswords = Array.from(
+                    document.querySelectorAll('#LOGIN_PWD')).filter(visible);
+                if ((loginIds.length || loginPasswords.length) &&
+                    (loginIds.length !== 1 || loginPasswords.length !== 1 ||
+                        !normalize(loginIds[0].value) ||
+                        !(loginPasswords[0].value || ''))) return null;
+                const captchas = Array.from(
+                    document.querySelectorAll('input#CHK')).filter(visible);
+                if (captchas.length !== 1 || captchas[0].disabled ||
+                    captchas[0].getAttribute('aria-disabled') === 'true' ||
+                    captchas[0].readOnly ||
+                    normalize(captchas[0].value).length !== 4) return null;
+                const buttons = Array.from(
+                    document.querySelectorAll('button#addcart')).filter(visible);
+                if (buttons.length !== 1 || buttons[0].disabled ||
+                    buttons[0].getAttribute('aria-disabled') === 'true') {
+                    return null;
+                }
+                return buttons[0];
+            };
+            const stateValid = plan.pageType === 'seat' ?
+                seatValid() : quantityValid();
+            if (!stateValid) return 'stale';
+            const button = commonControls();
+            if (!button) return 'rejected';
             if (plan.pageType === 'server_assigned_quantity') {
-                const form = buttons[0].form;
+                const form = button.form;
                 if (!form) return 'rejected';
                 const method = (
-                    buttons[0].hasAttribute('formmethod') ?
-                        buttons[0].formMethod : form.method
+                    button.hasAttribute('formmethod') ?
+                        button.formMethod : form.method
                 ).toLowerCase();
-                if (method !== 'post') {
-                    return 'rejected';
-                }
+                if (method !== 'post') return 'rejected';
                 const action = new URL(
-                    buttons[0].hasAttribute('formaction') ?
-                        buttons[0].formAction : form.action,
+                    button.hasAttribute('formaction') ?
+                        button.formAction : form.action,
                     location.href
                 );
                 const expectedPath = location.pathname.replace(/\/+$/, '') +
@@ -1998,16 +2144,13 @@ CONST_QUANTITY_SUBMIT_SCRIPT = r'''
                     action.pathname !== expectedPath ||
                     action.search || action.hash) return 'rejected';
             }
-            buttons[0].click();
+            button.click();
             return 'dispatched';
         })()'''
 
 
-async def dispatch_quantity_submit(tab, plan):
-    """Atomically revalidate quantity state and dispatch add-to-cart once."""
-    if not _valid_quantity_submit_input(plan):
-        return SubmitDispatchResult.REJECTED
-    plan_json = json.dumps({
+def _quantity_submit_payload(plan):
+    return {
         "pageUrl": plan.page_url,
         "documentId": plan.document_id,
         "performanceId": plan.performance_id,
@@ -2019,7 +2162,7 @@ async def dispatch_quantity_submit(tab, plan):
         "targetName": plan.target_name,
         "ticketNumber": plan.ticket_number,
         "pageType": plan.page_type,
-        "routePaths": CONST_SERVER_ASSIGNED_QUANTITY_PATHS,
+        "quantityRoutePaths": CONST_SERVER_ASSIGNED_QUANTITY_PATHS,
         "generalRoutes": CONST_GENERAL_ADMISSION_ROUTES,
         "performanceHiddenPresent": plan.performance_hidden_present,
         "productHiddenPresent": plan.product_hidden_present,
@@ -2027,12 +2170,50 @@ async def dispatch_quantity_submit(tab, plan):
         "priceAreaHiddenPresent": plan.price_area_hidden_present,
         "quantityLimitPresent": plan.quantity_limit_present,
         "targetRemainingPresent": plan.target_remaining_present,
-    }, ensure_ascii=False)
-    script = CONST_QUANTITY_SUBMIT_SCRIPT.replace(
+    }
+
+
+def _seat_submit_payload(plan):
+    expected = (
+        plan.target_seat_fingerprints
+        if plan.action == "select"
+        else plan.selected_seat_fingerprints
+    )
+    return {
+        "pageUrl": plan.page_url,
+        "documentId": plan.document_id,
+        "performanceId": plan.performance_id,
+        "productId": plan.product_id,
+        "groupId": plan.group_id,
+        "priceAreaId": plan.price_area_id,
+        "ticketNumber": plan.ticket_number,
+        "pageType": "seat",
+        "ticketTypeFingerprint": plan.ticket_type_fingerprint,
+        "ticketTypeId": plan.ticket_type_id,
+        "ticketTypeName": plan.ticket_type_name,
+        "expectedSeatFingerprints": expected,
+        "requirePhysicalAdjacency": plan.require_physical_adjacency,
+        "reservedRoutes": CONST_RESERVED_SEAT_ROUTES,
+    }
+
+
+async def dispatch_submit(tab, plan):
+    """Atomically revalidate one frozen purchase and dispatch add-to-cart."""
+    if not isinstance(plan, SubmitPlan) or not submit_plan_is_valid(plan):
+        return SubmitDispatchResult.REJECTED
+    selection_plan = plan.selection_plan
+    if isinstance(selection_plan, QuantityPlan):
+        payload = _quantity_submit_payload(selection_plan)
+    elif isinstance(selection_plan, SeatActionPlan):
+        payload = _seat_submit_payload(selection_plan)
+    else:
+        return SubmitDispatchResult.REJECTED
+    plan_json = json.dumps(payload, ensure_ascii=False)
+    script = CONST_SUBMIT_SCRIPT.replace(
         "__TICKETS_HUNTER_PLAN_JSON__", plan_json, 1
     )
     raw_result = await tab.evaluate(script)
     try:
         return SubmitDispatchResult(raw_result)
     except (TypeError, ValueError):
-        raise RuntimeError("quantity submit dispatch outcome is unknown")
+        raise RuntimeError("submit dispatch outcome is unknown")

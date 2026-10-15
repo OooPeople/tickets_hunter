@@ -26,10 +26,11 @@ from platforms.utiki.dom import (
     CommitResult,
     SubmitDispatchResult,
     commit_area,
-    dispatch_quantity_submit,
+    dispatch_submit,
 )
 from platforms.utiki.selection import (
     DialogSnapshot,
+    build_submit_plan,
     parse_area_snapshot,
     parse_date_snapshot,
     parse_quantity_snapshot,
@@ -754,6 +755,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(),
             ),
             patch(
+                "platforms.utiki.workflow.dispatch_submit",
+                AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
+            ) as dispatch,
+            patch(
                 "platforms.utiki.workflow._observe_ctbc_submit_outcome",
                 AsyncMock(return_value=False),
             ) as observe,
@@ -768,7 +773,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         self.assertEqual(
             ["inspect_seat", "commit_seat"], dom_port.events[:2]
         )
-        self.assertEqual(1, tab.button.click_count)
+        self.assertEqual(1, dispatch.await_count)
+        submitted_plan = dispatch.await_args.args[1]
+        self.assertEqual("seat", submitted_plan.page_kind.value)
+        self.assertEqual("select", submitted_plan.selection_plan.action)
+        self.assertEqual(0, tab.button.click_count)
         observe.assert_awaited_once()
         self.assertEqual(
             "awaiting_result", _state["submitted"][submit_key]["phase"]
@@ -1135,7 +1144,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             dom_port.events.append("submit")
             self.assertEqual(
                 "server_assigned_quantity",
-                kwargs["quantity_plan"].page_type,
+            kwargs["submit_plan"].page_kind.value,
             )
             return submit_calls == 2
 
@@ -1438,7 +1447,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.dispatch_quantity_submit",
+                "platforms.utiki.workflow.dispatch_submit",
                 AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
             ) as dispatch,
             patch(
@@ -1487,16 +1496,16 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         })
 
         with patch(
-            "platforms.utiki.workflow.dispatch_quantity_submit",
+            "platforms.utiki.workflow.dispatch_submit",
             AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
         ) as dispatch, patch(
             "platforms.utiki.workflow._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
         ):
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
-        dispatch.assert_awaited_once_with(tab, plan)
+        dispatch.assert_awaited_once_with(tab, build_submit_plan(plan))
 
     async def test_unknown_quantity_dispatch_is_sticky(self):
         snapshot = parse_quantity_snapshot(make_ctbc_quantity_snapshot())
@@ -1509,14 +1518,14 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         submit_key = _ctbc_purchase_state_key(tab)
 
         with patch(
-            "platforms.utiki.workflow.dispatch_quantity_submit",
+            "platforms.utiki.workflow.dispatch_submit",
             AsyncMock(side_effect=RuntimeError("unknown result")),
         ) as dispatch:
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
 
         self.assertEqual(1, dispatch.await_count)
@@ -1543,14 +1552,14 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             return SubmitDispatchResult.STALE
 
         with patch(
-            "platforms.utiki.workflow.dispatch_quantity_submit",
+            "platforms.utiki.workflow.dispatch_submit",
             AsyncMock(side_effect=lose_guard),
         ), patch(
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(),
         ) as reload_page:
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
 
         reload_page.assert_not_awaited()
@@ -1566,23 +1575,23 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         })
 
         with patch(
-            "platforms.utiki.workflow.dispatch_quantity_submit",
+            "platforms.utiki.workflow.dispatch_submit",
             AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
         ) as dispatch, patch(
             "platforms.utiki.workflow._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
         ):
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
             tab.dialog = "驗證碼錯誤"
             tab.dialog_visible = True
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
             tab.captcha_input.value = "WXYZ"
             self.assertFalse(await _ctbc_captcha_and_submit(
-                tab, cfg, ocr=None, quantity_plan=plan
+                tab, cfg, ocr=None, submit_plan=build_submit_plan(plan)
             ))
 
         self.assertEqual(2, dispatch.await_count)
@@ -1609,7 +1618,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         )
 
         with self.assertRaisesRegex(RuntimeError, "outcome is unknown"):
-            await dispatch_quantity_submit(tab, plan)
+            await dispatch_submit(tab, build_submit_plan(plan))
 
 
 if __name__ == "__main__":

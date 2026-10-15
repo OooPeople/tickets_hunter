@@ -24,7 +24,7 @@ from platforms.utiki.dom import (
     commit_quantity,
     commit_seat,
     dismiss_dialog,
-    dispatch_quantity_submit,
+    dispatch_submit,
     read_area_snapshot,
     read_date_snapshot,
     read_dialog_snapshot,
@@ -32,6 +32,7 @@ from platforms.utiki.dom import (
     read_seat_snapshot,
 )
 from platforms.utiki.selection import (
+    build_submit_plan,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
     select_area_snapshot,
     select_date_snapshot,
@@ -41,6 +42,7 @@ from platforms.utiki.selection import (
 )
 from platforms.utiki.profiles import PageKind
 from platforms.utiki.workflow import (
+    CTBC_SEAT_STALE_RELOAD_REASON,
     _ctbc_captcha_and_submit,
     _ctbc_delete_fast_navigation_marker,
     _ctbc_login_fingerprint,
@@ -140,6 +142,12 @@ async def _run_browser_fixtures():
                         "platforms.utiki.dom.CONST_GENERAL_ADMISSION_ROUTES",
                         fixture_routes,
                     ),
+                ):
+                    await assertion(browser)
+            elif assertion is _assert_server_assigned_quantity_fixture:
+                with patch(
+                    "platforms.utiki.selection.classify_utiki_page",
+                    return_value=PageKind.SERVER_ASSIGNED_QUANTITY,
                 ):
                     await assertion(browser)
             else:
@@ -754,6 +762,23 @@ async def _assert_seat_fixture(browser):
             seats: Number(document.body.dataset.seatClicks || 0)
         })''')
 
+    async def addcart_clicks(tab):
+        return await tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        )
+
+    async def open_committed_submit():
+        submit_tab = await _open_fixture(
+            browser, "UTK0205_seat.html", query
+        )
+        submit_snapshot, selection_plan = await read_plan(submit_tab)
+        assert await commit_seat(
+            submit_tab, submit_snapshot, selection_plan
+        ) is CommitResult.COMMITTED
+        submit_plan = build_submit_plan(selection_plan)
+        assert submit_plan is not None
+        return submit_tab, submit_plan
+
     tab = await _open_fixture(browser, "UTK0205_seat.html", query)
     before_html = await tab.evaluate("document.body.innerHTML")
     snapshot = await read_seat_snapshot(tab)
@@ -781,6 +806,12 @@ async def _assert_seat_fixture(browser):
         plan.ticket_type_id,
         plan.ticket_type_name,
     )
+    submit_plan = build_submit_plan(plan)
+    assert submit_plan is not None
+    assert await dispatch_submit(
+        tab, submit_plan
+    ) is SubmitDispatchResult.DISPATCHED
+    assert await addcart_clicks(tab) == 1
     ready_plan, reason = select_seat_snapshot(
         committed_snapshot,
         cfg["utiki"]["ticket_type_keyword"],
@@ -802,6 +833,87 @@ async def _assert_seat_fixture(browser):
     assert selected == ["A區-1排-1號", "A區-1排-2號"]
     assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
     assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
+
+    unlimited_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    await unlimited_tab.evaluate(
+        "document.querySelector('#QUANTITY_LIMIT').value = '0'"
+    )
+    unlimited_snapshot, unlimited_plan = await read_plan(unlimited_tab)
+    assert unlimited_snapshot.quantity_limit_raw == "0"
+    assert unlimited_plan.action == "select"
+    assert await commit_seat(
+        unlimited_tab, unlimited_snapshot, unlimited_plan
+    ) is CommitResult.COMMITTED
+    unlimited_submit = build_submit_plan(unlimited_plan)
+    assert unlimited_submit is not None
+    assert await dispatch_submit(
+        unlimited_tab, unlimited_submit
+    ) is SubmitDispatchResult.DISPATCHED
+    assert await addcart_clicks(unlimited_tab) == 1
+
+    nonadjacent_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    await nonadjacent_tab.evaluate('''(() => {
+        document.querySelector('#TBL td[data-seat-id="S1"]').click();
+        document.querySelector('#TBL td[data-seat-id="S2"]').click();
+        document.querySelector(
+            '#TBL td[data-seat-id="S2"]'
+        ).style.transform = 'translateX(120px)';
+    })()''')
+    nonadjacent_snapshot, nonadjacent_plan = await read_plan(nonadjacent_tab)
+    assert seat_selection_is_valid(
+        nonadjacent_snapshot,
+        nonadjacent_plan.ticket_number,
+        nonadjacent_plan.ticket_type_id,
+        nonadjacent_plan.ticket_type_name,
+    )
+    assert nonadjacent_plan.action == "clear"
+    assert nonadjacent_plan.require_physical_adjacency
+    assert await commit_seat(
+        nonadjacent_tab, nonadjacent_snapshot, nonadjacent_plan
+    ) is CommitResult.COMMITTED
+    assert await nonadjacent_tab.evaluate(
+        "Object.keys(window.seats).length"
+    ) == 0
+    assert await nonadjacent_tab.evaluate(
+        "document.querySelector('#FULL').textContent"
+    ) == "0"
+    assert not await nonadjacent_tab.evaluate(
+        "document.documentElement.hasAttribute("
+        "'data-tickets-hunter-utiki-seat-commit')"
+    )
+
+    forged_marker_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    await forged_marker_tab.evaluate('''(() => {
+        document.querySelector('#TBL td[data-seat-id="S1"]').click();
+        document.querySelector('#TBL td[data-seat-id="S2"]').click();
+    })()''')
+    forged_snapshot, forged_plan = await read_plan(forged_marker_tab)
+    assert forged_plan.action == "ready"
+    assert forged_plan.require_physical_adjacency
+    forged_intent = json.dumps([
+        "selection",
+        forged_plan.ticket_type_fingerprint,
+        forged_plan.ticket_type_id,
+        forged_plan.ticket_type_name,
+        forged_plan.ticket_number,
+        forged_plan.selected_seat_fingerprints,
+        False,
+    ], ensure_ascii=False)
+    await forged_marker_tab.evaluate(
+        "document.documentElement.setAttribute("
+        "'data-tickets-hunter-utiki-seat-commit', "
+        f"{json.dumps(forged_intent)})"
+    )
+    assert await commit_seat(
+        forged_marker_tab, forged_snapshot, forged_plan
+    ) is CommitResult.STALE
+    assert await addcart_clicks(forged_marker_tab) == 0
 
     clear_tab = await _open_fixture(browser, "UTK0205_seat.html", query)
     await clear_tab.evaluate(
@@ -925,6 +1037,133 @@ async def _assert_seat_fixture(browser):
         race_plan.ticket_type_name,
     )
 
+    negative_mutations = (
+        (
+            "dialog",
+            "document.body.insertAdjacentHTML('beforeend', "
+            "'<div id=\"dialog-message\">警告</div>')",
+            SubmitDispatchResult.REJECTED,
+        ),
+        (
+            "login",
+            "document.body.insertAdjacentHTML('beforeend', "
+            "'<input id=\"LOGIN_ID\"><input id=\"LOGIN_PWD\">')",
+            SubmitDispatchResult.REJECTED,
+        ),
+        (
+            "captcha",
+            "document.querySelector('#CHK').value = ''",
+            SubmitDispatchResult.REJECTED,
+        ),
+        (
+            "button",
+            "document.querySelector('#addcart').disabled = true",
+            SubmitDispatchResult.REJECTED,
+        ),
+        (
+            "seat",
+            "document.querySelector('#TBL td[data-seat-id=\"S1\"]').click()",
+            SubmitDispatchResult.STALE,
+        ),
+        (
+            "hidden-identity",
+            "document.querySelector('#PRODUCT_ID').value = 'OTHER_PRODUCT'",
+            SubmitDispatchResult.STALE,
+        ),
+        (
+            "seat-payload",
+            "Object.assign(window.seats[Object.keys(window.seats)[0]], "
+            "{Y: 'OTHER', Z: '其他票'})",
+            SubmitDispatchResult.STALE,
+        ),
+        (
+            "ticket-counter",
+            "document.querySelector('#FULL').textContent = '1'",
+            SubmitDispatchResult.STALE,
+        ),
+        (
+            "strict-adjacency",
+            "document.querySelector("
+            "'#TBL td[data-seat-id=\"S2\"]').style.transform = "
+            "'translateX(120px)'",
+            SubmitDispatchResult.STALE,
+        ),
+    )
+    for label, mutation, expected in negative_mutations:
+        invalid_tab, invalid_plan = await open_committed_submit()
+        await invalid_tab.evaluate(mutation)
+        assert await dispatch_submit(
+            invalid_tab, invalid_plan
+        ) is expected, label
+        assert await addcart_clicks(invalid_tab) == 0, label
+
+    document_tab, document_plan = await open_committed_submit()
+    await document_tab.sleep(0.05)
+    await document_tab.reload()
+    for _ in range(50):
+        if await document_tab.evaluate("document.readyState === 'complete'"):
+            break
+        await document_tab.sleep(0.02)
+    assert await dispatch_submit(
+        document_tab, document_plan
+    ) is SubmitDispatchResult.STALE
+    assert await addcart_clicks(document_tab) == 0
+
+    wait_tab, wait_plan = await open_committed_submit()
+    await wait_tab.evaluate("document.querySelector('#CHK').value = ''")
+    wait_cfg = config()
+    wait_cfg["ocr_captcha"].update({
+        "enable": True, "force_submit": True,
+    })
+    dispatch_results = []
+
+    async def mutate_seat_during_ocr(*_args):
+        await wait_tab.evaluate(
+            "document.querySelector("
+            "'#TBL td[data-seat-id=\"S1\"]').click()"
+        )
+        await wait_tab.evaluate(
+            "document.querySelector('#CHK').value = 'ABCD'"
+        )
+        return True
+
+    async def capture_seat_dispatch(*args):
+        result = await dispatch_submit(*args)
+        dispatch_results.append(result)
+        return result
+
+    with (
+        patch(
+            "platforms.utiki.workflow._ctbc_captcha",
+            AsyncMock(side_effect=mutate_seat_during_ocr),
+        ) as captcha_solver,
+        patch(
+            "platforms.utiki.workflow.dispatch_submit",
+            AsyncMock(side_effect=capture_seat_dispatch),
+        ),
+        patch(
+            "platforms.utiki.workflow._ctbc_purchase_state_key",
+            return_value=("fixture-seat-wait",),
+        ),
+        patch(
+            "platforms.utiki.workflow._get_ctbc_page_type",
+            return_value="seat",
+        ),
+        patch(
+            "platforms.utiki.workflow._reload_with_interval",
+            AsyncMock(return_value=False),
+        ) as reload_page,
+    ):
+        assert not await _ctbc_captcha_and_submit(
+            wait_tab, wait_cfg, ocr=None, submit_plan=wait_plan
+        )
+    captcha_solver.assert_awaited_once()
+    assert dispatch_results == [SubmitDispatchResult.STALE]
+    reload_page.assert_awaited_once_with(
+        wait_tab, wait_cfg, CTBC_SEAT_STALE_RELOAD_REASON
+    )
+    assert await addcart_clicks(wait_tab) == 0
+
 
 async def _assert_quantity_fixture(browser):
     query = (
@@ -1016,7 +1255,7 @@ async def _assert_quantity_fixture(browser):
     dispatch_results = []
 
     async def capture_flow_dispatch(*args):
-        result = await dispatch_quantity_submit(*args)
+        result = await dispatch_submit(*args)
         dispatch_results.append(result)
         return result
 
@@ -1030,7 +1269,7 @@ async def _assert_quantity_fixture(browser):
         "platforms.utiki.workflow._get_ctbc_page_type",
         return_value="general_admission",
     ), patch(
-        "platforms.utiki.workflow.dispatch_quantity_submit",
+        "platforms.utiki.workflow.dispatch_submit",
         AsyncMock(side_effect=capture_flow_dispatch),
     ), patch(
         "platforms.utiki.workflow._observe_ctbc_submit_outcome",
@@ -1185,8 +1424,8 @@ async def _assert_quantity_fixture(browser):
     await limit_tab.evaluate('''document.body.appendChild(
         document.querySelector('#QUANTITY_LIMIT').cloneNode(true)
     )''')
-    assert await dispatch_quantity_submit(
-        limit_tab, limit_plan
+    assert await dispatch_submit(
+        limit_tab, build_submit_plan(limit_plan)
     ) is SubmitDispatchResult.STALE
     assert await limit_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
@@ -1203,14 +1442,14 @@ async def _assert_quantity_fixture(browser):
     assert await commit_quantity(
         dispatch_tab, dispatch_snapshot, dispatch_plan
     ) is CommitResult.COMMITTED
-    assert await dispatch_quantity_submit(
-        dispatch_tab, dispatch_plan
+    assert await dispatch_submit(
+        dispatch_tab, build_submit_plan(dispatch_plan)
     ) is SubmitDispatchResult.DISPATCHED
     assert await dispatch_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 1
-    assert await dispatch_quantity_submit(
-        dispatch_tab, dispatch_plan
+    assert await dispatch_submit(
+        dispatch_tab, build_submit_plan(dispatch_plan)
     ) is SubmitDispatchResult.DISPATCHED
     assert await dispatch_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
@@ -1231,8 +1470,8 @@ async def _assert_quantity_fixture(browser):
         "document.documentElement.removeAttribute("
         "'data-tickets-hunter-utiki-quantity-commit')"
     )
-    assert await dispatch_quantity_submit(
-        marker_tab, marker_plan
+    assert await dispatch_submit(
+        marker_tab, build_submit_plan(marker_plan)
     ) is SubmitDispatchResult.STALE
     assert await marker_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
@@ -1257,8 +1496,8 @@ async def _assert_quantity_fixture(browser):
             document.body.appendChild(wrapper);
         })()
     ''')
-    assert await dispatch_quantity_submit(
-        dialog_tab, dialog_plan
+    assert await dispatch_submit(
+        dialog_tab, build_submit_plan(dialog_plan)
     ) is SubmitDispatchResult.REJECTED
     assert await dialog_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
@@ -1303,7 +1542,7 @@ async def _assert_quantity_fixture(browser):
         dispatch_results = []
 
         async def capture_dispatch(*args):
-            result = await dispatch_quantity_submit(*args)
+            result = await dispatch_submit(*args)
             dispatch_results.append(result)
             return result
 
@@ -1311,7 +1550,7 @@ async def _assert_quantity_fixture(browser):
             "platforms.utiki.workflow._ctbc_captcha",
             AsyncMock(side_effect=mutate_during_ocr),
         ) as captcha_solver, patch(
-            "platforms.utiki.workflow.dispatch_quantity_submit",
+            "platforms.utiki.workflow.dispatch_submit",
             AsyncMock(side_effect=capture_dispatch),
         ), patch(
             "platforms.utiki.workflow._ctbc_purchase_state_key",
@@ -1327,7 +1566,8 @@ async def _assert_quantity_fixture(browser):
             AsyncMock(return_value=False),
         ) as reload_page:
             assert not await _ctbc_captcha_and_submit(
-                wait_tab, wait_cfg, ocr=None, quantity_plan=wait_plan
+                wait_tab, wait_cfg, ocr=None,
+                submit_plan=build_submit_plan(wait_plan),
             )
         captcha_solver.assert_awaited_once()
         assert dispatch_results == [SubmitDispatchResult.STALE], mutation
@@ -1554,8 +1794,8 @@ async def _assert_server_assigned_quantity_fixture(browser):
         assert await _read_fixture_quantities(tab) == {
             "FULL": "2", "OTHER": "0"
         }
-        assert await dispatch_quantity_submit(
-            tab, plan
+        assert await dispatch_submit(
+            tab, build_submit_plan(plan)
         ) is SubmitDispatchResult.DISPATCHED
         assert await tab.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
@@ -1571,8 +1811,8 @@ async def _assert_server_assigned_quantity_fixture(browser):
             hidden_only, hidden_snapshot, hidden_plan
         ) is CommitResult.COMMITTED
         await hidden_only.evaluate("document.querySelector('#CHK').remove()")
-        assert await dispatch_quantity_submit(
-            hidden_only, hidden_plan
+        assert await dispatch_submit(
+            hidden_only, build_submit_plan(hidden_plan)
         ) is SubmitDispatchResult.REJECTED
         assert await hidden_only.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
@@ -1590,8 +1830,8 @@ async def _assert_server_assigned_quantity_fixture(browser):
         await invalid_form.evaluate(
             "document.querySelector('form').setAttribute('method', 'get')"
         )
-        assert await dispatch_quantity_submit(
-            invalid_form, invalid_plan
+        assert await dispatch_submit(
+            invalid_form, build_submit_plan(invalid_plan)
         ) is SubmitDispatchResult.REJECTED
         await invalid_form.evaluate('''
             (() => {
@@ -1603,8 +1843,8 @@ async def _assert_server_assigned_quantity_fixture(browser):
                 button.setAttribute('formmethod', '');
             })()
         ''')
-        assert await dispatch_quantity_submit(
-            invalid_form, invalid_plan
+        assert await dispatch_submit(
+            invalid_form, build_submit_plan(invalid_plan)
         ) is SubmitDispatchResult.REJECTED
         await invalid_form.evaluate('''
             (() => {
@@ -1613,8 +1853,8 @@ async def _assert_server_assigned_quantity_fixture(browser):
                 button.setAttribute('formaction', '');
             })()
         ''')
-        assert await dispatch_quantity_submit(
-            invalid_form, invalid_plan
+        assert await dispatch_submit(
+            invalid_form, build_submit_plan(invalid_plan)
         ) is SubmitDispatchResult.REJECTED
         assert await invalid_form.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
@@ -1628,8 +1868,8 @@ async def _assert_server_assigned_quantity_fixture(browser):
                 form.setAttribute('action', 'OTHER_ACTION');
             })()
         ''')
-        assert await dispatch_quantity_submit(
-            invalid_form, invalid_plan
+        assert await dispatch_submit(
+            invalid_form, build_submit_plan(invalid_plan)
         ) is SubmitDispatchResult.REJECTED
 
         product_drift = await _open_fixture_url(browser, url)

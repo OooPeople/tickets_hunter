@@ -7,7 +7,7 @@
     #TBL td[title] { width: 2rem; height: 2rem; border: 1px solid #333; }
   </style>
 </head>
-<body>
+<body data-addcart-clicks="0">
   <!-- Page kind: seat. Fixture date: 2026-10-15. Synthetic/deidentified. -->
   <input id="PERFORMANCE_ID" value="P16D0B8Z" hidden>
   <input id="PRODUCT_ID" value="PRODUCT_FIXTURE" hidden>
@@ -36,6 +36,11 @@
       </tr>
     </tbody>
   </table>
+  <input id="CHK" value="ABCD">
+  <button id="addcart" type="button"
+          onclick="document.body.dataset.addcartClicks = String(Number(document.body.dataset.addcartClicks || 0) + 1)">
+    加入購物車
+  </button>
   <script>
     window.seats = {};
     function setType(value) {

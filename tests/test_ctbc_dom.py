@@ -14,15 +14,16 @@ from tests.ctbc_support import (
     FakeTab,
     config,
     make_ctbc_area_snapshot,
+    make_ctbc_submit_plan,
 )
 
 from platforms.utiki.dom import SubmitDispatchResult
-from platforms.utiki.selection import QuantityPlan
+from platforms.utiki.selection import QuantityPlan, build_submit_plan
 
 from platforms.utiki.workflow import (
     CTBC_AREA_ROW_SELECTOR,
     _ctbc_attest_fast_destination,
-    _ctbc_captcha_and_submit,
+    _ctbc_captcha_and_submit as _workflow_ctbc_captcha_and_submit,
     _ctbc_fast_marker_matches_pending,
     _fill_ctbc_inline_login,
     _ctbc_pending_from_fast_marker,
@@ -41,6 +42,17 @@ from platforms.utiki.workflow import (
     nodriver_ctbc_inject_cookies,
     nodriver_ctbc_seat_main,
 )
+
+
+async def _ctbc_captcha_and_submit(
+    tab, config_dict, ocr, *, submit_plan=None,
+):
+    """Keep legacy dialog tests focused while supplying the new final intent."""
+    if submit_plan is None:
+        submit_plan = make_ctbc_submit_plan(str(tab.target.url))
+    return await _workflow_ctbc_captcha_and_submit(
+        tab, config_dict, ocr, submit_plan=submit_plan
+    )
 
 
 CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
@@ -1401,7 +1413,14 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": False}
         submit_key = _ctbc_purchase_state_key(tab)
-        self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        with patch(
+            "platforms.utiki.workflow.dispatch_submit",
+            AsyncMock(),
+        ) as dispatch:
+            self.assertTrue(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None
+            ))
+        dispatch.assert_not_awaited()
         self.assertFalse(tab.button.clicked)
         self.assertNotIn(submit_key, _state["submitted"])
         self.assertNotIn(submit_key, _state["submit_blocked"])
@@ -1412,14 +1431,9 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
         submit_key = _ctbc_purchase_state_key(tab)
         try:
-            with patch(
-                "platforms.utiki.workflow.dispatch_quantity_submit",
-                AsyncMock(),
-            ) as quantity_dispatch:
-                self.assertTrue(await _ctbc_captcha_and_submit(
-                    tab, cfg, ocr=None
-                ))
-            quantity_dispatch.assert_not_awaited()
+            self.assertTrue(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None
+            ))
             self.assertTrue(tab.button.clicked)
             self.assertEqual(1, tab.button.click_count)
         finally:
@@ -1553,13 +1567,13 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     "platforms.utiki.workflow.time.monotonic",
                     return_value=100.0,
                 ), patch(
-                    "platforms.utiki.workflow.dispatch_quantity_submit",
+                    "platforms.utiki.workflow.dispatch_submit",
                     AsyncMock(side_effect=dispatch_quantity),
                 ):
                     self.assertFalse(
                         await _ctbc_captcha_and_submit(
                             tab, cfg, ocr=None,
-                            quantity_plan=quantity_plan,
+                            submit_plan=build_submit_plan(quantity_plan),
                         )
                     )
                 if label.endswith("fragment"):
@@ -1573,7 +1587,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     self.assertFalse(
                         await _ctbc_captcha_and_submit(
                             tab, cfg, ocr=None,
-                            quantity_plan=quantity_plan,
+                            submit_plan=build_submit_plan(quantity_plan),
                         )
                     )
 
@@ -1649,14 +1663,14 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     "platforms.utiki.workflow.time.monotonic",
                     return_value=100.0,
                 ), patch(
-                    "platforms.utiki.workflow.dispatch_quantity_submit",
+                    "platforms.utiki.workflow.dispatch_submit",
                     AsyncMock(side_effect=dispatch_quantity),
                 ):
                     self.assertEqual(
                         expected,
                         await _ctbc_captcha_and_submit(
                             tab, cfg, ocr=None,
-                            quantity_plan=quantity_plan,
+                            submit_plan=build_submit_plan(quantity_plan),
                         ),
                     )
                 self.assertEqual(1, tab.button.click_count)
@@ -1669,7 +1683,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     self.assertFalse(
                         await _ctbc_captcha_and_submit(
                             tab, cfg, ocr=None,
-                            quantity_plan=quantity_plan,
+                            submit_plan=build_submit_plan(quantity_plan),
                         )
                     )
                     self.assertEqual(1, tab.button.click_count)
@@ -1888,11 +1902,12 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                     return SubmitDispatchResult.DISPATCHED
 
                 with patch(
-                    "platforms.utiki.workflow.dispatch_quantity_submit",
+                    "platforms.utiki.workflow.dispatch_submit",
                     AsyncMock(side_effect=dispatch_quantity),
                 ):
                     self.assertFalse(await _ctbc_captcha_and_submit(
-                        tab, cfg, ocr=None, quantity_plan=quantity_plan
+                        tab, cfg, ocr=None,
+                        submit_plan=build_submit_plan(quantity_plan),
                     ))
 
                 self.assertEqual(1, tab.button.click_count)

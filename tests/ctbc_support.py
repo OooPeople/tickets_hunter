@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -371,6 +372,68 @@ def make_ctbc_seat_snapshot(*, available=True, selected=()):
         ],
         "visual_selected_count": len(selected),
     }
+
+
+def make_ctbc_submit_plan(page_url=CTBC_TEST_SEAT_URL):
+    """Build a production-valid final-submit plan for state-machine tests."""
+    from platforms.utiki.profiles import PageKind, classify_utiki_page
+    from platforms.utiki.selection import (
+        build_submit_plan,
+        parse_quantity_snapshot,
+        parse_seat_snapshot,
+        select_quantity_snapshot,
+        select_seat_snapshot,
+    )
+
+    query = parse_qs(urlsplit(page_url).query, keep_blank_values=True)
+    page_kind = classify_utiki_page(page_url)
+    performance_id = query.get("PERFORMANCE_ID", ["P1"])[0] or "P1"
+    group_id = query.get("GROUP_ID", ["G1"])[0]
+    price_area_id = (
+        query.get("PERFORMANCE_PRICE_AREA_ID", ["A1"])[0] or "A1"
+    )
+    if page_kind is PageKind.RESERVED_SEAT:
+        raw = make_ctbc_seat_snapshot(selected=(0, 1))
+        raw.update({
+            "page_url": page_url,
+            "performance_id": performance_id,
+            "group_id": group_id or "G1",
+            "price_area_id": price_area_id,
+        })
+        selection_plan, reason = select_seat_snapshot(
+            parse_seat_snapshot(raw), "全票", 2
+        )
+    elif page_kind in (
+        PageKind.GENERAL_ADMISSION,
+        PageKind.SERVER_ASSIGNED_QUANTITY,
+    ):
+        is_server = page_kind is PageKind.SERVER_ASSIGNED_QUANTITY
+        raw = make_ctbc_quantity_snapshot(
+            page_url=page_url,
+            group_id=(group_id or "GROUP_FRONT") if is_server else group_id,
+            product_id="PRODUCT_FIXTURE" if is_server else "",
+        )
+        raw.update({
+            "performance_id": performance_id,
+            "price_area_id": price_area_id,
+        })
+        selection_plan = select_quantity_snapshot(
+            parse_quantity_snapshot(raw),
+            "全票",
+            2,
+            page_type=(
+                "server_assigned_quantity" if is_server
+                else "general_admission"
+            ),
+        )
+        reason = ""
+    else:
+        return None
+    if selection_plan is None:
+        return None
+    submit_plan = build_submit_plan(selection_plan)
+    assert submit_plan is not None
+    return submit_plan
 
 
 class FakeUtikiQuantityDomPort:
@@ -825,6 +888,9 @@ class FakeSubmitTab:
         self.reload_count = 0
 
     async def evaluate(self, script):
+        if "__ticketsHunterUtikiSubmit" in script:
+            await self.button.click()
+            return "dispatched"
         if "#LOGIN_ID" in script:
             if "JSON.stringify" in script:
                 expected = _script_json_constant(

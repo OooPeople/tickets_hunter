@@ -32,8 +32,10 @@ from platforms.utiki.selection import (
     parse_area_send_a_action as _parse_ctbc_map_send_a,
     parse_keyword_groups as _parse_keyword_groups,
     parse_map_title as _parse_ctbc_map_title,
+    parse_quantity_snapshot,
     quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
     select_area_snapshot as _select_ctbc_area_snapshot,
+    select_quantity_snapshot,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
 from platforms.utiki.workflow import (
@@ -1004,4 +1006,49 @@ class CtbcPureSelectionTest(unittest.TestCase):
         ))
         self.assertFalse(_ctbc_general_quantity_audit_is_valid(
             [{"key": "FULL", "value": 0}, {"key": "HALF", "value": 2}], "FULL", 2
+        ))
+
+    def test_quantity_selection_is_frozen_and_fails_closed(self):
+        raw = {
+            "ok": True,
+            "page_url": (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+                "PERFORMANCE_ID=P1&GROUP_ID=&"
+                "PERFORMANCE_PRICE_AREA_ID=A1"
+            ),
+            "document_id": "document-1",
+            "performance_id": "P1",
+            "group_id": "",
+            "price_area_id": "A1",
+            "quantity_limit_raw": "4",
+            "rows": [
+                {
+                    "key": "FULL", "name": "全票", "text": "全票",
+                    "disabled": False, "remaining_present": True,
+                    "remaining_raw": "5", "value": "0",
+                },
+                {
+                    "key": "OTHER", "name": "其他票", "text": "其他票",
+                    "disabled": False, "remaining_present": True,
+                    "remaining_raw": "5", "value": "0",
+                },
+            ],
+        }
+        snapshot = parse_quantity_snapshot(raw)
+        plan = select_quantity_snapshot(snapshot, "全票", 2)
+        self.assertEqual("FULL", plan.target_key)
+        self.assertEqual(2, plan.ticket_number)
+        raw["rows"][0]["key"] = "MUTATED"
+        self.assertEqual("FULL", snapshot.rows[0][0])
+
+        malformed = dict(raw, rows=[{
+            "key": "FULL", "name": "全票", "text": "全票",
+            "disabled": False, "remaining_present": True,
+            "remaining_raw": "unknown", "value": "0",
+        }])
+        self.assertIsNone(select_quantity_snapshot(malformed, "全票", 2))
+        duplicate = dict(raw, rows=[raw["rows"][1], raw["rows"][1]])
+        self.assertIsNone(select_quantity_snapshot(duplicate, "其他票", 2))
+        self.assertIsNone(select_quantity_snapshot(
+            dict(raw, quantity_limit_raw="1"), "其他票", 2
         ))

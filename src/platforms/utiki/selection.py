@@ -33,6 +33,32 @@ class AreaActionPlan:
     direct_destination: bool
 
 
+@dataclass(frozen=True)
+class QuantitySnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    performance_id: str
+    group_id: str
+    price_area_id: str
+    quantity_limit_raw: str
+    rows: tuple
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class QuantityPlan:
+    page_url: str
+    document_id: str
+    performance_id: str
+    group_id: str
+    price_area_id: str
+    quantity_limit: int
+    target_key: str
+    target_name: str
+    ticket_number: int
+
+
 def parse_area_snapshot(raw_snapshot):
     """Freeze an area reader result before it crosses into decision code."""
     if isinstance(raw_snapshot, AreaSnapshot):
@@ -76,6 +102,52 @@ def parse_area_snapshot(raw_snapshot):
                 str(area.get("title") or ""),
             )
             for area in areas
+        ),
+    )
+
+
+def parse_quantity_snapshot(raw_snapshot):
+    """Freeze a general-admission quantity reader result."""
+    if isinstance(raw_snapshot, QuantitySnapshot):
+        return raw_snapshot
+    if not isinstance(raw_snapshot, dict):
+        return None
+    if raw_snapshot.get("ok") is False:
+        return QuantitySnapshot(
+            ok=False,
+            page_url=str(raw_snapshot.get("page_url") or ""),
+            document_id=str(raw_snapshot.get("document_id") or ""),
+            performance_id="",
+            group_id="",
+            price_area_id="",
+            quantity_limit_raw="",
+            rows=(),
+            reason=str(raw_snapshot.get("reason") or "invalid-result"),
+        )
+    rows = raw_snapshot.get("rows")
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) for row in rows
+    ):
+        return None
+    return QuantitySnapshot(
+        ok=True,
+        page_url=str(raw_snapshot.get("page_url") or ""),
+        document_id=str(raw_snapshot.get("document_id") or ""),
+        performance_id=str(raw_snapshot.get("performance_id") or ""),
+        group_id=str(raw_snapshot.get("group_id") or ""),
+        price_area_id=str(raw_snapshot.get("price_area_id") or ""),
+        quantity_limit_raw=str(raw_snapshot.get("quantity_limit_raw") or ""),
+        rows=tuple(
+            (
+                str(row.get("key") or ""),
+                str(row.get("name") or ""),
+                str(row.get("text") or ""),
+                bool(row.get("disabled")),
+                bool(row.get("remaining_present")),
+                str(row.get("remaining_raw") or ""),
+                str(row.get("value") or ""),
+            )
+            for row in rows
         ),
     )
 
@@ -369,6 +441,86 @@ def quantity_audit_is_valid(quantities, target_key, ticket_number):
         ) and all(isinstance(item, dict) for item in quantities)
     except (TypeError, ValueError):
         return False
+
+
+def _parse_quantity_request(snapshot, ticket_number):
+    try:
+        requested = int(ticket_number)
+    except (TypeError, ValueError):
+        return None
+    if requested <= 0 or not snapshot.page_url or not snapshot.document_id:
+        return None
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    if (
+        not token.fullmatch(snapshot.performance_id)
+        or not token.fullmatch(snapshot.price_area_id)
+        or (snapshot.group_id and not token.fullmatch(snapshot.group_id))
+    ):
+        return None
+    if snapshot.quantity_limit_raw:
+        if not re.fullmatch(r"\d+", snapshot.quantity_limit_raw):
+            return None
+        quantity_limit = int(snapshot.quantity_limit_raw)
+    else:
+        quantity_limit = 0
+    if quantity_limit and requested > quantity_limit:
+        return None
+    return requested, quantity_limit
+
+
+def _quantity_candidates(snapshot, requested):
+    token = re.compile(r"[A-Za-z0-9_-]+")
+    if not 0 < len(snapshot.rows) <= 100:
+        return None
+    keys = [row[0] for row in snapshot.rows]
+    if any(not token.fullmatch(key) for key in keys) or len(set(keys)) != len(keys):
+        return None
+
+    candidates = []
+    for key, name, text, disabled, remaining_present, remaining_raw, _value in (
+        snapshot.rows
+    ):
+        if disabled or "售完" in text or not name:
+            continue
+        if remaining_present:
+            if not re.fullmatch(r"\d+", remaining_raw):
+                continue
+            if int(remaining_raw) < requested:
+                continue
+        candidates.append({"text": name, "key": key})
+    return candidates
+
+
+def select_quantity_snapshot(snapshot, keyword, ticket_number,
+                             mode="from top to bottom"):
+    """Choose one live quantity row from an immutable page snapshot."""
+    snapshot = parse_quantity_snapshot(snapshot)
+    if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
+        return None
+    request = _parse_quantity_request(snapshot, ticket_number)
+    if request is None:
+        return None
+    requested, quantity_limit = request
+    candidates = _quantity_candidates(snapshot, requested)
+    if candidates is None:
+        return None
+    target_index = choose_candidate_index(
+        candidates, keyword, mode, allow_fallback=False
+    )
+    if target_index is None:
+        return None
+    target = candidates[target_index]
+    return QuantityPlan(
+        page_url=snapshot.page_url,
+        document_id=snapshot.document_id,
+        performance_id=snapshot.performance_id,
+        group_id=snapshot.group_id,
+        price_area_id=snapshot.price_area_id,
+        quantity_limit=quantity_limit,
+        target_key=target["key"],
+        target_name=target["text"],
+        ticket_number=requested,
+    )
 
 
 def is_auth_error(dialog_text):

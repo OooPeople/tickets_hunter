@@ -38,7 +38,13 @@ from .auth import (
     get_tenant_auth_profile,
     parse_ctbc_cookie_string,
 )
-from .dom import CommitResult, commit_area, read_area_snapshot
+from .dom import (
+    CommitResult,
+    commit_area,
+    commit_quantity,
+    read_area_snapshot,
+    read_quantity_snapshot,
+)
 from .profiles import (
     CTBC_MAP_DOMAIN,
     PageKind,
@@ -52,10 +58,11 @@ from .profiles import (
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
+    QuantitySnapshot,
     choose_candidate_index as _choose_candidate_index,
     classify_submit_dialog as _classify_ctbc_submit_dialog,
-    quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
     select_area_snapshot as _select_ctbc_area_snapshot,
+    select_quantity_snapshot,
 )
 
 
@@ -86,6 +93,7 @@ CTBC_PENDING_NAVIGATION_TTL_SECONDS = 15.0
 CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
 CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
+CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
@@ -1570,6 +1578,17 @@ async def _reload_with_interval(tab, config_dict, reason):
     )
 
 
+async def _poll_ctbc_quantity_reload(tab, config_dict):
+    """Continue one queued quantity recovery without resetting its interval."""
+    request = _state["reload_request"].get(_ctbc_tab_identity(tab))
+    if not request or request.get("reason") != CTBC_QUANTITY_STALE_RELOAD_REASON:
+        return False
+    await _reload_with_interval(
+        tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
+    )
+    return True
+
+
 async def nodriver_utk_sports_health_check(tab, url, config_dict):
     """Run only rate-limit recovery, without selecting any ticket control."""
     guard_state, _ = await _utk_document_guard(tab, config_dict, url)
@@ -3050,7 +3069,9 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
 async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
     """Select quantity on the unnumbered-seat UTK0203 page."""
     debug = util.create_debug_logger(config_dict)
-    if not await _ctbc_attest_fast_destination(tab, "general_admission", config_dict):
+    if not await _ctbc_attest_fast_destination(
+        tab, "general_admission", config_dict
+    ):
         return False
     submit_key = _ctbc_purchase_state_key(tab)
     if submit_key is None:
@@ -3066,108 +3087,59 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
         return False
     if dialog_outcome is not None:
         return False
+    if await _poll_ctbc_quantity_reload(tab, config_dict):
+        return False
 
-    current_url = str(tab.target.url).lower()
-    row_selector = (
-        '[id="table_tickettype"]'
-        if "/utk0202_" in current_url
-        else '#table_tickettype > tbody > tr'
-    )
-    rows = []
-    for _ in range(10):
-        try:
-            rows = await tab.query_selector_all(row_selector)
-        except Exception:
-            rows = []
-        if rows:
-            break
-        await tab.sleep(0.2)
+    try:
+        snapshot = await read_quantity_snapshot(tab)
+    except Exception as exc:
+        debug.log(f"[CTBC GENERAL] Quantity snapshot failed: {exc}")
+        return False
+    if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
+        reason = (
+            snapshot.reason
+            if isinstance(snapshot, QuantitySnapshot)
+            else "invalid-result"
+        )
+        debug.log(f"[CTBC GENERAL] Quantity page was not ready: {reason}")
+        return False
 
-    candidates = []
     ticket_number = int(config_dict.get("ticket_number", 1))
-    for row in rows or []:
-        try:
-            amount = await row.query_selector('input.numbox[key]')
-            if not amount:
-                continue
-            disabled = await amount.apply('function(el) { return !!el.disabled; }')
-            row_text = await _element_text(row)
-            if disabled or "售完" in row_text:
-                continue
-            remaining_input = await row.query_selector('input[key="LAST_AMOUNT"]')
-            if remaining_input:
-                remaining_raw = await remaining_input.apply('function(el) { return el.value || "0"; }')
-                try:
-                    if int(remaining_raw) < ticket_number:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            cells = await row.query_selector_all('td.fill')
-            name = await _element_text(cells[0]) if cells else row_text
-            if not name:
-                continue
-            candidates.append({"text": name, "element": amount})
-        except Exception as exc:
-            debug.log(f"[CTBC GENERAL] Failed to inspect ticket type: {exc}")
-
-    keyword = _get_utiki_behavior(config_dict, "ticket_type_keyword", "全票")
-    target_index = _choose_candidate_index(candidates, keyword, "from top to bottom", False)
-    if target_index is None:
-        debug.log(f"[CTBC GENERAL] No ticket type matched: {keyword}")
+    keyword = _get_utiki_behavior(
+        config_dict, "ticket_type_keyword", "全票"
+    )
+    plan = select_quantity_snapshot(snapshot, keyword, ticket_number)
+    if plan is None:
+        debug.log(
+            f"[CTBC GENERAL] No available ticket type matched: {keyword}"
+        )
         return False
 
     await nodriver_utk_sports_cancel_refresh(tab, "ticket type found")
-    quantity_limit_raw = await tab.evaluate('''
-        (() => {
-            const input = document.querySelector('#QUANTITY_LIMIT');
-            return input ? parseInt(input.value || '0', 10) : 0;
-        })()
-    ''')
-    quantity_limit = int(quantity_limit_raw or 0)
-    if quantity_limit and ticket_number > quantity_limit:
-        debug.log(f"[CTBC GENERAL] Requested {ticket_number}, limit is {quantity_limit}")
-        return False
-
-    amount = candidates[target_index]["element"]
-    target_key = await amount.apply('function(el) { return el.getAttribute("key") || ""; }')
-    if not target_key:
-        return False
     try:
-        all_amounts = await tab.query_selector_all('input.numbox[key]')
-        for other_amount in all_amounts or []:
-            await other_amount.apply('''function(el) {
-                el.value = "0";
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-            }''')
-        await amount.apply(f'''function(el) {{
-            el.value = "{ticket_number}";
-            el.dispatchEvent(new Event('input', {{bubbles: true}}));
-            el.dispatchEvent(new Event('change', {{bubbles: true}}));
-            el.dispatchEvent(new Event('blur', {{bubbles: true}}));
-        }}''')
-        debug.log(f"[CTBC GENERAL] Selected {ticket_number} x {candidates[target_index]['text']}")
+        commit_result = await commit_quantity(tab, snapshot, plan)
     except Exception as exc:
-        debug.log(f"[CTBC GENERAL] Quantity assignment failed: {exc}")
+        debug.log(f"[CTBC GENERAL] Quantity commit outcome is unknown: {exc}")
         return False
-
-    quantities_raw = await tab.evaluate('''
-        (() => {
-            const inputs = Array.from(document.querySelectorAll('input.numbox[key]'));
-            return JSON.stringify(inputs.map(input => ({
-                key: input.getAttribute('key') || '',
-                value: Number(input.value || 0)
-            })));
-        })()
-    ''')
-    try:
-        quantities = json.loads(quantities_raw) if isinstance(quantities_raw, str) else []
-    except (TypeError, ValueError):
-        quantities = []
-    if not _ctbc_general_quantity_audit_is_valid(quantities, target_key, ticket_number):
-        debug.log("[CTBC GENERAL] Quantity verification failed; submit blocked")
+    if commit_result is CommitResult.STALE:
+        debug.log(
+            "[CTBC GENERAL] Quantity state changed during commit; "
+            "waiting to reload"
+        )
+        await _reload_with_interval(
+            tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
+        )
         return False
-
+    if commit_result is not CommitResult.COMMITTED:
+        debug.log(
+            f"[CTBC GENERAL] Quantity commit {commit_result.value}; "
+            "submit blocked"
+        )
+        return False
+    debug.log(
+        f"[CTBC GENERAL] Selected {plan.ticket_number} x "
+        f"{plan.target_name}"
+    )
     return await _ctbc_captcha_and_submit(tab, config_dict, ocr)
 
 

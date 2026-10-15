@@ -13,16 +13,23 @@ import zendriver as uc
 
 from tests.ctbc_support import config
 
-from platforms.utiki.dom import CommitResult, commit_area, read_area_snapshot
+from platforms.utiki.dom import (
+    CommitResult,
+    commit_area,
+    commit_quantity,
+    read_area_snapshot,
+    read_quantity_snapshot,
+)
 from platforms.utiki.selection import (
     classify_submit_dialog as _classify_ctbc_submit_dialog,
-    quantity_audit_is_valid as _ctbc_general_quantity_audit_is_valid,
     select_area_snapshot,
+    select_quantity_snapshot,
 )
 from platforms.utiki.workflow import (
     _ctbc_commit_fast_navigation,
     _ctbc_delete_fast_navigation_marker,
     _ctbc_read_fast_navigation_marker,
+    _ctbc_tab_identity,
     _dismiss_ctbc_dialog,
     _get_ctbc_visible_dialog_text,
     _state,
@@ -262,87 +269,229 @@ async def _assert_seat_fixture(browser):
 
 
 async def _assert_quantity_fixture(browser):
-    tab = await _open_fixture(
-        browser,
-        "UTK0203_quantity.html",
-        (
-            "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
-            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
-        ),
+    query = (
+        "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+        "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
     )
     cfg = config()
-    events = []
+    tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    snapshot = await read_quantity_snapshot(tab)
+    plan = select_quantity_snapshot(
+        snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert plan.target_key == "FULL"
+    assert plan.ticket_number == 2
+    assert await commit_quantity(
+        tab, snapshot, plan
+    ) is CommitResult.COMMITTED
+    assert await _read_fixture_quantities(tab) == {"FULL": "2", "OTHER": "0"}
+    event_count = await tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    )
+    assert event_count == 7
+    assert await commit_quantity(
+        tab, snapshot, plan
+    ) is CommitResult.COMMITTED
+    assert await tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == event_count
+    assert await tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+    await tab.evaluate(
+        "document.querySelector('input.numbox[key=\"OTHER\"]').value = '1'"
+    )
+    assert await commit_quantity(
+        tab, snapshot, plan
+    ) is CommitResult.STALE
+    assert await tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == event_count
+    assert await tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
 
-    def audit_spy(*args):
-        events.append("audit")
-        return _ctbc_general_quantity_audit_is_valid(*args)
-
-    async def submit_effect(*_args):
-        events.append("submit")
-        return True
-
-    submit_gate = AsyncMock(side_effect=submit_effect)
-    attestation = AsyncMock(return_value=True)
+    flow_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    submit_gate = AsyncMock(return_value=True)
     with patch(
-        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
-        side_effect=audit_spy,
-    ) as audit, patch(
         "platforms.utiki.workflow._ctbc_captcha_and_submit",
         submit_gate,
     ), patch(
         "platforms.utiki.workflow._ctbc_attest_fast_destination",
-        attestation,
+        AsyncMock(return_value=True),
     ), patch(
         "platforms.utiki.workflow._ctbc_purchase_state_key",
         return_value=("fixture-purchase",),
     ):
-        assert await nodriver_ctbc_general_admission_main(tab, cfg, ocr=None)
-
-    audit.assert_called_once()
-    attestation.assert_awaited_once_with(tab, "general_admission", cfg)
-    submit_gate.assert_awaited_once_with(tab, cfg, None)
-    assert events == ["audit", "submit"]
-    assert await _read_fixture_quantities(tab) == {"FULL": "2", "OTHER": "0"}
-    assert await tab.evaluate("Number(document.body.dataset.addcartClicks || 0)") == 0
-
-    race_tab = await _open_fixture(
-        browser,
-        "UTK0203_quantity.html",
-        (
-            "?PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
-            "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT&RACE=1"
-        ),
-    )
-    await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
-    race_cfg = config()
-    race_gate = AsyncMock(return_value=True)
-    race_attestation = AsyncMock(return_value=True)
-    with patch(
-        "platforms.utiki.workflow._ctbc_general_quantity_audit_is_valid",
-        wraps=_ctbc_general_quantity_audit_is_valid,
-    ) as race_audit, patch(
-        "platforms.utiki.workflow._ctbc_captcha_and_submit",
-        race_gate,
-    ), patch(
-        "platforms.utiki.workflow._ctbc_attest_fast_destination",
-        race_attestation,
-    ), patch(
-        "platforms.utiki.workflow._ctbc_purchase_state_key",
-        return_value=("fixture-race-purchase",),
-    ):
-        assert not await nodriver_ctbc_general_admission_main(
-            race_tab, race_cfg, ocr=None
+        assert await nodriver_ctbc_general_admission_main(
+            flow_tab, cfg, ocr=None
         )
+    submit_gate.assert_awaited_once_with(flow_tab, cfg, None)
+    assert await _read_fixture_quantities(flow_tab) == {
+        "FULL": "2", "OTHER": "0"
+    }
 
-    race_audit.assert_called_once()
-    race_attestation.assert_awaited_once_with(
-        race_tab, "general_admission", race_cfg
+    race_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
+    race_snapshot = await read_quantity_snapshot(race_tab)
+    race_plan = select_quantity_snapshot(
+        race_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
     )
-    race_gate.assert_not_awaited()
-    assert await _read_fixture_quantities(race_tab) == {"FULL": "2", "OTHER": "1"}
+    assert await commit_quantity(
+        race_tab, race_snapshot, race_plan
+    ) is CommitResult.STALE
+    assert await _read_fixture_quantities(race_tab) == {
+        "FULL": "2", "OTHER": "1"
+    }
+    race_event_count = await race_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    )
+    assert await commit_quantity(
+        race_tab, race_snapshot, race_plan
+    ) is CommitResult.STALE
+    assert await race_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == race_event_count
     assert await race_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 0
+
+    stale_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
+    stale_snapshot = await read_quantity_snapshot(stale_tab)
+    stale_plan = select_quantity_snapshot(
+        stale_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    stale_document_id = f"{stale_snapshot.document_id}-old"
+    stale_snapshot = replace(stale_snapshot, document_id=stale_document_id)
+    stale_plan = replace(stale_plan, document_id=stale_document_id)
+    assert await commit_quantity(
+        stale_tab, stale_snapshot, stale_plan
+    ) is CommitResult.STALE
+    assert await stale_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    identity_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    identity_snapshot = await read_quantity_snapshot(identity_tab)
+    identity_plan = select_quantity_snapshot(
+        identity_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await identity_tab.evaluate(
+        "document.querySelector('#PERFORMANCE_ID').value = 'OTHER'"
+    )
+    assert await commit_quantity(
+        identity_tab, identity_snapshot, identity_plan
+    ) is CommitResult.STALE
+    assert await identity_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    mutation_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    mutation_snapshot = await read_quantity_snapshot(mutation_tab)
+    mutation_plan = select_quantity_snapshot(
+        mutation_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    await mutation_tab.evaluate("document.body.dataset.addExtra = '1'")
+    assert await commit_quantity(
+        mutation_tab, mutation_snapshot, mutation_plan
+    ) is CommitResult.STALE
+    mutation_event_count = await mutation_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    )
+    assert await commit_quantity(
+        mutation_tab, mutation_snapshot, mutation_plan
+    ) is CommitResult.STALE
+    assert await mutation_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == mutation_event_count
+    assert await mutation_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
+
+    recovery_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await recovery_tab.evaluate("document.body.dataset.addExtra = '1'")
+    recovery_cfg = config()
+    recovery_cfg["advanced"]["auto_reload_page_interval"] = 5
+    reload_calls = 0
+
+    async def recovery_reload(reload_tab, _config, reason):
+        nonlocal reload_calls
+        reload_calls += 1
+        identity = _ctbc_tab_identity(reload_tab)
+        if reload_calls == 1:
+            _state["reload_request"][identity] = {"reason": reason}
+            return False
+        _state["reload_request"].pop(identity, None)
+        return True
+
+    with patch(
+        "platforms.utiki.workflow._ctbc_attest_fast_destination",
+        AsyncMock(return_value=True),
+    ), patch(
+        "platforms.utiki.workflow._ctbc_purchase_state_key",
+        return_value=("fixture-stale-quantity",),
+    ), patch(
+        "platforms.utiki.workflow._reload_with_interval",
+        AsyncMock(side_effect=recovery_reload),
+    ) as reload_page, patch(
+        "platforms.utiki.workflow._ctbc_captcha_and_submit",
+        AsyncMock(return_value=True),
+    ) as submit_gate:
+        assert not await nodriver_ctbc_general_admission_main(
+            recovery_tab, recovery_cfg, ocr=None
+        )
+        recovery_event_count = await recovery_tab.evaluate(
+            "Number(document.body.dataset.quantityEvents || 0)"
+        )
+        assert not await nodriver_ctbc_general_admission_main(
+            recovery_tab, recovery_cfg, ocr=None
+        )
+    assert reload_page.await_count == 2
+    submit_gate.assert_not_awaited()
+    assert await recovery_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == recovery_event_count
+
+    malformed_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await malformed_tab.evaluate(
+        "document.querySelector('input[key=\"LAST_AMOUNT\"]').value = "
+        "'unknown'"
+    )
+    malformed_snapshot = await read_quantity_snapshot(malformed_tab)
+    assert select_quantity_snapshot(
+        malformed_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    ) is None
+
+    multi_tab = await _open_fixture(
+        browser, "UTK0202_quantity.html", query
+    )
+    multi_snapshot = await read_quantity_snapshot(multi_tab)
+    assert len(multi_snapshot.rows) == 2
+    multi_plan = select_quantity_snapshot(
+        multi_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert multi_plan.target_key == "FULL"
+    assert await commit_quantity(
+        multi_tab, multi_snapshot, multi_plan
+    ) is CommitResult.COMMITTED
+    assert await _read_fixture_quantities(multi_tab) == {
+        "OTHER": "0", "FULL": "2"
+    }
 
 
 async def _read_fixture_quantities(tab):

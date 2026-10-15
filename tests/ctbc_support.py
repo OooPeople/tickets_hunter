@@ -116,6 +116,11 @@ CTBC_TEST_AREA_URL = (
     "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
     "PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L"
 )
+CTBC_TEST_QUANTITY_URL = (
+    "https://tix.ctbcsports.com/BROTHERS/UTK0203_?"
+    "PERFORMANCE_ID=P16D0B8Z&GROUP_ID=&"
+    "PERFORMANCE_PRICE_AREA_ID=PRICE_FRONT"
+)
 
 
 def make_ctbc_area_snapshot(
@@ -165,6 +170,50 @@ def make_ctbc_area_snapshot(
         "rows": rows,
         "areas": areas,
     }
+
+
+def make_ctbc_quantity_snapshot():
+    return {
+        "ok": True,
+        "page_url": CTBC_TEST_QUANTITY_URL,
+        "document_id": "document-1",
+        "performance_id": "P16D0B8Z",
+        "group_id": "",
+        "price_area_id": "PRICE_FRONT",
+        "quantity_limit_raw": "4",
+        "rows": [
+            {
+                "key": "FULL", "name": "全票", "text": "全票",
+                "disabled": False, "remaining_present": True,
+                "remaining_raw": "5", "value": "0",
+            },
+            {
+                "key": "OTHER", "name": "其他票", "text": "其他票",
+                "disabled": False, "remaining_present": True,
+                "remaining_raw": "5", "value": "0",
+            },
+        ],
+    }
+
+
+class FakeUtikiQuantityDomPort:
+    def __init__(self, snapshot, commit_result):
+        self.snapshot = snapshot
+        self.commit_result = commit_result
+        self.events = []
+        self.commit_count = 0
+
+    async def read_quantity_snapshot(self, _tab):
+        self.events.append("inspect_quantity")
+        return self.snapshot
+
+    async def commit_quantity(self, _tab, snapshot, plan):
+        self.events.append("commit_quantity")
+        self.commit_count += 1
+        assert snapshot is self.snapshot
+        assert plan.target_key == "FULL"
+        assert plan.ticket_number == 2
+        return self.commit_result
 
 
 class FakeElement:

@@ -1,243 +1,84 @@
 # 開發文件導航
 
-**文件說明**：Tickets Hunter 開發文件導航中心，涵蓋開發規範、12 階段標準、架構說明與新手指引
-**最後更新**：2026-09-16
+**文件說明**：Tickets Hunter 開發規範、架構、測試與設計提案的入口。
 
----
+**最後更新**：2026-10-15
 
-歡迎來到 Tickets Hunter 開發文件中心！本目錄包含開發新平台、維護現有功能所需的所有文件。
+## 先從哪裡開始
 
-## 🚀 快速開始
+### 修復 Bug 或調整既有功能
 
-### 我是新手開發者，想開始開發新平台
+1. 依 [CONTRIBUTING.md](../../CONTRIBUTING.md) 建立／確認 Issue。
+2. 閱讀 [程式碼邊界](code-boundaries.md)，確認修改應放在哪個模組。
+3. 從 [結構索引](structure.md) 找到公開入口，再追蹤實際呼叫路徑。
+4. 涉及搶票流程時對照 [12 階段標準](ticket_automation_standard.md)。
+5. 依 [測試執行指南](testing_execution_guide.md) 驗證。
+6. 依 [工程審查指南](engineering-review.md) findings-first 自審。
 
-1. **第一步**：閱讀 [`code-boundaries.md`](./code-boundaries.md) 了解模組職責、依賴方向與命名慣例（必讀）
-2. **第二步**：閱讀 [`development_guide.md`](./development_guide.md) 了解開發規範和 ZenDriver First 策略
-3. **第三步**：檢視 [`structure.md`](./structure.md) 了解現有平台的函式架構
-4. **第四步**：參考 [`coding_templates.md`](./coding_templates.md) 中的程式碼範本開始實作
-5. **深入學習**：查閱 [`ticket_automation_standard.md`](./ticket_automation_standard.md) 了解 12 階段詳細定義
+### 新增平台或大型重構
 
-### 我要修復 Bug 或改進現有功能
+1. 先完成上述步驟。
+2. 調查是否存在同引擎的家族平台，而不只比較畫面外觀。
+3. 在正式文件定義 scope、依賴、相容、階段、驗收及回退。
+4. 維護者核准計劃後才開始 production code。
+5. 每個階段獨立驗證與審查，不把多個高風險行為綁成一次切換。
 
-1. **定位問題**：檢視 [`structure.md`](./structure.md) 中的函式索引找到相關函式
-2. **理解設計**：查閱 [`code-boundaries.md`](./code-boundaries.md) 的模組邊界與 [`development_guide.md`](./development_guide.md) 的設計原則
-3. **檢視範本**：如需參考，檢視 [`coding_templates.md`](./coding_templates.md) 中的相應範本
-4. **測試驗證**：依 [`testing_execution_guide.md`](./testing_execution_guide.md) 執行測試並檢查記錄標籤
+目前待審提案：[uTiki2 職棒售票引擎重構計劃](utiki-refactor-plan.md)。
 
-### 我想了解項目整體架構
+## 文件責任
 
-閱讀順序：
-1. [`ticket_seat_selection_algorithm.md`](./ticket_seat_selection_algorithm.md) - 座位選擇演算法（如適用）
-2. [`structure.md`](./structure.md) - 程式結構與函式組織
-3. [`development_guide.md`](./development_guide.md) - 開發規範與最佳實踐
-
----
-
-## 📚 文件分類
-
-### 核心指南（日常開發必讀）
-
-| 文件 | 用途 | 優先度 |
-|------|------|--------|
-| **development_guide.md** | 開發規範、檢查清單、程式碼品質標準 | ⭐⭐⭐ |
-| **structure.md** | 平台函式索引、完整度評分、現有實作分析 | ⭐⭐⭐ |
-| **coding_templates.md** | 程式碼範本庫、實作檢查表、平台完成度評分 | ⭐⭐⭐ |
-| **logic_flowcharts.md** | 邏輯判斷流程圖、可重用程式範本、核心機制實作 | ⭐⭐ |
-| **sound_notification_system.md** | 音效通知系統、兩階段音效設計與實作 | ⭐⭐ |
-
-### 參考資料（詳細定義）
-
-| 文件 | 用途 | 何時查閱 |
+| 文件 | 責任 | 使用時機 |
 |------|------|----------|
-| **ticket_automation_standard.md** | 12 階段詳細定義、函式拆分規範、配置項目索引 | 深入了解每個階段 |
+| [code-boundaries.md](code-boundaries.md) | 模組職責、依賴 DAG、命名與禁止模式 | 每次程式碼修改前 |
+| [ticket_automation_standard.md](ticket_automation_standard.md) | 12 階段及功能語意的唯一來源 | 平台流程設計與審查 |
+| [testing_execution_guide.md](testing_execution_guide.md) | 現行測試命令、測試分層與結果陳述 | 修改後驗證 |
+| [engineering-review.md](engineering-review.md) | 嚴重度、審查清單與輸出格式 | 自審與第二人審查 |
+| [structure.md](structure.md) | 現有程式結構與函式索引 | 定位實作；可能落後時以程式碼為準 |
+| [development_guide.md](development_guide.md) | 一般開發原則與檢查清單 | 日常開發參考 |
+| [coding_templates.md](coding_templates.md) | 現有寫法範例 | 需要具體範本時 |
+| [logic_flowcharts.md](logic_flowcharts.md) | 常見判斷流程 | 理解既有邏輯時 |
+| [ticket_seat_selection_algorithm.md](ticket_seat_selection_algorithm.md) | 座位選擇演算法 | 手動劃位相關工作 |
+| [sound_notification_system.md](sound_notification_system.md) | 通知音效設計 | 通知相關工作 |
+| [utiki-refactor-plan.md](utiki-refactor-plan.md) | uTiki2 家族重構的提案與 gates | 計劃核准及後續執行 |
 
-### 工作流程與文件
+## 依工作類型導航
 
-| 文件 | 用途 | 用於 |
-|------|------|------|
-| **ticket_seat_selection_algorithm.md** | 座位選擇詳細演算法 | TicketPlus 座位選擇 |
+### 瀏覽器 DOM、點擊與填值
 
-### 跨階段機制（`docs/03-mechanisms/`）
+- [zendriver API 指南](../06-api-reference/zendriver_api_guide.md)
+- [CDP 協定參考](../06-api-reference/cdp_protocol_reference.md)
+- [Shadow DOM 指南](../06-api-reference/shadow_dom_pierce_guide.md)
 
-| 文件 | 用途 | 新增時間 |
-|------|------|----------|
-| [13-active-polling-pattern.md](../03-mechanisms/13-active-polling-pattern.md) | 刷新等待機制（Simple Wait / Active Polling） | 2025 |
-| [14-hot-reload.md](../03-mechanisms/14-hot-reload.md) | 設定檔 Hot Reload 即時修改 | 2026-02 |
-| [15-cloudflare-turnstile.md](../03-mechanisms/15-cloudflare-turnstile.md) | Cloudflare Turnstile 偵測與自動點擊 | 2026-02 |
-| [16-yii2-captcha-hash.md](../03-mechanisms/16-yii2-captcha-hash.md) | Yii2 Captcha Hash 預驗證 | 2026-04 |
-| [17-multi-instance.md](../03-mechanisms/17-multi-instance.md) | 多開實例隔離 | 2026-06 |
-| [18-universal-ocr-model.md](../03-mechanisms/18-universal-ocr-model.md) | 通用 OCR 模型選擇 | 2026-06 |
+### 跨階段機制
 
-## 🎯 按工作型別導航
+- [刷新等待機制](../03-mechanisms/13-active-polling-pattern.md)
+- [Hot Reload](../03-mechanisms/14-hot-reload.md)
+- [Cloudflare Turnstile](../03-mechanisms/15-cloudflare-turnstile.md)
+- [Yii2 CAPTCHA hash](../03-mechanisms/16-yii2-captcha-hash.md)
+- [多實例隔離](../03-mechanisms/17-multi-instance.md)
+- [通用 OCR 模型](../03-mechanisms/18-universal-ocr-model.md)
+- [購買資格驗證](../03-mechanisms/19-purchase-qualification.md)
 
-### 開發新平台
+### 打包與發行
 
-```
-開始 → development_guide.md (新手入門)
-  ↓
-查看現有實作 → structure.md (函數索引)
-  ↓
-選擇參考平台 → coding_templates.md (範本庫)
-  ↓
-深入了解階段定義 → ticket_automation_standard.md
-  ↓
-開始編碼 → 使用 development_guide.md 檢查清單
-```
+- [PyInstaller 打包指南](../07-deployment/pyinstaller_packaging_guide.md)
+- [本地打包快速開始](../../build_scripts/QUICK_START.md)
 
-### 修復 Bug
+## 單一真實來源
 
-```
-定位函數 → structure.md (函數搜索)
-  ↓
-理解邏輯 → logic_flowcharts.md (判斷流程圖)
-  ↓
-理解實作 → coding_templates.md (參考範本)
-  ↓
-查詢設計意圖 → ticket_automation_standard.md (12 階段定義)
-  ↓
-驗證修復 → development_guide.md (測試檢查清單)
-```
+- 代理起手規則只維護在根目錄 [AGENTS.md](../../AGENTS.md)。
+- Issue／branch／commit／PR 流程只維護在 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
+- 12 階段定義只維護在 [ticket_automation_standard.md](ticket_automation_standard.md)。
+- 模組邊界只維護在 [code-boundaries.md](code-boundaries.md)。
+- 可執行命令與驗證分級只維護在 [testing_execution_guide.md](testing_execution_guide.md)。
+- 尚未核准的設計放在標示狀態的計劃文件，不提前寫入現況文件。
 
-### 評估現有實作
+若索引、範本或歷史文件和 production code 不一致，先記錄差異並確認真實行為；不要為了符合過時文件而修改程式。
 
-```
-查看評分 → structure.md (完整度評分表)
-  ↓
-細節分析 → coding_templates.md (實作檢查表)
-  ↓
-了解標準 → ticket_automation_standard.md (評分標準)
-```
+## 文件維護規則
 
----
-
-## 📋 各文件詳細說明
-
-### development_guide.md
-- **內容**：開發規範、ZenDriver First 策略、編碼標準、檢查清單
-- **適合**：所有開發者，新手入門首選
-- **關鍵章節**：
-  - 搶票程式標準函式架構（12 階段概覽）
-  - 程式碼品質標準
-  - WebDriver 除錯規則
-
-### structure.md
-- **內容**：平台函式索引、完整度評分、現有實作分析
-- **適合**：了解現有實作、尋找特定函式
-- **關鍵章節**：
-  - 平台支援狀態表
-  - ZenDriver API 與 Chrome API 函式對照
-  - 各平台的函式完整度評分
-
-### coding_templates.md
-- **內容**：程式碼範本庫、實作檢查表、平台完成度評分
-- **適合**：編寫程式碼時參考、評估完整度
-- **關鍵章節**：
-  - 必要開發規範（Debug 標準、暫停機制）
-  - 標準範本庫（各功能模組的程式碼範本）
-  - 實作完整度檢查表（白金/金/銀級標準）
-  - 平台完成度總覽
-
-### logic_flowcharts.md
-- **內容**：邏輯判斷流程圖、可重用程式範本、核心機制實作
-- **適合**：理解判斷邏輯、開發新平台、除錯現有功能
-- **關鍵章節**：
-  - 日期選擇判斷邏輯（文字流程圖 + 程式範本）
-  - 區域選擇判斷邏輯（AND 邏輯 + 回退機制）
-  - 核心可重用機制（關鍵字比對、選擇策略、點擊回退鏈）
-  - 實戰應用案例（TixCraft 完整流程實例）
-
-### ticket_automation_standard.md
-- **內容**：12 階段詳細定義、函式拆分規範、配置項目索引
-- **適合**：需要深入了解設計意圖、系統性學習
-- **關鍵章節**：
-  - 核心設計原則（配置驅動、回退策略等）
-  - 12 階段完整功能定義
-  - 函式命名與拆分原則
-
-### ticket_seat_selection_algorithm.md
-- **內容**：座位選擇詳細演算法、特殊平台考量
-- **適合**：實作座位選擇功能的開發者
-- **適用平台**：TicketPlus 等有複雜座位選擇的平台
-
----
-
-## 🔗 快速連結
-
-### 常用任務
-- **尋找函式定義**：→ `structure.md`（函式索引）
-- **檢視程式碼範本**：→ `coding_templates.md`（標準範本庫）
-- **理解邏輯判斷**：→ `logic_flowcharts.md`（流程圖與可重用範本）
-- **了解音效通知**：→ `sound_notification_system.md`（兩階段音效設計）
-- **了解 12 階段**：→ `ticket_automation_standard.md`
-- **檢查開發規範**：→ `development_guide.md`（必要元素部分）
-- **Cloudflare Turnstile**：→ [`15-cloudflare-turnstile.md`](../03-mechanisms/15-cloudflare-turnstile.md)（CDP 偵測與自動點擊）
-- **Hot Reload 機制**：→ [`14-hot-reload.md`](../03-mechanisms/14-hot-reload.md)（搶票中即時修改設定）
-
-### 平台特定資源
-- **TixCraft**：檢視 `structure.md` 和 `coding_templates.md` 中的白金級實例
-- **KKTIX**：同上
-- **TicketPlus**：檢視座位選擇部分和展開式面板處理
-- **iBon**：檢視金級實例
-- **新平台開發**：參考 `development_guide.md` 的檢查清單
-
----
-
-## 💡 建議使用流程
-
-### 第一次開發
-```
-1. 完整閱讀 development_guide.md
-2. 瀏覽 structure.md 了解現有實作
-3. 參考 coding_templates.md 中的相應範本
-4. 需要時查閱 ticket_automation_standard.md
-```
-
-### 後續開發
-```
-1. 查看 structure.md 找到相關函數
-2. 參考 coding_templates.md 中的範本
-3. 按照 development_guide.md 檢查清單驗證
-4. 遇到疑問查閱相應文檔
-```
-
----
-
-## 🔄 文件維護策略
-
-### 單一真實來源 (SSOT) 原則
-
-為了避免重複和不一致，遵循以下原則：
-
-- **核心定義**：`ticket_automation_standard.md` 是 12 階段和函式定義的唯一來源
-- **快速參考**：`development_guide.md` 提供摘要，指向詳細文件
-- **程式碼範本**：`coding_templates.md` 提供實際程式碼示例
-- **平台分析**：`structure.md` 提供實作分析和評分
-
-### 更新流程
-
-編輯文件時遵循：
-1. 只在授權位置進行編輯
-2. 其他文件中應提供指向原始檔的連結
-3. 保持相互參考的一致性
-
----
-
-## ❓ 常見問題
-
-**Q: 我應該先讀哪個文件？**
-A: 如果是新手，先讀 `development_guide.md`。如果是尋找特定內容，檢視上面的「快速開始」部分。
-
-**Q: ticket_automation_standard.md 為什麼在 reference 子目錄？**
-A: 這是「單一真實來源」策略的一部分。詳細定義集中在 reference，其他文件指向它。
-
-**Q: 程式碼範本在哪裡？**
-A: 在 `coding_templates.md` 中。按功能型別搜索相應的範本。
-
-**Q: 我想評估平台的完整度？**
-A: 檢視 `structure.md` 的完整度評分表或 `coding_templates.md` 的實作檢查表。
-
----
-
-**最後更新**：2026-06-14
-**版本**：2.3（修正 documentation_workflow / nodriver_comprehensive 鬼引用、補機制 16-17、歸檔文件移至已歸檔資源段）
-
+- 更新行為時同步更新負責該語意的文件；其他文件只連結，不複製完整規則。
+- 架構提案必須標示「提案／已核准／執行中／完成／撤回」。
+- 引用長期位置時使用檔案與函式／符號名稱；當次 review 才使用易變動的行號。
+- 命令必須在目前 repository 可執行；尚未導入的工具不得寫成現行必要步驟。
+- 文件中的預定行為要明確標示，不能讓讀者誤以為已經實作。

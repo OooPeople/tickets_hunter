@@ -5,6 +5,7 @@ The CTBC site uses the same UTK naming convention as a few older ticketing
 sites. This module owns the single per-tab runtime and purchase workflow.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -79,6 +80,7 @@ from .selection import (
 __all__ = [
     "is_utk_sports_url",
     "nodriver_utk_sports_cancel_refresh",
+    "nodriver_utk_sports_cleanup_tab",
     "nodriver_utk_sports_pause_refresh",
     "nodriver_utk_sports_consume_reload_event",
     "nodriver_utk_sports_health_check",
@@ -177,6 +179,19 @@ def _ctbc_runtime_for_identity(identity):
 
 def _ctbc_tab_runtime(tab):
     return _ctbc_runtime_for_identity(_ctbc_tab_identity(tab))
+
+
+def _existing_utiki_tab_context(tab):
+    """Return an existing tab runtime without allocating or pinning identity."""
+    identity = str(getattr(tab, _UTIKI_TAB_TOKEN_ATTR, "") or "")
+    if not identity:
+        target_id = str(
+            getattr(getattr(tab, "target", None), "target_id", "") or ""
+        ).strip()
+        if not target_id:
+            return None, None
+        identity = f"utiki-target-{target_id}"
+    return identity, _state["tabs"].get(identity)
 
 
 def _ctbc_purchase_runtime(tab):
@@ -469,6 +484,29 @@ async def nodriver_utk_sports_cancel_refresh(
         wait=wait,
         abandon_probe=abandon_probe,
     )
+
+
+async def nodriver_utk_sports_cleanup_tab(tab, reason=""):
+    """Detach and clean the exact existing runtime owned by one browser tab."""
+    identity, runtime = _existing_utiki_tab_context(tab)
+    if runtime is None or _state["tabs"].get(identity) is not runtime:
+        return False
+    _state["tabs"].pop(identity, None)
+    try:
+        await refresh_engine.cancel_refresh(
+            tab,
+            runtime,
+            refresh_engine.build_refresh_identity(identity),
+            _state["cancel_tasks"],
+            reason,
+            wait=True,
+            abandon_probe=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    return True
 
 
 async def nodriver_utk_sports_pause_refresh(tab, reason="paused"):
@@ -3294,8 +3332,17 @@ async def _ctbc_reconcile_area_navigation(tab, current_url, config_dict=None):
 
 
 async def _handle_ctbc_checkout(tab, config_dict):
-    checkout_key = _ctbc_tab_state_key(tab)
-    checkout_notified = _ctbc_purchase_runtime(tab)["checkout_notified"]
+    purchase = _ctbc_purchase_runtime(tab)
+    purchase_key, context = _ctbc_recent_submit_context(purchase)
+    if (
+        purchase_key is not None
+        and isinstance(context, dict)
+        and context.get("nonce")
+    ):
+        checkout_key = ("submit", purchase_key, str(context["nonce"]))
+    else:
+        checkout_key = ("location", _ctbc_tab_state_key(tab))
+    checkout_notified = purchase["checkout_notified"]
     if checkout_key in checkout_notified:
         return
     checkout_notified.add(checkout_key)

@@ -378,15 +378,27 @@ async def cancel_refresh(
 
     async def cancel_all():
         changed = False
+        request_error = None
         if request is not None:
-            changed = await coordinator.cancel_request(
-                UTK_SPORTS_SCOPE, refresh_identity,
-                request_token=request.get("request_token"),
-            ) or changed
-        if probe is not None:
-            changed = await _abandon_recovery_probe(
-                runtime, refresh_identity, cancel_tasks, coordinator, probe
-            ) or changed
+            try:
+                changed = await coordinator.cancel_request(
+                    UTK_SPORTS_SCOPE, refresh_identity,
+                    request_token=request.get("request_token"),
+                ) or changed
+            except BaseException as exc:
+                request_error = exc
+        try:
+            if probe is not None:
+                changed = await _abandon_recovery_probe(
+                    runtime, refresh_identity, cancel_tasks, coordinator, probe
+                ) or changed
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if request_error is None:
+                raise
+        if request_error is not None:
+            raise request_error
         return changed
 
     cancel_call = cancel_all()

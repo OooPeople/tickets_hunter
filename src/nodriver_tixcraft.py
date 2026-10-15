@@ -75,6 +75,7 @@ from platforms.utiki import (
     nodriver_ctbc_inject_cookies,
     nodriver_utiki_main,
     nodriver_utk_sports_cancel_refresh,
+    nodriver_utk_sports_cleanup_tab,
     nodriver_utk_sports_consume_reload_event,
     nodriver_utk_sports_health_check,
     nodriver_utk_sports_pause_refresh,
@@ -113,6 +114,13 @@ async def _pause_utk_refresh(tab, url, last_url):
     if not (is_utk_sports_url(url) or is_utk_sports_url(last_url)):
         return False
     await nodriver_utk_sports_pause_refresh(tab, "paused")
+    return True
+
+
+async def _cleanup_utiki_if_driver_missing(driver, tab):
+    if driver is not None:
+        return False
+    await nodriver_utk_sports_cleanup_tab(tab, "driver unavailable")
     return True
 
 
@@ -1063,7 +1071,7 @@ async def main(args):
                 pass
 
         # pass if driver not loaded.
-        if driver is None:
+        if await _cleanup_utiki_if_driver_missing(driver, tab):
             print("nodriver not accessible!")
             break
 
@@ -1078,11 +1086,7 @@ async def main(args):
             #print("url:", url)
 
         if is_quit_bot:
-            current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-            if is_utk_sports_url(current_url) or is_utk_sports_url(last_url):
-                await nodriver_utk_sports_cancel_refresh(
-                    tab, "stopped", wait=True, abandon_probe=True
-                )
+            await nodriver_utk_sports_cleanup_tab(tab, "stopped")
             try:
                 await driver.stop()
                 driver = None
@@ -1129,11 +1133,8 @@ async def main(args):
         if len(url) > 0 :
             if url != last_url:
                 if is_utk_sports_url(last_url) and not is_utk_sports_url(url):
-                    await nodriver_utk_sports_cancel_refresh(
-                        tab,
-                        "left UTK Sports",
-                        wait=True,
-                        abandon_probe=True,
+                    await nodriver_utk_sports_cleanup_tab(
+                        tab, "left UTK Sports"
                     )
                 print(url)
                 write_last_url_to_file(url)
@@ -1238,7 +1239,13 @@ async def main(args):
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
 
         if is_utk_sports_url(url):
-            tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
+            try:
+                tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
+            except BaseException:
+                await nodriver_utk_sports_cleanup_tab(
+                    tab, "uTiki handler failed"
+                )
+                raise
 
         kham_family = False
         if 'kham.com.tw' in url:

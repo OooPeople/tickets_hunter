@@ -1685,6 +1685,91 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 "quota", self._outcome_for(quota_tab, quota_key)["kind"]
             )
 
+    async def test_checkout_two_ticks_notifies_once_and_retains_runtime(self):
+        cfg = config()
+        checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        tab = FakeSubmitTab(dialog="", url=checkout_url)
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="unverified"),
+        ), patch(
+            "platforms.utiki.workflow._reconcile_utiki_purchase",
+            AsyncMock(return_value="success"),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.send_discord_notification",
+        ) as discord, patch(
+            "platforms.utiki.workflow.send_telegram_notification",
+        ) as telegram:
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+
+        identity = _ctbc_tab_identity(tab)
+        self.assertIn(identity, _state["tabs"])
+        self.assertEqual(
+            1,
+            len(ctbc_identity_runtime(identity)["purchase"]["checkout_notified"]),
+        )
+        discord.assert_called_once_with(cfg, "order", "CTBC Sports")
+        telegram.assert_called_once_with(cfg, "order", "CTBC Sports")
+
+    async def test_checkout_notification_uses_submit_nonce_as_order_epoch(self):
+        cfg = config()
+        checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
+        first_key = _ctbc_purchase_state_key(tab)
+        tab.target.url = checkout_url
+        purchase = ctbc_tab_runtime(tab)["purchase"]
+        first_outcome = {"kind": "success", "nonce": "a" * 32}
+        purchase["outcomes"][first_key] = first_outcome
+        purchase["last_submit"] = {
+            "purchase_key": first_key,
+            "nonce": first_outcome["nonce"],
+        }
+
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="unverified"),
+        ), patch(
+            "platforms.utiki.workflow._reconcile_utiki_purchase",
+            AsyncMock(return_value="success"),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.send_discord_notification",
+        ) as discord, patch(
+            "platforms.utiki.workflow.send_telegram_notification",
+        ) as telegram:
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            second_outcome = {"kind": "success", "nonce": "b" * 32}
+            purchase["outcomes"][first_key] = second_outcome
+            purchase["last_submit"] = {
+                "purchase_key": first_key,
+                "nonce": second_outcome["nonce"],
+            }
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+
+        self.assertIs(second_outcome, purchase["outcomes"][first_key])
+        self.assertEqual(first_key, purchase["last_submit"]["purchase_key"])
+        self.assertEqual("b" * 32, purchase["last_submit"]["nonce"])
+        self.assertEqual({
+            ("submit", first_key, "a" * 32),
+            ("submit", first_key, "b" * 32),
+        }, purchase["checkout_notified"])
+        self.assertEqual(2, discord.call_count)
+        self.assertEqual(2, telegram.call_count)
+
     async def test_outer_router_reaches_seat_conflict_recovery(self):
         tab = FakeSubmitTab(dialog="", url=CTBC_TEST_SEAT_URL)
         cfg = config()

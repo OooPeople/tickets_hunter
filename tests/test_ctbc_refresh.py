@@ -5,10 +5,15 @@ import tempfile
 import time
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
-from nodriver_tixcraft import _pause_utk_refresh, main as nodriver_main
+from nodriver_tixcraft import (
+    _cleanup_utiki_if_driver_missing,
+    _pause_utk_refresh,
+    main as nodriver_main,
+)
 
 from tests.ctbc_support import (
     CtbcStateIsolationMixin,
@@ -36,6 +41,7 @@ from platforms.utiki.workflow import (
     _state,
     nodriver_ctbc_main,
     nodriver_utk_sports_cancel_refresh,
+    nodriver_utk_sports_cleanup_tab,
     nodriver_utk_sports_consume_reload_event,
     nodriver_utk_sports_health_check,
     nodriver_utk_sports_pause_refresh,
@@ -49,6 +55,9 @@ CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
 
 class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
     ctbc_state = _state
+
+    class _StopOuterLoop(Exception):
+        pass
 
     def setUp(self):
         super().setUp()
@@ -68,6 +77,112 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         remaining_patch.start()
         self.addCleanup(marker_patch.stop)
         self.addCleanup(remaining_patch.stop)
+
+    async def _run_outer_main_case(
+        self, tab, *, current_urls, quit_results, handler=None, stop_after=0,
+    ):
+        cfg = config()
+
+        async def stop_driver():
+            identity = str(getattr(
+                tab, "_tickets_hunter_utiki_tab_token", ""
+            ) or "")
+            if identity:
+                self.assertNotIn(identity, _state["tabs"])
+
+        driver = types.SimpleNamespace(
+            main_tab=None,
+            config=types.SimpleNamespace(port=0),
+            stop=AsyncMock(side_effect=stop_driver),
+        )
+        args = types.SimpleNamespace(instance=None, input=None, mcp_debug=False)
+        sleep_calls = {"count": 0}
+
+        async def bounded_sleep(_seconds):
+            sleep_calls["count"] += 1
+            if stop_after and sleep_calls["count"] >= stop_after:
+                raise self._StopOuterLoop
+
+        handler = handler or AsyncMock(return_value=tab)
+        original_print = builtins.print
+        with tempfile.TemporaryDirectory() as temp_root:
+            try:
+                builtins.print = lambda *_args, **_kwargs: None
+                with ExitStack() as stack:
+                    for patcher in (
+                        patch("nodriver_tixcraft.get_config_dict", return_value=cfg),
+                        patch(
+                            "nodriver_tixcraft.get_extension_config",
+                            return_value=types.SimpleNamespace(),
+                        ),
+                        patch("nodriver_tixcraft.nodriver_overwrite_prefs"),
+                        patch(
+                            "nodriver_tixcraft.uc.start",
+                            AsyncMock(return_value=driver),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.nodriver_goto_homepage",
+                            AsyncMock(return_value=tab),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.nodrver_block_urls",
+                            AsyncMock(return_value=tab),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.nodriver_resize_window", AsyncMock()
+                        ),
+                        patch(
+                            "nodriver_tixcraft.reload_config",
+                            AsyncMock(return_value=(cfg, 0)),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.nodriver_current_url",
+                            AsyncMock(side_effect=current_urls),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.check_and_handle_quit",
+                            AsyncMock(side_effect=quit_results),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.check_and_handle_pause",
+                            AsyncMock(return_value=False),
+                        ),
+                        patch(
+                            "nodriver_tixcraft._advance_cloudflare_gate",
+                            AsyncMock(return_value=(False, True, 0, False, 0)),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.nodriver_utk_sports_health_check",
+                            AsyncMock(return_value="normal"),
+                        ),
+                        patch(
+                            "nodriver_tixcraft.check_refresh_datetime_gate",
+                            AsyncMock(return_value=False),
+                        ),
+                        patch("nodriver_tixcraft.nodriver_utiki_main", handler),
+                        patch("nodriver_tixcraft.write_last_url_to_file"),
+                        patch(
+                            "nodriver_tixcraft.util.get_app_root",
+                            return_value=temp_root,
+                        ),
+                        patch(
+                            "nodriver_tixcraft.util.get_instance_state_path",
+                            side_effect=lambda name: str(Path(temp_root, name)),
+                        ),
+                        patch("nodriver_tixcraft.os.path.exists", return_value=False),
+                        patch(
+                            "nodriver_tixcraft.asyncio.sleep",
+                            AsyncMock(side_effect=bounded_sleep),
+                        ),
+                    ):
+                        stack.enter_context(patcher)
+                    try:
+                        await nodriver_main(args)
+                    except self._StopOuterLoop:
+                        pass
+            finally:
+                builtins.print = original_print
+        return driver, handler
 
     @staticmethod
     def coordinator_for(decision, *, report=None):
@@ -395,6 +510,90 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertEqual(2, pause.await_count)
         pause.assert_awaited_with(tab, "paused")
 
+    async def test_driver_missing_cleanup_uses_existing_runtime(self):
+        tab = FakeSubmitTab(dialog="")
+        identity = _ctbc_tab_identity(tab)
+        ctbc_identity_runtime(identity)
+        with patch(
+            "platforms.utiki.workflow.refresh_engine.cancel_refresh",
+            AsyncMock(return_value=False),
+        ) as cancel:
+            self.assertTrue(await _cleanup_utiki_if_driver_missing(None, tab))
+
+        self.assertNotIn(identity, _state["tabs"])
+        cancel.assert_awaited_once()
+
+    async def test_outer_main_terminal_paths_cleanup_existing_runtime(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        cases = (
+            ("explicit-stop", [], [True], 0),
+            ("url-reader-quit", [("", True)], [False], 0),
+            (
+                "leave-utiki",
+                [(source, False), ("https://example.com/", False)],
+                [False, False],
+                3,
+            ),
+        )
+        for label, urls, quits, stop_after in cases:
+            with self.subTest(label=label):
+                _state["tabs"].clear()
+                tab = FakeTab("", [], url=source)
+                tab.target.target_id = f"outer-{label}"
+                identity = _ctbc_tab_identity(tab)
+                ctbc_identity_runtime(identity)
+
+                driver, _handler = await self._run_outer_main_case(
+                    tab,
+                    current_urls=urls,
+                    quit_results=quits,
+                    stop_after=stop_after,
+                )
+
+                self.assertNotIn(identity, _state["tabs"])
+                if label != "leave-utiki":
+                    driver.stop.assert_awaited_once()
+
+    async def test_silent_websocket_threshold_is_not_terminal_cleanup(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab("", [], url=source)
+        tab.target.target_id = "outer-silent-websocket"
+        identity = _ctbc_tab_identity(tab)
+        runtime = ctbc_identity_runtime(identity)
+
+        with patch("nodriver_tixcraft.get_url_error_count", return_value=15):
+            driver, _handler = await self._run_outer_main_case(
+                tab,
+                current_urls=[("", False)],
+                quit_results=[False],
+                stop_after=2,
+            )
+
+        self.assertIs(runtime, _state["tabs"][identity])
+        driver.stop.assert_not_awaited()
+
+    async def test_outer_main_utiki_handler_exception_cleans_runtime(self):
+        class HandlerFailed(Exception):
+            pass
+
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab("", [], url=source)
+        tab.target.target_id = "outer-handler-failure"
+        identity = _ctbc_tab_identity(tab)
+        ctbc_identity_runtime(identity)
+        handler = AsyncMock(side_effect=HandlerFailed)
+
+        with self.assertRaises(HandlerFailed):
+            await self._run_outer_main_case(
+                tab,
+                current_urls=[(source, False)],
+                quit_results=[False],
+                handler=handler,
+            )
+
+        self.assertNotIn(identity, _state["tabs"])
+        handler.assert_awaited_once()
+
     async def test_outer_main_pauses_utiki_when_current_url_is_missing(self):
         class StopMainLoop(Exception):
             pass
@@ -402,6 +601,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         cfg = config()
         tab = FakeSubmitTab(dialog="")
         source = str(tab.target.url)
+        identity = _ctbc_tab_identity(tab)
+        runtime = ctbc_identity_runtime(identity)
         driver = types.SimpleNamespace(
             main_tab=None,
             config=types.SimpleNamespace(port=0),
@@ -479,6 +680,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                     ],
                     pause.await_args_list,
                 )
+                self.assertIs(runtime, _state["tabs"][identity])
             finally:
                 builtins.print = original_print
 
@@ -2437,6 +2639,114 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             with self.assertRaises(asyncio.CancelledError):
                 await unrelated
             _state["cancel_tasks"].discard(unrelated)
+
+    async def test_cleanup_unknown_tab_does_not_allocate_identity_or_runtime(self):
+        fresh = FakeTab("", [], url="https://example.com/")
+        with_token = FakeTab("", [], url="https://example.com/")
+        setattr(with_token, "_tickets_hunter_utiki_tab_token", "missing-token")
+        with_target = FakeTab("", [], url="https://example.com/")
+        with_target.target.target_id = "missing-target"
+
+        self.assertFalse(await nodriver_utk_sports_cleanup_tab(fresh, "unknown"))
+        self.assertFalse(
+            await nodriver_utk_sports_cleanup_tab(with_token, "unknown")
+        )
+        self.assertFalse(
+            await nodriver_utk_sports_cleanup_tab(with_target, "unknown")
+        )
+
+        self.assertFalse(hasattr(
+            fresh, "_tickets_hunter_utiki_tab_token"
+        ))
+        self.assertFalse(hasattr(
+            with_target, "_tickets_hunter_utiki_tab_token"
+        ))
+        self.assertFalse(_state["tabs"])
+
+    async def test_cleanup_exact_runtime_cleans_probe_and_keeps_other_tasks(self):
+        first = FakeTab("", [], url="https://example.com/")
+        first.target.target_id = "cleanup-first"
+        first_identity = _ctbc_tab_identity(first)
+        first_runtime = ctbc_identity_runtime(first_identity)
+        second = FakeTab("", [], url="https://example.com/")
+        second.target.target_id = "cleanup-second"
+        second_identity = _ctbc_tab_identity(second)
+        second_runtime = ctbc_identity_runtime(second_identity)
+        second_runtime["action"]["sentinel"] = True
+
+        lease_task = asyncio.create_task(asyncio.Event().wait())
+        unrelated = asyncio.create_task(asyncio.Event().wait())
+        _state["cancel_tasks"].update({lease_task, unrelated})
+        first_runtime["refresh"]["reload_request"] = {
+            "request_token": "cleanup-request",
+        }
+        first_runtime["refresh"]["recovery_probe"] = {
+            "permit_id": "cleanup-probe",
+            "lease_task": lease_task,
+        }
+        coordinator = types.SimpleNamespace(
+            cancel_request=AsyncMock(side_effect=RuntimeError("cancel failed")),
+            complete_recovery_probe=AsyncMock(return_value=types.SimpleNamespace(
+                accepted=True, recovery_required=True, error="",
+            )),
+        )
+        try:
+            with patch(
+                "platforms.utiki.refresh.get_shared_refresh_coordinator",
+                return_value=coordinator,
+            ):
+                self.assertTrue(await nodriver_utk_sports_cleanup_tab(
+                    first, "terminal cleanup"
+                ))
+                self.assertFalse(await nodriver_utk_sports_cleanup_tab(
+                    first, "terminal cleanup again"
+                ))
+
+            self.assertNotIn(first_identity, _state["tabs"])
+            self.assertIs(second_runtime, _state["tabs"][second_identity])
+            self.assertTrue(second_runtime["action"]["sentinel"])
+            self.assertTrue(lease_task.cancelled())
+            self.assertNotIn(lease_task, _state["cancel_tasks"])
+            self.assertFalse(unrelated.done())
+            self.assertIn(unrelated, _state["cancel_tasks"])
+            coordinator.cancel_request.assert_awaited_once()
+            coordinator.complete_recovery_probe.assert_awaited_once_with(
+                "utk-sports",
+                build_refresh_identity(first_identity),
+                "cleanup-probe",
+                success=False,
+            )
+        finally:
+            unrelated.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await unrelated
+            _state["cancel_tasks"].discard(unrelated)
+
+    async def test_cleanup_detaches_before_await_and_preserves_replacement(self):
+        tab = FakeTab("", [], url="https://example.com/")
+        tab.target.target_id = "cleanup-replacement"
+        identity = _ctbc_tab_identity(tab)
+        old_runtime = ctbc_identity_runtime(identity)
+        replacements = []
+
+        async def replace_after_detach(*_args, **_kwargs):
+            self.assertNotIn(identity, _state["tabs"])
+            replacement = ctbc_tab_runtime(tab)
+            replacement["action"]["replacement"] = True
+            replacements.append(replacement)
+            return False
+
+        with patch(
+            "platforms.utiki.workflow.refresh_engine.cancel_refresh",
+            AsyncMock(side_effect=replace_after_detach),
+        ):
+            self.assertTrue(await nodriver_utk_sports_cleanup_tab(
+                tab, "replace during cleanup"
+            ))
+
+        self.assertIsNot(old_runtime, replacements[0])
+        self.assertIs(replacements[0], _state["tabs"][identity])
+        self.assertTrue(replacements[0]["action"]["replacement"])
 
     async def test_temporary_probe_completion_failure_can_be_retried(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"

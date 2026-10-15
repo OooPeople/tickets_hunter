@@ -1,7 +1,7 @@
 ---
-name: 🐛 Bug Report
-about: Report a bug or unexpected behavior
-title: '[BUG] '
+name: 🐛 錯誤回報
+about: 回報錯誤或非預期行為
+title: '[錯誤] '
 labels: 'bug'
 ---
 

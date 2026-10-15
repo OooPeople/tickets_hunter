@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
+    CtbcStateIsolationMixin,
     FakeElement,
     FakeSubmitTab,
     FakeTab,
@@ -34,7 +35,9 @@ from platforms.ctbc import (
 )
 
 
-class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
+class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    ctbc_state = _state
+
     def _track_submit_state(self, tab):
         submit_key = _ctbc_tab_state_key(tab)
         for state_name in (
@@ -81,6 +84,52 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             _state["ticket_type"].pop(state_key, None)
+
+    async def test_manual_reserved_flow_revalidates_and_submits_once(self):
+        tab = FakeSubmitTab()
+        events = []
+        audits = iter((False, True))
+
+        async def record(name, result=True):
+            events.append(name)
+            return result
+
+        def record_effect(name):
+            async def effect(*_args, **_kwargs):
+                return await record(name)
+            return effect
+
+        async def audit(*_args, **_kwargs):
+            result = next(audits)
+            events.append("audit")
+            return result
+
+        with patch(
+            "platforms.ctbc._ctbc_attest_fast_destination",
+            AsyncMock(side_effect=record_effect("attest")),
+        ), patch(
+            "platforms.ctbc.nodriver_ctbc_ticket_type_auto_select",
+            AsyncMock(side_effect=record_effect("ticket_type")),
+        ), patch(
+            "platforms.ctbc._validate_ctbc_seat_selection",
+            AsyncMock(side_effect=audit),
+        ), patch(
+            "platforms.ctbc.nodriver_ctbc_seat_auto_select",
+            AsyncMock(side_effect=record_effect("seat")),
+        ), patch(
+            "platforms.ctbc.nodriver_utk_sports_cancel_refresh",
+            AsyncMock(side_effect=record_effect("cancel")),
+        ), patch(
+            "platforms.ctbc._ctbc_captcha_and_submit",
+            AsyncMock(side_effect=record_effect("submit")),
+        ) as submit:
+            self.assertTrue(await nodriver_ctbc_seat_main(tab, config(), ocr=None))
+
+        self.assertEqual(
+            ["attest", "ticket_type", "audit", "seat", "cancel", "audit", "submit"],
+            events,
+        )
+        submit.assert_awaited_once()
 
     async def test_captcha_capture_prefers_native_canvas_bytes(self):
         expected = b"native-png"
@@ -526,11 +575,14 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
             _state["fast_target"].pop(identity, None)
 
     async def test_captcha_does_not_submit_when_force_submit_is_off(self):
-        tab = FakeSubmitTab()
+        tab = FakeSubmitTab(dialog="")
         cfg = config()
         cfg["ocr_captcha"] = {"enable": True, "force_submit": False}
+        submit_key = _ctbc_tab_state_key(tab)
         self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
         self.assertFalse(tab.button.clicked)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertNotIn(submit_key, _state["submit_blocked"])
 
     async def test_captcha_submits_when_force_submit_is_on(self):
         tab = FakeSubmitTab(dialog="", dialogs=["", "", "成功加入購物車"])
@@ -543,6 +595,23 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         finally:
             _state["submitted"].pop(submit_key, None)
             _state["submit_blocked"].pop(submit_key, None)
+
+    async def test_delayed_success_does_not_submit_twice(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": True, "force_submit": True}
+        submit_key = _ctbc_tab_state_key(tab)
+
+        self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertEqual(1, tab.button.click_count)
+        self.assertIn(submit_key, _state["submitted"])
+
+        tab.dialog = "成功加入購物車"
+        tab.dialog_visible = True
+        self.assertTrue(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertEqual(1, tab.button.click_count)
+        self.assertNotIn(submit_key, _state["submitted"])
+        self.assertEqual("success", _state["submit_blocked"][submit_key])
 
     async def test_delayed_seat_conflict_closes_and_clears_submit_guard(self):
         conflict_text = "該位置已被選走"

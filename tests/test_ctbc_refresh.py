@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from tests.ctbc_support import (
+    CtbcStateIsolationMixin,
     FakeSubmitTab,
     FakeTab,
     config,
@@ -28,8 +29,11 @@ from platforms.ctbc import (
 )
 
 
-class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
+class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    ctbc_state = _state
+
     def setUp(self):
+        super().setUp()
         self.global_settings = {
             "utk_sports": {
                 "enabled": True,

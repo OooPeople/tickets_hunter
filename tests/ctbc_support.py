@@ -32,33 +32,54 @@ def install_zendriver_stub():
 
 install_zendriver_stub()
 
+from settings import get_default_config  # noqa: E402
+
 
 def config(date_keyword='"9/10"', area_keyword='"A"'):
-    return {
-        "ticket_number": 2,
-        "keyword_exclude": '"身障","輪椅"',
-        "date_auto_fallback": False,
-        "area_auto_fallback": False,
-        "date_auto_select": {
-            "enable": True,
-            "date_keyword": date_keyword,
-            "mode": "from top to bottom",
-        },
-        "area_auto_select": {
-            "enable": True,
-            "area_keyword": area_keyword,
-            "mode": "from top to bottom",
-        },
-        "ctbc": {
-            "ticket_type_keyword": "全票",
-            "seat_sorting": "row_seat",
-        },
-        "advanced": {
-            "verbose": False,
-            "auto_reload_page_interval": 0,
-            "disable_adjacent_seat": False,
-        },
-    }
+    config_dict = get_default_config()
+    config_dict["homepage"] = "https://tix.ctbcsports.com/BROTHERS/"
+    config_dict["ticket_number"] = 2
+    config_dict["keyword_exclude"] = '"身障","輪椅"'
+    config_dict["date_auto_fallback"] = False
+    config_dict["area_auto_fallback"] = False
+    config_dict["date_auto_select"].update({
+        "enable": True,
+        "date_keyword": date_keyword,
+        "mode": "from top to bottom",
+    })
+    config_dict["area_auto_select"].update({
+        "enable": True,
+        "area_keyword": area_keyword,
+        "mode": "from top to bottom",
+    })
+    config_dict["ctbc"].update({
+        "ticket_type_keyword": "全票",
+        "seat_sorting": "row_seat",
+    })
+    config_dict["ocr_captcha"].update({
+        "enable": False,
+        "force_submit": False,
+    })
+    config_dict["advanced"].update({
+        "verbose": False,
+        "auto_reload_page_interval": 0,
+        "disable_adjacent_seat": False,
+    })
+    return config_dict
+
+
+class CtbcStateIsolationMixin:
+    ctbc_state = None
+
+    def setUp(self):
+        super().setUp()
+        self._clear_ctbc_test_state()
+        self.addCleanup(self._clear_ctbc_test_state)
+
+    def _clear_ctbc_test_state(self):
+        for bucket in (self.ctbc_state or {}).values():
+            if isinstance(bucket, (dict, list, set)):
+                bucket.clear()
 
 
 CTBC_TEST_PERFORMANCE_ID = "P16D0B8Z"
@@ -284,7 +305,7 @@ class FakeSubmitTab:
     def __init__(
         self,
         captcha="ABCD",
-        dialog="成功加入購物車",
+        dialog="",
         *,
         dialogs=None,
         url="https://tix.ctbcsports.com/BROTHERS/UTK0205_?P=1",

@@ -56,6 +56,16 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 migrate_config(configured)["ctbc"]["seat_sorting"],
             )
 
+    def test_config_builder_returns_fresh_complete_configs(self):
+        first = config()
+        second = config()
+
+        self.assertIn("accounts", first)
+        self.assertIn("ocr_captcha", first)
+        self.assertFalse(first["ocr_captcha"]["enable"])
+        first["advanced"]["auto_reload_page_interval"] = 99
+        self.assertEqual(0, second["advanced"]["auto_reload_page_interval"])
+
     def test_captcha_answer_is_ascii_only_and_uppercase(self):
         self.assertEqual("2CHH", _normalize_ctbc_captcha_answer(" 2C-HH\n"))
         self.assertEqual("WTYF", _normalize_ctbc_captcha_answer("wtyf"))

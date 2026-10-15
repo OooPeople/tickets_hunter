@@ -21,10 +21,14 @@
 ```text
 tests/
   test_cloudflare_handling.py
-  test_ctbc_selection.py
+  ctbc_support.py
+  test_ctbc_pure.py
+  test_ctbc_dom.py
+  test_ctbc_refresh.py
   test_global_settings.py
   test_ibon_date_selection.py
   test_refresh_coordinator.py
+  test_runtime_output.py
 ```
 
 Phase 1 導入時的基線是 pytest 收集並通過 155 個測試（其中 CTBC 94 個）；這是用來偵測遷移差異的起始快照，不是永久數量門檻。`pytest.ini` 定義預設收集與 marker，`requirements-dev.txt` 固定直接使用的測試工具版本。
@@ -81,7 +85,7 @@ git diff --check
 只檢查本次修改過的 Python 檔案，例如：
 
 ```bash
-python -m py_compile src/platforms/ctbc.py tests/test_ctbc_selection.py
+python -m py_compile src/platforms/ctbc.py tests/ctbc_support.py tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py
 ```
 
 `py_compile` 只證明語法與匯入前編譯階段可通過，不證明行為正確。
@@ -89,15 +93,15 @@ python -m py_compile src/platforms/ctbc.py tests/test_ctbc_selection.py
 ### 4.3 聚焦測試
 
 ```bash
-python -m pytest tests/test_ctbc_selection.py
+python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py
 python -m pytest tests/test_refresh_coordinator.py
 ```
 
 也可以執行單一 test class 或 method：
 
 ```bash
-python -m pytest tests/test_ctbc_selection.py::CtbcPureSelectionTest
-python -m pytest tests/test_ctbc_selection.py::CtbcPureSelectionTest::test_name
+python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest
+python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 ```
 
 ### 4.4 完整測試
@@ -241,7 +245,7 @@ fixture 必須：
 
 ```text
 - `git diff --check`：通過。
-- `python -m pytest tests/test_ctbc_selection.py`：94 tests passed（此數字是當次輸出，不是永久門檻）。
+- `python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py`：94 tests passed（此數字是當次輸出，不是永久門檻）。
 - 完整 pytest：未執行，原因是本次只修改文件。
 - 實機：未執行；售票入口已關閉，因此 dialog recovery 仍待下一次可用活動驗證。
 ```

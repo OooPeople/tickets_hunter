@@ -105,6 +105,42 @@ def test_application_cannot_call_raw_evaluate(tmp_path):
     assert "APPLICATION_BROWSER_PRIMITIVE" in report["failure_reasons"]
 
 
+def test_a02_application_evaluate_and_reverse_import_reach_architecture_gate(tmp_path):
+    _base_tree(tmp_path)
+    inventory = _inventory(tmp_path)
+    application = (
+        tmp_path / "src" / "platforms" / "utiki" / "application" / "engine.py"
+    )
+    _write(application.parent / "adapters.py", "VALUE = 2\n")
+    _write(
+        application,
+        "from ..profiles import VALUE\nfrom .adapters import VALUE as LOCAL\nRESULT = VALUE + LOCAL\n",
+    )
+    legal = _run(tmp_path, inventory)
+    assert legal.returncode == 0, legal.stderr
+    assert json.loads(legal.stdout)["status"] == "PASS"
+
+    injections = (
+        ("async def run(tab):\n    await tab.evaluate('x')\n", "APPLICATION_BROWSER_PRIMITIVE"),
+        ("from ..adapters.browser import BrowserPort\n", "APPLICATION_REVERSE_IMPORT"),
+        ("from ...utiki.adapters import BrowserPort\n", "APPLICATION_REVERSE_IMPORT"),
+        ("from platforms.utiki.adapters.browser import BrowserPort\n", "APPLICATION_REVERSE_IMPORT"),
+        ("from .. import bootstrap\n", "APPLICATION_REVERSE_IMPORT"),
+        ("from platforms.utiki import bootstrap\n", "APPLICATION_REVERSE_IMPORT"),
+    )
+    for source, reason in injections:
+        _write(application, source)
+        rejected = _run(tmp_path, inventory)
+        assert rejected.returncode != 0
+        report = json.loads(rejected.stdout)
+        assert reason in report["failure_reasons"]
+        assert any(
+            finding["path"] == "src/platforms/utiki/application/engine.py"
+            and finding["reason"] == reason
+            for finding in report["findings"]
+        )
+
+
 def test_domain_rejects_io_and_reverse_imports(tmp_path):
     _base_tree(tmp_path)
     inventory = _inventory(tmp_path)

@@ -243,6 +243,31 @@ def _imports(tree: ast.AST) -> list[tuple[str, int]]:
     return found
 
 
+def _resolved_imports(path: str, tree: ast.AST) -> list[tuple[str, int]]:
+    """Resolve imports against the package containing one source file."""
+    package = list(PurePosixPath(path).parts[1:-1])
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend((alias.name, node.lineno) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                if node.level > len(package):
+                    continue
+                parts = package[: len(package) - node.level + 1]
+            else:
+                parts = []
+            if node.module:
+                parts.extend(node.module.split("."))
+            base = ".".join(parts)
+            found.append((base, node.lineno))
+            found.extend(
+                (f"{base}.{alias.name}", node.lineno)
+                for alias in node.names if alias.name != "*"
+            )
+    return found
+
+
 def _is_target(path: str) -> bool:
     return path in TARGET_SINGLE_FILES or path.startswith(TARGET_ROOTS)
 
@@ -295,6 +320,12 @@ def _target_findings(path: str, tree: ast.AST) -> list[Finding]:
                 findings.append(Finding("DOMAIN_FORBIDDEN_CALL", path, node.lineno))
 
     if path.startswith("src/platforms/utiki/application/"):
+        for module, line in _resolved_imports(path, tree):
+            if module in {"platforms.utiki.adapters", "platforms.utiki.bootstrap"} or (
+                module.startswith("platforms.utiki.adapters.")
+                or module.startswith("platforms.utiki.bootstrap.")
+            ):
+                findings.append(Finding("APPLICATION_REVERSE_IMPORT", path, line))
         for module, line in imports:
             normalized = module.lstrip(".")
             if normalized.split(".", 1)[0] in APPLICATION_FORBIDDEN_IMPORT_ROOTS:

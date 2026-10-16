@@ -1,10 +1,12 @@
 """Tenant identity and route classification for the uTiki2 sports family."""
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import SplitResult, parse_qsl, urlsplit
 
 
 class PageKind(str, Enum):
@@ -27,7 +29,7 @@ class TenantProfile:
     fast_area_prefetch: bool
     supports_server_assignment: bool = False
 
-    def as_legacy_dict(self):
+    def as_legacy_dict(self) -> dict[str, str | bool]:
         """將租戶設定轉成舊版呼叫端使用的字典。"""
 
         return {
@@ -65,7 +67,7 @@ _TENANTS = (
 TENANT_PROFILES = MappingProxyType({profile.host: profile for profile in _TENANTS})
 
 
-def get_utiki_tenant_profile(url):
+def get_utiki_tenant_profile(url: str | None) -> TenantProfile | None:
     """依精確的安全來源取得對應 uTiki 租戶。"""
     try:
         parsed = urlsplit(str(url or ""))
@@ -82,13 +84,13 @@ def get_utiki_tenant_profile(url):
     return TENANT_PROFILES.get(host)
 
 
-def is_utiki_sports_url(url):
+def is_utiki_sports_url(url: str | None) -> bool:
     """判斷網址是否屬於支援的 uTiki 棒球售票站。"""
 
     return get_utiki_tenant_profile(url) is not None
 
 
-def unique_query(url):
+def unique_query(url: str) -> dict[str, str] | None:
     """僅在每個查詢鍵都唯一時回傳查詢參數字典。"""
     try:
         pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
@@ -99,7 +101,7 @@ def unique_query(url):
     return dict(pairs)
 
 
-def classify_utiki_page(url):
+def classify_utiki_page(url: str) -> PageKind:
     """依網址判別 uTiki 售票頁面類型。"""
 
     profile = get_utiki_tenant_profile(url)
@@ -136,7 +138,7 @@ def classify_utiki_page(url):
             return PageKind.SERVER_ASSIGNED_QUANTITY
         return PageKind.UNKNOWN
 
-    route_specs = {
+    route_specs: dict[str, tuple[PageKind, str | None]] = {
         f"{profile.tenant_path}/UTK0201_": (PageKind.DATE, "PRODUCT_ID"),
         f"{profile.tenant_path}/UTK0202_": (
             PageKind.GENERAL_ADMISSION,
@@ -164,7 +166,7 @@ def classify_utiki_page(url):
     return page_kind
 
 
-def same_origin(first, second):
+def same_origin(first: SplitResult, second: SplitResult) -> bool:
     """拒絕內嵌憑證後比較兩個網址是否同源。"""
     if first.username or first.password or second.username or second.password:
         return False

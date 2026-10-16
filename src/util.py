@@ -14,6 +14,8 @@ from typing import Optional
 import requests
 import uuid
 
+import keyword_rules
+
 CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
 CONST_CENTER = "center"
@@ -316,10 +318,7 @@ def format_keyword_string(keyword):
     Input text is matched exactly as provided (Issue #23).
     Only removes full-width spaces that are clearly erroneous.
     """
-    if not keyword is None:
-        if len(keyword) > 0:
-            keyword = keyword.replace('　','')  # Remove full-width space only
-    return keyword
+    return keyword_rules.format_keyword_string(keyword)
 
 def format_quota_string(formated_html_text):
     formated_html_text = formated_html_text.replace('「','【')
@@ -1322,12 +1321,7 @@ def parse_keyword_string_to_array(keyword_string):
         if not keywords:
             keywords = [kw.strip() for kw in keyword.split(',') if kw.strip()]
     """
-    if not keyword_string or not keyword_string.strip():
-        return []
-    try:
-        return json.loads("[" + keyword_string + "]")
-    except:
-        return []
+    return keyword_rules.parse_keyword_string_to_array(keyword_string)
 
 
 def get_matched_blocks_by_keyword(config_dict, auto_select_mode, keyword_string, formated_area_list):
@@ -1342,45 +1336,11 @@ def get_matched_blocks_by_keyword(config_dict, auto_select_mode, keyword_string,
 
 
 def is_row_match_keyword(keyword_string, row_text):
-    # clean stop word.
-    row_text = format_keyword_string(row_text)
-
-    is_match_keyword = True
-    if len(keyword_string) > 0 and len(row_text) > 0:
-        is_match_keyword = False
-        keyword_array = []
-        try:
-            keyword_array = json.loads("["+ keyword_string +"]")
-        except Exception as exc:
-            keyword_array = []
-        for item_list in keyword_array:
-            if len(item_list) > 0:
-                if ' ' in item_list:
-                    keyword_item_array = item_list.split(' ')
-                    is_match_all_exclude = True
-                    for each_item in keyword_item_array:
-                        each_item = format_keyword_string(each_item)
-                        if not each_item in row_text:
-                            is_match_all_exclude = False
-                    if is_match_all_exclude:
-                        is_match_keyword = True
-                else:
-                    item_list = format_keyword_string(item_list)
-                    if item_list in row_text:
-                        is_match_keyword = True
-            else:
-                # match all.
-                is_match_keyword = True
-            if is_match_keyword:
-                break
-    return is_match_keyword
+    return keyword_rules.is_row_match_keyword(keyword_string, row_text)
 
 def reset_row_text_if_match_keyword_exclude(config_dict, row_text):
     area_keyword_exclude = config_dict["keyword_exclude"]
-    if len(area_keyword_exclude) > 0:
-        return is_row_match_keyword(area_keyword_exclude, row_text)
-    else:
-        return False
+    return keyword_rules.is_keyword_excluded(area_keyword_exclude, row_text)
 
 
 def yii_captcha_hash(code):

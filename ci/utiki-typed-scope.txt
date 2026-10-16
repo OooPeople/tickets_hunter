@@ -19,6 +19,7 @@ src/platforms/utiki/domain/inputs.py
 src/platforms/utiki/application/__init__.py
 src/platforms/utiki/application/ports.py
 src/utiki_config.py
+src/keyword_rules.py
 
 # P1 checker rules for future files (comments are not active path entries):
 # - INCLUDE_WHEN_PRESENT: src/platforms/utiki/domain/**/*.py

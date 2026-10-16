@@ -7,6 +7,11 @@ from typing import Callable, TypeVar, TypedDict, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import util
+from keyword_rules import (
+    format_keyword_string,
+    is_keyword_excluded,
+    parse_keyword_string_to_array,
+)
 
 from .profiles import (
     PageKind,
@@ -492,8 +497,7 @@ def parse_keyword_groups(keyword_string: str | None) -> Iterable[object]:
     raw = (keyword_string or "").strip()
     if not raw:
         return []
-    # util is the shared keyword source and is outside the current typed scope.
-    parsed: object = util.parse_keyword_string_to_array(raw)
+    parsed: object = parse_keyword_string_to_array(raw)
     if parsed and isinstance(parsed, (list, tuple, dict, str)):
         return parsed
     delimiter = ";" if ";" in raw else ","
@@ -509,7 +513,7 @@ def matches_keyword_group(text: object, keyword_group: object) -> bool:
 
     if not isinstance(text, str):
         return False
-    formatted_text: object = util.format_keyword_string(text or "")
+    formatted_text: object = format_keyword_string(text or "")
     if not isinstance(formatted_text, str):
         return False
     if isinstance(keyword_group, (list, tuple)):
@@ -517,10 +521,15 @@ def matches_keyword_group(text: object, keyword_group: object) -> bool:
     else:
         parts = [part for part in str(keyword_group or "").split(" ") if part]
     for part in parts:
-        formatted_part: object = util.format_keyword_string(part)
+        formatted_part: object = format_keyword_string(part)
         if not isinstance(formatted_part, str) or formatted_part not in formatted_text:
             return False
     return bool(parts)
+
+
+def _keyword_excluded(config_dict: Mapping[str, object], row_text: str) -> bool:
+    raw = config_dict.get("keyword_exclude", "")
+    return not isinstance(raw, str) or is_keyword_excluded(raw, row_text)
 
 
 def choose_candidate_index(
@@ -724,7 +733,7 @@ def _date_candidates(
         ]
         if len(actionable) != 1 or not row.text:
             continue
-        if util.reset_row_text_if_match_keyword_exclude(config_dict, row.text):
+        if _keyword_excluded(config_dict, row.text):
             continue
         control_index, fingerprint = actionable[0]
         action = _classify_date_control(fingerprint, snapshot.page_url)
@@ -1067,7 +1076,7 @@ def _area_candidate(
     if any(not re.fullmatch(r"[A-Za-z0-9_-]+", token) for token in rel_tokens):
         return None
     match_text = f"{area_text} {price_text}".strip()
-    if util.reset_row_text_if_match_keyword_exclude(config_dict, match_text):
+    if _keyword_excluded(config_dict, match_text):
         return None
     options = _area_map_options(
         indexed_areas, rel_tokens, area_text, price_text,

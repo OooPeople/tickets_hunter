@@ -2,6 +2,8 @@
 
 import math
 import re
+from collections.abc import Iterable, Mapping, Sequence
+from typing import TypedDict
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import util
@@ -141,7 +143,21 @@ def parse_area_snapshot(raw_snapshot):
     )
 
 
-def _quantity_presence_fields(raw_snapshot):
+class _QuantityPresence(TypedDict):
+    performance_hidden_present: bool
+    product_hidden_present: bool
+    group_hidden_present: bool
+    price_area_hidden_present: bool
+    quantity_limit_present: bool
+
+
+class _QuantityCandidate(TypedDict):
+    text: str
+    key: str
+    remaining_present: bool
+
+
+def _quantity_presence_fields(raw_snapshot: dict[str, object]) -> _QuantityPresence:
     """讀取票數快照中用來判斷欄位是否存在的資訊。"""
 
     product_id = str(raw_snapshot.get("product_id") or "")
@@ -167,7 +183,7 @@ def _quantity_presence_fields(raw_snapshot):
     }
 
 
-def parse_quantity_snapshot(raw_snapshot):
+def parse_quantity_snapshot(raw_snapshot: object) -> QuantitySnapshot | None:
     """固定一份自由入座票數頁面的觀察快照。"""
     if isinstance(raw_snapshot, QuantitySnapshot):
         return raw_snapshot
@@ -400,13 +416,14 @@ def parse_dialog_snapshot(raw_snapshot):
     )
 
 
-def parse_keyword_groups(keyword_string):
+def parse_keyword_groups(keyword_string: str | None) -> Iterable[object]:
     """解析設定中的關鍵字格式，並相容字串或分號分組輸入。"""
     raw = (keyword_string or "").strip()
     if not raw:
         return []
-    parsed = util.parse_keyword_string_to_array(raw)
-    if parsed:
+    # util is the shared keyword source and is outside the current typed scope.
+    parsed: object = util.parse_keyword_string_to_array(raw)
+    if parsed and isinstance(parsed, (list, tuple, dict, str)):
         return parsed
     delimiter = ";" if ";" in raw else ","
     return [
@@ -416,20 +433,31 @@ def parse_keyword_groups(keyword_string):
     ]
 
 
-def matches_keyword_group(text, keyword_group):
+def matches_keyword_group(text: object, keyword_group: object) -> bool:
     """判斷文字是否符合一組必要與排除關鍵字。"""
 
-    formatted_text = util.format_keyword_string(text or "")
+    if not isinstance(text, str):
+        return False
+    formatted_text: object = util.format_keyword_string(text or "")
+    if not isinstance(formatted_text, str):
+        return False
     if isinstance(keyword_group, (list, tuple)):
         parts = [str(item).strip() for item in keyword_group if str(item).strip()]
     else:
         parts = [part for part in str(keyword_group or "").split(" ") if part]
-    return bool(parts) and all(
-        util.format_keyword_string(part) in formatted_text for part in parts
-    )
+    for part in parts:
+        formatted_part: object = util.format_keyword_string(part)
+        if not isinstance(formatted_part, str) or formatted_part not in formatted_text:
+            return False
+    return bool(parts)
 
 
-def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=False):
+def choose_candidate_index(
+    candidates: Sequence[Mapping[str, object]],
+    keyword_string: str | None,
+    mode: str,
+    allow_fallback: bool = False,
+) -> int | None:
     """依關鍵字優先序選出原始候選項目索引。"""
     if not candidates:
         return None
@@ -442,12 +470,18 @@ def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=Fals
                 if matches_keyword_group(item[1].get("text", ""), keyword_group)
             ]
             if matched:
-                target = util.get_target_item_from_matched_list(matched, mode)
-                return target[0] if target else None
+                target: object = util.get_target_item_from_matched_list(
+                    matched, mode
+                )
+                if isinstance(target, tuple) and target and type(target[0]) is int:
+                    return target[0]
+                return None
         if not allow_fallback:
             return None
     target = util.get_target_item_from_matched_list(indexed, mode)
-    return target[0] if target else None
+    if isinstance(target, tuple) and target and type(target[0]) is int:
+        return target[0]
+    return None
 
 
 def _parse_date_target_url(target_value, current_url):
@@ -1432,7 +1466,9 @@ def seat_plan_matches_snapshot(snapshot, plan):
     return _seat_targets_are_adjacent(snapshot, targets)
 
 
-def quantity_audit_is_valid(quantities, target_key, ticket_number):
+def quantity_audit_is_valid(
+    quantities: object, target_key: object, ticket_number: object
+) -> bool:
     """稽核目標票種與各票數欄位是否符合要求。"""
 
     if not isinstance(quantities, list) or not target_key:
@@ -1455,7 +1491,9 @@ def quantity_audit_is_valid(quantities, target_key, ticket_number):
     return True
 
 
-def _parse_quantity_request(snapshot, ticket_number):
+def _parse_quantity_request(
+    snapshot: QuantitySnapshot, ticket_number: object
+) -> tuple[int, int] | None:
     """從票數快照解析要求張數與既有選擇。"""
 
     observed_request = parse_nonnegative_count(ticket_number)
@@ -1485,7 +1523,9 @@ def _parse_quantity_request(snapshot, ticket_number):
     return requested, quantity_limit
 
 
-def _quantity_candidates(snapshot, requested):
+def _quantity_candidates(
+    snapshot: QuantitySnapshot, requested: int
+) -> list[_QuantityCandidate] | None:
     """建立符合張數需求的票種候選清單。"""
 
     token = re.compile(r"[A-Za-z0-9_-]+")
@@ -1495,7 +1535,7 @@ def _quantity_candidates(snapshot, requested):
     if any(not token.fullmatch(key) for key in keys) or len(set(keys)) != len(keys):
         return None
 
-    candidates = []
+    candidates: list[_QuantityCandidate] = []
     for row in snapshot.rows:
         if row.disabled or "售完" in row.text or not row.name:
             continue
@@ -1512,15 +1552,17 @@ def _quantity_candidates(snapshot, requested):
     return candidates
 
 
-def _quantity_page_type_matches(page_url, page_type):
+def _quantity_page_type_matches(page_url: str, page_type: str) -> bool:
     """判斷網址是否符合預期的票數頁面類型。"""
 
     if page_type == "general_admission":
-        return classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION
+        return bool(classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION)
     return page_type == "server_assigned_quantity"
 
 
-def _quantity_snapshot_identity_is_valid(snapshot, page_type):
+def _quantity_snapshot_identity_is_valid(
+    snapshot: QuantitySnapshot, page_type: str
+) -> bool:
     """驗證票數快照的文件與商品身分。"""
 
     token = r"[A-Za-z0-9_-]+"
@@ -1541,9 +1583,13 @@ def _quantity_snapshot_identity_is_valid(snapshot, page_type):
     )
 
 
-def select_quantity_snapshot(snapshot, keyword, ticket_number,
-                             mode="from top to bottom",
-                             page_type="general_admission"):
+def select_quantity_snapshot(
+    snapshot: object,
+    keyword: str | None,
+    ticket_number: object,
+    mode: str = "from top to bottom",
+    page_type: str = "general_admission",
+) -> QuantityPlan | None:
     """從不可變票數快照選出仍可購買的票種列。"""
     snapshot = parse_quantity_snapshot(snapshot)
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:

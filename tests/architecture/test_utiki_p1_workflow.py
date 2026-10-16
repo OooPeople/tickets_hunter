@@ -53,6 +53,16 @@ def test_p1_workflow_has_exact_required_jobs_and_minimal_permissions() -> None:
     assert "PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}" in text
 
 
+def test_p1_workflow_does_not_use_step_only_runner_context_in_job_env() -> None:
+    text = _text()
+
+    # GitHub resolves job-level ``env`` before a runner exists.  A runner
+    # context here makes the workflow fail before any job or diagnostic log is
+    # created, so keep temporary paths bound to run-scoped GitHub values.
+    assert "${{ runner." not in text
+    assert "/tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}" in text
+
+
 def test_source_jobs_are_fail_closed_and_unit_preserves_full_suites() -> None:
     text = _text()
     for job_id in ("unit-contract", "modified-python-syntax", "architecture-types"):

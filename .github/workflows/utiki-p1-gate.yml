@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      JOB_RUN_DIR: ${{ runner.temp }}/utiki-p1/unit-contract-source-linux-x64
-      PROBE_INPUT_ROOT: ${{ runner.temp }}/utiki-p1/probes/unit-contract-source-linux-x64
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/unit-contract-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/probes/unit-contract-source-linux-x64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -123,8 +123,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      JOB_RUN_DIR: ${{ runner.temp }}/utiki-p1/modified-python-syntax-source-linux-x64
-      PROBE_INPUT_ROOT: ${{ runner.temp }}/utiki-p1/probes/modified-python-syntax-source-linux-x64
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/modified-python-syntax-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/probes/modified-python-syntax-source-linux-x64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -196,8 +196,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      JOB_RUN_DIR: ${{ runner.temp }}/utiki-p1/architecture-types-source-linux-x64
-      PROBE_INPUT_ROOT: ${{ runner.temp }}/utiki-p1/probes/architecture-types-source-linux-x64
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/architecture-types-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/probes/architecture-types-source-linux-x64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -261,7 +261,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      JOB_RUN_DIR: ${{ runner.temp }}/utiki-p1/browser-contract-isolated-linux-x64
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/browser-contract-isolated-linux-x64
       ISOLATION_IMAGE_TAG: utiki-p1-browser:${{ github.run_id }}-${{ github.run_attempt }}
       PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}
     steps:
@@ -338,7 +338,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      JOB_RUN_DIR: ${{ runner.temp }}/utiki-p1/performance-contract-isolated-linux-x64
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/performance-contract-isolated-linux-x64
       ISOLATION_IMAGE_TAG: utiki-p1-performance:${{ github.run_id }}-${{ github.run_attempt }}
       PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}
     steps:
@@ -425,7 +425,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      AGGREGATE_DIR: ${{ runner.temp }}/utiki-p1-aggregate
+      AGGREGATE_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/aggregate
     steps:
       - uses: actions/checkout@v7
         with:

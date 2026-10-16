@@ -878,7 +878,40 @@ def _make_run(
                 for index, sibling in enumerate(sibling_files.values(), start=1):
                     sibling.write_text(f"controlled performance output {index}\n", encoding="utf-8")
                 build_evidence = path.parent / "performance-image-build.json"
-                build_evidence.write_text("controlled image build\n", encoding="utf-8")
+                build_base_image = "python:3.11@sha256:" + "4" * 64
+                build_image_id = "sha256:" + "5" * 64
+                build_inputs = [
+                    {
+                        "path": relative,
+                        "sha256": _sha256(PROJECT_ROOT / relative),
+                    }
+                    for relative in (
+                        "ci/utiki-isolation/Dockerfile",
+                        "requirement.txt",
+                        "requirements-dev.txt",
+                    )
+                ]
+                _write_json(
+                    build_evidence,
+                    {
+                        "schema_version": 1,
+                        "evidence_kind": "utiki-isolation-image-build",
+                        "base_image": build_base_image,
+                        "image_id": build_image_id,
+                        "inputs": build_inputs,
+                        "build_completed_before_isolation": True,
+                        "isolation_phase_pulled_or_built": False,
+                    },
+                )
+                extra_inputs.append(
+                    {
+                        "kind": "image-build",
+                        "scope": "evidence",
+                        "path": build_evidence.name,
+                        "sha256": _sha256(build_evidence),
+                    }
+                )
+                extra_command_args.append(str(build_evidence.resolve()))
                 producer_payloads[kind] = {
                     "schema_version": 1,
                     "report_kind": "utiki-browser-isolation-launcher",
@@ -910,8 +943,11 @@ def _make_run(
                         "path": str(manifest_path.resolve()),
                         "sha256": _sha256(manifest_path),
                     },
-                    "image": {"id": "sha256:" + "5" * 64},
+                    "image": {"id": build_image_id},
                     "image_build_evidence": {
+                        "base_image": build_base_image,
+                        "image_id": build_image_id,
+                        "inputs": build_inputs,
                         "path": str(build_evidence.resolve()),
                         "sha256": _sha256(build_evidence),
                     },
@@ -2112,6 +2148,282 @@ def test_aggregate_revalidates_every_required_p1_job_target(gate_inputs):
         for job_id, profile in case["profiles"][PHASE].items()
         for target in profile["targets"]
     }
+
+
+def test_aggregate_accepts_digest_bound_artifacts_relocated_after_production(
+    gate_inputs,
+):
+    case = gate_inputs
+    index_path, _, _ = _make_run_index(case, compact=True)
+    relocated_root = case["root"].with_name(case["root"].name + "-relocated")
+    shutil.copytree(case["root"], relocated_root)
+    relocated_manifest = relocated_root / case["manifest_path"].relative_to(case["root"])
+    relocated_index = relocated_root / index_path.relative_to(case["root"])
+
+    result = _run_checker(*_index_arguments(relocated_manifest, relocated_index))
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_relocated_evidence_rejects_same_name_with_wrong_artifact_suffix(gate_inputs):
+    case = gate_inputs
+    artifact = _artifact_path(case["run"], "checker-exit-nonzero")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    declared = next(item for item in envelope["inputs"] if item["scope"] == "evidence")
+    declared_path = (artifact.parent / declared["path"]).resolve()
+    command = envelope["producer"]["command"]
+    command[command.index(str(declared_path))] = str(
+        declared_path.parent / "wrong-directory" / declared_path.name
+    )
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(case["run"], "checker-exit-nonzero")
+    relocated_root = case["root"].with_name(case["root"].name + "-relocated")
+    shutil.copytree(case["root"], relocated_root)
+    relocated_run = {
+        key: relocated_root / value.relative_to(case["root"])
+        for key, value in case["run"].items()
+    }
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], relocated_run))
+
+    assert result.returncode != 0
+    assert "UNBOUND_EVIDENCE_INPUT" in result.stdout
+
+
+def test_relocated_evidence_still_rejects_declared_input_digest_mismatch(gate_inputs):
+    case = gate_inputs
+    relocated_root = case["root"].with_name(case["root"].name + "-relocated")
+    shutil.copytree(case["root"], relocated_root)
+    relocated_run = {
+        key: relocated_root / value.relative_to(case["root"])
+        for key, value in case["run"].items()
+    }
+    artifact = _artifact_path(relocated_run, "checker-exit-nonzero")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    declared = next(item for item in envelope["inputs"] if item["scope"] == "evidence")
+    declared_path = artifact.parent / declared["path"]
+    declared_path.write_bytes(declared_path.read_bytes() + b"tampered\n")
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], relocated_run))
+
+    assert result.returncode != 0
+    assert "EVIDENCE_DIGEST_MISMATCH" in result.stdout
+
+
+def test_repository_only_typecheck_inputs_bind_relocated_producer_report(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    artifact = _artifact_path(run, "typecheck-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = artifact.parent / producer_output["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    fixture_root = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "typecheck-p1"
+    typed_manifest = fixture_root / "manifest.txt"
+    mypy_config = fixture_root / "mypy.ini"
+    coverage_context = fixture_root / "context.json"
+    raw["coverage_context_path"] = str(coverage_context)
+    raw["coverage_context_sha256"] = _sha256(coverage_context)
+    _write_json(producer_report, raw)
+    producer_output["sha256"] = _sha256(producer_report)
+    envelope["inputs"] = [
+        {
+            "kind": "typed-manifest",
+            "scope": "repository",
+            "path": typed_manifest.relative_to(PROJECT_ROOT).as_posix(),
+            "sha256": _sha256(typed_manifest),
+        },
+        {
+            "kind": "mypy-config",
+            "scope": "repository",
+            "path": mypy_config.relative_to(PROJECT_ROOT).as_posix(),
+            "sha256": _sha256(mypy_config),
+        },
+        {
+            "kind": "coverage-context",
+            "scope": "repository",
+            "path": coverage_context.relative_to(PROJECT_ROOT).as_posix(),
+            "sha256": _sha256(coverage_context),
+        },
+    ]
+    envelope["producer"]["command"] = [
+        sys.executable,
+        str(PROJECT_ROOT / "tools" / "run_utiki_typecheck.py"),
+        "--root",
+        str(fixture_root),
+        "--manifest",
+        str(typed_manifest),
+        "--config",
+        str(mypy_config),
+        "--coverage-context",
+        str(coverage_context),
+        "--report",
+        str(producer_report.resolve()),
+    ]
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "typecheck-report")
+    relocated_root = case["root"].with_name(case["root"].name + "-relocated")
+    shutil.copytree(case["root"], relocated_root)
+    relocated_run = {
+        key: relocated_root / value.relative_to(case["root"])
+        for key, value in run.items()
+    }
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            relocated_run,
+            "architecture-types",
+            "source-linux-x64",
+        )
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_performance_image_build_cannot_substitute_same_digest_sibling(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "performance-contract",
+        "isolated-linux-x64",
+    )
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = artifact.parent / producer_output["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    bound_input = next(item for item in envelope["inputs"] if item["kind"] == "image-build")
+    bound_path = artifact.parent / bound_input["path"]
+    substitute = bound_path.with_name("substituted-image-build.json")
+    shutil.copyfile(bound_path, substitute)
+    raw["image_build_evidence"]["path"] = str(substitute.resolve())
+    _write_json(producer_report, raw)
+    producer_output["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "browser-isolation-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "performance-contract",
+            "isolated-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "performance image build path differs" in result.stdout
+
+
+def test_performance_image_build_must_match_current_candidate_inputs(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "performance-contract",
+        "isolated-linux-x64",
+    )
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = artifact.parent / producer_output["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    bound_input = next(item for item in envelope["inputs"] if item["kind"] == "image-build")
+    bound_path = artifact.parent / bound_input["path"]
+    build = json.loads(bound_path.read_text(encoding="utf-8"))
+    build["inputs"][0]["sha256"] = "f" * 64
+    _write_json(bound_path, build)
+    bound_input["sha256"] = _sha256(bound_path)
+    raw["image_build_evidence"]["inputs"] = build["inputs"]
+    raw["image_build_evidence"]["sha256"] = _sha256(bound_path)
+    _write_json(producer_report, raw)
+    producer_output["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "browser-isolation-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "performance-contract",
+            "isolated-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "performance image build input digest mismatch" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "base_image",
+    [
+        "bad image@sha256:" + "a" * 64,
+        "bad@name@sha256:" + "a" * 64,
+        "bad\nimage@sha256:" + "a" * 64,
+    ],
+)
+def test_performance_image_build_rejects_invalid_base_image_reference(
+    gate_inputs, base_image
+):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "performance-contract",
+        "isolated-linux-x64",
+    )
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = artifact.parent / producer_output["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    bound_input = next(item for item in envelope["inputs"] if item["kind"] == "image-build")
+    bound_path = artifact.parent / bound_input["path"]
+    build = json.loads(bound_path.read_text(encoding="utf-8"))
+    build["base_image"] = base_image
+    _write_json(bound_path, build)
+    bound_input["sha256"] = _sha256(bound_path)
+    raw["image_build_evidence"]["base_image"] = base_image
+    raw["image_build_evidence"]["sha256"] = _sha256(bound_path)
+    _write_json(producer_report, raw)
+    producer_output["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "browser-isolation-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "performance-contract",
+            "isolated-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "base image is not repository-digest pinned" in result.stdout
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unknown"])

@@ -15,7 +15,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, NoReturn
 from xml.etree import ElementTree
 
@@ -41,6 +41,7 @@ PLAN_SHA256 = "c8fcc741a37db3d404cefd73cfcda6731a24a922f42522777fbdbc3eeddf6328"
 PHASES = ("P0", "P1", "P2", "P3a", "P3b", "P4", "P5", "P6a", "P6b", "P6c", "P7", "P8")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
+BASE_IMAGE_RE = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}\Z")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+\[\]-]*\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*-attempt-[1-9][0-9]*\Z")
 TARGET_PLATFORM = {
@@ -205,6 +206,142 @@ def safe_relative_path(root: Path, raw_path: Any, *, label: str) -> Path:
     if resolved_root not in resolved.parents:
         fail("UNSAFE_PATH", f"{label} escapes evidence directory: {text!r}")
     return resolved
+
+
+@dataclass(frozen=True)
+class _RecordedPathRoot:
+    flavor: str
+    parts: tuple[str, ...]
+
+
+def _absolute_path_parts(value: str) -> tuple[str, tuple[str, ...]] | None:
+    posix = PurePosixPath(value)
+    if posix.is_absolute():
+        return "posix", posix.parts
+    windows = PureWindowsPath(value)
+    if windows.is_absolute():
+        return "windows", windows.parts
+    return None
+
+
+def _normalized_path_parts(flavor: str, parts: tuple[str, ...]) -> tuple[str, ...]:
+    if flavor == "windows":
+        return tuple(part.casefold() for part in parts)
+    return parts
+
+
+def _bind_recorded_artifact_path(
+    command: list[Any],
+    current_path: Path,
+    artifact_root: Path,
+    *,
+    label: str,
+    expected_root: _RecordedPathRoot | None = None,
+    error_code: str = "UNBOUND_EVIDENCE_INPUT",
+) -> _RecordedPathRoot:
+    try:
+        relative = current_path.resolve().relative_to(artifact_root.resolve())
+    except ValueError:
+        fail("UNSAFE_PATH", f"{label} is outside the run artifact root")
+    suffix = relative.parts
+    if not suffix:
+        fail("UNSAFE_PATH", f"{label} cannot name the run artifact root")
+    matches: set[_RecordedPathRoot] = set()
+    for value in command:
+        if not isinstance(value, str):
+            continue
+        parsed = _absolute_path_parts(value)
+        if parsed is None:
+            continue
+        flavor, parts = parsed
+        if len(parts) <= len(suffix):
+            continue
+        normalized_parts = _normalized_path_parts(flavor, parts)
+        normalized_suffix = _normalized_path_parts(flavor, suffix)
+        if normalized_parts[-len(suffix) :] != normalized_suffix:
+            continue
+        root = _RecordedPathRoot(flavor, normalized_parts[: -len(suffix)])
+        if expected_root is None or root == expected_root:
+            matches.add(root)
+    if len(matches) != 1:
+        fail(error_code, f"{label} is not uniquely bound by its stable artifact-relative path")
+    return next(iter(matches))
+
+
+def _relocated_artifact_path(
+    recorded_path: Any,
+    recorded_root: _RecordedPathRoot,
+    artifact_root: Path,
+    *,
+    label: str,
+) -> Path:
+    value = require_str(recorded_path, label=label)
+    parsed = _absolute_path_parts(value)
+    if parsed is None or parsed[0] != recorded_root.flavor:
+        fail("INVALID_EVIDENCE_CONTENT", f"{label} is not under the recorded artifact root")
+    flavor, parts = parsed
+    normalized = _normalized_path_parts(flavor, parts)
+    root_parts = recorded_root.parts
+    if len(normalized) <= len(root_parts) or normalized[: len(root_parts)] != root_parts:
+        fail("INVALID_EVIDENCE_CONTENT", f"{label} is not under the recorded artifact root")
+    relative_parts = parts[len(root_parts) :]
+    relative = PurePosixPath(*relative_parts).as_posix()
+    return safe_relative_path(artifact_root, relative, label=label)
+
+
+def _maybe_relocated_artifact_path(
+    recorded_path: str,
+    recorded_root: _RecordedPathRoot,
+    artifact_root: Path,
+    *,
+    label: str,
+) -> Path | None:
+    parsed = _absolute_path_parts(recorded_path)
+    if parsed is None or parsed[0] != recorded_root.flavor:
+        return None
+    flavor, parts = parsed
+    normalized = _normalized_path_parts(flavor, parts)
+    if (
+        len(normalized) < len(recorded_root.parts)
+        or normalized[: len(recorded_root.parts)] != recorded_root.parts
+    ):
+        return None
+    relative_parts = parts[len(recorded_root.parts) :]
+    if not relative_parts:
+        return artifact_root.resolve()
+    relative = PurePosixPath(*relative_parts).as_posix()
+    return safe_relative_path(artifact_root, relative, label=label)
+
+
+def _relocated_transcript_child(
+    child: dict[str, Any],
+    recorded_root: _RecordedPathRoot,
+    artifact_root: Path,
+) -> dict[str, Any]:
+    relocated = dict(child)
+    relocated_command: list[str] = []
+    for value in require_list(child.get("command"), label="negative.child.command"):
+        command_value = require_str(value, label="negative.child.command[]")
+        mapped = _maybe_relocated_artifact_path(
+            command_value,
+            recorded_root,
+            artifact_root,
+            label="negative.child.command",
+        )
+        relocated_command.append(str(mapped) if mapped is not None else command_value)
+    relocated["command"] = relocated_command
+    working_directory = require_str(
+        child.get("working_directory"), label="negative.child.working_directory"
+    )
+    mapped_working_directory = _maybe_relocated_artifact_path(
+        working_directory,
+        recorded_root,
+        artifact_root,
+        label="negative.child.working_directory",
+    )
+    if mapped_working_directory is not None:
+        relocated["working_directory"] = str(mapped_working_directory)
+    return relocated
 
 
 def parse_timestamp(value: Any, *, label: str) -> datetime:
@@ -1023,6 +1160,11 @@ def _validate_performance_isolation_payload(
     metadata: dict[str, Any],
     expected_keys: set[ExecutionKey],
     producer_report: Path,
+    artifact_root: Path,
+    recorded_artifact_root: _RecordedPathRoot,
+    inputs: dict[str, Path],
+    input_scopes: dict[str, str],
+    repository_root: Path,
 ) -> None:
     require_exact_keys(
         payload,
@@ -1113,11 +1255,120 @@ def _validate_performance_isolation_payload(
     if re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
         fail("INVALID_EVIDENCE_CONTENT", "performance image is not content addressed")
     build = require_dict(payload["image_build_evidence"], label="performance image build")
-    build_path = Path(require_str(build.get("path"), label="performance image build path")).resolve()
-    if not build_path.is_file() or digest_file(build_path, label="performance image build") != require_sha256(
+    require_exact_keys(
+        build,
+        {"base_image", "image_id", "inputs", "path", "sha256"},
+        label="performance image build reference",
+    )
+    envelope_build_path = inputs.get("image-build")
+    if envelope_build_path is None or input_scopes.get("image-build") != "evidence":
+        fail(
+            "INVALID_EVIDENCE_CONTENT",
+            "performance image build is not an evidence-scoped envelope input",
+        )
+    build_path = _relocated_artifact_path(
+        build.get("path"),
+        recorded_artifact_root,
+        artifact_root,
+        label="performance image build path",
+    )
+    if build_path.resolve() != envelope_build_path.resolve():
+        fail(
+            "INVALID_EVIDENCE_CONTENT",
+            "performance image build path differs from its envelope-bound input",
+        )
+    build_digest = digest_file(envelope_build_path, label="performance image build")
+    if build_digest != require_sha256(
         build.get("sha256"), label="performance image build digest"
     ):
         fail("EVIDENCE_DIGEST_MISMATCH", "performance image build evidence mismatch")
+    build_payload = _json_output(envelope_build_path, label="performance image build")
+    require_exact_keys(
+        build_payload,
+        {
+            "schema_version",
+            "evidence_kind",
+            "base_image",
+            "image_id",
+            "inputs",
+            "build_completed_before_isolation",
+            "isolation_phase_pulled_or_built",
+        },
+        label="performance image build evidence",
+    )
+    if (
+        build_payload["schema_version"] != 1
+        or build_payload["evidence_kind"] != "utiki-isolation-image-build"
+        or build_payload["build_completed_before_isolation"] is not True
+        or build_payload["isolation_phase_pulled_or_built"] is not False
+    ):
+        fail("INVALID_EVIDENCE_CONTENT", "performance image build lifecycle is invalid")
+    base_image = require_str(
+        build_payload["base_image"], label="performance image build base image"
+    )
+    if BASE_IMAGE_RE.fullmatch(base_image) is None:
+        fail(
+            "INVALID_EVIDENCE_CONTENT",
+            "performance image build base image is not repository-digest pinned",
+        )
+    evidence_image_id = require_str(
+        build_payload["image_id"], label="performance image build image id"
+    )
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", evidence_image_id) is None:
+        fail(
+            "INVALID_EVIDENCE_CONTENT",
+            "performance image build image id is not content-addressed",
+        )
+    build_inputs = require_list(build_payload["inputs"], label="performance image build inputs")
+    required_build_inputs = {
+        "ci/utiki-isolation/Dockerfile",
+        "requirement.txt",
+        "requirements-dev.txt",
+    }
+    seen_build_inputs: set[str] = set()
+    for index, value in enumerate(build_inputs):
+        item = require_dict(value, label=f"performance image build inputs[{index}]")
+        require_exact_keys(
+            item,
+            {"path", "sha256"},
+            label=f"performance image build inputs[{index}]",
+        )
+        relative = require_str(
+            item["path"], label=f"performance image build inputs[{index}].path"
+        )
+        if relative in seen_build_inputs:
+            fail("DUPLICATE_EVIDENCE", "performance image build input is duplicated")
+        expected_input_digest = require_sha256(
+            item["sha256"], label=f"performance image build inputs[{index}].sha256"
+        )
+        input_path = safe_relative_path(
+            repository_root,
+            relative,
+            label=f"performance image build inputs[{index}].path",
+        )
+        if not input_path.is_file() or digest_file(
+            input_path, label=f"performance image build input {relative}"
+        ) != expected_input_digest:
+            fail(
+                "EVIDENCE_DIGEST_MISMATCH",
+                f"performance image build input digest mismatch: {relative}",
+            )
+        seen_build_inputs.add(relative)
+    if seen_build_inputs != required_build_inputs:
+        fail(
+            "EVIDENCE_SET_MISMATCH",
+            "performance image build inputs do not equal the required repository files",
+        )
+    if (
+        build["base_image"] != build_payload["base_image"]
+        or build["image_id"] != build_payload["image_id"]
+        or build["inputs"] != build_inputs
+        or build_payload["image_id"] != image_id
+    ):
+        fail(
+            "INVALID_EVIDENCE_CONTENT",
+            "performance image build reference differs from envelope evidence",
+        )
     sibling_digests = {
         "inner_report_sha256": "inner-performance-report.json",
         "benchmark_report_sha256": "raw-benchmark-report.json",
@@ -1136,9 +1387,29 @@ def _validate_browser_payload(
     metadata: dict[str, Any],
     expected_keys: set[ExecutionKey],
     producer_report: Path,
+    artifact_root: Path,
+    recorded_artifact_root: _RecordedPathRoot | None,
+    inputs: dict[str, Path],
+    input_scopes: dict[str, str],
+    repository_root: Path,
 ) -> None:
     if metadata["job_id"] == "performance-contract":
-        _validate_performance_isolation_payload(payload, metadata, expected_keys, producer_report)
+        if recorded_artifact_root is None:
+            fail(
+                "INVALID_EVIDENCE_REPORT",
+                "performance isolation report has no artifact path binding",
+            )
+        _validate_performance_isolation_payload(
+            payload,
+            metadata,
+            expected_keys,
+            producer_report,
+            artifact_root,
+            recorded_artifact_root,
+            inputs,
+            input_scopes,
+            repository_root,
+        )
         return
     if (
         payload.get("schema_version") != 1
@@ -1436,6 +1707,9 @@ def _validate_positive_payload(
     producer_report: Path,
     inputs: dict[str, Path],
     repository_root: Path,
+    artifact_root: Path,
+    recorded_artifact_root: _RecordedPathRoot | None,
+    input_scopes: dict[str, str],
 ) -> None:
     validators = {
         "architecture-report": lambda: _validate_architecture_payload(
@@ -1444,7 +1718,15 @@ def _validate_positive_payload(
         "typecheck-report": lambda: _validate_typecheck_payload(payload, inputs),
         "python-syntax-report": lambda: _validate_syntax_payload(payload, metadata),
         "browser-isolation-report": lambda: _validate_browser_payload(
-            payload, metadata, expected_keys, producer_report
+            payload,
+            metadata,
+            expected_keys,
+            producer_report,
+            artifact_root,
+            recorded_artifact_root,
+            inputs,
+            input_scopes,
+            repository_root,
         ),
         "production-origin-report": lambda: _validate_origin_payload(payload, metadata),
         "benchmark-report": lambda: _validate_benchmark_payload(
@@ -1466,6 +1748,8 @@ def _validate_negative_payload(
     envelope_observed_exit: int,
     evidence_dir: Path,
     repository_root: Path,
+    artifact_root: Path,
+    recorded_artifact_root: _RecordedPathRoot,
 ) -> None:
     require_exact_keys(
         payload,
@@ -1553,9 +1837,17 @@ def _validate_negative_payload(
             fail("INVALID_NEGATIVE_PROBE", "negative pytest command is invalid")
     else:
         fail("INVALID_NEGATIVE_PROBE", "negative child kind is untrusted")
-    child_working_directory = Path(
-        require_str(child["working_directory"], label="negative.child.working_directory")
-    ).resolve()
+    raw_child_working_directory = require_str(
+        child["working_directory"], label="negative.child.working_directory"
+    )
+    child_working_directory = _maybe_relocated_artifact_path(
+        raw_child_working_directory,
+        recorded_artifact_root,
+        artifact_root,
+        label="negative.child.working_directory",
+    )
+    if child_working_directory is None:
+        child_working_directory = Path(raw_child_working_directory).resolve()
     if child_working_directory != repository_root and (
         evidence_dir not in child_working_directory.parents
         or child_working_directory.is_symlink()
@@ -1569,14 +1861,19 @@ def _validate_negative_payload(
         require_exact_keys(item, {"kind", "path", "sha256"}, label=f"negative.inputs[{index}]")
         require_str(item["kind"], label=f"negative.inputs[{index}].kind")
         raw_path = require_str(item["path"], label=f"negative.inputs[{index}].path")
-        path = Path(raw_path).resolve()
+        path = _relocated_artifact_path(
+            raw_path,
+            recorded_artifact_root,
+            artifact_root,
+            label=f"negative.inputs[{index}].path",
+        )
         if evidence_dir not in path.parents or path.is_symlink() or not path.is_file():
             fail("INVALID_NEGATIVE_PROBE", "negative child input is outside evidence storage")
         if digest_file(path, label="negative child input") != require_sha256(
             item["sha256"], label=f"negative.inputs[{index}].sha256"
         ):
             fail("EVIDENCE_DIGEST_MISMATCH", "negative child input digest mismatch")
-        if str(path) not in child_command:
+        if raw_path not in child_command:
             fail("UNBOUND_EVIDENCE_INPUT", "negative child does not consume its mutation input")
         if path in child_inputs:
             fail("DUPLICATE_EVIDENCE", "negative child input is duplicated")
@@ -1596,7 +1893,12 @@ def _validate_negative_payload(
         item = require_dict(value, label=f"negative.outputs[{index}]")
         require_exact_keys(item, {"kind", "path", "sha256"}, label=f"negative.outputs[{index}]")
         kind = require_str(item["kind"], label=f"negative.outputs[{index}].kind")
-        path = Path(require_str(item["path"], label=f"negative.outputs[{index}].path")).resolve()
+        path = _relocated_artifact_path(
+            item["path"],
+            recorded_artifact_root,
+            artifact_root,
+            label=f"negative.outputs[{index}].path",
+        )
         if evidence_dir not in path.parents or path.is_symlink() or not path.is_file():
             fail("INVALID_NEGATIVE_PROBE", "negative child output is outside evidence storage")
         if digest_file(path, label="negative child output") != require_sha256(
@@ -1624,7 +1926,12 @@ def _validate_negative_payload(
     else:
         proof_value = require_dict(proof, label="negative.isolation_proof")
         require_exact_keys(proof_value, {"path", "sha256"}, label="negative.isolation_proof")
-        proof_path = Path(require_str(proof_value["path"], label="negative.isolation_proof.path")).resolve()
+        proof_path = _relocated_artifact_path(
+            proof_value["path"],
+            recorded_artifact_root,
+            artifact_root,
+            label="negative.isolation_proof.path",
+        )
         if evidence_dir not in proof_path.parents or not proof_path.is_file():
             fail("INVALID_NEGATIVE_PROBE", "isolation proof is outside evidence storage")
         if digest_file(proof_path, label="negative isolation proof") != require_sha256(
@@ -1646,6 +1953,7 @@ def _validate_evidence_report(
     metadata: dict[str, Any],
     expected_keys: set[ExecutionKey],
     catalog: CatalogModel,
+    artifact_root: Path,
 ) -> None:
     report, _ = read_json(path, label=f"{kind} report")
     require_exact_keys(
@@ -1757,8 +2065,21 @@ def _validate_evidence_report(
         fail("INVALID_EVIDENCE_REPORT", f"{kind} report has no bound input")
     if not {"stdout", "stderr"}.issubset(outputs):
         fail("INVALID_EVIDENCE_REPORT", f"{kind} report lacks captured stdout/stderr")
-    for input_path in inputs.values():
-        if str(input_path.resolve()) not in command:
+    input_scopes = {
+        require_str(item["kind"], label=f"{kind}.inputs.kind"): item["scope"]
+        for item in require_list(report["inputs"], label=f"{kind}.inputs")
+    }
+    recorded_artifact_root: _RecordedPathRoot | None = None
+    for input_kind, input_path in inputs.items():
+        if input_scopes[input_kind] == "evidence":
+            recorded_artifact_root = _bind_recorded_artifact_path(
+                command,
+                input_path,
+                artifact_root,
+                label=f"{kind} input {input_kind!r}",
+                expected_root=recorded_artifact_root,
+            )
+        elif str(input_path.resolve()) not in command:
             fail(
                 "UNBOUND_EVIDENCE_INPUT",
                 f"{kind} command does not consume a declared digest-bound input",
@@ -1809,12 +2130,8 @@ def _validate_evidence_report(
             fail("INVALID_NEGATIVE_PROBE", "negative probe rejection token is absent from captured output")
         if not any(name.startswith("injected-") for name in inputs):
             fail("INVALID_NEGATIVE_PROBE", "negative probe has no digest-bound injected input")
-        for name, input_path in inputs.items():
-            if name.startswith("injected-") and str(input_path.resolve()) not in command:
-                fail(
-                    "INVALID_NEGATIVE_PROBE",
-                    "negative probe command does not consume its digest-bound injected input",
-                )
+        if recorded_artifact_root is None:
+            fail("INVALID_NEGATIVE_PROBE", "negative probe has no artifact path binding")
         registry_path = inputs.get("probe-registry")
         probe_input_path = inputs.get("injected-probe")
         if registry_path is None or probe_input_path is None:
@@ -1914,8 +2231,14 @@ def _validate_evidence_report(
         producer_report = outputs.get("producer-report")
         if producer_report is None:
             fail("INVALID_NEGATIVE_PROBE", "negative probe lacks its child transcript report")
-        if str(producer_report.resolve()) not in command:
-            fail("UNBOUND_EVIDENCE_OUTPUT", "negative command does not identify its child transcript report")
+        _bind_recorded_artifact_path(
+            command,
+            producer_report,
+            artifact_root,
+            label="negative producer report",
+            expected_root=recorded_artifact_root,
+            error_code="UNBOUND_EVIDENCE_OUTPUT",
+        )
         raw_negative = _json_output(producer_report, label="negative producer output")
         if raw_negative.get("rejection_token") != token:
             fail("INVALID_NEGATIVE_PROBE", "negative envelope/raw rejection tokens differ")
@@ -1927,12 +2250,18 @@ def _validate_evidence_report(
             envelope_observed_exit=observed_exit,
             evidence_dir=path.parent.resolve(),
             repository_root=catalog.repository_root,
+            artifact_root=artifact_root,
+            recorded_artifact_root=recorded_artifact_root,
         )
         try:
             validate_transcript_contract(
                 registry_matches[0],
                 probe_request,
-                require_dict(raw_negative.get("child"), label="negative.child"),
+                _relocated_transcript_child(
+                    require_dict(raw_negative.get("child"), label="negative.child"),
+                    recorded_artifact_root,
+                    artifact_root,
+                ),
                 probe_root=probe_input_path.parent.resolve(),
                 repository_root=catalog.repository_root,
             )
@@ -1946,13 +2275,14 @@ def _validate_evidence_report(
         producer_report = outputs.get("producer-report")
         if producer_report is None:
             fail("INVALID_EVIDENCE_REPORT", f"{kind} lacks the raw producer report")
-        if (
-            producer_report.resolve() != outputs["stdout"].resolve()
-            and str(producer_report.resolve()) not in command
-        ):
-            fail(
-                "UNBOUND_EVIDENCE_OUTPUT",
-                f"{kind} command does not identify its raw producer report output",
+        if producer_report.resolve() != outputs["stdout"].resolve():
+            recorded_artifact_root = _bind_recorded_artifact_path(
+                command,
+                producer_report,
+                artifact_root,
+                label=f"{kind} producer report",
+                expected_root=recorded_artifact_root,
+                error_code="UNBOUND_EVIDENCE_OUTPUT",
             )
         _validate_positive_payload(
             kind,
@@ -1962,6 +2292,9 @@ def _validate_evidence_report(
             producer_report,
             inputs,
             catalog.repository_root,
+            artifact_root,
+            recorded_artifact_root,
+            input_scopes,
         )
 
 
@@ -2107,6 +2440,7 @@ def validate_run_metadata(
             metadata,
             evidence_owners[evidence_key],
             catalog,
+            path.parent.resolve(),
         )
 
     resources = _validate_digest_entries(path.parent, metadata["resources"], label="run metadata.resources")

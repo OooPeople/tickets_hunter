@@ -6,13 +6,25 @@
 
 ## 1. 原則
 
-- 驗證強度要與風險相稱：先跑最相關的測試，再擴大範圍。
+- 驗證強度要與風險相稱，但驗證範圍不得無條件逐次擴大：實作切片期間只跑最相關的測試，完整 suite 與正式 CI 留到 phase 出站。
 - 任何新測試必須實際執行；不能只建立測試檔就宣告完成。
 - 平台流程可以拆成純邏輯、DOM 契約與瀏覽器流程測試，不應一概視為「無法測試」。
 - 單元測試通過不代表真實網站流程通過；實機測試也不能取代可重複的自動測試。
 - 測試不得提交或輸出 Cookie、帳號、驗證碼、付款資料、webhook URL 或完整頁面個資。
 - 不得用廣泛的程序終止指令關閉所有 Python 或 Chrome；只停止本次測試啟動的程序。
 - 實機測試的刷新頻率必須使用使用者設定，不得為加速測試而私自縮短。沒有明確設定時，人工調查預設至少間隔 5 秒。
+
+### 1.1 Phase 驗證節奏
+
+大型計劃以核准文件定義的 phase 為驗證單位；一般修改若沒有正式 phase，則以一個可獨立交付、可回退的工作批次視為 phase。
+
+1. **切片迭代**：修改哪個模組，就執行該模組的精確 pytest node、直接相依契約與修改檔 `py_compile`。同一失敗未修好前，不擴大到完整 suite。
+2. **切片收斂**：相關測試通過後完成自我審查；高風險變更先完成第二位審查者覆核。審查修改仍以 focused tests 驗證。
+3. **Phase 出站**：全部切片完成、檔案固定、審查無阻擋 finding 後，才執行一次完整 pytest；需要維持 unittest runner 相容時，在同一出站批次執行一次 unittest。
+4. **正式 CI**：本機出站驗證通過後才推送並觸發一次 phase gate。不得以連續 push／rerun 逐一發現本機可重現的錯誤。
+5. **CI 特有失敗**：僅限 runner、OS、容器隔離或 artifact 搬移等本機原先無法重現的差異。修正前先下載真實 artifact 或建立等價 fixture；用 focused regression 收斂後，再重新執行 phase 出站驗證與一次正式 CI。
+
+完整 suite、coverage、打包與正式 CI 的必要義務沒有被取消；本節只限制執行時機，避免把高成本驗證當成開發內迴圈。
 
 ## 2. 目前測試基線
 
@@ -61,8 +73,8 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 |------|------|----------------|
 | A. 靜態檢查 | 發現語法、空白與文件問題 | `py_compile`、`git diff --check`、連結檢查 |
 | B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m pytest tests/test_<module>.py` |
-| C. 完整單元套件 | 發現跨模組回歸 | `python -m pytest` |
-| D. 建置驗證 | 驗證 import、相依套件與 PyInstaller | `python build_scripts/build_local.py` |
+| C. Phase 出站完整套件 | 階段完成後發現跨模組回歸；切片期間不執行 | `python -m pytest` |
+| D. Phase 出站建置 | 涉及 import、相依或打包時於階段完成後驗證 | `python build_scripts/build_local.py` |
 | E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
 
 ## 4. 常用命令
@@ -106,6 +118,8 @@ python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 ```
 
 ### 4.4 完整測試
+
+本節命令只在 phase 出站執行一次，不是每個 commit 或 focused test 通過後的固定下一步。
 
 ```bash
 python -m pytest
@@ -284,12 +298,12 @@ python build_scripts/build_local.py
 | 變更 | 最低要求 |
 |------|----------|
 | 純文件 | `git diff --check`、連結與現況核對 |
-| 純函式／選擇演算法 | 語法、相關測試、完整單元套件 |
+| 純函式／選擇演算法 | 切片期間跑語法與相關測試；phase 出站跑完整單元套件 |
 | 平台 DOM reader 或 selector | 上述項目、脫敏 fixture／契約測試；可用時加實機煙霧測試 |
 | 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例、實機煙霧測試 |
-| 刷新／429 協調 | 聚焦協調器測試、完整套件、多實例或時間控制測試 |
+| 刷新／429 協調 | 切片期間跑聚焦協調器、多實例或時間控制測試；phase 出站跑完整套件 |
 | 設定 schema／遷移 | default、舊設定遷移、儲存回讀、UI 顯示、相關流程測試 |
-| import／相依／spec | 語法、完整套件、本地建置 |
+| import／相依／spec | 切片期間跑語法與 import focused tests；phase 出站跑完整套件與本地建置 |
 
 ## 6. 測試設計準則
 
@@ -388,7 +402,7 @@ fixture 必須：
 1. 保留第一個完整 traceback 與執行命令。
 2. 以最小案例重跑，確認是否穩定重現。
 3. 判斷是 production regression、測試耦合、fixture 過期或環境問題。
-4. 修正後先跑失敗案例，再跑受影響模組，最後視風險跑完整套件。
+4. 修正後先跑失敗案例，再跑受影響模組；完整套件只在該 phase 再次收斂並完成審查後執行。
 5. 若無法安全修正，停止擴張修改範圍並在交付說明未解問題。
 
 工程審查的嚴重度與輸出格式見 [engineering-review.md](engineering-review.md)。

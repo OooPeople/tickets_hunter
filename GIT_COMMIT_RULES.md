@@ -28,6 +28,9 @@
 - 不要在 `summary` 結尾加句號。
 - 避免模糊訊息，例如 `update`、`fix bug`、`modify code`。
 - 一次 commit 盡量聚焦單一職責。
+- Commit 必須是已完成、可獨立審查與回退的邏輯單位；不要提交尚在除錯的中間態。
+- 同一根因的多個小修正、相應回歸測試與文件更新應整合在同一實作切片或 phase checkpoint，不要每修一個小錯誤就各建 commit。
+- 建立 commit 前先讓相關 focused tests 通過並處理該切片的審查 finding；完整 suite 與正式 CI 依測試指南在 phase 出站時執行。
 
 ## 常用 type
 

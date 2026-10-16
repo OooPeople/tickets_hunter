@@ -7,9 +7,10 @@ import json
 import os
 import stat
 import tempfile
+import unicodedata
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal, cast
 
 from utiki_config import (
@@ -32,6 +33,29 @@ class PreparedProfile:
     source_identity: tuple[int, int, int, int, int]
     source_digest: str
     output_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileRequest:
+    source: Path
+    output_name: str
+    conflict_policy: ConflictPolicy | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchEntry:
+    source_name: str
+    output_name: str
+    source_sha256: str
+    status: Literal["PASS", "FAILED", "NOT_RUN"]
+    output_sha256: str | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    status: Literal["PASS", "PARTIAL_FAILURE"]
+    entries: tuple[BatchEntry, ...]
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -132,6 +156,87 @@ def write_new_profile(prepared: PreparedProfile, target: Path) -> str:
     finally:
         temporary.unlink(missing_ok=True)
     return hashlib.sha256(prepared.output_bytes).hexdigest()
+
+
+def _check_output_names(requests: tuple[ProfileRequest, ...]) -> None:
+    if not requests:
+        raise ConfigError("EMPTY_BATCH")
+    names: set[str] = set()
+    sources: set[Path] = set()
+    for request in requests:
+        name = request.output_name
+        normalized_name = unicodedata.normalize("NFC", name).casefold()
+        if (
+            not name
+            or name in {".", ".."}
+            or normalized_name == "manifest.json"
+            or name.startswith(".")
+            or name.rstrip(" .") != name
+            or PureWindowsPath(name).name != name
+            or PureWindowsPath(name).is_reserved()
+            or any(ord(character) < 32 or character in '<>:"/\\|?*' for character in name)
+        ):
+            raise ConfigError("INVALID_OUTPUT_NAME")
+        if normalized_name in names or request.source in sources:
+            raise ConfigError("DUPLICATE_BATCH_ENTRY")
+        names.add(normalized_name)
+        sources.add(request.source)
+
+
+def _write_manifest(directory: Path, result: BatchResult) -> None:
+    payload = (
+        json.dumps(
+            {"schema_version": 1, "status": result.status, "entries": [asdict(entry) for entry in result.entries]},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    ).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".manifest.", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            _publish(temporary, directory / "manifest.json")
+        except FileExistsError as exc:
+            raise ConfigError("MANIFEST_EXISTS") from exc
+        temporary.unlink(missing_ok=True)
+        _sync_directory(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_profile_batch(requests: tuple[ProfileRequest, ...], output_dir: Path) -> BatchResult:
+    """Validate every input before creating a new output directory."""
+    _check_output_names(requests)
+    if os.path.lexists(output_dir):
+        raise ConfigError("OUTPUT_DIRECTORY_EXISTS")
+    prepared = tuple(
+        prepare_profile(request.source, conflict_policy=request.conflict_policy)
+        for request in requests
+    )
+    output_dir.mkdir(mode=0o700)
+    _sync_directory(output_dir.parent)
+    entries: list[BatchEntry] = []
+    failed = False
+    for request, item in zip(requests, prepared):
+        if failed:
+            entries.append(BatchEntry(request.source.name, request.output_name, item.source_digest, "NOT_RUN"))
+            continue
+        try:
+            digest = write_new_profile(item, output_dir / request.output_name)
+        except (ConfigError, OSError) as exc:
+            reason = exc.code if isinstance(exc, ConfigError) else "WRITE_FAILED"
+            entries.append(BatchEntry(request.source.name, request.output_name, item.source_digest, "FAILED", error_code=reason))
+            failed = True
+        else:
+            entries.append(BatchEntry(request.source.name, request.output_name, item.source_digest, "PASS", digest))
+    result = BatchResult("PARTIAL_FAILURE" if failed else "PASS", tuple(entries))
+    _write_manifest(output_dir, result)
+    return result
 
 
 def convert_profile_mapping(

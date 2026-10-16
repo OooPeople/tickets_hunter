@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Generic, TypeAlias, TypeVar
@@ -151,3 +152,87 @@ class DateRow:
             not isinstance(control, DateControl) for control in self.controls
         ):
             raise ValueError("date row must contain text and controls")
+
+
+SeatFingerprint: TypeAlias = tuple[str | int | float | bool, ...]
+
+
+def _valid_seat_fingerprint(value: object) -> bool:
+    return (
+        type(value) is tuple
+        and bool(value)
+        and all(type(item) in (str, int, float, bool) for item in value)
+        and all(type(item) is not float or math.isfinite(item) for item in value)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TicketTypeRow:
+    fingerprint: SeatFingerprint
+    text: str
+    disabled: bool
+    type_id: str
+    type_name: str
+    counter_present: bool
+    counter_raw: str
+
+    def __post_init__(self) -> None:
+        if not _valid_seat_fingerprint(self.fingerprint):
+            raise ValueError("ticket type fingerprint is invalid")
+        for name in ("text", "type_id", "type_name", "counter_raw"):
+            if type(getattr(self, name)) is not str:
+                raise ValueError(f"{name} must be a string")
+        if type(self.disabled) is not bool or type(self.counter_present) is not bool:
+            raise ValueError("ticket type flags must be booleans")
+
+
+@dataclass(frozen=True, slots=True)
+class SeatRow:
+    fingerprint: SeatFingerprint
+    title: str
+    row_index: int
+    cell_index: int
+    center_x: int | float
+    center_y: int | float
+    width: int | float
+    height: int | float
+    available: bool
+    selected: bool
+
+    def __post_init__(self) -> None:
+        if not _valid_seat_fingerprint(self.fingerprint) or type(self.title) is not str:
+            raise ValueError("seat identity is invalid")
+        if type(self.row_index) is not int or type(self.cell_index) is not int:
+            raise ValueError("seat indexes must be integers")
+        for name in ("center_x", "center_y", "width", "height"):
+            value = getattr(self, name)
+            if type(value) not in (int, float):
+                raise ValueError(f"{name} must be numeric")
+            try:
+                if not math.isfinite(value):
+                    raise ValueError(f"{name} must be finite")
+            except OverflowError as error:
+                raise ValueError(f"{name} must be finite") from error
+        if type(self.available) is not bool or type(self.selected) is not bool:
+            raise ValueError("seat flags must be booleans")
+
+
+@dataclass(frozen=True, slots=True)
+class SubmittedSeat:
+    a: str
+    y: str
+    z: str
+
+    def __post_init__(self) -> None:
+        if any(type(getattr(self, name)) is not str for name in ("a", "y", "z")):
+            raise ValueError("submitted seat values must be strings")
+
+
+@dataclass(frozen=True, slots=True)
+class SeatCounter:
+    type_id: str
+    raw: str
+
+    def __post_init__(self) -> None:
+        if type(self.type_id) is not str or type(self.raw) is not str:
+            raise ValueError("seat counter values must be strings")

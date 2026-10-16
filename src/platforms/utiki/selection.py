@@ -25,6 +25,10 @@ from .domain.snapshots import (
     MapArea,
     PresentField,
     QuantityRow,
+    SeatCounter,
+    SeatRow,
+    SubmittedSeat,
+    TicketTypeRow,
     parse_nonnegative_count,
 )
 
@@ -135,10 +139,10 @@ class SeatSnapshot:
     product_hidden_present: bool = False
     quantity_limit_present: bool = False
     quantity_limit_raw: str = ""
-    ticket_types: tuple = ()
-    seats: tuple = ()
-    submitted_seats: tuple = ()
-    counters: tuple = ()
+    ticket_types: tuple[TicketTypeRow, ...] = ()
+    seats: tuple[SeatRow, ...] = ()
+    submitted_seats: tuple[SubmittedSeat, ...] = ()
+    counters: tuple[SeatCounter, ...] = ()
     visual_selected_count: int = 0
     reason: str = ""
 
@@ -387,10 +391,12 @@ def _freeze_ticket_type(raw_type):
         raw_type.get("counter_present")
     ) is not bool:
         return None
-    return (
-        fingerprint, raw_type["text"], raw_type["disabled"],
-        raw_type["type_id"], raw_type["type_name"],
-        raw_type["counter_present"], raw_type["counter_raw"],
+    return TicketTypeRow(
+        fingerprint=fingerprint, text=raw_type["text"],
+        disabled=raw_type["disabled"], type_id=raw_type["type_id"],
+        type_name=raw_type["type_name"],
+        counter_present=raw_type["counter_present"],
+        counter_raw=raw_type["counter_raw"],
     )
 
 
@@ -419,11 +425,12 @@ def _freeze_seat(raw_seat):
         return None
     if any(type(raw_seat.get(field)) is not bool for field in ("available", "selected")):
         return None
-    return (
-        fingerprint, raw_seat["title"], raw_seat["row_index"],
-        raw_seat["cell_index"], raw_seat["center_x"], raw_seat["center_y"],
-        raw_seat["width"], raw_seat["height"], raw_seat["available"],
-        raw_seat["selected"],
+    return SeatRow(
+        fingerprint=fingerprint, title=raw_seat["title"],
+        row_index=raw_seat["row_index"], cell_index=raw_seat["cell_index"],
+        center_x=raw_seat["center_x"], center_y=raw_seat["center_y"],
+        width=raw_seat["width"], height=raw_seat["height"],
+        available=raw_seat["available"], selected=raw_seat["selected"],
     )
 
 
@@ -434,7 +441,7 @@ def _freeze_submitted_seat(raw_seat):
         return None
     if any(not isinstance(raw_seat.get(field), str) for field in ("A", "Y", "Z")):
         return None
-    return raw_seat["A"], raw_seat["Y"], raw_seat["Z"]
+    return SubmittedSeat(raw_seat["A"], raw_seat["Y"], raw_seat["Z"])
 
 
 def _freeze_seat_counter(raw_counter):
@@ -446,7 +453,7 @@ def _freeze_seat_counter(raw_counter):
         raw_counter.get("counter_raw"), str
     ):
         return None
-    return raw_counter["id"], raw_counter["counter_raw"]
+    return SeatCounter(raw_counter["id"], raw_counter["counter_raw"])
 
 
 def parse_seat_snapshot(raw_snapshot):
@@ -473,7 +480,10 @@ def parse_seat_snapshot(raw_snapshot):
         raw_items = raw_snapshot.get(name)
         if not isinstance(raw_items, list):
             return None
-        items = tuple(parser(item) for item in raw_items)
+        try:
+            items = tuple(parser(item) for item in raw_items)
+        except (TypeError, ValueError):
+            return None
         if any(item is None for item in items):
             return None
         collections[name] = items
@@ -1276,17 +1286,17 @@ def _seat_snapshot_structure_is_valid(snapshot):
         return False
     if not 0 < len(snapshot.ticket_types) <= 100 or len(snapshot.seats) > 5000:
         return False
-    seat_fingerprints = [seat[0] for seat in snapshot.seats]
-    counter_ids = [counter[0] for counter in snapshot.counters]
+    seat_fingerprints = [seat.fingerprint for seat in snapshot.seats]
+    counter_ids = [counter.type_id for counter in snapshot.counters]
     if len(set(seat_fingerprints)) != len(seat_fingerprints):
         return False
     if any(not item for item in counter_ids) or len(set(counter_ids)) != len(counter_ids):
         return False
-    if any(_counter_value(raw) is None for _type_id, raw in snapshot.counters):
+    if any(_counter_value(counter.raw) is None for counter in snapshot.counters):
         return False
-    selected = [seat for seat in snapshot.seats if seat[9]]
+    selected = [seat for seat in snapshot.seats if seat.selected]
     return (
-        all(not (seat[8] and seat[9]) for seat in snapshot.seats)
+        all(not (seat.available and seat.selected) for seat in snapshot.seats)
         and len(selected) == snapshot.visual_selected_count
         and len(snapshot.submitted_seats) <= len(snapshot.seats)
     )
@@ -1298,9 +1308,15 @@ def _target_seat_ticket_type(snapshot, keyword):
     candidates = []
     seen_fingerprints = set()
     seen_type_ids = set()
-    counter_map = dict(snapshot.counters)
+    counter_map = {counter.type_id: counter.raw for counter in snapshot.counters}
     for ticket_type in snapshot.ticket_types:
-        fingerprint, text, disabled, type_id, type_name, present, raw = ticket_type
+        fingerprint = ticket_type.fingerprint
+        text = ticket_type.text
+        disabled = ticket_type.disabled
+        type_id = ticket_type.type_id
+        type_name = ticket_type.type_name
+        present = ticket_type.counter_present
+        raw = ticket_type.counter_raw
         if fingerprint in seen_fingerprints:
             return None, "invalid-snapshot"
         seen_fingerprints.add(fingerprint)
@@ -1332,15 +1348,18 @@ def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
     requested = observed_request.value
     if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok or requested <= 0:
         return False
-    selected = [seat for seat in snapshot.seats if seat[9]]
+    selected = [seat for seat in snapshot.seats if seat.selected]
     if len(selected) != requested or snapshot.visual_selected_count != requested:
         return False
     if len(snapshot.submitted_seats) != requested or any(
-        payload != ("S", ticket_type_id, ticket_type_name)
+        payload != SubmittedSeat("S", ticket_type_id, ticket_type_name)
         for payload in snapshot.submitted_seats
     ):
         return False
-    counts = [(type_id, _counter_value(raw)) for type_id, raw in snapshot.counters]
+    counts = [
+        (counter.type_id, _counter_value(counter.raw))
+        for counter in snapshot.counters
+    ]
     if any(value is None for _type_id, value in counts):
         return False
     targets = [value for type_id, value in counts if type_id == ticket_type_id]
@@ -1368,10 +1387,11 @@ def _seat_dicts(snapshot):
 
     return [
         {
-            "index": index, "title": seat[1], "row_index": seat[2],
-            "cell_index": seat[3], "center_x": seat[4], "center_y": seat[5],
-            "width": seat[6], "height": seat[7], "available": seat[8],
-            "selected": seat[9],
+            "index": index, "title": seat.title, "row_index": seat.row_index,
+            "cell_index": seat.cell_index, "center_x": seat.center_x,
+            "center_y": seat.center_y, "width": seat.width,
+            "height": seat.height, "available": seat.available,
+            "selected": seat.selected,
         }
         for index, seat in enumerate(snapshot.seats)
     ]
@@ -1381,7 +1401,7 @@ def _seat_targets_are_adjacent(snapshot, fingerprints):
     """判斷目標座位指紋是否形成連續座位。"""
 
     by_fingerprint = dict(zip(
-        (seat[0] for seat in snapshot.seats), _seat_dicts(snapshot)
+        (seat.fingerprint for seat in snapshot.seats), _seat_dicts(snapshot)
     ))
     targets = [by_fingerprint.get(fingerprint) for fingerprint in fingerprints]
     return bool(all(targets)) and all(
@@ -1403,9 +1423,9 @@ def _make_seat_plan(snapshot, ticket_type, action, requested,
         product_id=snapshot.product_id,
         action=action,
         ticket_number=requested,
-        ticket_type_fingerprint=ticket_type[0],
-        ticket_type_id=ticket_type[3],
-        ticket_type_name=ticket_type[4],
+        ticket_type_fingerprint=ticket_type.fingerprint,
+        ticket_type_id=ticket_type.type_id,
+        ticket_type_name=ticket_type.type_name,
         selected_seat_fingerprints=tuple(selected),
         target_seat_fingerprints=tuple(targets),
         require_physical_adjacency=require_adjacency,
@@ -1418,8 +1438,8 @@ def _seat_state_is_clean(snapshot):
     return (
         snapshot.visual_selected_count == 0
         and not snapshot.submitted_seats
-        and not any(seat[9] for seat in snapshot.seats)
-        and all(_counter_value(raw) == 0 for _type_id, raw in snapshot.counters)
+        and not any(seat.selected for seat in snapshot.seats)
+        and all(_counter_value(counter.raw) == 0 for counter in snapshot.counters)
     )
 
 
@@ -1435,12 +1455,12 @@ def select_seat_snapshot(snapshot, keyword, ticket_number,
     ticket_type, reason = _target_seat_ticket_type(snapshot, keyword)
     if ticket_type is None:
         return None, reason
-    selected = tuple(seat[0] for seat in snapshot.seats if seat[9])
+    selected = tuple(seat.fingerprint for seat in snapshot.seats if seat.selected)
     require_adjacency = (
         not allow_non_adjacent or seat_sorting == "row_asc_aisle"
     )
     if seat_selection_is_valid(
-        snapshot, requested, ticket_type[3], ticket_type[4]
+        snapshot, requested, ticket_type.type_id, ticket_type.type_name
     ):
         if require_adjacency and not _seat_targets_are_adjacent(
             snapshot, selected
@@ -1465,7 +1485,7 @@ def select_seat_snapshot(snapshot, keyword, ticket_number,
     )
     if len(indexes) != requested:
         return None, "seats-unavailable"
-    targets = tuple(snapshot.seats[index][0] for index in indexes)
+    targets = tuple(snapshot.seats[index].fingerprint for index in indexes)
     return _make_seat_plan(
         snapshot, ticket_type, "select", requested, targets=targets,
         require_adjacency=require_adjacency,
@@ -1488,17 +1508,17 @@ def _seat_plan_identity_matches(snapshot, plan):
         return False
     matching_types = [
         item for item in snapshot.ticket_types
-        if item[0] == plan.ticket_type_fingerprint
+        if item.fingerprint == plan.ticket_type_fingerprint
     ]
-    counter_map = dict(snapshot.counters)
+    counter_map = {counter.type_id: counter.raw for counter in snapshot.counters}
     return bool(
         len(matching_types) == 1
-        and matching_types[0][3] == plan.ticket_type_id
-        and matching_types[0][4] == plan.ticket_type_name
-        and not matching_types[0][2]
-        and matching_types[0][5]
-        and _counter_value(matching_types[0][6]) is not None
-        and counter_map.get(plan.ticket_type_id) == matching_types[0][6]
+        and matching_types[0].type_id == plan.ticket_type_id
+        and matching_types[0].type_name == plan.ticket_type_name
+        and not matching_types[0].disabled
+        and matching_types[0].counter_present
+        and _counter_value(matching_types[0].counter_raw) is not None
+        and counter_map.get(plan.ticket_type_id) == matching_types[0].counter_raw
     )
 
 
@@ -1513,7 +1533,7 @@ def seat_plan_matches_snapshot(snapshot, plan):
         or _seat_request(snapshot, plan.ticket_number) is None
     ):
         return False
-    selected = tuple(seat[0] for seat in snapshot.seats if seat[9])
+    selected = tuple(seat.fingerprint for seat in snapshot.seats if seat.selected)
     if plan.selected_seat_fingerprints != selected:
         return False
     valid = seat_selection_is_valid(
@@ -1534,14 +1554,14 @@ def seat_plan_matches_snapshot(snapshot, plan):
         return not valid
     if selected or not _seat_state_is_clean(snapshot):
         return False
-    by_fingerprint = {seat[0]: seat for seat in snapshot.seats}
+    by_fingerprint = {seat.fingerprint: seat for seat in snapshot.seats}
     targets = plan.target_seat_fingerprints
     targets_match = bool(
         len(targets) == plan.ticket_number == len(set(targets))
         and all(
             fingerprint in by_fingerprint
-            and by_fingerprint[fingerprint][8]
-            and not by_fingerprint[fingerprint][9]
+            and by_fingerprint[fingerprint].available
+            and not by_fingerprint[fingerprint].selected
             for fingerprint in targets
         )
     )

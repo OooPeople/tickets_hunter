@@ -9,8 +9,8 @@ from typing import Generic, TypeAlias, TypeVar
 
 T = TypeVar("T")
 _ASCII_COUNT = re.compile(r"[0-9]+\Z")
-_MAX_SAFE_COUNT = 9_007_199_254_740_991
-_MAX_SAFE_COUNT_DIGITS = len(str(_MAX_SAFE_COUNT))
+MAX_SAFE_COUNT = 9_007_199_254_740_991
+MAX_SAFE_COUNT_DIGITS = len(str(MAX_SAFE_COUNT))
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,7 @@ def parse_nonnegative_count(value: object) -> FieldObservation[int]:
     if type(value) is int:
         if value < 0:
             return InvalidField("negative")
-        if value > _MAX_SAFE_COUNT:
+        if value > MAX_SAFE_COUNT:
             return InvalidField("out-of-range")
         return PresentField(value)
     if type(value) is str:
@@ -49,10 +49,10 @@ def parse_nonnegative_count(value: object) -> FieldObservation[int]:
         if not text:
             return InvalidField("empty")
         if _ASCII_COUNT.fullmatch(text):
-            if len(text) > _MAX_SAFE_COUNT_DIGITS:
+            if len(text) > MAX_SAFE_COUNT_DIGITS:
                 return InvalidField("out-of-range")
             count = int(text)
-            if count > _MAX_SAFE_COUNT:
+            if count > MAX_SAFE_COUNT:
                 return InvalidField("out-of-range")
             return PresentField(count)
     return InvalidField("not-integer")

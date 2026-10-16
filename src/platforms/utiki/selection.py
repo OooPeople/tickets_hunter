@@ -1,5 +1,6 @@
 """Pure selection and audit rules for the uTiki2 ticketing family."""
 
+import math
 import re
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -19,6 +20,8 @@ from .domain.snapshots import (
     DateControl,
     DateRow,
     InvalidField,
+    MAX_SAFE_COUNT,
+    MAX_SAFE_COUNT_DIGITS,
     MapArea,
     PresentField,
     QuantityRow,
@@ -364,6 +367,8 @@ def _freeze_scalar_tuple(value):
         return None
     if any(not isinstance(item, (str, int, float, bool)) for item in value):
         return None
+    if any(type(item) is float and not math.isfinite(item) for item in value):
+        return None
     return tuple(value)
 
 
@@ -406,6 +411,11 @@ def _freeze_seat(raw_seat):
         or not isinstance(raw_seat.get(field), (int, float))
         for field in geometry_fields
     ):
+        return None
+    try:
+        if any(not math.isfinite(raw_seat[field]) for field in geometry_fields):
+            return None
+    except OverflowError:
         return None
     if any(type(raw_seat.get(field)) is not bool for field in ("available", "selected")):
         return None
@@ -1092,7 +1102,14 @@ def _seat_number(seat):
     """解析座位資料中的數字座號。"""
 
     match = re.search(r"-(\d+)排-(\d+)號\s*$", str(seat.get("title") or ""))
-    return (int(match.group(1)), int(match.group(2))) if match else None
+    if match is None:
+        return None
+    if any(len(match.group(index)) > MAX_SAFE_COUNT_DIGITS for index in (1, 2)):
+        return None
+    row, number = int(match.group(1)), int(match.group(2))
+    if row > MAX_SAFE_COUNT or number > MAX_SAFE_COUNT:
+        return None
+    return row, number
 
 
 def _seat_row_edges(seats, strict_titles):
@@ -1242,9 +1259,10 @@ def _seat_snapshot_route_is_valid(snapshot):
 def _counter_value(raw_value):
     """將票種計數值正規化為整數。"""
 
-    if not re.fullmatch(r"\d+", str(raw_value or "")):
+    if type(raw_value) is not str or raw_value != raw_value.strip():
         return None
-    return int(raw_value)
+    observed = parse_nonnegative_count(raw_value)
+    return observed.value if isinstance(observed, PresentField) else None
 
 
 def _seat_snapshot_structure_is_valid(snapshot):
@@ -1308,10 +1326,10 @@ def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
                             ticket_type_name):
     """稽核畫面座位、送出資料與所有票種計數。"""
     snapshot = parse_seat_snapshot(snapshot)
-    try:
-        requested = int(ticket_number)
-    except (TypeError, ValueError):
+    observed_request = parse_nonnegative_count(ticket_number)
+    if not isinstance(observed_request, PresentField):
         return False
+    requested = observed_request.value
     if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok or requested <= 0:
         return False
     selected = [seat for seat in snapshot.seats if seat[9]]
@@ -1335,10 +1353,10 @@ def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
 def _seat_request(snapshot, ticket_number):
     """建立座位選擇所需的張數與目前狀態。"""
 
-    try:
-        requested = int(ticket_number)
-    except (TypeError, ValueError):
+    observed_request = parse_nonnegative_count(ticket_number)
+    if not isinstance(observed_request, PresentField):
         return None
+    requested = observed_request.value
     limit = _counter_value(snapshot.quantity_limit_raw)
     if requested <= 0 or limit is None or (limit and requested > limit):
         return None
@@ -1537,21 +1555,22 @@ def quantity_audit_is_valid(quantities, target_key, ticket_number):
 
     if not isinstance(quantities, list) or not target_key:
         return False
-    target_matches = [
-        item for item in quantities
-        if isinstance(item, dict) and item.get("key") == target_key
-    ]
+    requested = parse_nonnegative_count(ticket_number)
+    if not isinstance(requested, PresentField) or requested.value == 0:
+        return False
+    if any(not isinstance(item, dict) for item in quantities):
+        return False
+    target_matches = [item for item in quantities if item.get("key") == target_key]
     if len(target_matches) != 1:
         return False
-    try:
-        if int(target_matches[0].get("value", 0)) != int(ticket_number):
+    for item in quantities:
+        count = parse_nonnegative_count(item.get("value"))
+        if not isinstance(count, PresentField):
             return False
-        return all(
-            item is target_matches[0] or int(item.get("value", 0)) == 0
-            for item in quantities if isinstance(item, dict)
-        ) and all(isinstance(item, dict) for item in quantities)
-    except (TypeError, ValueError):
-        return False
+        expected = requested.value if item is target_matches[0] else 0
+        if count.value != expected:
+            return False
+    return True
 
 
 def _parse_quantity_request(snapshot, ticket_number):

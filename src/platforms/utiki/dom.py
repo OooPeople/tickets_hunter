@@ -1311,6 +1311,8 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
             const markerName = 'data-tickets-hunter-utiki-seat-commit';
             const normalize = value => String(value || '')
                 .replace(/\s+/g, ' ').trim();
+            const safeCount = raw => /^[0-9]{1,16}$/.test(raw) &&
+                Number.isSafeInteger(Number(raw));
             const same = (first, second) =>
                 JSON.stringify(first) === JSON.stringify(second);
             const key = value => JSON.stringify(value);
@@ -1446,7 +1448,7 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
                 const ticketKeys = tickets.map(ticket => key(ticket.fingerprint));
                 if (!tickets.length || counterIds.some(id => !id) ||
                     new Set(counterIds).size !== counterIds.length ||
-                    counters.some(counter => !/^\d+$/.test(counter.raw)) ||
+                    counters.some(counter => !safeCount(counter.raw)) ||
                     new Set(seatKeys).size !== seatKeys.length ||
                     new Set(ticketKeys).size !== ticketKeys.length) {
                     return {status: 'stale'};
@@ -1829,6 +1831,8 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
         (() => {
             // __ticketsHunterUtikiQuantityCommit
             const plan = __TICKETS_HUNTER_PLAN_JSON__;
+            const safeCount = raw => /^[0-9]{1,16}$/.test(raw) &&
+                Number.isSafeInteger(Number(raw));
             const identityValid = () => {
                 if (location.href !== plan.pageUrl ||
                     String(performance.timeOrigin) !== plan.documentId) {
@@ -1924,7 +1928,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                 const limitInput = limitInputs[0] || null;
                 const limitRaw = limitInput ?
                     (limitInput.value || '').trim() : '';
-                if (limitRaw && !/^\d+$/.test(limitRaw)) {
+                if (plan.quantityLimitPresent && !safeCount(limitRaw)) {
                     return {status: 'rejected'};
                 }
                 const liveLimit = limitRaw ? Number(limitRaw) : 0;
@@ -1952,7 +1956,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                 }
                 if (remaining.length === 1) {
                     const raw = (remaining[0].value || '').trim();
-                    if (!/^\d+$/.test(raw) ||
+                    if (!safeCount(raw) ||
                         Number(raw) < plan.ticketNumber) {
                         return {status: 'rejected'};
                     }
@@ -1966,7 +1970,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
             let live = inspectLive();
             if (live.status !== 'ok') return marker ? 'stale' : live.status;
             const auditValid = state => state.inputs.every(input =>
-                Number(input.value || 0) ===
+                safeCount(input.value) && Number(input.value) ===
                     (input === state.target ? plan.ticketNumber : 0));
             if (marker) {
                 return marker === intent && auditValid(live) ?
@@ -2033,6 +2037,8 @@ CONST_SUBMIT_SCRIPT = r'''
             const plan = __TICKETS_HUNTER_PLAN_JSON__;
             const normalize = value => String(value || '')
                 .replace(/\s+/g, ' ').trim();
+            const safeCount = raw => /^[0-9]{1,16}$/.test(raw) &&
+                Number.isSafeInteger(Number(raw));
             const same = (first, second) =>
                 JSON.stringify(first) === JSON.stringify(second);
             const key = value => JSON.stringify(value);
@@ -2139,8 +2145,8 @@ CONST_SUBMIT_SCRIPT = r'''
                     (plan.quantityLimitPresent ? 1 : 0)) return false;
                 const limitRaw = limitInputs[0] ?
                     normalize(limitInputs[0].value) : '';
-                const liveLimit = /^\d+$/.test(limitRaw) ? Number(limitRaw) : 0;
-                if ((limitRaw && !/^\d+$/.test(limitRaw)) ||
+                const liveLimit = safeCount(limitRaw) ? Number(limitRaw) : 0;
+                if ((plan.quantityLimitPresent && !safeCount(limitRaw)) ||
                     liveLimit !== plan.quantityLimit ||
                     (liveLimit && plan.ticketNumber > liveLimit)) return false;
                 const target = targets[0];
@@ -2156,10 +2162,11 @@ CONST_SUBMIT_SCRIPT = r'''
                     remaining.length !==
                         (plan.targetRemainingPresent ? 1 : 0)) return false;
                 if (remaining.length === 1 &&
-                    (!/^\d+$/.test(normalize(remaining[0].value)) ||
+                    (!safeCount(normalize(remaining[0].value)) ||
                         Number(normalize(remaining[0].value)) <
                             plan.ticketNumber)) return false;
-                return inputs.every(input => Number(input.value || 0) ===
+                return inputs.every(input => safeCount(input.value) &&
+                    Number(input.value) ===
                     (input === target ? plan.ticketNumber : 0));
             };
             const ticketLabel = button => {
@@ -2269,7 +2276,7 @@ CONST_SUBMIT_SCRIPT = r'''
                     exactHiddenMatches('#GROUP_ID', plan.groupId) &&
                     exactHiddenMatches('#PRICE_AREA_ID', plan.priceAreaId) &&
                     exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
-                    /^\d+$/.test(limitRaw) &&
+                    safeCount(limitRaw) &&
                     (Number(limitRaw) === 0 ||
                         Number(limitRaw) >= plan.ticketNumber);
             };
@@ -2285,7 +2292,7 @@ CONST_SUBMIT_SCRIPT = r'''
                     new Set(seatKeys).size !== seatKeys.length ||
                     counterIds.some(id => !id) ||
                     new Set(counterIds).size !== counterIds.length ||
-                    live.counters.some(item => !/^\d+$/.test(item.raw))) {
+                    live.counters.some(item => !safeCount(item.raw))) {
                     return false;
                 }
                 const tickets = live.tickets.filter(ticket =>

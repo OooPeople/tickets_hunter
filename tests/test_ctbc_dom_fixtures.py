@@ -338,8 +338,8 @@ async def _assert_date_fixture(browser):
     tab, snapshot = await open_snapshot()
     assert snapshot.document_id
     assert len(snapshot.rows) == 2
-    assert snapshot.rows[0][1][0][0]
-    assert not snapshot.rows[1][1][0][0]
+    assert snapshot.rows[0].controls[0].actionable
+    assert not snapshot.rows[1].controls[0].actionable
     assert await tab.evaluate("Number(document.body.dataset.dateClicks || 0)") == 0
 
     plan = plan_for(snapshot)
@@ -494,6 +494,15 @@ async def _assert_area_fixture(browser):
         "document.querySelector('#mapdata area#front').setAttribute("
         "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
         "'GROUP_FRONT','1')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '暫停銷售'",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'title', '票區:109區前排 票價：1600 尚餘：剩餘NaN')",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','暫停銷售')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '0000000000000000000000000000000000000002'",
     )
     for index, mutation in enumerate(availability_mutations):
         unavailable_tab = await _open_fixture(
@@ -587,6 +596,29 @@ async def _assert_area_fixture(browser):
     assert await server_tab.evaluate(
         "Number(document.body.dataset.rowClicks || 0)"
     ) == 1
+
+    oversized_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    oversized_snapshot = await read_area_snapshot(oversized_tab)
+    oversized_target = select_area_snapshot(
+        oversized_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    assert oversized_target is not None
+    await oversized_tab.evaluate(
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '0000000000000000000000000000000000000002'"
+    )
+    assert await commit_server_assigned_area(
+        oversized_tab, oversized_snapshot, oversized_target,
+        cfg["ticket_number"], "b" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await oversized_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
 
     ambiguous_tab = await _open_fixture(
         browser,
@@ -906,6 +938,19 @@ async def _assert_seat_fixture(browser):
     assert plan.action == "select"
     assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
     assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
+
+    oversized_counter_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    oversized_snapshot, oversized_plan = await read_plan(oversized_counter_tab)
+    await oversized_counter_tab.evaluate(
+        "document.querySelector('#OTHER').textContent = '0000000000000000000000000000000000000000'"
+    )
+    assert await commit_seat(
+        oversized_counter_tab, oversized_snapshot, oversized_plan
+    ) is CommitResult.STALE
+    assert await click_counts(oversized_counter_tab) == {"ticketType": 0, "seats": 0}
+
     committed_snapshot = await read_seat_snapshot(tab)
     assert seat_selection_is_valid(
         committed_snapshot,
@@ -1264,6 +1309,11 @@ async def _assert_seat_fixture(browser):
             SubmitDispatchResult.STALE,
         ),
         (
+            "oversized-zero-counter",
+            "document.querySelector('#OTHER').textContent = '0000000000000000000000000000000000000000'",
+            SubmitDispatchResult.STALE,
+        ),
+        (
             "strict-adjacency",
             "document.querySelector("
             "'#TBL td[data-seat-id=\"S2\"]').style.transform = "
@@ -1619,6 +1669,64 @@ async def _assert_quantity_fixture(browser):
         "Number(document.body.dataset.quantityEvents || 0)"
     ) == 0
 
+    oversized_remaining_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    oversized_remaining_snapshot = await read_quantity_snapshot(oversized_remaining_tab)
+    oversized_remaining_plan = select_quantity_snapshot(
+        oversized_remaining_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert oversized_remaining_plan is not None
+    await oversized_remaining_tab.evaluate(
+        "document.querySelector('input.numbox[key=\"FULL\"]').closest('tr')"
+        ".querySelector('input[key=\"LAST_AMOUNT\"]').value = "
+        "'0000000000000000000000000000000000000002'"
+    )
+    assert await commit_quantity(
+        oversized_remaining_tab, oversized_remaining_snapshot,
+        oversized_remaining_plan,
+    ) is CommitResult.REJECTED
+    assert await oversized_remaining_tab.evaluate(
+        "Number(document.body.dataset.quantityEvents || 0)"
+    ) == 0
+
+    missing_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await missing_tab.evaluate('''document.querySelector(
+        'input.numbox[key="FULL"]'
+    ).closest('tr').querySelector('input[key="LAST_AMOUNT"]').remove()''')
+    missing_snapshot = await read_quantity_snapshot(missing_tab)
+    missing_row = next(row for row in missing_snapshot.rows if row.key == "FULL")
+    assert not missing_row.remaining_present
+    assert missing_row.remaining_raw == ""
+    assert select_quantity_snapshot(
+        missing_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    ) is not None
+
+    duplicate_remaining_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await duplicate_remaining_tab.evaluate('''(() => {
+        const row = document.querySelector('input.numbox[key="FULL"]').closest('tr');
+        const remaining = row.querySelector('input[key="LAST_AMOUNT"]');
+        row.appendChild(remaining.cloneNode(true));
+    })()''')
+    duplicate_remaining_snapshot = await read_quantity_snapshot(
+        duplicate_remaining_tab
+    )
+    duplicate_remaining_row = next(
+        row for row in duplicate_remaining_snapshot.rows if row.key == "FULL"
+    )
+    assert duplicate_remaining_row.remaining_present
+    assert duplicate_remaining_row.remaining_raw == "__invalid__"
+    assert select_quantity_snapshot(
+        duplicate_remaining_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    ) is None
+
     limit_tab = await _open_fixture(
         browser, "UTK0203_quantity.html", query
     )
@@ -1675,6 +1783,60 @@ async def _assert_quantity_fixture(browser):
     assert await dispatch_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 2
+
+    for clear_live_limit in (False, True):
+        zero_limit_tab = await _open_fixture(
+            browser, "UTK0203_quantity.html", query
+        )
+        await zero_limit_tab.evaluate(
+            "document.querySelector('#QUANTITY_LIMIT').value = '0'"
+        )
+        zero_limit_snapshot = await read_quantity_snapshot(zero_limit_tab)
+        zero_limit_plan = select_quantity_snapshot(
+            zero_limit_snapshot, cfg["utiki"]["ticket_type_keyword"],
+            cfg["ticket_number"],
+        )
+        assert zero_limit_plan is not None and zero_limit_plan.quantity_limit == 0
+        assert await commit_quantity(
+            zero_limit_tab, zero_limit_snapshot, zero_limit_plan
+        ) is CommitResult.COMMITTED
+        if clear_live_limit:
+            await zero_limit_tab.evaluate(
+                "document.querySelector('#QUANTITY_LIMIT').value = ''"
+            )
+        expected = (
+            SubmitDispatchResult.STALE if clear_live_limit
+            else SubmitDispatchResult.DISPATCHED
+        )
+        assert await dispatch_submit(
+            zero_limit_tab, build_submit_plan(zero_limit_plan)
+        ) is expected
+        assert await zero_limit_tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == (0 if clear_live_limit else 1)
+
+    oversized_quantity_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    oversized_quantity_snapshot = await read_quantity_snapshot(oversized_quantity_tab)
+    oversized_quantity_plan = select_quantity_snapshot(
+        oversized_quantity_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    )
+    assert oversized_quantity_plan is not None
+    assert await commit_quantity(
+        oversized_quantity_tab, oversized_quantity_snapshot, oversized_quantity_plan
+    ) is CommitResult.COMMITTED
+    await oversized_quantity_tab.evaluate(
+        "document.querySelector('input.numbox[key=\"OTHER\"]').value = "
+        "'0000000000000000000000000000000000000000'"
+    )
+    assert await dispatch_submit(
+        oversized_quantity_tab, build_submit_plan(oversized_quantity_plan)
+    ) is SubmitDispatchResult.STALE
+    assert await oversized_quantity_tab.evaluate(
+        "Number(document.body.dataset.addcartClicks || 0)"
+    ) == 0
 
     marker_tab = await _open_fixture(
         browser, "UTK0203_quantity.html", query

@@ -33,6 +33,7 @@ from .profiles import (
     same_origin,
     unique_query,
 )
+from .domain.snapshots import PresentField, parse_nonnegative_count
 
 
 CONST_SERVER_ASSIGNED_QUANTITY_PATHS = tuple(
@@ -763,10 +764,8 @@ def _valid_area_commit_input(snapshot, plan, ticket_number, navigation_nonce):
         return False
     if not re.fullmatch(r"[a-f0-9]{32}", str(navigation_nonce or "")):
         return False
-    try:
-        return int(ticket_number) > 0
-    except (TypeError, ValueError):
-        return False
+    requested = parse_nonnegative_count(ticket_number)
+    return isinstance(requested, PresentField) and requested.value > 0
 
 
 async def commit_area(
@@ -785,7 +784,7 @@ async def commit_area(
     price_json = json.dumps(plan.price)
     action_name_json = json.dumps(plan.action_name)
     action_args_json = json.dumps(plan.stable_args)
-    ticket_number_json = json.dumps(int(ticket_number))
+    ticket_number_json = json.dumps(parse_nonnegative_count(ticket_number).value)
     nonce_json = json.dumps(navigation_nonce)
     marker_key_json = json.dumps(fast_marker_key)
     raw_result = await tab.evaluate(fr'''
@@ -806,14 +805,14 @@ async def commit_area(
                 const text = (value || '').replace(/\s+/g, '');
                 if (!text || text.includes('售完') ||
                     /^(0|0張|無)$/.test(text)) return false;
-                if (/^\d+$/.test(text)) {{
-                    return Number(text) >= ticketNumber;
-                }}
-                if (/(?:剩餘|尚餘|剩|餘)/.test(text)) {{
-                    const count = text.match(/(\d+)/);
-                    if (count && Number(count[1]) < ticketNumber) return false;
-                }}
-                return true;
+                if (text === '熱賣中') return true;
+                const count = text.match(
+                    /^(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?$/) ||
+                    text.match(/^([0-9]+)(?:張)?$/);
+                if (!count || count[1].length > 16) return false;
+                const available = Number(count[1]);
+                return Number.isSafeInteger(available) &&
+                    available >= ticketNumber;
             }};
             const parseAction = value => {{
                 const match = (value || '').match(
@@ -961,13 +960,13 @@ CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
                 if (!text || text.includes('售完') ||
                     /^(0|0張|無)$/.test(text)) return false;
                 if (text === '熱賣中') return true;
-                if (/^\d+$/.test(text)) {
-                    return Number(text) >= intent.ticketNumber;
-                }
                 const count = text.match(
-                    /^(?:剩餘|尚餘|剩|餘)[:：]?(\d+)(?:張)?$/);
-                if (count) return Number(count[1]) >= intent.ticketNumber;
-                return false;
+                    /^(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?$/) ||
+                    text.match(/^([0-9]+)(?:張)?$/);
+                if (!count || count[1].length > 16) return false;
+                const available = Number(count[1]);
+                return Number.isSafeInteger(available) &&
+                    available >= intent.ticketNumber;
             };
             const parseAction = value => {
                 const match = (value || '').match(
@@ -1110,7 +1109,7 @@ async def commit_server_assigned_area(
         "price": plan.price,
         "actionName": plan.action_name,
         "actionArgs": plan.stable_args,
-        "ticketNumber": int(ticket_number),
+        "ticketNumber": parse_nonnegative_count(ticket_number).value,
         "navigationNonce": navigation_nonce,
         "fastMarkerKey": fast_marker_key,
     }, ensure_ascii=False)
@@ -1312,6 +1311,8 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
             const markerName = 'data-tickets-hunter-utiki-seat-commit';
             const normalize = value => String(value || '')
                 .replace(/\s+/g, ' ').trim();
+            const safeCount = raw => /^[0-9]{1,16}$/.test(raw) &&
+                Number.isSafeInteger(Number(raw));
             const same = (first, second) =>
                 JSON.stringify(first) === JSON.stringify(second);
             const key = value => JSON.stringify(value);
@@ -1447,7 +1448,7 @@ CONST_SEAT_COMMIT_SCRIPT = r'''
                 const ticketKeys = tickets.map(ticket => key(ticket.fingerprint));
                 if (!tickets.length || counterIds.some(id => !id) ||
                     new Set(counterIds).size !== counterIds.length ||
-                    counters.some(counter => !/^\d+$/.test(counter.raw)) ||
+                    counters.some(counter => !safeCount(counter.raw)) ||
                     new Set(seatKeys).size !== seatKeys.length ||
                     new Set(ticketKeys).size !== ticketKeys.length) {
                     return {status: 'stale'};
@@ -1740,8 +1741,9 @@ CONST_QUANTITY_SNAPSHOT_SCRIPT = r'''
                         disabled: !!input.disabled ||
                             input.getAttribute('aria-disabled') === 'true',
                         remaining_present: remaining.length > 0,
-                        remaining_raw: remaining.length === 1 ?
-                            (remaining[0].value || '').trim() : '__invalid__',
+                        remaining_raw: remaining.length === 0 ? '' :
+                            remaining.length === 1 ?
+                                (remaining[0].value || '').trim() : '__invalid__',
                         value: (input.value || '').trim()
                     };
                 })
@@ -1829,6 +1831,8 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
         (() => {
             // __ticketsHunterUtikiQuantityCommit
             const plan = __TICKETS_HUNTER_PLAN_JSON__;
+            const safeCount = raw => /^[0-9]{1,16}$/.test(raw) &&
+                Number.isSafeInteger(Number(raw));
             const identityValid = () => {
                 if (location.href !== plan.pageUrl ||
                     String(performance.timeOrigin) !== plan.documentId) {
@@ -1924,7 +1928,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                 const limitInput = limitInputs[0] || null;
                 const limitRaw = limitInput ?
                     (limitInput.value || '').trim() : '';
-                if (limitRaw && !/^\d+$/.test(limitRaw)) {
+                if (plan.quantityLimitPresent && !safeCount(limitRaw)) {
                     return {status: 'rejected'};
                 }
                 const liveLimit = limitRaw ? Number(limitRaw) : 0;
@@ -1952,7 +1956,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                 }
                 if (remaining.length === 1) {
                     const raw = (remaining[0].value || '').trim();
-                    if (!/^\d+$/.test(raw) ||
+                    if (!safeCount(raw) ||
                         Number(raw) < plan.ticketNumber) {
                         return {status: 'rejected'};
                     }
@@ -1966,7 +1970,7 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
             let live = inspectLive();
             if (live.status !== 'ok') return marker ? 'stale' : live.status;
             const auditValid = state => state.inputs.every(input =>
-                Number(input.value || 0) ===
+                safeCount(input.value) && Number(input.value) ===
                     (input === state.target ? plan.ticketNumber : 0));
             if (marker) {
                 return marker === intent && auditValid(live) ?
@@ -2033,6 +2037,8 @@ CONST_SUBMIT_SCRIPT = r'''
             const plan = __TICKETS_HUNTER_PLAN_JSON__;
             const normalize = value => String(value || '')
                 .replace(/\s+/g, ' ').trim();
+            const safeCount = raw => /^[0-9]{1,16}$/.test(raw) &&
+                Number.isSafeInteger(Number(raw));
             const same = (first, second) =>
                 JSON.stringify(first) === JSON.stringify(second);
             const key = value => JSON.stringify(value);
@@ -2139,8 +2145,8 @@ CONST_SUBMIT_SCRIPT = r'''
                     (plan.quantityLimitPresent ? 1 : 0)) return false;
                 const limitRaw = limitInputs[0] ?
                     normalize(limitInputs[0].value) : '';
-                const liveLimit = /^\d+$/.test(limitRaw) ? Number(limitRaw) : 0;
-                if ((limitRaw && !/^\d+$/.test(limitRaw)) ||
+                const liveLimit = safeCount(limitRaw) ? Number(limitRaw) : 0;
+                if ((plan.quantityLimitPresent && !safeCount(limitRaw)) ||
                     liveLimit !== plan.quantityLimit ||
                     (liveLimit && plan.ticketNumber > liveLimit)) return false;
                 const target = targets[0];
@@ -2156,10 +2162,11 @@ CONST_SUBMIT_SCRIPT = r'''
                     remaining.length !==
                         (plan.targetRemainingPresent ? 1 : 0)) return false;
                 if (remaining.length === 1 &&
-                    (!/^\d+$/.test(normalize(remaining[0].value)) ||
+                    (!safeCount(normalize(remaining[0].value)) ||
                         Number(normalize(remaining[0].value)) <
                             plan.ticketNumber)) return false;
-                return inputs.every(input => Number(input.value || 0) ===
+                return inputs.every(input => safeCount(input.value) &&
+                    Number(input.value) ===
                     (input === target ? plan.ticketNumber : 0));
             };
             const ticketLabel = button => {
@@ -2269,7 +2276,7 @@ CONST_SUBMIT_SCRIPT = r'''
                     exactHiddenMatches('#GROUP_ID', plan.groupId) &&
                     exactHiddenMatches('#PRICE_AREA_ID', plan.priceAreaId) &&
                     exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
-                    /^\d+$/.test(limitRaw) &&
+                    safeCount(limitRaw) &&
                     (Number(limitRaw) === 0 ||
                         Number(limitRaw) >= plan.ticketNumber);
             };
@@ -2285,7 +2292,7 @@ CONST_SUBMIT_SCRIPT = r'''
                     new Set(seatKeys).size !== seatKeys.length ||
                     counterIds.some(id => !id) ||
                     new Set(counterIds).size !== counterIds.length ||
-                    live.counters.some(item => !/^\d+$/.test(item.raw))) {
+                    live.counters.some(item => !safeCount(item.raw))) {
                     return false;
                 }
                 const tickets = live.tickets.filter(ticket =>

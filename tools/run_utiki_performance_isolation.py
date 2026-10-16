@@ -98,6 +98,7 @@ def _isolated_command(
     catalog_sha256: str,
     candidate_sha: str,
     candidate_attestation_path: str,
+    owner: str,
 ) -> list[str]:
     return [
         runtime,
@@ -106,6 +107,8 @@ def _isolated_command(
         "never",
         "--name",
         name,
+        "--label",
+        f"{browser_isolation.OWNER_LABEL}={owner}",
         "--network",
         "none",
         *browser_isolation._security_options(),
@@ -325,7 +328,9 @@ def main(argv: list[str] | None = None) -> int:
     network = _safe_name(arguments.run_id, "network")
     server = _safe_name(arguments.run_id, "peer")
     isolated = _safe_name(arguments.run_id, "isolated")
+    owner = secrets.token_hex(16)
     cleanup_needed = False
+    created_containers: list[str] = []
     workspace_context = None
     exit_code = 2
     report: dict[str, Any] = {
@@ -441,13 +446,19 @@ def main(argv: list[str] | None = None) -> int:
             report["reasons"].append("plan-only mode cannot produce performance evidence")
             return exit_code
 
+        browser_isolation._require_unused_cleanup_names(
+            arguments.runtime, [isolated, server], network
+        )
         subnet_digest = hashlib.sha256(network.encode("ascii")).hexdigest()
         ipv6_subnet = f"fd42:{subnet_digest[:4]}:{subnet_digest[4:8]}::/64"
+        cleanup_needed = True
         browser_isolation._run(
             [
                 arguments.runtime,
                 "network",
                 "create",
+                "--label",
+                f"{browser_isolation.OWNER_LABEL}={owner}",
                 "--internal",
                 "--ipv6",
                 "--subnet",
@@ -456,10 +467,10 @@ def main(argv: list[str] | None = None) -> int:
             ],
             timeout=20,
         )
-        cleanup_needed = True
         report["runtime_evidence"]["controlled_peer_network"] = (
             browser_isolation._inspect_internal_network(arguments.runtime, network)
         )
+        created_containers.append(server)
         browser_isolation._run(
             browser_isolation._peer_server_command(
                 arguments.runtime,
@@ -467,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                 network,
                 server,
                 candidate_workspace,
+                owner,
             ),
             timeout=30,
         )
@@ -499,7 +511,9 @@ def main(argv: list[str] | None = None) -> int:
             catalog_sha256=arguments.catalog_sha256,
             candidate_sha=arguments.candidate_sha,
             candidate_attestation_path="/artifacts/candidate-workspace-attestation.json",
+            owner=owner,
         )
+        created_containers.append(isolated)
         completed = browser_isolation._run(command, check=False, timeout=1200)
         report["runtime_evidence"]["isolated_container"] = (
             browser_isolation._inspect_isolated_container(arguments.runtime, isolated)
@@ -554,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if cleanup_needed:
             cleanup_errors = browser_isolation._cleanup(
-                arguments.runtime, [isolated, server], network
+                arguments.runtime, list(reversed(created_containers)), network, owner
             )
         if workspace_context is not None:
             workspace_context.__exit__(None, None, None)

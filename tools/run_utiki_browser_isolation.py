@@ -41,6 +41,7 @@ SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 DEFAULT_CONTRACT = Path(__file__).resolve().parent.parent / "ci" / "utiki-browser-isolation.json"
 PEER_PORT = 8765
+OWNER_LABEL = "org.tickets-hunter.utiki-cleanup-owner"
 
 
 class IsolationBlocked(RuntimeError):
@@ -351,6 +352,7 @@ def _peer_server_command(
     network: str,
     name: str,
     repository: Path,
+    owner: str,
 ) -> list[str]:
     return [
         runtime,
@@ -360,6 +362,8 @@ def _peer_server_command(
         "never",
         "--name",
         name,
+        "--label",
+        f"{OWNER_LABEL}={owner}",
         "--network",
         network,
         *_security_options(),
@@ -438,6 +442,7 @@ def _isolated_command(
     phase: str,
     catalog_sha256: str,
     candidate_sha: str,
+    owner: str,
 ) -> list[str]:
     job_run_dir = run_dir.parent
     return [
@@ -447,6 +452,8 @@ def _isolated_command(
         "never",
         "--name",
         name,
+        "--label",
+        f"{OWNER_LABEL}={owner}",
         "--network",
         "none",
         *_security_options(),
@@ -799,25 +806,113 @@ def _negative_evidence_digests(
     return sorted(result, key=lambda item: item["path"])
 
 
-def _cleanup(runtime: str, containers: Sequence[str], network: str) -> list[str]:
-    errors: list[str] = []
-    for name in containers:
-        try:
-            completed = _run([runtime, "rm", "-f", name], check=False, timeout=20)
-        except IsolationBlocked as exc:
-            errors.append(str(exc))
-            continue
-        if completed.returncode not in (0, 1):
-            errors.append(f"failed to remove container {name}")
+def _resource_names(runtime: str, kind: str) -> set[str]:
+    command = (
+        [runtime, "container", "ls", "--all", "--format", "{{.Names}}"]
+        if kind == "container"
+        else [runtime, "network", "ls", "--format", "{{.Name}}"]
+    )
+    return set(_run(command, timeout=20).stdout.splitlines())
+
+
+def _require_unused_cleanup_names(
+    runtime: str, containers: Sequence[str], network: str
+) -> None:
+    existing_containers = _resource_names(runtime, "container")
+    existing_networks = _resource_names(runtime, "network")
+    if any(name in existing_containers for name in containers) or network in existing_networks:
+        raise IsolationBlocked("isolation resource name already exists")
+
+
+def _is_only_missing_error(kind: str, identifier: str, detail: str) -> bool:
+    prefix = r"(?:Error response from daemon: |Error: )?"
+    escaped = re.escape(identifier)
+    missing = (
+        rf"(?:No such container: {escaped}|No such object: {escaped})"
+        if kind == "container"
+        else rf"(?:No such network: {escaped}|network {escaped} not found)"
+    )
+    return re.fullmatch(prefix + missing, detail.strip()) is not None
+
+
+def _cleanup_resource(runtime: str, kind: str, name: str, owner: str) -> str | None:
+    inspect_command = [
+        runtime, kind, "inspect", name, "--format", "{{json .}}",
+    ]
     try:
-        completed = _run(
-            [runtime, "network", "rm", network], check=False, timeout=20
+        inspected = _run(inspect_command, check=False, timeout=20)
+    except IsolationBlocked as exc:
+        return f"cannot inspect {kind} {name} before cleanup: {exc}"
+    if inspected.returncode != 0:
+        detail = inspected.stderr.strip() or inspected.stdout.strip()
+        if inspected.returncode != 1 or not _is_only_missing_error(kind, name, detail):
+            return f"cannot inspect {kind} {name} ({inspected.returncode}): {detail}"
+        try:
+            remaining = _resource_names(runtime, kind)
+        except IsolationBlocked as exc:
+            return f"cannot confirm {kind} {name} is absent after cleanup: {exc}"
+        return None if name not in remaining else f"{kind} {name} still exists after cleanup"
+    try:
+        resource = json.loads(inspected.stdout)
+    except json.JSONDecodeError:
+        return f"cannot verify {kind} {name} ownership: invalid inspect response"
+    if not isinstance(resource, dict):
+        return f"cannot verify {kind} {name} ownership: invalid inspect response"
+    resource_id = resource.get("Id")
+    expected_name = f"/{name}" if kind == "container" else name
+    labels = (
+        resource.get("Config", {}).get("Labels")
+        if kind == "container" and isinstance(resource.get("Config"), dict)
+        else resource.get("Labels") if kind == "network" else None
+    )
+    if (
+        not isinstance(resource_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", resource_id) is None
+        or resource.get("Name") != expected_name
+        or not isinstance(labels, dict)
+        or labels.get(OWNER_LABEL) != owner
+    ):
+        return f"cannot verify {kind} {name} belongs to this run"
+    remove_command = (
+        [runtime, "rm", "-f", resource_id]
+        if kind == "container"
+        else [runtime, "network", "rm", resource_id]
+    )
+    try:
+        removed = _run(remove_command, check=False, timeout=20)
+    except IsolationBlocked as exc:
+        return f"cannot remove {kind} {name}: {exc}"
+    if removed.returncode == 0:
+        return None
+    detail = removed.stderr.strip() or removed.stdout.strip()
+    if removed.returncode != 1 or not _is_only_missing_error(kind, resource_id, detail):
+        return f"failed to remove {kind} {name} ({removed.returncode}): {detail}"
+    try:
+        remaining = _run(
+            [runtime, kind, "inspect", resource_id, "--format", "{{json .}}"],
+            check=False, timeout=20,
         )
     except IsolationBlocked as exc:
-        errors.append(str(exc))
-        return errors
-    if completed.returncode not in (0, 1):
-        errors.append(f"failed to remove network {network}")
+        return f"cannot confirm {kind} {name} is absent after cleanup: {exc}"
+    remaining_detail = remaining.stderr.strip() or remaining.stdout.strip()
+    if remaining.returncode != 1 or not _is_only_missing_error(
+        kind, resource_id, remaining_detail
+    ):
+        return f"cannot confirm {kind} {name} is absent after cleanup"
+    return None
+
+
+def _cleanup(
+    runtime: str, containers: Sequence[str], network: str, owner: str
+) -> list[str]:
+    errors: list[str] = []
+    for name in containers:
+        error = _cleanup_resource(runtime, "container", name, owner)
+        if error is not None:
+            errors.append(error)
+    error = _cleanup_resource(runtime, "network", network, owner)
+    if error is not None:
+        errors.append(error)
     return errors
 
 
@@ -926,8 +1021,10 @@ def _main(argv: list[str] | None = None) -> int:
     network = _safe_name(args.run_id, "network")
     server = _safe_name(args.run_id, "peer")
     isolated = _safe_name(args.run_id, "isolated")
+    owner = secrets.token_hex(16)
     cleanup_errors: list[str] = []
     cleanup_needed = False
+    created_containers: list[str] = []
     workspace_context = None
     exit_code = 2
     try:
@@ -1001,13 +1098,17 @@ def _main(argv: list[str] | None = None) -> int:
             report["reasons"].append("plan-only mode cannot produce isolation evidence")
             return exit_code
 
+        _require_unused_cleanup_names(args.runtime, [isolated, server], network)
         subnet_digest = hashlib.sha256(network.encode("ascii")).hexdigest()
         ipv6_subnet = f"fd42:{subnet_digest[:4]}:{subnet_digest[4:8]}::/64"
+        cleanup_needed = True
         _run(
             [
                 args.runtime,
                 "network",
                 "create",
+                "--label",
+                f"{OWNER_LABEL}={owner}",
                 "--internal",
                 "--ipv6",
                 "--subnet",
@@ -1016,10 +1117,10 @@ def _main(argv: list[str] | None = None) -> int:
             ],
             timeout=20,
         )
-        cleanup_needed = True
         report["runtime_evidence"]["controlled_peer_network"] = (
             _inspect_internal_network(args.runtime, network)
         )
+        created_containers.append(server)
         _run(
             _peer_server_command(
                 args.runtime,
@@ -1027,6 +1128,7 @@ def _main(argv: list[str] | None = None) -> int:
                 network,
                 server,
                 candidate_workspace,
+                owner,
             ),
             timeout=30,
         )
@@ -1092,7 +1194,9 @@ def _main(argv: list[str] | None = None) -> int:
             args.phase,
             args.catalog_sha256,
             args.candidate_sha,
+            owner,
         )
+        created_containers.append(isolated)
         completed = _run(isolated_command, check=False, timeout=900)
         report["runtime_evidence"]["isolated_container"] = (
             _inspect_isolated_container(
@@ -1180,7 +1284,9 @@ def _main(argv: list[str] | None = None) -> int:
         exit_code = 1
     finally:
         if cleanup_needed:
-            cleanup_errors = _cleanup(args.runtime, [isolated, server], network)
+            cleanup_errors = _cleanup(
+                args.runtime, list(reversed(created_containers)), network, owner
+            )
         if workspace_context is not None:
             workspace_context.__exit__(None, None, None)
         if cleanup_errors:

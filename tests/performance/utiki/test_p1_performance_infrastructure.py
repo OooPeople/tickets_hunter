@@ -358,9 +358,13 @@ def test_isolated_command_enforces_hard_egress_and_exact_inputs(
         catalog_sha256=CATALOG,
         candidate_sha=CANDIDATE,
         candidate_attestation_path="/artifacts/candidate-workspace-attestation.json",
+        owner="ours",
     )
 
     assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("--label") + 1] == (
+        f"{isolation.browser_isolation.OWNER_LABEL}=ours"
+    )
     assert "--read-only" in command
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges" in command

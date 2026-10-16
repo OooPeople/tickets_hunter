@@ -1,10 +1,17 @@
 """Pure selection and audit rules for the uTiki2 ticketing family."""
 
+import math
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Callable, TypeVar, TypedDict, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import util
+from keyword_rules import (
+    format_keyword_string,
+    is_keyword_excluded,
+    parse_keyword_string_to_array,
+)
 
 from .profiles import (
     PageKind,
@@ -13,164 +20,42 @@ from .profiles import (
     same_origin,
     unique_query,
 )
-
-
-DATE_CONTROL_FINGERPRINT_FIELDS = (
-    "tag_name", "id", "href", "resolved_href", "role", "type",
-    "target", "download", "ping", "formaction", "has_form", "onclick",
+from .domain.plans import (
+    AreaActionPlan,
+    DateActionPlan,
+    QuantityPlan,
+    SeatActionPlan,
+    SubmitPlan,
+    build_submit_plan,
+    submit_plan_is_valid,
+)
+from .domain.snapshots import (
+    AreaRow,
+    AreaSnapshot,
+    DATE_CONTROL_FINGERPRINT_FIELDS,
+    DateControl,
+    DateFingerprint,
+    DateRow,
+    DateSnapshot,
+    DialogSnapshot,
+    InvalidField,
+    MAX_SAFE_COUNT,
+    MAX_SAFE_COUNT_DIGITS,
+    MapArea,
+    PresentField,
+    QuantityRow,
+    QuantitySnapshot,
+    SeatCounter,
+    SeatFingerprint,
+    SeatRow,
+    SeatSnapshot,
+    SubmittedSeat,
+    TicketTypeRow,
+    parse_nonnegative_count,
 )
 
 
-@dataclass(frozen=True)
-class DateSnapshot:
-    ok: bool
-    page_url: str
-    document_id: str
-    rows: tuple
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class DateActionPlan:
-    row_index: int
-    control_index: int
-    text: str
-    action_kind: str
-    onclick: str
-    control_fingerprint: tuple
-    target_url: str = ""
-    performance_id: str = ""
-    product_id: str = ""
-    tenant_path: str = ""
-    host: str = ""
-    map_namespace: str = ""
-    fast_area_prefetch: bool = False
-    action_token: str = ""
-
-
-@dataclass(frozen=True)
-class AreaSnapshot:
-    ok: bool
-    page_url: str
-    document_id: str
-    rows: tuple
-    areas: tuple
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class AreaActionPlan:
-    text: str
-    area: str
-    price: str
-    status: str
-    rel: str
-    action_name: str
-    route: str
-    performance_id: str
-    price_area_id: str
-    group_id: str
-    stable_args: tuple
-    action_status: str
-    direct_destination: bool
-
-
-@dataclass(frozen=True)
-class QuantitySnapshot:
-    ok: bool
-    page_url: str
-    document_id: str
-    performance_id: str
-    group_id: str
-    price_area_id: str
-    quantity_limit_raw: str
-    rows: tuple
-    product_id: str = ""
-    reason: str = ""
-    performance_hidden_present: bool = False
-    product_hidden_present: bool = False
-    group_hidden_present: bool = False
-    price_area_hidden_present: bool = False
-    quantity_limit_present: bool = False
-
-
-@dataclass(frozen=True)
-class QuantityPlan:
-    page_url: str
-    document_id: str
-    performance_id: str
-    group_id: str
-    price_area_id: str
-    quantity_limit: int
-    target_key: str
-    target_name: str
-    ticket_number: int
-    page_type: str = "general_admission"
-    product_id: str = ""
-    performance_hidden_present: bool = False
-    product_hidden_present: bool = False
-    group_hidden_present: bool = False
-    price_area_hidden_present: bool = False
-    quantity_limit_present: bool = False
-    target_remaining_present: bool = False
-
-
-@dataclass(frozen=True)
-class SeatSnapshot:
-    ok: bool
-    page_url: str
-    document_id: str
-    performance_id: str = ""
-    group_id: str = ""
-    price_area_id: str = ""
-    product_id: str = ""
-    product_hidden_present: bool = False
-    quantity_limit_present: bool = False
-    quantity_limit_raw: str = ""
-    ticket_types: tuple = ()
-    seats: tuple = ()
-    submitted_seats: tuple = ()
-    counters: tuple = ()
-    visual_selected_count: int = 0
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class SeatActionPlan:
-    page_url: str
-    document_id: str
-    performance_id: str
-    group_id: str
-    price_area_id: str
-    product_id: str
-    action: str
-    ticket_number: int
-    ticket_type_fingerprint: tuple
-    ticket_type_id: str
-    ticket_type_name: str
-    selected_seat_fingerprints: tuple = ()
-    target_seat_fingerprints: tuple = ()
-    require_physical_adjacency: bool = False
-
-
-@dataclass(frozen=True)
-class SubmitPlan:
-    page_url: str
-    document_id: str
-    page_kind: PageKind
-    payload_fingerprint: tuple
-    selection_plan: SeatActionPlan | QuantityPlan
-
-
-@dataclass(frozen=True)
-class DialogSnapshot:
-    page_url: str
-    document_id: str
-    visible_count: int
-    text: str
-
-
-def _freeze_date_control(raw_control):
+def _freeze_date_control(raw_control: object) -> DateControl | None:
     """將場次控制項轉成不可變的安全資料。"""
 
     if not isinstance(raw_control, dict):
@@ -186,10 +71,10 @@ def _freeze_date_control(raw_control):
         (field, has_form if field == "has_form" else raw_control.get(field, ""))
         for field in DATE_CONTROL_FINGERPRINT_FIELDS
     )
-    return actionable, fingerprint
+    return DateControl(actionable, fingerprint)
 
 
-def parse_date_snapshot(raw_snapshot):
+def parse_date_snapshot(raw_snapshot: object) -> DateSnapshot | None:
     """固定一份無副作用的場次表觀察快照。"""
     if isinstance(raw_snapshot, DateSnapshot):
         return raw_snapshot
@@ -206,17 +91,20 @@ def parse_date_snapshot(raw_snapshot):
     rows = raw_snapshot.get("rows")
     if not isinstance(rows, list):
         return None
-    frozen_rows = []
+    frozen_rows: list[DateRow] = []
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("text"), str):
             return None
         controls = row.get("controls")
         if not isinstance(controls, list):
             return None
-        frozen_controls = tuple(_freeze_date_control(item) for item in controls)
-        if any(item is None for item in frozen_controls):
-            return None
-        frozen_rows.append((row["text"], frozen_controls))
+        frozen_controls: list[DateControl] = []
+        for item in controls:
+            control = _freeze_date_control(item)
+            if control is None:
+                return None
+            frozen_controls.append(control)
+        frozen_rows.append(DateRow(row["text"], tuple(frozen_controls)))
     page_url = raw_snapshot.get("page_url")
     document_id = raw_snapshot.get("document_id")
     if not isinstance(page_url, str) or not isinstance(document_id, str):
@@ -224,7 +112,7 @@ def parse_date_snapshot(raw_snapshot):
     return DateSnapshot(True, page_url, document_id, tuple(frozen_rows))
 
 
-def parse_area_snapshot(raw_snapshot):
+def parse_area_snapshot(raw_snapshot: object) -> AreaSnapshot | None:
     """在區域快照進入決策邏輯前轉成不可變資料。"""
     if isinstance(raw_snapshot, AreaSnapshot):
         return raw_snapshot
@@ -247,31 +135,41 @@ def parse_area_snapshot(raw_snapshot):
         return None
     if any(not isinstance(area, dict) for area in areas):
         return None
+    try:
+        frozen_rows = tuple(
+            AreaRow(row["area"], row["price"], row["status"], row["rel"])
+            for row in rows
+        )
+        frozen_areas = tuple(
+            MapArea(area["id"], area["href"], area["title"])
+            for area in areas
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
     return AreaSnapshot(
         ok=True,
         page_url=str(raw_snapshot.get("page_url") or ""),
         document_id=str(raw_snapshot.get("document_id") or ""),
-        rows=tuple(
-            (
-                str(row.get("area") or ""),
-                str(row.get("price") or ""),
-                str(row.get("status") or ""),
-                str(row.get("rel") or ""),
-            )
-            for row in rows
-        ),
-        areas=tuple(
-            (
-                str(area.get("id") or ""),
-                str(area.get("href") or ""),
-                str(area.get("title") or ""),
-            )
-            for area in areas
-        ),
+        rows=frozen_rows,
+        areas=frozen_areas,
     )
 
 
-def _quantity_presence_fields(raw_snapshot):
+class _QuantityPresence(TypedDict):
+    performance_hidden_present: bool
+    product_hidden_present: bool
+    group_hidden_present: bool
+    price_area_hidden_present: bool
+    quantity_limit_present: bool
+
+
+class _QuantityCandidate(TypedDict):
+    text: str
+    key: str
+    remaining_present: bool
+
+
+def _quantity_presence_fields(raw_snapshot: dict[str, object]) -> _QuantityPresence:
     """讀取票數快照中用來判斷欄位是否存在的資訊。"""
 
     product_id = str(raw_snapshot.get("product_id") or "")
@@ -297,7 +195,7 @@ def _quantity_presence_fields(raw_snapshot):
     }
 
 
-def parse_quantity_snapshot(raw_snapshot):
+def parse_quantity_snapshot(raw_snapshot: object) -> QuantitySnapshot | None:
     """固定一份自由入座票數頁面的觀察快照。"""
     if isinstance(raw_snapshot, QuantitySnapshot):
         return raw_snapshot
@@ -320,6 +218,28 @@ def parse_quantity_snapshot(raw_snapshot):
         not isinstance(row, dict) for row in rows
     ):
         return None
+    if type(raw_snapshot.get("quantity_limit_raw", "")) is not str:
+        return None
+    if (
+        "quantity_limit_present" in raw_snapshot
+        and type(raw_snapshot["quantity_limit_present"]) is not bool
+    ):
+        return None
+    try:
+        frozen_rows = tuple(
+            QuantityRow(
+                key=row["key"],
+                name=row["name"],
+                text=row["text"],
+                disabled=row["disabled"],
+                remaining_present=row["remaining_present"],
+                remaining_raw=row["remaining_raw"],
+                value=row["value"],
+            )
+            for row in rows
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
     return QuantitySnapshot(
         ok=True,
         page_url=str(raw_snapshot.get("page_url") or ""),
@@ -328,34 +248,28 @@ def parse_quantity_snapshot(raw_snapshot):
         group_id=str(raw_snapshot.get("group_id") or ""),
         price_area_id=str(raw_snapshot.get("price_area_id") or ""),
         quantity_limit_raw=str(raw_snapshot.get("quantity_limit_raw") or ""),
-        rows=tuple(
-            (
-                str(row.get("key") or ""),
-                str(row.get("name") or ""),
-                str(row.get("text") or ""),
-                bool(row.get("disabled")),
-                bool(row.get("remaining_present")),
-                str(row.get("remaining_raw") or ""),
-                str(row.get("value") or ""),
-            )
-            for row in rows
-        ),
+        rows=frozen_rows,
         product_id=str(raw_snapshot.get("product_id") or ""),
         **_quantity_presence_fields(raw_snapshot),
     )
 
 
-def _freeze_scalar_tuple(value):
+def _freeze_scalar_tuple(value: object) -> SeatFingerprint | None:
     """將純量序列轉成不可變元組。"""
 
     if not isinstance(value, (list, tuple)) or not value:
         return None
-    if any(not isinstance(item, (str, int, float, bool)) for item in value):
-        return None
-    return tuple(value)
+    items: list[str | int | float | bool] = []
+    for item in value:
+        if not isinstance(item, (str, int, float, bool)):
+            return None
+        if type(item) is float and not math.isfinite(item):
+            return None
+        items.append(item)
+    return tuple(items)
 
 
-def _freeze_ticket_type(raw_type):
+def _freeze_ticket_type(raw_type: object) -> TicketTypeRow | None:
     """將票種資料轉成不可變快照。"""
 
     if not isinstance(raw_type, dict):
@@ -370,14 +284,16 @@ def _freeze_ticket_type(raw_type):
         raw_type.get("counter_present")
     ) is not bool:
         return None
-    return (
-        fingerprint, raw_type["text"], raw_type["disabled"],
-        raw_type["type_id"], raw_type["type_name"],
-        raw_type["counter_present"], raw_type["counter_raw"],
+    return TicketTypeRow(
+        fingerprint=fingerprint, text=raw_type["text"],
+        disabled=raw_type["disabled"], type_id=raw_type["type_id"],
+        type_name=raw_type["type_name"],
+        counter_present=raw_type["counter_present"],
+        counter_raw=raw_type["counter_raw"],
     )
 
 
-def _freeze_seat(raw_seat):
+def _freeze_seat(raw_seat: object) -> SeatRow | None:
     """將可選座位資料轉成不可變快照。"""
 
     if not isinstance(raw_seat, dict):
@@ -395,27 +311,33 @@ def _freeze_seat(raw_seat):
         for field in geometry_fields
     ):
         return None
+    try:
+        if any(not math.isfinite(raw_seat[field]) for field in geometry_fields):
+            return None
+    except OverflowError:
+        return None
     if any(type(raw_seat.get(field)) is not bool for field in ("available", "selected")):
         return None
-    return (
-        fingerprint, raw_seat["title"], raw_seat["row_index"],
-        raw_seat["cell_index"], raw_seat["center_x"], raw_seat["center_y"],
-        raw_seat["width"], raw_seat["height"], raw_seat["available"],
-        raw_seat["selected"],
+    return SeatRow(
+        fingerprint=fingerprint, title=raw_seat["title"],
+        row_index=raw_seat["row_index"], cell_index=raw_seat["cell_index"],
+        center_x=raw_seat["center_x"], center_y=raw_seat["center_y"],
+        width=raw_seat["width"], height=raw_seat["height"],
+        available=raw_seat["available"], selected=raw_seat["selected"],
     )
 
 
-def _freeze_submitted_seat(raw_seat):
+def _freeze_submitted_seat(raw_seat: object) -> SubmittedSeat | None:
     """將已送出的座位資料轉成不可變快照。"""
 
     if not isinstance(raw_seat, dict):
         return None
     if any(not isinstance(raw_seat.get(field), str) for field in ("A", "Y", "Z")):
         return None
-    return raw_seat["A"], raw_seat["Y"], raw_seat["Z"]
+    return SubmittedSeat(raw_seat["A"], raw_seat["Y"], raw_seat["Z"])
 
 
-def _freeze_seat_counter(raw_counter):
+def _freeze_seat_counter(raw_counter: object) -> SeatCounter | None:
     """將座位票種計數資料轉成不可變快照。"""
 
     if not isinstance(raw_counter, dict):
@@ -424,57 +346,125 @@ def _freeze_seat_counter(raw_counter):
         raw_counter.get("counter_raw"), str
     ):
         return None
-    return raw_counter["id"], raw_counter["counter_raw"]
+    return SeatCounter(raw_counter["id"], raw_counter["counter_raw"])
 
 
-def parse_seat_snapshot(raw_snapshot):
+_Item = TypeVar("_Item")
+
+
+def _freeze_seat_items(
+    raw_snapshot: dict[str, object], name: str, parser: Callable[[object], _Item | None]
+) -> tuple[_Item, ...] | None:
+    raw_items = raw_snapshot.get(name)
+    if not isinstance(raw_items, list):
+        return None
+    try:
+        frozen = tuple(parser(item) for item in raw_items)
+    except (TypeError, ValueError):
+        return None
+    if any(item is None for item in frozen):
+        return None
+    return cast(tuple[_Item, ...], frozen)
+
+
+class _SeatScalars(TypedDict):
+    page_url: str
+    document_id: str
+    performance_id: str
+    group_id: str
+    price_area_id: str
+    product_id: str
+    product_hidden_present: bool
+    quantity_limit_present: bool
+    quantity_limit_raw: str
+    visual_selected_count: int
+
+
+def _seat_scalars(raw: dict[str, object]) -> _SeatScalars | None:
+    page_url = raw.get("page_url")
+    document_id = raw.get("document_id")
+    performance_id = raw.get("performance_id")
+    group_id = raw.get("group_id")
+    price_area_id = raw.get("price_area_id")
+    product_id = raw.get("product_id")
+    product_hidden_present = raw.get("product_hidden_present")
+    quantity_limit_present = raw.get("quantity_limit_present")
+    quantity_limit_raw = raw.get("quantity_limit_raw")
+    visual_selected_count = raw.get("visual_selected_count")
+    if not (
+        isinstance(page_url, str) and type(page_url) is str
+        and isinstance(document_id, str) and type(document_id) is str
+        and isinstance(performance_id, str) and type(performance_id) is str
+        and isinstance(group_id, str) and type(group_id) is str
+        and isinstance(price_area_id, str) and type(price_area_id) is str
+        and isinstance(product_id, str) and type(product_id) is str
+        and isinstance(quantity_limit_raw, str) and type(quantity_limit_raw) is str
+        and isinstance(product_hidden_present, bool) and type(product_hidden_present) is bool
+        and isinstance(quantity_limit_present, bool) and type(quantity_limit_present) is bool
+        and isinstance(visual_selected_count, int) and type(visual_selected_count) is int
+        and visual_selected_count >= 0
+    ):
+        return None
+    return {
+        "page_url": page_url,
+        "document_id": document_id,
+        "performance_id": performance_id,
+        "group_id": group_id,
+        "price_area_id": price_area_id,
+        "product_id": product_id,
+        "product_hidden_present": product_hidden_present,
+        "quantity_limit_present": quantity_limit_present,
+        "quantity_limit_raw": quantity_limit_raw,
+        "visual_selected_count": visual_selected_count,
+    }
+
+
+def parse_seat_snapshot(raw_snapshot: object) -> SeatSnapshot | None:
     """固定票種與劃位座位的合併觀察快照。"""
     if isinstance(raw_snapshot, SeatSnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
         return None
-    if raw_snapshot.get("ok") is False:
+    raw: dict[str, object] = raw_snapshot
+    if raw.get("ok") is False:
         return SeatSnapshot(
             ok=False,
-            page_url=str(raw_snapshot.get("page_url") or ""),
-            document_id=str(raw_snapshot.get("document_id") or ""),
-            reason=str(raw_snapshot.get("reason") or "invalid-result"),
+            page_url=str(raw.get("page_url") or ""),
+            document_id=str(raw.get("document_id") or ""),
+            reason=str(raw.get("reason") or "invalid-result"),
         )
-    collections = {}
-    parsers = {
-        "ticket_types": _freeze_ticket_type,
-        "seats": _freeze_seat,
-        "submitted_seats": _freeze_submitted_seat,
-        "counters": _freeze_seat_counter,
-    }
-    for name, parser in parsers.items():
-        raw_items = raw_snapshot.get(name)
-        if not isinstance(raw_items, list):
-            return None
-        items = tuple(parser(item) for item in raw_items)
-        if any(item is None for item in items):
-            return None
-        collections[name] = items
-    scalar_types = {
-        "page_url": str, "document_id": str, "performance_id": str,
-        "group_id": str, "price_area_id": str, "product_id": str,
-        "product_hidden_present": bool,
-        "quantity_limit_present": bool, "quantity_limit_raw": str,
-        "visual_selected_count": int,
-    }
-    if any(
-        type(raw_snapshot.get(name)) is not expected
-        for name, expected in scalar_types.items()
-    ):
+    ticket_types: tuple[TicketTypeRow, ...] | None = _freeze_seat_items(
+        raw, "ticket_types", _freeze_ticket_type
+    )
+    if ticket_types is None:
         return None
-    if raw_snapshot["visual_selected_count"] < 0:
+    seats: tuple[SeatRow, ...] | None = _freeze_seat_items(raw, "seats", _freeze_seat)
+    if seats is None:
         return None
-    return SeatSnapshot(ok=True, **collections, **{
-        name: raw_snapshot[name] for name in scalar_types
-    })
+    submitted_seats: tuple[SubmittedSeat, ...] | None = _freeze_seat_items(
+        raw, "submitted_seats", _freeze_submitted_seat
+    )
+    if submitted_seats is None:
+        return None
+    counters: tuple[SeatCounter, ...] | None = _freeze_seat_items(
+        raw, "counters", _freeze_seat_counter
+    )
+    if counters is None:
+        return None
+    scalars = _seat_scalars(raw)
+    if scalars is None:
+        return None
+    return SeatSnapshot(
+        ok=True,
+        ticket_types=ticket_types,
+        seats=seats,
+        submitted_seats=submitted_seats,
+        counters=counters,
+        **scalars,
+    )
 
 
-def parse_dialog_snapshot(raw_snapshot):
+def parse_dialog_snapshot(raw_snapshot: object) -> DialogSnapshot | None:
     """固定一份無副作用的可見送出對話框快照。"""
     if isinstance(raw_snapshot, DialogSnapshot):
         return raw_snapshot
@@ -490,9 +480,7 @@ def parse_dialog_snapshot(raw_snapshot):
     page_url = raw_snapshot.get("page_url")
     document_id = raw_snapshot.get("document_id")
     text = raw_snapshot.get("text")
-    if not all(isinstance(value, str) for value in (
-        page_url, document_id, text
-    )):
+    if not isinstance(page_url, str) or not isinstance(document_id, str) or not isinstance(text, str):
         return None
     if not page_url or not document_id:
         return None
@@ -506,13 +494,13 @@ def parse_dialog_snapshot(raw_snapshot):
     )
 
 
-def parse_keyword_groups(keyword_string):
+def parse_keyword_groups(keyword_string: str | None) -> Iterable[object]:
     """解析設定中的關鍵字格式，並相容字串或分號分組輸入。"""
     raw = (keyword_string or "").strip()
     if not raw:
         return []
-    parsed = util.parse_keyword_string_to_array(raw)
-    if parsed:
+    parsed: object = parse_keyword_string_to_array(raw)
+    if parsed and isinstance(parsed, (list, tuple, dict, str)):
         return parsed
     delimiter = ";" if ";" in raw else ","
     return [
@@ -522,20 +510,36 @@ def parse_keyword_groups(keyword_string):
     ]
 
 
-def matches_keyword_group(text, keyword_group):
+def matches_keyword_group(text: object, keyword_group: object) -> bool:
     """判斷文字是否符合一組必要與排除關鍵字。"""
 
-    formatted_text = util.format_keyword_string(text or "")
+    if not isinstance(text, str):
+        return False
+    formatted_text: object = format_keyword_string(text or "")
+    if not isinstance(formatted_text, str):
+        return False
     if isinstance(keyword_group, (list, tuple)):
         parts = [str(item).strip() for item in keyword_group if str(item).strip()]
     else:
         parts = [part for part in str(keyword_group or "").split(" ") if part]
-    return bool(parts) and all(
-        util.format_keyword_string(part) in formatted_text for part in parts
-    )
+    for part in parts:
+        formatted_part: object = format_keyword_string(part)
+        if not isinstance(formatted_part, str) or formatted_part not in formatted_text:
+            return False
+    return bool(parts)
 
 
-def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=False):
+def _keyword_excluded(config_dict: Mapping[str, object], row_text: str) -> bool:
+    raw = config_dict.get("keyword_exclude", "")
+    return not isinstance(raw, str) or is_keyword_excluded(raw, row_text)
+
+
+def choose_candidate_index(
+    candidates: Sequence[Mapping[str, object]],
+    keyword_string: str | None,
+    mode: str,
+    allow_fallback: bool = False,
+) -> int | None:
     """依關鍵字優先序選出原始候選項目索引。"""
     if not candidates:
         return None
@@ -548,15 +552,44 @@ def choose_candidate_index(candidates, keyword_string, mode, allow_fallback=Fals
                 if matches_keyword_group(item[1].get("text", ""), keyword_group)
             ]
             if matched:
-                target = util.get_target_item_from_matched_list(matched, mode)
-                return target[0] if target else None
+                target: object = util.get_target_item_from_matched_list(
+                    matched, mode
+                )
+                if isinstance(target, tuple) and target and type(target[0]) is int:
+                    return target[0]
+                return None
         if not allow_fallback:
             return None
     target = util.get_target_item_from_matched_list(indexed, mode)
-    return target[0] if target else None
+    if isinstance(target, tuple) and target and type(target[0]) is int:
+        return target[0]
+    return None
 
 
-def _parse_date_target_url(target_value, current_url):
+class _DateTarget(TypedDict):
+    target_url: str
+    performance_id: str
+    product_id: str
+    tenant_path: str
+    host: str
+    map_namespace: str
+    fast_area_prefetch: bool
+
+
+_DateAction = tuple[str, _DateTarget | None, str]
+
+
+class _DateCandidate(TypedDict):
+    text: str
+    row_index: int
+    control_index: int
+    fingerprint: DateFingerprint
+    action: _DateAction
+
+
+def _parse_date_target_url(
+    target_value: object, current_url: str
+) -> _DateTarget | None:
     """從場次目標解析並驗證導覽網址。"""
 
     if classify_utiki_page(current_url) != PageKind.DATE:
@@ -604,7 +637,7 @@ def _parse_date_target_url(target_value, current_url):
     }
 
 
-def _parse_date_target(onclick, current_url):
+def _parse_date_target(onclick: object, current_url: str) -> _DateTarget | None:
     """從場次按鈕事件解析一般導覽目標。"""
 
     match = re.fullmatch(
@@ -615,7 +648,7 @@ def _parse_date_target(onclick, current_url):
     return _parse_date_target_url(match.group("url"), current_url) if match else None
 
 
-def _parse_vip_date_token(onclick, current_url):
+def _parse_vip_date_token(onclick: object, current_url: str) -> str | None:
     """從場次按鈕事件解析 VIP 導覽識別。"""
 
     if classify_utiki_page(current_url) != PageKind.DATE:
@@ -632,7 +665,7 @@ def _parse_vip_date_token(onclick, current_url):
     return match.group("token") if match else None
 
 
-def _safe_date_button_handler(onclick):
+def _safe_date_button_handler(onclick: object) -> bool:
     """驗證場次按鈕事件是否屬於允許的安全格式。"""
 
     source = str(onclick or "").strip()
@@ -654,12 +687,14 @@ def _safe_date_button_handler(onclick):
     )
 
 
-def _classify_date_control(fingerprint, current_url):
+def _classify_date_control(
+    fingerprint: DateFingerprint, current_url: str
+) -> _DateAction | None:
     """依控制項指紋與目前網址判別場次操作類型。"""
 
     control = dict(fingerprint)
-    tag_name = control.get("tag_name", "").upper()
-    onclick = control.get("onclick", "")
+    tag_name = cast(str, control.get("tag_name", "")).upper()
+    onclick = cast(str, control.get("onclick", ""))
     if tag_name == "A":
         if onclick or any(control.get(key, "") for key in ("target", "download", "ping")):
             return None
@@ -674,7 +709,7 @@ def _classify_date_control(fingerprint, current_url):
     vip_token = _parse_vip_date_token(onclick, current_url)
     if vip_token:
         return "vip_native", None, vip_token
-    control_type = control.get("type", "").lower()
+    control_type = cast(str, control.get("type", "")).lower()
     if (
         tag_name != "BUTTON"
         or control.get("formaction", "")
@@ -686,25 +721,27 @@ def _classify_date_control(fingerprint, current_url):
     return "structural_native", None, ""
 
 
-def _date_candidates(snapshot, config_dict):
+def _date_candidates(
+    snapshot: DateSnapshot, config_dict: dict[str, object]
+) -> list[_DateCandidate]:
     """從場次快照建立符合設定的候選清單。"""
 
-    candidates = []
-    for row_index, (row_text, controls) in enumerate(snapshot.rows):
+    candidates: list[_DateCandidate] = []
+    for row_index, row in enumerate(snapshot.rows):
         actionable = [
-            (index, fingerprint)
-            for index, (is_actionable, fingerprint) in enumerate(controls)
-            if is_actionable
+            (index, control.fingerprint)
+            for index, control in enumerate(row.controls)
+            if control.actionable
         ]
-        if len(actionable) != 1 or not row_text:
+        if len(actionable) != 1 or not row.text:
             continue
-        if util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
+        if _keyword_excluded(config_dict, row.text):
             continue
         control_index, fingerprint = actionable[0]
         action = _classify_date_control(fingerprint, snapshot.page_url)
         if action:
             candidates.append({
-                "text": row_text,
+                "text": row.text,
                 "row_index": row_index,
                 "control_index": control_index,
                 "fingerprint": fingerprint,
@@ -713,7 +750,9 @@ def _date_candidates(snapshot, config_dict):
     return candidates
 
 
-def select_date_snapshot(snapshot, config_dict):
+def select_date_snapshot(
+    snapshot: object, config_dict: dict[str, object]
+) -> DateActionPlan | None:
     """從不可變場次快照選出一個安全操作。"""
     snapshot = parse_date_snapshot(snapshot)
     if (
@@ -727,36 +766,45 @@ def select_date_snapshot(snapshot, config_dict):
         return None
     candidates = _date_candidates(snapshot, config_dict)
     date_config = config_dict.get("date_auto_select", {})
+    if not isinstance(date_config, Mapping):
+        return None
+    keyword = date_config.get("date_keyword", "")
+    mode = date_config.get("mode", "from top to bottom")
+    allow_fallback = config_dict.get("date_auto_fallback", False)
+    if (
+        not isinstance(keyword, str)
+        or not isinstance(mode, str)
+        or not isinstance(allow_fallback, bool)
+    ):
+        return None
     target_index = choose_candidate_index(
         candidates,
-        date_config.get("date_keyword", "").strip(),
-        date_config.get("mode", "from top to bottom"),
-        config_dict.get("date_auto_fallback", False),
+        keyword.strip(), mode, allow_fallback,
     )
     if target_index is None:
         return None
     target = candidates[target_index]
     action_kind, date_target, action_token = target["action"]
-    date_target = date_target or {}
+    target_data: Mapping[str, object] = date_target or {}
     return DateActionPlan(
         row_index=target["row_index"],
         control_index=target["control_index"],
         text=target["text"],
         action_kind=action_kind,
-        onclick=dict(target["fingerprint"]).get("onclick", ""),
+        onclick=cast(str, dict(target["fingerprint"]).get("onclick", "")),
         control_fingerprint=target["fingerprint"],
-        target_url=date_target.get("target_url", ""),
-        performance_id=date_target.get("performance_id", ""),
-        product_id=date_target.get("product_id", ""),
-        tenant_path=date_target.get("tenant_path", ""),
-        host=date_target.get("host", ""),
-        map_namespace=date_target.get("map_namespace", ""),
-        fast_area_prefetch=bool(date_target.get("fast_area_prefetch", False)),
+        target_url=cast(str, target_data.get("target_url", "")),
+        performance_id=cast(str, target_data.get("performance_id", "")),
+        product_id=cast(str, target_data.get("product_id", "")),
+        tenant_path=cast(str, target_data.get("tenant_path", "")),
+        host=cast(str, target_data.get("host", "")),
+        map_namespace=cast(str, target_data.get("map_namespace", "")),
+        fast_area_prefetch=bool(target_data.get("fast_area_prefetch", False)),
         action_token=action_token,
     )
 
 
-def date_plan_matches_snapshot(snapshot, plan):
+def date_plan_matches_snapshot(snapshot: object, plan: object) -> bool:
     """驗證不可變場次計畫確實由指定快照產生。"""
     if not isinstance(snapshot, DateSnapshot) or not isinstance(
         plan, DateActionPlan
@@ -770,12 +818,13 @@ def date_plan_matches_snapshot(snapshot, plan):
         or not 0 <= plan.row_index < len(snapshot.rows)
     ):
         return False
-    row_text, controls = snapshot.rows[plan.row_index]
-    if not 0 <= plan.control_index < len(controls):
+    row = snapshot.rows[plan.row_index]
+    if not 0 <= plan.control_index < len(row.controls):
         return False
-    actionable, fingerprint = controls[plan.control_index]
+    control = row.controls[plan.control_index]
+    fingerprint = control.fingerprint
     if (
-        not actionable or plan.text != row_text
+        not control.actionable or plan.text != row.text
         or plan.control_fingerprint != fingerprint
         or tuple(key for key, _value in fingerprint)
         != DATE_CONTROL_FINGERPRINT_FIELDS
@@ -786,7 +835,7 @@ def date_plan_matches_snapshot(snapshot, plan):
     if not action:
         return False
     action_kind, target, action_token = action
-    target = target or {}
+    target_data: Mapping[str, object] = target or {}
     return (
         plan.action_kind == action_kind
         and plan.action_token == action_token
@@ -795,30 +844,70 @@ def date_plan_matches_snapshot(snapshot, plan):
             plan.tenant_path, plan.host, plan.map_namespace,
             plan.fast_area_prefetch,
         ) == (
-            target.get("target_url", ""), target.get("performance_id", ""),
-            target.get("product_id", ""), target.get("tenant_path", ""),
-            target.get("host", ""), target.get("map_namespace", ""),
-            bool(target.get("fast_area_prefetch", False)),
+            target_data.get("target_url", ""), target_data.get("performance_id", ""),
+            target_data.get("product_id", ""), target_data.get("tenant_path", ""),
+            target_data.get("host", ""), target_data.get("map_namespace", ""),
+            bool(target_data.get("fast_area_prefetch", False)),
         )
     )
 
 
-def availability_has_tickets(status_text, ticket_number=1):
+def availability_has_tickets(status_text: object, ticket_number: object = 1) -> bool:
     """判斷區域庫存文字是否足以供應要求票數。"""
 
+    requested = parse_nonnegative_count(ticket_number)
+    if not isinstance(requested, PresentField) or requested.value == 0:
+        return False
+    if type(status_text) is not str:
+        return False
     text = re.sub(r"\s+", "", status_text or "")
     if not text or "售完" in text or text in {"0", "0張", "無"}:
         return False
-    if re.fullmatch(r"\d+", text):
-        return int(text) >= int(ticket_number)
-    if any(marker in text for marker in ("剩餘", "尚餘", "剩", "餘")):
-        match = re.search(r"(\d+)", text)
-        if match and int(match.group(1)) < int(ticket_number):
-            return False
-    return True
+    if text == "熱賣中":
+        return True
+    match = re.fullmatch(r"([0-9]+)(?:張)?", text)
+    if match is None:
+        match = re.fullmatch(r"(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?", text)
+    if match is None:
+        return False
+    available = parse_nonnegative_count(match.group(1))
+    return isinstance(available, PresentField) and available.value >= requested.value
 
 
-def parse_area_send_action(href, expected_performance_id):
+class _AreaAction(TypedDict):
+    action_name: str
+    route: str
+    performance_id: str
+    price_area_id: str
+    group_id: str
+    stable_args: list[str]
+    status: str
+
+
+class _MapTitle(TypedDict):
+    area: str
+    price: str
+    status: str
+
+
+class _MapAreaTarget(TypedDict):
+    href: str
+    title: str
+
+
+class _AreaCandidate(TypedDict):
+    text: str
+    area: str
+    price: str
+    status: str
+    rel: str
+    map_action: _AreaAction
+    destination: _AreaAction | None
+
+
+def parse_area_send_action(
+    href: object, expected_performance_id: str
+) -> _AreaAction | None:
     """解析區域連結中的一般送出操作。"""
 
     match = re.fullmatch(
@@ -848,7 +937,9 @@ def parse_area_send_action(href, expected_performance_id):
     }
 
 
-def parse_area_send_a_action(href, expected_performance_id):
+def parse_area_send_a_action(
+    href: object, expected_performance_id: str
+) -> _AreaAction | None:
     """解析區域連結中的替代送出操作。"""
 
     match = re.fullmatch(
@@ -881,7 +972,7 @@ def parse_area_send_a_action(href, expected_performance_id):
     }
 
 
-def parse_map_title(title):
+def parse_map_title(title: object) -> _MapTitle | None:
     """解析座位區圖標題中的區域與票價資訊。"""
 
     match = re.fullmatch(
@@ -899,7 +990,12 @@ def parse_map_title(title):
     }
 
 
-def map_title_matches_available_row(map_title, area_text, price_text, ticket_number):
+def map_title_matches_available_row(
+    map_title: _MapTitle | None,
+    area_text: str,
+    price_text: str,
+    ticket_number: object,
+) -> bool:
     """判斷區域圖標題是否對應有足夠庫存的區域列。"""
 
     return bool(
@@ -910,24 +1006,33 @@ def map_title_matches_available_row(map_title, area_text, price_text, ticket_num
     )
 
 
-def _index_map_areas(areas):
+def _index_map_areas(areas: object) -> dict[str, list[_MapAreaTarget]] | None:
     """依區域圖識別建立可查詢的區域索引。"""
 
     if not isinstance(areas, tuple) or not 0 < len(areas) <= 500:
         return None
-    indexed = {}
-    for area_id, href, title in areas:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", area_id) or not href:
+    indexed: dict[str, list[_MapAreaTarget]] = {}
+    for area in areas:
+        if not isinstance(area, MapArea):
             return None
-        indexed.setdefault(area_id, []).append({"href": href, "title": title})
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", area.area_id) or not area.href:
+            return None
+        indexed.setdefault(area.area_id, []).append({"href": area.href, "title": area.title})
     return indexed
 
 
-def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
-                      expected_performance_id, ticket_number, require_direct):
+def _area_map_options(
+    indexed_areas: dict[str, list[_MapAreaTarget]],
+    rel_tokens: list[str],
+    area_text: str,
+    price_text: str,
+    expected_performance_id: str,
+    ticket_number: int,
+    require_direct: bool,
+) -> list[tuple[str, _AreaAction, _AreaAction | None]]:
     """建立一筆區域列可用的地圖目的地選項。"""
 
-    options = []
+    options: list[tuple[str, _AreaAction, _AreaAction | None]] = []
     for rel in rel_tokens:
         for map_area in indexed_areas.get(rel, []):
             map_title = parse_map_title(map_area["title"])
@@ -952,15 +1057,20 @@ def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
     return options
 
 
-def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
-                    ticket_number, require_direct):
+def _area_candidate(
+    row: AreaRow,
+    indexed_areas: dict[str, list[_MapAreaTarget]],
+    config_dict: dict[str, object],
+    expected_performance_id: str,
+    ticket_number: int,
+    require_direct: bool,
+) -> _AreaCandidate | None:
     """依設定與庫存將區域列轉成候選項目。"""
 
-    area, price, status, rel = row
-    area_text = re.sub(r"\s+", " ", area).strip()
-    price_text = re.sub(r"\s+", " ", price).strip()
-    status_text = re.sub(r"\s+", " ", status).strip()
-    rel_tokens = rel.split()
+    area_text = re.sub(r"\s+", " ", row.area).strip()
+    price_text = re.sub(r"\s+", " ", row.price).strip()
+    status_text = re.sub(r"\s+", " ", row.status).strip()
+    rel_tokens = row.rel.split()
     if not area_text or not rel_tokens or not availability_has_tickets(
         status_text, ticket_number
     ):
@@ -968,7 +1078,7 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
     if any(not re.fullmatch(r"[A-Za-z0-9_-]+", token) for token in rel_tokens):
         return None
     match_text = f"{area_text} {price_text}".strip()
-    if util.reset_row_text_if_match_keyword_exclude(config_dict, match_text):
+    if _keyword_excluded(config_dict, match_text):
         return None
     options = _area_map_options(
         indexed_areas, rel_tokens, area_text, price_text,
@@ -977,11 +1087,14 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
     if not options:
         return None
     if require_direct:
-        identities = {
-            (item[2]["route"], item[2]["performance_id"],
-             item[2]["price_area_id"], item[2]["group_id"])
-            for item in options
-        }
+        identities: set[tuple[str, str, str, str]] = set()
+        for _rel, _action, destination in options:
+            if destination is None:
+                return None
+            identities.add((
+                destination["route"], destination["performance_id"],
+                destination["price_area_id"], destination["group_id"],
+            ))
         if len(identities) != 1:
             return None
     rel, action, destination = options[0]
@@ -992,8 +1105,12 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
     }
 
 
-def select_area_snapshot(snapshot, config_dict, expected_performance_id,
-                         require_direct_destination=True):
+def select_area_snapshot(
+    snapshot: object,
+    config_dict: dict[str, object],
+    expected_performance_id: str,
+    require_direct_destination: bool = True,
+) -> AreaActionPlan | None:
     """從批次 DOM 與地圖快照選出一個區域。"""
     snapshot = parse_area_snapshot(snapshot)
     if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
@@ -1003,23 +1120,33 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
     indexed_areas = _index_map_areas(snapshot.areas)
     if indexed_areas is None:
         return None
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    candidates = []
+    requested = parse_nonnegative_count(config_dict.get("ticket_number", 1))
+    if not isinstance(requested, PresentField) or requested.value == 0:
+        return None
+    ticket_number = requested.value
+    candidates: list[_AreaCandidate] = []
     for row in snapshot.rows:
         candidate = _area_candidate(
             row, indexed_areas, config_dict, expected_performance_id,
             ticket_number, require_direct_destination,
         )
-        if candidate is False:
-            return None
         if candidate:
             candidates.append(candidate)
     area_config = config_dict.get("area_auto_select", {})
+    if not isinstance(area_config, Mapping):
+        return None
+    keyword = area_config.get("area_keyword", "")
+    mode = area_config.get("mode", "from top to bottom")
+    allow_fallback = config_dict.get("area_auto_fallback", False)
+    if (
+        not isinstance(keyword, str)
+        or not isinstance(mode, str)
+        or not isinstance(allow_fallback, bool)
+    ):
+        return None
     target_index = choose_candidate_index(
         candidates,
-        area_config.get("area_keyword", "").strip(),
-        area_config.get("mode", "from top to bottom"),
-        config_dict.get("area_auto_fallback", False),
+        keyword.strip(), mode, allow_fallback,
     )
     if target_index is None:
         return None
@@ -1042,7 +1169,37 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
     )
 
 
-def seats_are_physically_adjacent(first, second):
+class _SeatGeometry(TypedDict, total=False):
+    center_x: int | float
+    center_y: int | float
+    width: int | float
+    height: int | float
+
+
+class _SeatChoice(_SeatGeometry):
+    index: int
+    title: str
+    row_index: int
+    cell_index: int
+    available: bool
+    selected: bool
+
+
+class _ParsedSeatChoice(_SeatChoice):
+    _row_number: int
+    _seat_number: int
+
+
+class _SeatBlock(TypedDict):
+    seats: list[_ParsedSeatChoice]
+    row_number: int
+    min_seat_number: int
+    max_seat_number: int
+    dom_index: int
+    touches_aisle: bool
+
+
+def seats_are_physically_adjacent(first: _SeatChoice, second: _SeatChoice) -> bool:
     """判斷 uTiki 水平或旋轉垂直座位圖中的兩席是否相鄰。"""
     geometry = ("center_x", "center_y", "width", "height")
     if all(
@@ -1066,17 +1223,26 @@ def seats_are_physically_adjacent(first, second):
     )
 
 
-def _seat_number(seat):
+def _seat_number(seat: _SeatChoice) -> tuple[int, int] | None:
     """解析座位資料中的數字座號。"""
 
     match = re.search(r"-(\d+)排-(\d+)號\s*$", str(seat.get("title") or ""))
-    return (int(match.group(1)), int(match.group(2))) if match else None
+    if match is None:
+        return None
+    if any(len(match.group(index)) > MAX_SAFE_COUNT_DIGITS for index in (1, 2)):
+        return None
+    row, number = int(match.group(1)), int(match.group(2))
+    if row > MAX_SAFE_COUNT or number > MAX_SAFE_COUNT:
+        return None
+    return row, number
 
 
-def _seat_row_edges(seats, strict_titles):
+def _seat_row_edges(
+    seats: Sequence[_SeatChoice], strict_titles: bool
+) -> dict[int, list[int]] | None:
     """找出各排座位在目前清單中的邊界。"""
 
-    edges = {}
+    edges: dict[int, list[int]] = {}
     for seat in seats:
         numbers = _seat_number(seat)
         if numbers is None:
@@ -1090,17 +1256,21 @@ def _seat_row_edges(seats, strict_titles):
     return edges
 
 
-def _seat_block_candidates(available, needed, row_edges):
+def _seat_block_candidates(
+    available: Sequence[_SeatChoice], needed: int, row_edges: dict[int, list[int]]
+) -> list[_SeatBlock]:
     """建立符合張數需求的連續座位區塊候選。"""
 
-    rows = {}
+    rows: dict[int, list[_ParsedSeatChoice]] = {}
     for seat in available:
         numbers = _seat_number(seat)
         if numbers is None:
             continue
-        parsed = dict(seat, _row_number=numbers[0], _seat_number=numbers[1])
+        parsed = cast(_ParsedSeatChoice, dict(
+            seat, _row_number=numbers[0], _seat_number=numbers[1]
+        ))
         rows.setdefault(numbers[0], []).append(parsed)
-    candidates = []
+    candidates: list[_SeatBlock] = []
     for row_number, row in rows.items():
         ordered = sorted(row, key=lambda item: item["_seat_number"])
         for start in range(len(ordered) - needed + 1):
@@ -1122,14 +1292,17 @@ def _seat_block_candidates(available, needed, row_edges):
     return candidates
 
 
-def _sort_seat_blocks(candidates, seat_sorting):
+def _sort_seat_blocks(
+    candidates: list[_SeatBlock], seat_sorting: str
+) -> list[_SeatBlock]:
     """依座位排序設定排列連續座位區塊。"""
 
+    if seat_sorting == "display":
+        return sorted(candidates, key=lambda item: item["dom_index"])
+    key: Callable[[_SeatBlock], tuple[int, ...]]
     if seat_sorting == "row_asc_aisle":
         candidates = [item for item in candidates if item["touches_aisle"]]
         key = lambda item: (item["row_number"], item["dom_index"])
-    elif seat_sorting == "display":
-        key = lambda item: item["dom_index"]
     elif seat_sorting == "row_asc_seat_desc":
         key = lambda item: (
             item["row_number"], -item["max_seat_number"], item["dom_index"]
@@ -1145,7 +1318,9 @@ def _sort_seat_blocks(candidates, seat_sorting):
     return sorted(candidates, key=key)
 
 
-def _numeric_seat_key(seat, seat_sorting):
+def _numeric_seat_key(
+    seat: _SeatChoice, seat_sorting: str
+) -> tuple[int, int, int, int, int]:
     """建立數字座號的排序鍵。"""
 
     numbers = _seat_number(seat)
@@ -1162,8 +1337,12 @@ def _numeric_seat_key(seat, seat_sorting):
     )
 
 
-def select_seat_indexes(seats, needed, allow_non_adjacent=False,
-                        seat_sorting="row_seat"):
+def select_seat_indexes(
+    seats: Sequence[_SeatChoice],
+    needed: int,
+    allow_non_adjacent: bool = False,
+    seat_sorting: str = "row_seat",
+) -> list[int]:
     """保留既有優先規則後選出劃位座位索引。"""
     if needed <= 0:
         return []
@@ -1197,7 +1376,7 @@ def select_seat_indexes(seats, needed, allow_non_adjacent=False,
     return [seat["index"] for seat in available[:needed]]
 
 
-def _seat_snapshot_route_is_valid(snapshot):
+def _seat_snapshot_route_is_valid(snapshot: SeatSnapshot) -> bool:
     """驗證座位快照所屬的頁面路由。"""
 
     query = unique_query(snapshot.page_url)
@@ -1217,15 +1396,16 @@ def _seat_snapshot_route_is_valid(snapshot):
     )
 
 
-def _counter_value(raw_value):
+def _counter_value(raw_value: object) -> int | None:
     """將票種計數值正規化為整數。"""
 
-    if not re.fullmatch(r"\d+", str(raw_value or "")):
+    if type(raw_value) is not str or raw_value != raw_value.strip():
         return None
-    return int(raw_value)
+    observed = parse_nonnegative_count(raw_value)
+    return observed.value if isinstance(observed, PresentField) else None
 
 
-def _seat_snapshot_structure_is_valid(snapshot):
+def _seat_snapshot_structure_is_valid(snapshot: SeatSnapshot) -> bool:
     """驗證座位快照必要欄位與結構。"""
 
     if not _seat_snapshot_route_is_valid(snapshot):
@@ -1236,31 +1416,44 @@ def _seat_snapshot_structure_is_valid(snapshot):
         return False
     if not 0 < len(snapshot.ticket_types) <= 100 or len(snapshot.seats) > 5000:
         return False
-    seat_fingerprints = [seat[0] for seat in snapshot.seats]
-    counter_ids = [counter[0] for counter in snapshot.counters]
+    seat_fingerprints = [seat.fingerprint for seat in snapshot.seats]
+    counter_ids = [counter.type_id for counter in snapshot.counters]
     if len(set(seat_fingerprints)) != len(seat_fingerprints):
         return False
     if any(not item for item in counter_ids) or len(set(counter_ids)) != len(counter_ids):
         return False
-    if any(_counter_value(raw) is None for _type_id, raw in snapshot.counters):
+    if any(_counter_value(counter.raw) is None for counter in snapshot.counters):
         return False
-    selected = [seat for seat in snapshot.seats if seat[9]]
+    selected = [seat for seat in snapshot.seats if seat.selected]
     return (
-        all(not (seat[8] and seat[9]) for seat in snapshot.seats)
+        all(not (seat.available and seat.selected) for seat in snapshot.seats)
         and len(selected) == snapshot.visual_selected_count
         and len(snapshot.submitted_seats) <= len(snapshot.seats)
     )
 
 
-def _target_seat_ticket_type(snapshot, keyword):
+class _TicketTypeCandidate(TypedDict):
+    text: str
+    ticket_type: TicketTypeRow
+
+
+def _target_seat_ticket_type(
+    snapshot: SeatSnapshot, keyword: str | None
+) -> tuple[TicketTypeRow | None, str]:
     """依關鍵字從座位快照選出目標票種。"""
 
-    candidates = []
-    seen_fingerprints = set()
-    seen_type_ids = set()
-    counter_map = dict(snapshot.counters)
+    candidates: list[_TicketTypeCandidate] = []
+    seen_fingerprints: set[SeatFingerprint] = set()
+    seen_type_ids: set[str] = set()
+    counter_map = {counter.type_id: counter.raw for counter in snapshot.counters}
     for ticket_type in snapshot.ticket_types:
-        fingerprint, text, disabled, type_id, type_name, present, raw = ticket_type
+        fingerprint = ticket_type.fingerprint
+        text = ticket_type.text
+        disabled = ticket_type.disabled
+        type_id = ticket_type.type_id
+        type_name = ticket_type.type_name
+        present = ticket_type.counter_present
+        raw = ticket_type.counter_raw
         if fingerprint in seen_fingerprints:
             return None, "invalid-snapshot"
         seen_fingerprints.add(fingerprint)
@@ -1282,76 +1475,98 @@ def _target_seat_ticket_type(snapshot, keyword):
     return candidates[target_index]["ticket_type"], ""
 
 
-def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
-                            ticket_type_name):
+def seat_selection_is_valid(
+    snapshot: object,
+    ticket_number: object,
+    ticket_type_id: str,
+    ticket_type_name: str,
+) -> bool:
     """稽核畫面座位、送出資料與所有票種計數。"""
     snapshot = parse_seat_snapshot(snapshot)
-    try:
-        requested = int(ticket_number)
-    except (TypeError, ValueError):
+    observed_request = parse_nonnegative_count(ticket_number)
+    if not isinstance(observed_request, PresentField):
         return False
+    requested = observed_request.value
     if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok or requested <= 0:
         return False
-    selected = [seat for seat in snapshot.seats if seat[9]]
+    selected = [seat for seat in snapshot.seats if seat.selected]
     if len(selected) != requested or snapshot.visual_selected_count != requested:
         return False
     if len(snapshot.submitted_seats) != requested or any(
-        payload != ("S", ticket_type_id, ticket_type_name)
+        payload != SubmittedSeat("S", ticket_type_id, ticket_type_name)
         for payload in snapshot.submitted_seats
     ):
         return False
-    counts = [(type_id, _counter_value(raw)) for type_id, raw in snapshot.counters]
+    counts = [
+        (counter.type_id, _counter_value(counter.raw))
+        for counter in snapshot.counters
+    ]
     if any(value is None for _type_id, value in counts):
         return False
     targets = [value for type_id, value in counts if type_id == ticket_type_id]
     return (
         len(targets) == 1 and targets[0] == requested
-        and sum(value for _type_id, value in counts) == requested
+        and sum(cast(int, value) for _type_id, value in counts) == requested
     )
 
 
-def _seat_request(snapshot, ticket_number):
+def _seat_request(snapshot: SeatSnapshot, ticket_number: object) -> int | None:
     """建立座位選擇所需的張數與目前狀態。"""
 
-    try:
-        requested = int(ticket_number)
-    except (TypeError, ValueError):
+    observed_request = parse_nonnegative_count(ticket_number)
+    if not isinstance(observed_request, PresentField):
         return None
+    requested = observed_request.value
     limit = _counter_value(snapshot.quantity_limit_raw)
     if requested <= 0 or limit is None or (limit and requested > limit):
         return None
     return requested
 
 
-def _seat_dicts(snapshot):
+def _seat_dicts(snapshot: SeatSnapshot) -> list[_SeatChoice]:
     """將座位快照項目整理成可供決策的字典清單。"""
 
-    return [
+    return cast(list[_SeatChoice], [
         {
-            "index": index, "title": seat[1], "row_index": seat[2],
-            "cell_index": seat[3], "center_x": seat[4], "center_y": seat[5],
-            "width": seat[6], "height": seat[7], "available": seat[8],
-            "selected": seat[9],
+            "index": index, "title": seat.title, "row_index": seat.row_index,
+            "cell_index": seat.cell_index, "center_x": seat.center_x,
+            "center_y": seat.center_y, "width": seat.width,
+            "height": seat.height, "available": seat.available,
+            "selected": seat.selected,
         }
         for index, seat in enumerate(snapshot.seats)
-    ]
+    ])
 
 
-def _seat_targets_are_adjacent(snapshot, fingerprints):
+def _seat_targets_are_adjacent(
+    snapshot: SeatSnapshot, fingerprints: Sequence[SeatFingerprint]
+) -> bool:
     """判斷目標座位指紋是否形成連續座位。"""
 
     by_fingerprint = dict(zip(
-        (seat[0] for seat in snapshot.seats), _seat_dicts(snapshot)
+        (seat.fingerprint for seat in snapshot.seats), _seat_dicts(snapshot)
     ))
-    targets = [by_fingerprint.get(fingerprint) for fingerprint in fingerprints]
-    return bool(all(targets)) and all(
+    targets: list[_SeatChoice] = []
+    for fingerprint in fingerprints:
+        target = by_fingerprint.get(fingerprint)
+        if target is None:
+            return False
+        targets.append(target)
+    return all(
         seats_are_physically_adjacent(targets[index], targets[index + 1])
         for index in range(len(targets) - 1)
     )
 
 
-def _make_seat_plan(snapshot, ticket_type, action, requested,
-                    selected=(), targets=(), require_adjacency=False):
+def _make_seat_plan(
+    snapshot: SeatSnapshot,
+    ticket_type: TicketTypeRow,
+    action: str,
+    requested: int,
+    selected: Sequence[SeatFingerprint] = (),
+    targets: Sequence[SeatFingerprint] = (),
+    require_adjacency: bool = False,
+) -> SeatActionPlan:
     """建立包含身分與相鄰限制的座位操作計畫。"""
 
     return SeatActionPlan(
@@ -1363,28 +1578,33 @@ def _make_seat_plan(snapshot, ticket_type, action, requested,
         product_id=snapshot.product_id,
         action=action,
         ticket_number=requested,
-        ticket_type_fingerprint=ticket_type[0],
-        ticket_type_id=ticket_type[3],
-        ticket_type_name=ticket_type[4],
+        ticket_type_fingerprint=ticket_type.fingerprint,
+        ticket_type_id=ticket_type.type_id,
+        ticket_type_name=ticket_type.type_name,
         selected_seat_fingerprints=tuple(selected),
         target_seat_fingerprints=tuple(targets),
         require_physical_adjacency=require_adjacency,
     )
 
 
-def _seat_state_is_clean(snapshot):
+def _seat_state_is_clean(snapshot: SeatSnapshot) -> bool:
     """判斷座位頁是否尚未殘留任何選擇。"""
 
     return (
         snapshot.visual_selected_count == 0
         and not snapshot.submitted_seats
-        and not any(seat[9] for seat in snapshot.seats)
-        and all(_counter_value(raw) == 0 for _type_id, raw in snapshot.counters)
+        and not any(seat.selected for seat in snapshot.seats)
+        and all(_counter_value(counter.raw) == 0 for counter in snapshot.counters)
     )
 
 
-def select_seat_snapshot(snapshot, keyword, ticket_number,
-                         allow_non_adjacent=False, seat_sorting="row_seat"):
+def select_seat_snapshot(
+    snapshot: object,
+    keyword: str | None,
+    ticket_number: object,
+    allow_non_adjacent: bool = False,
+    seat_sorting: str = "row_seat",
+) -> tuple[SeatActionPlan | None, str]:
     """從劃位快照規劃清除、選擇或就緒操作。"""
     snapshot = parse_seat_snapshot(snapshot)
     if not isinstance(snapshot, SeatSnapshot) or not _seat_snapshot_structure_is_valid(snapshot):
@@ -1395,12 +1615,12 @@ def select_seat_snapshot(snapshot, keyword, ticket_number,
     ticket_type, reason = _target_seat_ticket_type(snapshot, keyword)
     if ticket_type is None:
         return None, reason
-    selected = tuple(seat[0] for seat in snapshot.seats if seat[9])
+    selected = tuple(seat.fingerprint for seat in snapshot.seats if seat.selected)
     require_adjacency = (
         not allow_non_adjacent or seat_sorting == "row_asc_aisle"
     )
     if seat_selection_is_valid(
-        snapshot, requested, ticket_type[3], ticket_type[4]
+        snapshot, requested, ticket_type.type_id, ticket_type.type_name
     ):
         if require_adjacency and not _seat_targets_are_adjacent(
             snapshot, selected
@@ -1425,14 +1645,16 @@ def select_seat_snapshot(snapshot, keyword, ticket_number,
     )
     if len(indexes) != requested:
         return None, "seats-unavailable"
-    targets = tuple(snapshot.seats[index][0] for index in indexes)
+    targets = tuple(snapshot.seats[index].fingerprint for index in indexes)
     return _make_seat_plan(
         snapshot, ticket_type, "select", requested, targets=targets,
         require_adjacency=require_adjacency,
     ), ""
 
 
-def _seat_plan_identity_matches(snapshot, plan):
+def _seat_plan_identity_matches(
+    snapshot: SeatSnapshot, plan: SeatActionPlan
+) -> bool:
     """驗證座位計畫與快照的頁面身分一致。"""
 
     if (
@@ -1448,21 +1670,21 @@ def _seat_plan_identity_matches(snapshot, plan):
         return False
     matching_types = [
         item for item in snapshot.ticket_types
-        if item[0] == plan.ticket_type_fingerprint
+        if item.fingerprint == plan.ticket_type_fingerprint
     ]
-    counter_map = dict(snapshot.counters)
+    counter_map = {counter.type_id: counter.raw for counter in snapshot.counters}
     return bool(
         len(matching_types) == 1
-        and matching_types[0][3] == plan.ticket_type_id
-        and matching_types[0][4] == plan.ticket_type_name
-        and not matching_types[0][2]
-        and matching_types[0][5]
-        and _counter_value(matching_types[0][6]) is not None
-        and counter_map.get(plan.ticket_type_id) == matching_types[0][6]
+        and matching_types[0].type_id == plan.ticket_type_id
+        and matching_types[0].type_name == plan.ticket_type_name
+        and not matching_types[0].disabled
+        and matching_types[0].counter_present
+        and _counter_value(matching_types[0].counter_raw) is not None
+        and counter_map.get(plan.ticket_type_id) == matching_types[0].counter_raw
     )
 
 
-def seat_plan_matches_snapshot(snapshot, plan):
+def seat_plan_matches_snapshot(snapshot: object, plan: object) -> bool:
     """在瀏覽器端原子驗證前檢查座位操作文法。"""
     snapshot = parse_seat_snapshot(snapshot)
     if (
@@ -1473,7 +1695,7 @@ def seat_plan_matches_snapshot(snapshot, plan):
         or _seat_request(snapshot, plan.ticket_number) is None
     ):
         return False
-    selected = tuple(seat[0] for seat in snapshot.seats if seat[9])
+    selected = tuple(seat.fingerprint for seat in snapshot.seats if seat.selected)
     if plan.selected_seat_fingerprints != selected:
         return False
     valid = seat_selection_is_valid(
@@ -1494,14 +1716,14 @@ def seat_plan_matches_snapshot(snapshot, plan):
         return not valid
     if selected or not _seat_state_is_clean(snapshot):
         return False
-    by_fingerprint = {seat[0]: seat for seat in snapshot.seats}
+    by_fingerprint = {seat.fingerprint: seat for seat in snapshot.seats}
     targets = plan.target_seat_fingerprints
     targets_match = bool(
         len(targets) == plan.ticket_number == len(set(targets))
         and all(
             fingerprint in by_fingerprint
-            and by_fingerprint[fingerprint][8]
-            and not by_fingerprint[fingerprint][9]
+            and by_fingerprint[fingerprint].available
+            and not by_fingerprint[fingerprint].selected
             for fingerprint in targets
         )
     )
@@ -1510,35 +1732,40 @@ def seat_plan_matches_snapshot(snapshot, plan):
     return _seat_targets_are_adjacent(snapshot, targets)
 
 
-def quantity_audit_is_valid(quantities, target_key, ticket_number):
+def quantity_audit_is_valid(
+    quantities: object, target_key: object, ticket_number: object
+) -> bool:
     """稽核目標票種與各票數欄位是否符合要求。"""
 
     if not isinstance(quantities, list) or not target_key:
         return False
-    target_matches = [
-        item for item in quantities
-        if isinstance(item, dict) and item.get("key") == target_key
-    ]
+    requested = parse_nonnegative_count(ticket_number)
+    if not isinstance(requested, PresentField) or requested.value == 0:
+        return False
+    if any(not isinstance(item, dict) for item in quantities):
+        return False
+    target_matches = [item for item in quantities if item.get("key") == target_key]
     if len(target_matches) != 1:
         return False
-    try:
-        if int(target_matches[0].get("value", 0)) != int(ticket_number):
+    for item in quantities:
+        count = parse_nonnegative_count(item.get("value"))
+        if not isinstance(count, PresentField):
             return False
-        return all(
-            item is target_matches[0] or int(item.get("value", 0)) == 0
-            for item in quantities if isinstance(item, dict)
-        ) and all(isinstance(item, dict) for item in quantities)
-    except (TypeError, ValueError):
-        return False
+        expected = requested.value if item is target_matches[0] else 0
+        if count.value != expected:
+            return False
+    return True
 
 
-def _parse_quantity_request(snapshot, ticket_number):
+def _parse_quantity_request(
+    snapshot: QuantitySnapshot, ticket_number: object
+) -> tuple[int, int] | None:
     """從票數快照解析要求張數與既有選擇。"""
 
-    try:
-        requested = int(ticket_number)
-    except (TypeError, ValueError):
+    observed_request = parse_nonnegative_count(ticket_number)
+    if not isinstance(observed_request, PresentField):
         return None
+    requested = observed_request.value
     if requested <= 0 or not snapshot.page_url or not snapshot.document_id:
         return None
     token = re.compile(r"[A-Za-z0-9_-]+")
@@ -1548,55 +1775,60 @@ def _parse_quantity_request(snapshot, ticket_number):
         or (snapshot.group_id and not token.fullmatch(snapshot.group_id))
     ):
         return None
-    if snapshot.quantity_limit_raw:
-        if not re.fullmatch(r"\d+", snapshot.quantity_limit_raw):
+    if snapshot.quantity_limit_present:
+        observed_limit = parse_nonnegative_count(snapshot.quantity_limit_raw)
+        if not isinstance(observed_limit, PresentField):
             return None
-        quantity_limit = int(snapshot.quantity_limit_raw)
+        quantity_limit = observed_limit.value
     else:
+        if snapshot.quantity_limit_raw:
+            return None
         quantity_limit = 0
     if quantity_limit and requested > quantity_limit:
         return None
     return requested, quantity_limit
 
 
-def _quantity_candidates(snapshot, requested):
+def _quantity_candidates(
+    snapshot: QuantitySnapshot, requested: int
+) -> list[_QuantityCandidate] | None:
     """建立符合張數需求的票種候選清單。"""
 
     token = re.compile(r"[A-Za-z0-9_-]+")
     if not 0 < len(snapshot.rows) <= 100:
         return None
-    keys = [row[0] for row in snapshot.rows]
+    keys = [row.key for row in snapshot.rows]
     if any(not token.fullmatch(key) for key in keys) or len(set(keys)) != len(keys):
         return None
 
-    candidates = []
-    for key, name, text, disabled, remaining_present, remaining_raw, _value in (
-        snapshot.rows
-    ):
-        if disabled or "售完" in text or not name:
+    candidates: list[_QuantityCandidate] = []
+    for row in snapshot.rows:
+        if row.disabled or "售完" in row.text or not row.name:
             continue
-        if remaining_present:
-            if not re.fullmatch(r"\d+", remaining_raw):
-                continue
-            if int(remaining_raw) < requested:
-                continue
+        remaining = row.remaining_observation
+        if isinstance(remaining, InvalidField):
+            continue
+        if isinstance(remaining, PresentField) and remaining.value < requested:
+            continue
         candidates.append({
-            "text": name,
-            "key": key,
-            "remaining_present": remaining_present,
+            "text": row.name,
+            "key": row.key,
+            "remaining_present": row.remaining_present,
         })
     return candidates
 
 
-def _quantity_page_type_matches(page_url, page_type):
+def _quantity_page_type_matches(page_url: str, page_type: str) -> bool:
     """判斷網址是否符合預期的票數頁面類型。"""
 
     if page_type == "general_admission":
-        return classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION
+        return bool(classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION)
     return page_type == "server_assigned_quantity"
 
 
-def _quantity_snapshot_identity_is_valid(snapshot, page_type):
+def _quantity_snapshot_identity_is_valid(
+    snapshot: QuantitySnapshot, page_type: str
+) -> bool:
     """驗證票數快照的文件與商品身分。"""
 
     token = r"[A-Za-z0-9_-]+"
@@ -1617,9 +1849,13 @@ def _quantity_snapshot_identity_is_valid(snapshot, page_type):
     )
 
 
-def select_quantity_snapshot(snapshot, keyword, ticket_number,
-                             mode="from top to bottom",
-                             page_type="general_admission"):
+def select_quantity_snapshot(
+    snapshot: object,
+    keyword: str | None,
+    ticket_number: object,
+    mode: str = "from top to bottom",
+    page_type: str = "general_admission",
+) -> QuantityPlan | None:
     """從不可變票數快照選出仍可購買的票種列。"""
     snapshot = parse_quantity_snapshot(snapshot)
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
@@ -1660,142 +1896,7 @@ def select_quantity_snapshot(snapshot, keyword, ticket_number,
     )
 
 
-def _seat_submit_payload(plan):
-    """建立劃位計畫的最終送出資料。"""
-
-    if not isinstance(plan, SeatActionPlan) or plan.action not in {
-        "select", "ready"
-    }:
-        return None
-    expected = (
-        plan.target_seat_fingerprints
-        if plan.action == "select"
-        else plan.selected_seat_fingerprints
-    )
-    unused = (
-        plan.selected_seat_fingerprints
-        if plan.action == "select"
-        else plan.target_seat_fingerprints
-    )
-    fingerprints = (plan.ticket_type_fingerprint, *expected)
-    token = r"[A-Za-z0-9_-]+"
-    if (
-        classify_utiki_page(plan.page_url) != PageKind.RESERVED_SEAT
-        or not isinstance(plan.document_id, str) or not plan.document_id
-        or type(plan.ticket_number) is not int or plan.ticket_number <= 0
-        or not isinstance(plan.selected_seat_fingerprints, tuple)
-        or not isinstance(plan.target_seat_fingerprints, tuple) or unused
-        or len(expected) != plan.ticket_number
-        or any(not isinstance(item, tuple) or not item for item in fingerprints)
-        or any(
-            any(not isinstance(value, (str, int, float, bool)) for value in item)
-            for item in fingerprints
-        )
-        or len(set(expected)) != len(expected)
-        or any(
-            not isinstance(value, str) or not re.fullmatch(token, value)
-            for value in (
-                plan.performance_id, plan.group_id,
-                plan.price_area_id, plan.product_id,
-            )
-        )
-        or not isinstance(plan.ticket_type_id, str) or not plan.ticket_type_id
-        or not isinstance(plan.ticket_type_name, str) or not plan.ticket_type_name
-        or type(plan.require_physical_adjacency) is not bool
-    ):
-        return None
-    return (
-        "seat", plan.ticket_number, plan.ticket_type_fingerprint,
-        plan.ticket_type_id, plan.ticket_type_name, expected,
-        plan.require_physical_adjacency,
-    )
-
-
-def _quantity_submit_payload(plan):
-    """建立票數計畫的最終送出資料。"""
-
-    if not isinstance(plan, QuantityPlan):
-        return None
-    page_kinds = {
-        "general_admission": PageKind.GENERAL_ADMISSION,
-        "server_assigned_quantity": PageKind.SERVER_ASSIGNED_QUANTITY,
-    }
-    page_kind = page_kinds.get(plan.page_type)
-    token = r"[A-Za-z0-9_-]+"
-    bool_fields = (
-        plan.performance_hidden_present, plan.product_hidden_present,
-        plan.group_hidden_present, plan.price_area_hidden_present,
-        plan.quantity_limit_present, plan.target_remaining_present,
-    )
-    if (
-        page_kind is None or classify_utiki_page(plan.page_url) != page_kind
-        or not isinstance(plan.document_id, str) or not plan.document_id
-        or type(plan.ticket_number) is not int or plan.ticket_number <= 0
-        or type(plan.quantity_limit) is not int or plan.quantity_limit < 0
-        or not isinstance(plan.target_name, str) or not plan.target_name
-        or not isinstance(plan.performance_id, str)
-        or not re.fullmatch(token, plan.performance_id)
-        or not isinstance(plan.price_area_id, str)
-        or not re.fullmatch(token, plan.price_area_id)
-        or not isinstance(plan.target_key, str)
-        or not re.fullmatch(token, plan.target_key)
-        or not isinstance(plan.group_id, str)
-        or (plan.group_id and not re.fullmatch(token, plan.group_id))
-        or not isinstance(plan.product_id, str)
-        or (plan.product_id and not re.fullmatch(token, plan.product_id))
-        or bool(plan.product_id) != plan.product_hidden_present
-        or (
-            page_kind is PageKind.SERVER_ASSIGNED_QUANTITY
-            and (not plan.group_id or not plan.product_id)
-        )
-        or any(type(value) is not bool for value in bool_fields)
-    ):
-        return None
-    return (
-        "quantity", plan.page_type, plan.target_key, plan.target_name,
-        plan.ticket_number, plan.quantity_limit, bool_fields,
-    )
-
-
-def build_submit_plan(selection_plan):
-    """從選擇計畫固定一份不含敏感資料的最終送出意圖。"""
-    if isinstance(selection_plan, SeatActionPlan):
-        page_kind = PageKind.RESERVED_SEAT
-        payload = _seat_submit_payload(selection_plan)
-    elif isinstance(selection_plan, QuantityPlan):
-        page_kind = {
-            "general_admission": PageKind.GENERAL_ADMISSION,
-            "server_assigned_quantity": PageKind.SERVER_ASSIGNED_QUANTITY,
-        }.get(selection_plan.page_type)
-        payload = _quantity_submit_payload(selection_plan)
-    else:
-        return None
-    if page_kind is None or payload is None:
-        return None
-    return SubmitPlan(
-        page_url=selection_plan.page_url,
-        document_id=selection_plan.document_id,
-        page_kind=page_kind,
-        payload_fingerprint=payload,
-        selection_plan=selection_plan,
-    )
-
-
-def submit_plan_is_valid(plan):
-    """重建純資料指紋以拒絕遭竄改的送出資訊。"""
-    if not isinstance(plan, SubmitPlan):
-        return False
-    expected = build_submit_plan(plan.selection_plan)
-    return bool(
-        expected is not None
-        and plan.page_url == expected.page_url
-        and plan.document_id == expected.document_id
-        and plan.page_kind is expected.page_kind
-        and plan.payload_fingerprint == expected.payload_fingerprint
-    )
-
-
-def is_auth_error(dialog_text):
+def is_auth_error(dialog_text: str | None) -> bool:
     """判斷對話框文字是否表示登入狀態失效。"""
 
     return (
@@ -1807,7 +1908,7 @@ def is_auth_error(dialog_text):
     )
 
 
-def classify_submit_dialog(dialog_text):
+def classify_submit_dialog(dialog_text: object) -> str | None:
     """依對話框文字判別送出結果與後續處理類型。"""
 
     text = str(dialog_text or "").strip()

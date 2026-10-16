@@ -73,8 +73,8 @@
 - **platforms/ibon.py** - iBon + Tour iBon 平台（25 函式）
 - **platforms/kham.py** - KHAM + ticket.com.tw + UDN 平台（21 函式）
 - **platforms/hkticketing.py** - HKTicketing + GalaxyMacau + Ticketek 平台（30 函式）
-- **platforms/utiki/** - uTiki2 職棒售票家族（tenant profile、路由、登入、refresh infrastructure 與 workflow）
-- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade，新邏輯不得加在此檔
+- **platforms/utiki/** - uTiki2 職棒售票家族；目前仍是 legacy workflow owner，Issue #17 將依 v1.5 切換至 engine/session 架構
+- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade；P6c removal candidate，新邏輯不得加在此檔
 
 ### 🌐 支援平台清單
 
@@ -389,26 +389,27 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### 目前模組邊界
+#### Baseline 現行模組邊界（切換前）
 
 ```text
 platforms/utiki/
-├── __init__.py   # 主迴圈使用的穩定公開 API
+├── __init__.py   # eager re-export 現行 workflow API；不是 v1.5 target root
 ├── profiles.py   # tenant allowlist、PageKind 與 route classifier
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
 ├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
 ├── refresh.py    # document health、429 與跨程序刷新協調；不持有 runtime
-└── workflow.py   # 唯一的 per-tab runtime owner 與購票流程編排
+└── workflow.py   # 現行 module registry owner 與購票流程編排
 
 platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 ```
 
-- 已驗證 tenant：中信育樂、味全龍。
-- `workflow.py` 單向傳入 canonical runtime、tab identity 與 cancel-task registry 給 `refresh.py`；refresh 不得反向 import workflow 或建立 mirror state。
-- 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
+- 現行 allowlist tenant：中信育樂、味全龍；此處只描述路由範圍，不代表本輪已完成真站驗證。
+- baseline 的 `workflow.py` 持有唯一 registry，並單向傳入 runtime、tab identity 與 cancel-task registry 給 `refresh.py`；refresh 不得反向 import workflow 或建立 mirror registry。兩個模組目前都會直接修改該 runtime，因此這是 single registry，不是 v1.5 target 的 single writer。
+- baseline 共用行為設定以 `utiki.*` 優先，`ctbc.*` 仍是 runtime/UI相容鏡像。已採用 v1.5 target則要求正式 runtime只接受 canonical `utiki` behavior，legacy/mixed格式由 offline upgrader處理；目前尚未切換。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
-- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，分階段拆分見 [uTiki2 重構計劃](utiki-refactor-plan.md)。
+- 已採用 target 是 `main -> platforms.utiki.bootstrap.create_engine(...)`，由一個 engine instance持有 registry、application session writer單一寫入、reducers只提 proposal、所有 mutation經唯一 `ActiveEffect` 仲裁。這些模組目前尚未實作，不能從本節誤讀為 production 已切換。
+- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，正式階段與 gates見 [uTiki 根本重構計劃 v1.5](utiki-root-refactor-plan-v1.5.md)；[先前重構計劃](utiki-refactor-plan.md)只保留歷史脈絡。
 
 ### 🎪 **Fansigo** (platforms/fansigo.py)
 

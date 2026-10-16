@@ -44,6 +44,7 @@ user_data/
 # Build output
 /build/
 /dist/
+/artifacts/
 *.spec.bak
 
 # Logs and temp files

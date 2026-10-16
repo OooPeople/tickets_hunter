@@ -1,0 +1,34 @@
+# uTiki typed scope — P0 seed manifest
+# Issue: OooPeople/tickets_hunter#17
+# Branch: refactor/17-utiki-root-v1-5
+# Baseline: f307f7caba054fb40aab807a4629c891e69fb200
+#
+# Active entries below are existing pure/domain-ish uTiki modules only. Their
+# presence in this manifest defines the P0 typecheck scope; it does not claim
+# that a strict typecheck has already been executed or passed.
+src/platforms/utiki/auth.py
+src/platforms/utiki/profiles.py
+src/platforms/utiki/selection.py
+
+# P1 checker rules for future files (comments are not active path entries):
+# - INCLUDE_WHEN_PRESENT: src/platforms/utiki/domain/**/*.py
+# - INCLUDE_WHEN_PRESENT: src/platforms/utiki/application/**/*.py
+# - INCLUDE_WHEN_PRESENT: src/platforms/utiki/application/ports.py
+# - INCLUDE_WHEN_PRESENT: src/platforms/utiki/adapters/**/*.py
+# - INCLUDE_WHEN_PRESENT: src/platforms/utiki/bootstrap.py
+# - INCLUDE_WHEN_PRESENT: src/utiki_config.py
+# - INCLUDE_WHEN_PRESENT: src/keyword_rules.py
+# - INCLUDE_WHEN_PRESENT: src/utiki_core_services.py
+# - INCLUDE_WHEN_PRESENT: tools/migrations/convert_utiki_config.py
+#
+# New or rewritten domain, application, ports, adapters, bootstrap, current
+# config, keyword, conditional core bridge, and upgrade-tool Python modules
+# become required entries as soon as they are added. P1's manifest checker must
+# derive those paths independently from Git plus the approved roots above and
+# fail when a required existing file is omitted; a comment or non-existent path
+# must never be counted as a typed file.
+#
+# Existing legacy/browser-heavy modules such as workflow.py, refresh.py and
+# dom.py are not represented here as already typed. If they are rewritten or
+# replaced by the new architecture, their new/revised paths enter the scope
+# under the rules above.

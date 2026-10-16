@@ -2,7 +2,7 @@
 
 **文件說明**：Tickets Hunter 開發規範、架構、測試與設計提案的入口。
 
-**最後更新**：2026-10-15
+**最後更新**：2026-10-16
 
 ## 先從哪裡開始
 
@@ -23,7 +23,8 @@
 4. 維護者核准計劃後才開始 production code。
 5. 每個階段獨立驗證與審查，不把多個高風險行為綁成一次切換。
 
-目前待審提案：[uTiki2 職棒售票引擎重構計劃](utiki-refactor-plan.md)。
+目前執行中的正式計劃：[uTiki 低延遲重構 v1.5](utiki-root-refactor-plan-v1.5.md)。
+先前的 [uTiki2 職棒售票引擎重構計劃](utiki-refactor-plan.md) 僅保留歷史脈絡。
 
 ## 文件責任
 
@@ -39,7 +40,8 @@
 | [logic_flowcharts.md](logic_flowcharts.md) | 常見判斷流程 | 理解既有邏輯時 |
 | [ticket_seat_selection_algorithm.md](ticket_seat_selection_algorithm.md) | 座位選擇演算法 | 手動劃位相關工作 |
 | [sound_notification_system.md](sound_notification_system.md) | 通知音效設計 | 通知相關工作 |
-| [utiki-refactor-plan.md](utiki-refactor-plan.md) | uTiki2 家族重構的提案與 gates | 計劃核准及後續執行 |
+| [utiki-root-refactor-plan-v1.5.md](utiki-root-refactor-plan-v1.5.md) | uTiki 根本重構的正式執行契約與 P0–P8 gates | Issue #17 的實作、驗證與審查 |
+| [utiki-refactor-plan.md](utiki-refactor-plan.md) | 先前 uTiki2 家族重構計劃 | 查閱已完成階段的歷史脈絡 |
 
 ## 依工作類型導航
 

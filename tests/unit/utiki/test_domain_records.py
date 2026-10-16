@@ -12,11 +12,15 @@ def test_domain_import_is_pure_without_zendriver(tmp_path: Path) -> None:
         "import sys; "
         "from platforms.utiki.domain.identity import TabKey, DocumentKey; "
         "from platforms.utiki.domain.snapshots import parse_nonnegative_count; "
+        "from platforms.utiki.domain.effects import ClaimId; "
+        "from platforms.utiki.domain.inputs import InputAttemptId; "
         "assert 'zendriver' not in sys.modules; "
         "assert 'nodriver_common' not in sys.modules; "
         "assert 'platforms.utiki.workflow' not in sys.modules; "
         "assert TabKey(0, 'tab').target_id == 'tab'; "
-        "assert DocumentKey('doc').token == 'doc'"
+        "assert DocumentKey('doc').token == 'doc'; "
+        "assert ClaimId('claim').token == 'claim'; "
+        "assert InputAttemptId('input').token == 'input'"
     )
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(source_root)

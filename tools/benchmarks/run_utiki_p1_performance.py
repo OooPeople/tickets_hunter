@@ -508,6 +508,8 @@ def _run_assertion_nodes(
         sys.executable,
         "-m",
         "pytest",
+        "-c",
+        str(REPOSITORY / "pytest.ini"),
         "--rootdir",
         str(REPOSITORY),
         "-o",

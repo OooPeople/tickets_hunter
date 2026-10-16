@@ -438,6 +438,37 @@ def test_browser_launch_failure_is_recorded_as_performance_blocker(monkeypatch):
         inner_runner._run_browser_measurement({"browser_samples": 30})
 
 
+def test_performance_pytest_loads_repository_marker_config(
+    tmp_path, monkeypatch
+):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        assert kwargs["cwd"] == ROOT
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(inner_runner.subprocess, "run", fake_run)
+    exit_code, command = inner_runner._run_assertion_nodes(
+        raw_report=tmp_path / "raw.json",
+        contract_path=CONTRACT,
+        manifest_path=MANIFEST,
+        junit=tmp_path / "performance.xml",
+        reporter_result=tmp_path / "reporter.json",
+        context={
+            "run_id": "p1-performance-test-attempt-1",
+            "attempt": 1,
+            "candidate_sha": CANDIDATE,
+        },
+        fixture_digest="1" * 64,
+        script_digest="2" * 64,
+    )
+
+    assert exit_code == 0
+    assert command == commands[0]
+    assert command[command.index("-c") + 1] == str(ROOT / "pytest.ini")
+
+
 def test_untrusted_candidate_is_blocked_before_container_runtime(tmp_path):
     run_dir = tmp_path / "run"
     report = run_dir / "performance-isolation-raw.json"

@@ -717,7 +717,7 @@ def _make_run(
             child_stderr.write_text(child_error, encoding="utf-8")
             probe_request_path, probe_request, raw_negative = (
                 _canonical_negative_fixture(
-                    path.parent / f"{support_stem}.probe",
+                    path.parent / f"p{len(artifacts):03d}",
                     registry_entry,
                     child_stdout,
                     child_stderr,
@@ -1555,6 +1555,20 @@ def test_non_pytest_syntax_job_accepts_true_empty_junit(gate_inputs):
         "modified-python-syntax",
         "source-linux-x64",
     )
+    probe_roots = [path.parent for path in run["dir"].rglob("probe.json")]
+    assert len(probe_roots) == 12
+    windows_temp_root = (
+        "C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/"
+        "pytest-999/test_non_pytest_syntax_job_acc0/"
+    )
+    for probe_root in probe_roots:
+        projected = (
+            windows_temp_root
+            + probe_root.relative_to(case["root"]).as_posix()
+            + "/repo/.git/objects/ff/"
+            + "a" * 38
+        )
+        assert len(projected) < 240, projected
 
     result = _run_checker(
         *_single_arguments(

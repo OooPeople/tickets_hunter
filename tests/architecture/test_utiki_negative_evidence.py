@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -97,6 +98,37 @@ SLICE2_ENTRIES = [
 ]
 
 
+def _read_probe_transcript(
+    path: Path, completed: subprocess.CompletedProcess[str], root: Path
+) -> dict[str, object]:
+    if not path.is_file():
+        def redact_path(value: str) -> str:
+            value = value.replace(str(root), "<probe-root>")
+            value = value.replace(str(PROJECT_ROOT), "<repository>")
+            value = value.replace(sys.executable, "<python>")
+            value = re.sub(r"[A-Za-z]:[\\/][^\s'\"]+", "<path>", value)
+            return re.sub(r"/(?:Users|home|tmp|private)/[^\s'\"]+", "<path>", value)
+
+        sensitive = re.compile(
+            r"(?i)\b(password|cookie|token|authorization|webhook|secret|api[_-]?key)\b"
+        )
+        stderr_lines = [
+            "<redacted sensitive stderr line>" if sensitive.search(line) else redact_path(line)
+            for line in completed.stderr.splitlines()[:8]
+        ]
+        safe_stderr = "\n".join(stderr_lines)[:1200]
+        command = [redact_path(str(argument)) for argument in completed.args]
+
+        raise AssertionError(
+            "negative probe report absent: "
+            f"exit_code={completed.returncode}; "
+            f"command={command!r}; "
+            "cwd=<repository>; "
+            f"stderr={safe_stderr!r}"
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _run_probe(root: Path) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     producer_report = root / "producer.json"
     completed = subprocess.run(
@@ -117,8 +149,35 @@ def _run_probe(root: Path) -> tuple[subprocess.CompletedProcess[str], dict[str, 
         text=True,
         check=False,
     )
-    transcript = json.loads(producer_report.read_text(encoding="utf-8"))
+    transcript = _read_probe_transcript(producer_report, completed, root)
     return completed, transcript
+
+
+def test_missing_probe_report_preserves_redacted_child_failure(tmp_path: Path) -> None:
+    completed = subprocess.CompletedProcess(
+        args=[
+            sys.executable,
+            str(PROJECT_ROOT / "tools/run_utiki_negative_probe.py"),
+            r"C:\Users\runneradmin\Temp\probe.json",
+        ],
+        returncode=2,
+        stdout="",
+        stderr=(
+            f"fixture failed at {tmp_path}\n"
+            "fatal: Invalid path 'C:\\Users\\runneradmin\\Temp\\probe.json'\n"
+            "Authorization: Bearer sample-credential\n"
+            'token="sample part-two"\n'
+        ),
+    )
+    with pytest.raises(AssertionError, match="exit_code=2") as error:
+        _read_probe_transcript(tmp_path / "producer.json", completed, tmp_path)
+    message = str(error.value)
+    assert "command=" in message and "cwd=<repository>" in message
+    assert "fixture failed at <probe-root>" in message
+    assert "sample-credential" not in message
+    assert "part-two" not in message
+    assert "runneradmin" not in message
+    assert "<redacted sensitive stderr line>" in message
 
 
 @pytest.mark.parametrize("entry", SLICE2_ENTRIES, ids=lambda item: item["obligation_id"])
@@ -294,6 +353,16 @@ def test_builder_and_host_negative_job_execute_real_per_key_children(tmp_path: P
         for path in input_root.rglob("*")
     )
     assert longest_projected_path < 240
+    git_directories = list(input_root.rglob(".git"))
+    assert git_directories
+    for git_directory in git_directories:
+        projected_object = (
+            simulated_windows_root
+            + git_directory.relative_to(input_root).as_posix()
+            + "/objects/ff/"
+            + "a" * 38
+        )
+        assert len(projected_object) < 240, projected_object
     entries = json.loads(REGISTRY.read_text(encoding="utf-8"))["probes"]
 
     def request_path(obligation_id: str, variant_id: str) -> Path:
@@ -378,10 +447,10 @@ def test_pytest_negative_probe_ignores_unreviewed_conftest(tmp_path: Path) -> No
         check=False,
     )
 
+    transcript = _read_probe_transcript(producer_report, completed, tmp_path)
     assert completed.returncode != 0
     assert entry["rejection_token"] in completed.stdout + completed.stderr
     assert "unreviewed conftest was loaded" not in completed.stdout + completed.stderr
-    transcript = json.loads(producer_report.read_text(encoding="utf-8"))
     assert transcript["status"] == "EXPECTED_REJECTION"
 
 
@@ -642,9 +711,9 @@ def test_ci_checker_probe_keeps_absolute_evidence_bindings_in_place(
         check=False,
     )
 
+    transcript = _read_probe_transcript(producer_report, completed, tmp_path)
     assert completed.returncode != 0
     assert entry["rejection_token"] in completed.stdout + completed.stderr
-    transcript = json.loads(producer_report.read_text(encoding="utf-8"))
     assert transcript["status"] == "EXPECTED_REJECTION"
 
 

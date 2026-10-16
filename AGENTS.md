@@ -29,6 +29,20 @@
 
 架構重寫、設定格式遷移、跨平台共用抽取等高風險變更，必須先有經維護者同意的正式計劃；不得因整理程式碼而順便改變行為。
 
+## 自主執行與收斂
+
+連續多階段工作須先讀取並遵守 [自主執行規範](docs/02-development/autonomous-execution.md)。
+本規範只管理執行方法，不降低核准計劃／catalog／測試／真站／發布門檻。
+
+- 已授權且前置成立的工作，自主選擇最小修法或垂直切片；不因使用者暫時不在而擴大需求。
+- 具體 bug 按首因修完整相關路徑；兩次同根因無新證據先做一次有限診斷重置，不直接猜第三套方案。
+- 重置仍不成立就保留具體阻擋，繼續可獨立執行的授權工作；不跳過正式 phase gate。
+- 驗證按精確案例→受影響群組→固定候選出站；必要的遠端診斷、checkpoint 及重跑依證據決定，不限死一次。
+- 高風險變更需獨立覆核固定候選；既有審查可按未變範圍沿用，不能以自審或人數代替。
+- 全部已到期要求通過即結案；在連續授權下自動接續下一個前置成立的工作，不逐片等待確認。
+- 語意未變的 catalog 核准可沿用；不得自行刪案例、放寬 gate、改信任模型或核准自己。
+- 更新一份精簡持久工作狀態以利恢復；不為管理自己另建 checker、registry 或代理排程框架。
+
 ## 3. 文件責任
 
 | 文件 | 主要責任 |
@@ -38,6 +52,7 @@
 | `docs/02-development/code-boundaries.md` | 模組職責、依賴方向、命名與禁止模式 |
 | `docs/02-development/ticket_automation_standard.md` | 12 階段流程及其語意 |
 | `docs/02-development/testing_execution_guide.md` | 驗證層級、實際命令與結果陳述方式 |
+| `docs/02-development/autonomous-execution.md` | 多階段自主實作、切片、首因診斷、有限重試、差異覆核與連續接續；不取代當次操作授權 |
 | `docs/02-development/engineering-review.md` | 工程審查範圍、嚴重度與交付格式 |
 | `docs/06-api-reference/zendriver_api_guide.md` | zendriver 與 CDP 使用方式 |
 | `docs/07-deployment/` | PyInstaller 與發行打包 |
@@ -88,10 +103,10 @@
 
 - 文件變更：檢查連結、格式、`git diff --check`，並確認描述符合 repository 現況。
 - Python 變更：對修改過的檔案執行 `python -m py_compile`。
-- 實作切片進行中：只跑能直接驗證本次修改與失敗原因的精確 pytest node／相關測試檔；修正後先重跑原失敗案例，再跑受影響模組。不得在每個小修改、每個 commit 或每次除錯後重跑完整 suite。
-- 階段（phase）出站：該階段全部切片完成、工作目錄固定且自我審查／必要的第二審完成後，才跑一次 `python -m pytest`；需要核對既有 runner 相容性時，同一出站批次再跑一次 unittest suite。若出站測試發現問題，回到 focused tests 修正，待修正與審查收斂後再重跑出站套件。
-- 正式 CI：每個 phase 只在本機出站驗證與審查完成後觸發一次，不得用遠端 CI 逐錯除錯。只有 CI 揭露本機無法重現的 runner／OS／隔離問題時，才允許修正後追加一次重跑，並須先在本機或下載的真實 artifact 上建立對應回歸。
-- import、相依套件或 spec 變更：執行本地打包驗證。
+- 實作切片進行中：先跑原失敗／精確節點，再跑受影響 family；共用程式有變就擴及所有受影響呼叫端。每次重跑須有定位、回歸或出站目的，不在無變更時反覆重跑整套測試。完整節奏依自主執行規範。
+- 階段出站：實作與必要獨立覆核收斂後，對固定候選完成核准計劃的完整驗收。失敗回到精確診斷、最小修正、差異覆核與必要重驗；不以「只跑一次」限制必要重驗。unittest 的獨立執行依現行核准契約與實際 runner 相容性要求決定，不任意增刪。出站成立後，在連續授權範圍內自動接續下一階段。
+- CI 區分定向診斷與正式出站：本機能快速定位的錯誤先在本機處理；只有遠端具備的 OS／隔離／打包條件，可在授權範圍內執行有明確目標的診斷。每次重跑對應新修正、新證據或有依據的暫時故障，不原樣重跑碰運氣。正式多 job 驗收遵循同 candidate／run／attempt 與既有證據繼承契約。不得降低 required gate 或以局部結果冒充出站。
+- import、相依套件、資源或 spec 變更：在授權且適合該 target 的環境完成原計劃要求的打包與 frozen 驗證。本機不具備 target 時可使用已授權的原生 runner；缺環境保留 BLOCKED，不以其他 OS、source 或語法成功取代。P3a 同期打包要求維持不變。
 - 即時售票流程：單元測試不能取代實機煙霧測試；記錄實際平台、頁面、操作範圍與刷新間隔。
 
 不得把「閱讀過」、「語法通過」、「單元測試通過」寫成「完整流程已驗證」。審查依 [工程審查指南](docs/02-development/engineering-review.md) 採 findings-first，先列可重現問題，再寫摘要。
@@ -111,8 +126,8 @@
 
 - Markdown、既有中文註解及使用者訊息使用繁體中文（台灣用語）；新增 `.py` 註解優先使用英文，既有中文註解不必改寫。程式碼識別字、log 標籤與 commit 訊息使用英文。
 - 設定名稱沿用 UI 既有文字，例如「刷新」與「無圖形界面模式」。
-- Commit 必須代表可獨立審查與回退的完整邏輯單位。除錯中間態、單一小錯誤修正、同一根因的後續補丁不得逐一 commit；應留在工作目錄，以 focused tests 收斂後併入所屬實作切片或 phase checkpoint。
-- 建立 commit 前，該邏輯單位的程式碼、測試與文件須一致，相關 focused tests 已通過且審查 finding 已處理。大型重構優先在切片完成或 phase 出站時建立少量、語意完整的 commit，不以 commit 數量記錄除錯過程。
+- Commit 應是可理解、可恢復的語意單位，不以提交數記錄除錯。若乾淨 HEAD、跨 OS CI 或固定候選覆核需要，可在已授權分支建立 checkpoint；標明 REVIEW_PENDING／VALIDATION_PENDING，不冒充正式完成。不為湊成一個巨大 commit 阻止必要驗證，也不無目的逐行提交。
+- 正式可合併單位須保持程式碼、測試、文件一致，並完成必要驗證與覆核。checkpoint 可先於完整出站，但須保留未完成事項及證據對應。只暫存確認屬於本任務的檔案，不提交秘密、私人設定或 generated artifacts；不以 reset／clean 丟棄使用者工作。
 - Commit 與 branch 命名依 [CONTRIBUTING.md](CONTRIBUTING.md)，不含 emoji。
 
 ## 10. 常用入口

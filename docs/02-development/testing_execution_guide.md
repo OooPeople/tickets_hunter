@@ -2,11 +2,11 @@
 
 **文件說明**：定義目前 repository 可執行的驗證層級、命令與結果陳述方式。
 
-**最後更新**：2026-10-16
+**最後更新**：2026-10-17
 
 ## 1. 原則
 
-- 驗證強度要與風險相稱，但驗證範圍不得無條件逐次擴大：實作切片期間只跑最相關的測試，完整 suite 與正式 CI 留到 phase 出站。
+- 驗證強度要與風險相稱，但驗證範圍不得無條件逐次擴大：實作切片期間先跑最相關的測試，固定候選再完成 phase 出站驗證；遠端特有條件可依 [自主執行規範](autonomous-execution.md) 做有目標的診斷。
 - 任何新測試必須實際執行；不能只建立測試檔就宣告完成。
 - 平台流程可以拆成純邏輯、DOM 契約與瀏覽器流程測試，不應一概視為「無法測試」。
 - 單元測試通過不代表真實網站流程通過；實機測試也不能取代可重複的自動測試。
@@ -18,11 +18,11 @@
 
 大型計劃以核准文件定義的 phase 為驗證單位；一般修改若沒有正式 phase，則以一個可獨立交付、可回退的工作批次視為 phase。
 
-1. **切片迭代**：修改哪個模組，就執行該模組的精確 pytest node、直接相依契約與修改檔 `py_compile`。同一失敗未修好前，不擴大到完整 suite。
-2. **切片收斂**：相關測試通過後完成自我審查；高風險變更先完成第二位審查者覆核。審查修改仍以 focused tests 驗證。
-3. **Phase 出站**：全部切片完成、檔案固定、審查無阻擋 finding 後，才執行一次完整 pytest；需要維持 unittest runner 相容時，在同一出站批次執行一次 unittest。
-4. **正式 CI**：本機出站驗證通過後才推送並觸發一次 phase gate。不得以連續 push／rerun 逐一發現本機可重現的錯誤。
-5. **CI 特有失敗**：僅限 runner、OS、容器隔離或 artifact 搬移等本機原先無法重現的差異。修正前先下載真實 artifact 或建立等價 fixture；用 focused regression 收斂後，再重新執行 phase 出站驗證與一次正式 CI。
+1. **切片迭代**：修改哪個模組，就執行該模組的精確 pytest node、直接相依契約與修改檔 `py_compile`；共用程式變動擴及受影響呼叫端。同一失敗未修好前，不無目的擴大到完整 suite。
+2. **切片收斂**：相關測試通過後完成自我審查；高風險變更由獨立審查者覆核固定候選。審查修改仍先以 focused tests 驗證。
+3. **Phase 出站**：全部切片完成、檔案固定且審查無阻擋 finding 後，完成核准計劃的完整 pytest 與其他已到期驗收；unittest 獨立執行依現行契約與 runner 相容性要求決定。失敗經局部修正、覆核後須必要重驗，不以一次為上限。
+4. **CI**：本機可定位問題先本機處理；遠端才具備的 OS／隔離／打包條件可做有目標的診斷。正式出站對固定候選執行必要 gate；每次重跑須有新修正、新證據或有依據的暫時故障，不連續推送碰運氣。
+5. **CI 特有失敗**：對 runner、OS、容器隔離或 artifact 搬移等差異，先下載真實 artifact 或建立等價 fixture；以 focused regression 收斂後，對修正後候選完成受影響驗證及必要正式 CI，不混用不同 SHA／run／attempt 的成果。
 
 完整 suite、coverage、打包與正式 CI 的必要義務沒有被取消；本節只限制執行時機，避免把高成本驗證當成開發內迴圈。
 
@@ -73,8 +73,8 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 |------|------|----------------|
 | A. 靜態檢查 | 發現語法、空白與文件問題 | `py_compile`、`git diff --check`、連結檢查 |
 | B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m pytest tests/test_<module>.py` |
-| C. Phase 出站完整套件 | 階段完成後發現跨模組回歸；切片期間不執行 | `python -m pytest` |
-| D. Phase 出站建置 | 涉及 import、相依或打包時於階段完成後驗證 | `python build_scripts/build_local.py` |
+| C. Phase 出站完整套件 | 固定候選發現跨模組回歸；失敗修正後必要重驗 | `python -m pytest` |
+| D. Phase 出站建置 | 涉及 import、相依、資源或打包時依核准計劃於適用 target 驗證 | `python build_scripts/build_local.py` |
 | E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
 
 ## 4. 常用命令
@@ -119,7 +119,7 @@ python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 
 ### 4.4 完整測試
 
-本節命令只在 phase 出站執行一次，不是每個 commit 或 focused test 通過後的固定下一步。
+本節命令用於固定候選的 phase 出站，不是每個 commit 或 focused test 通過後的固定下一步；修正出站失敗後按影響範圍必要重驗。
 
 ```bash
 python -m pytest

@@ -19,6 +19,7 @@ src/platforms/utiki/domain/effects.py
 src/platforms/utiki/domain/inputs.py
 src/platforms/utiki/application/__init__.py
 src/platforms/utiki/application/ports.py
+src/platforms/utiki/application/quantity.py
 src/utiki_config.py
 src/keyword_rules.py
 

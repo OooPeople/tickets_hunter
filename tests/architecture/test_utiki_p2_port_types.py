@@ -101,3 +101,38 @@ def test_quantity_port_rejects_raw_dict_adapter() -> None:
         got_signature="commit_quantity(self, plan: QuantityPlan, claim: RunningEffect) "
         "-> Coroutine[Any, Any, dict[str, str]]",
     )
+
+
+def test_real_quantity_application_rejects_raw_plan() -> None:
+    source = """
+from platforms.utiki.application.quantity import commit_granted_quantity
+from platforms.utiki.application.ports import QuantityBrowserPort
+from platforms.utiki.domain.effects import RunningEffect
+from platforms.utiki.domain.plans import QuantityPlan
+
+async def legal(port: QuantityBrowserPort, plan: QuantityPlan, claim: RunningEffect) -> None:
+    await commit_granted_quantity(port, plan, claim)
+
+async def wrong(port: QuantityBrowserPort, claim: RunningEffect) -> None:
+    await commit_granted_quantity(port, {"raw": "plan"}, claim)
+"""
+    legal_source = source.replace(
+        '    await commit_granted_quantity(port, {"raw": "plan"}, claim)\n',
+        "    raise NotImplementedError\n",
+    )
+    command = [
+        sys.executable, "-m", "mypy", "--strict", "--no-incremental",
+        "--config-file", str(CONFIG), "-c",
+    ]
+    legal = subprocess.run(
+        [*command, legal_source], cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert legal.returncode == 0, legal.stdout + legal.stderr
+    wrong = subprocess.run(
+        [*command, source], cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert wrong.returncode != 0
+    assert 'Argument 2 to "commit_granted_quantity" has incompatible type' in wrong.stdout
+    assert "dict[str, str]" in wrong.stdout
+    assert "QuantityPlan" in wrong.stdout
+    assert "[arg-type]" in wrong.stdout

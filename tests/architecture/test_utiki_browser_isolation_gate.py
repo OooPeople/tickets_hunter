@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import hashlib
 import json
@@ -10,6 +11,38 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER_PATH = PROJECT_ROOT / "tools" / "run_utiki_browser_isolation.py"
 CONTRACT_PATH = PROJECT_ROOT / "ci" / "utiki-browser-isolation.json"
+
+
+def _zendriver_start_calls(path: Path) -> list[ast.Call]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "uc"
+        and node.func.attr == "start"
+    ]
+
+
+def test_isolated_browser_launches_delegate_sandboxing_to_the_container():
+    launchers = (
+        PROJECT_ROOT / "tests/browser/utiki/test_hard_egress_canary.py",
+        PROJECT_ROOT / "tests/browser/utiki/test_production_origin_contract.py",
+        PROJECT_ROOT / "tools/utiki_egress_canary.py",
+        PROJECT_ROOT / "tools/benchmarks/run_utiki_p1_performance.py",
+    )
+
+    for launcher in launchers:
+        calls = _zendriver_start_calls(launcher)
+        assert len(calls) == 1, launcher
+        sandbox = next(
+            (keyword.value for keyword in calls[0].keywords if keyword.arg == "sandbox"),
+            None,
+        )
+        assert isinstance(sandbox, ast.Constant), launcher
+        assert sandbox.value is False, launcher
 
 
 def _load_launcher():
@@ -229,8 +262,13 @@ def test_image_build_evidence_rejects_unbound_or_unknown_fields(
         )
 
 
-def test_isolated_command_cannot_restore_network_or_privilege(tmp_path):
+def test_isolated_command_cannot_restore_network_or_privilege(
+    tmp_path, monkeypatch
+):
     launcher = _load_launcher()
+    monkeypatch.setattr(
+        launcher, "_user_options", lambda: ["--user", "65532:65532"]
+    )
     image = "example/isolation@sha256:" + "a" * 64
     command = launcher._isolated_command(
         "docker",

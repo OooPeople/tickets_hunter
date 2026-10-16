@@ -334,7 +334,14 @@ def test_raw_report_corruption_is_rejected(mutation, message):
         validate_raw_report(report, contract=load_contract(CONTRACT))
 
 
-def test_isolated_command_enforces_hard_egress_and_exact_inputs(tmp_path):
+def test_isolated_command_enforces_hard_egress_and_exact_inputs(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        isolation.browser_isolation,
+        "_user_options",
+        lambda: ["--user", "65532:65532"],
+    )
     command = isolation._isolated_command(
         runtime="docker",
         image="sha256:" + "a" * 64,
@@ -357,6 +364,7 @@ def test_isolated_command_enforces_hard_egress_and_exact_inputs(tmp_path):
     assert "--read-only" in command
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges" in command
+    assert command[command.index("--user") + 1] == "65532:65532"
     assert "tools/benchmarks/run_utiki_p1_performance.py" in command
     assert "/artifacts/raw-benchmark-report.json" in command
     assert "/artifacts/candidate-workspace-attestation.json" in command
@@ -414,6 +422,20 @@ def test_no_git_workspace_uses_outer_candidate_attestation(tmp_path, monkeypatch
         inner_runner.PerformanceRunError, match="file digest mismatch"
     ):
         inner_runner._verify_candidate_attestation(attestation, CANDIDATE)
+
+
+def test_browser_launch_failure_is_recorded_as_performance_blocker(monkeypatch):
+    async def fail_measurement(measurement):
+        assert measurement == {"browser_samples": 30}
+        raise RuntimeError("synthetic browser boundary failure")
+
+    monkeypatch.setattr(inner_runner, "_measure_browser", fail_measurement)
+
+    with pytest.raises(
+        inner_runner.PerformanceRunError,
+        match="isolated browser boundary failed: RuntimeError",
+    ):
+        inner_runner._run_browser_measurement({"browser_samples": 30})
 
 
 def test_untrusted_candidate_is_blocked_before_container_runtime(tmp_path):

@@ -63,6 +63,7 @@ async def _run_production_origin_fixture():
         browser = await uc.start(
             user_data_dir=profile.name,
             headless=True,
+            sandbox=False,
             browser_args=[
                 "--disable-background-networking",
                 "--disable-default-apps",

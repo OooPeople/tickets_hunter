@@ -293,11 +293,13 @@ def _mypy_command(requested: Path | None) -> list[str]:
             information = requested.lstat()
         except OSError as exc:
             raise GateError("MYPY_NOT_AVAILABLE") from exc
-        if (
-            stat.S_ISLNK(information.st_mode)
-            or not stat.S_ISREG(information.st_mode)
-            or not os.access(requested, os.X_OK)
+        if stat.S_ISLNK(information.st_mode) or not stat.S_ISREG(
+            information.st_mode
         ):
+            raise GateError("MYPY_NOT_AVAILABLE")
+        if os.name == "nt" and requested.suffix.casefold() == ".py":
+            return [sys.executable, str(requested)]
+        if not os.access(requested, os.X_OK):
             raise GateError("MYPY_NOT_AVAILABLE")
         return [str(requested)]
     executable = shutil.which("mypy")

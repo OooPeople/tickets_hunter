@@ -172,7 +172,8 @@ python tools/run_utiki_browser_isolation.py \
 上述 image、build evidence 與 SHA 必須由當次受審查的 CI context 代入，範例字串
 本身不能執行。GitHub Actions 的正式 P1 workflow 另要求 repository variable
 `UTIKI_P1_BASE_IMAGE`；其值只能是維護者已審查的 `repository@sha256:<64-hex>`。
-目前 repository 尚未配置此變數，因此 browser／performance required job 會在 build 前
+repository 的正式 P1 gate 已配置此變數；workflow 仍須逐次驗證它是 digest-pinned
+reference。若變數缺失或格式不符，browser／performance required job 必須在 build 前
 明確以 `BLOCKED` prerequisite 失敗；不得改用 mutable tag、臨時解析 tag，或把空值視為
 skip／PASS。build evidence 要綁定 digest-pinned base image、實際 image ID，以及
 `ci/utiki-isolation/Dockerfile`、`requirement.txt`、`requirements-dev.txt` 的當次

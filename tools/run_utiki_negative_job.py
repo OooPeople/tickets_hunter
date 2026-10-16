@@ -24,12 +24,14 @@ from typing import Any
 try:
     from tools.utiki_negative_contract import (
         NegativeContractError,
+        probe_directory_name,
         validate_registry_contract,
         validate_request_contract,
     )
 except ModuleNotFoundError:  # Direct execution from tools/.
     from utiki_negative_contract import (  # type: ignore[no-redef]
         NegativeContractError,
+        probe_directory_name,
         validate_registry_contract,
         validate_request_contract,
     )
@@ -316,13 +318,16 @@ def main(argv: list[str] | None = None) -> int:
         for key in selected:
             entry = registry[key]
             name = f"{_token(key[1])}--{_token(key[2])}"
-            source_dir = input_root / name
+            directory_name = probe_directory_name(entry)
+            source_dir = input_root / directory_name
             source_request = source_dir / "probe.json"
             if not source_request.is_file():
                 raise JobError(f"concrete probe input is missing: {name}")
             report = run_dir / evidence_paths[key]
             report.parent.mkdir(parents=True, exist_ok=True)
-            copied_dir = _stage_probe_input(source_dir, report.parent, name)
+            copied_dir = _stage_probe_input(
+                source_dir, report.parent, directory_name
+            )
             copied_request = copied_dir / "probe.json"
             request = _load(copied_request)
             if _key(request) != key:

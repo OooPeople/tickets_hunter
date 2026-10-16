@@ -115,6 +115,26 @@ def test_persisted_manifest_is_byte_stable_and_has_fixed_counts(tmp_path):
     }
 
 
+def test_byte_pinned_json_uses_lf_checkout() -> None:
+    paths = (
+        "ci/utiki-required-cases.json",
+        "ci/utiki-p1-negative-probes.json",
+        "tests/fixtures/utiki/manifest.json",
+    )
+    result = subprocess.run(
+        ["git", "check-attr", "eol", "--", *paths],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert set(result.stdout.splitlines()) == {
+        f"{path}: eol: lf" for path in paths
+    }
+
+
 @pytest.mark.parametrize("mutation", ["missing", "extra", "duplicate"])
 def test_binding_set_mutations_fail_closed(tmp_path, mutation):
     registry = _registry()

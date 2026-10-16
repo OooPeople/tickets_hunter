@@ -513,6 +513,30 @@ def test_digest_pinned_ignored_build_source_is_compiled(gate_repo):
     )
 
 
+def test_file_digest_preserves_crlf_bytes(tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "verify_modified_python_for_binary_digest", TOOL_SOURCE
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    previous = sys.modules.get(spec.name)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        source = tmp_path / "source.py"
+        source.write_bytes(b"VALUE = 1\r\n")
+        digest, _ = module._file_digest(tmp_path, "source.py")
+    finally:
+        if previous is None:
+            sys.modules.pop(spec.name, None)
+        else:
+            sys.modules[spec.name] = previous
+
+    assert digest == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
 def test_unmerged_index_is_rejected(gate_repo):
     case = gate_repo
     repo = case["repo"]

@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 from xml.etree import ElementTree
 
 
@@ -25,6 +25,17 @@ GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 class NegativeContractError(Exception):
     """The concrete negative probe does not match its reviewed contract."""
+
+
+def probe_directory_name(entry: Mapping[str, Any]) -> str:
+    """Return a short, deterministic physical directory for one execution key."""
+
+    fields = ("case_id", "obligation_id", "variant_id", "job_id", "target")
+    values = [entry.get(field) for field in fields]
+    if not all(isinstance(value, str) and value for value in values):
+        raise NegativeContractError("negative probe directory key is invalid")
+    identity = "\0".join(str(value) for value in values).encode("utf-8")
+    return f"p-{hashlib.sha256(identity).hexdigest()[:16]}"
 
 
 def argument_contract_id(entry: dict[str, Any]) -> str:
@@ -253,7 +264,7 @@ def _validate_typecheck(
         "--root": f"{PROBE_ROOT}/repo",
         "--manifest": f"{PROBE_ROOT}/repo/ci/utiki-typed-scope.txt",
         "--config": f"{PROBE_ROOT}/repo/ci/mypy-utiki.ini",
-        "--mypy": f"{PROBE_ROOT}/fake-mypy",
+        "--mypy": f"{PROBE_ROOT}/fake-mypy.py",
         "--report": f"{PROBE_ROOT}/typecheck-report.json",
     }
     if any(values.get(key) != value for key, value in expected_static.items()):

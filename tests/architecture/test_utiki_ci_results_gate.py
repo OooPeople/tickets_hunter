@@ -12,6 +12,8 @@ from xml.etree import ElementTree
 
 import pytest
 
+from tools.utiki_negative_contract import probe_directory_name
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHECKER = PROJECT_ROOT / "tools" / "verify_utiki_ci_results.py"
@@ -80,8 +82,9 @@ def _canonical_negative_fixture(
         if os.environ.get("UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL") == "1":
             _internal_negative_request(destination, registry_entry)
         else:
-            name = f"{registry_entry['obligation_id']}--{registry_entry['variant_id']}"
-            source = _canonical_negative_cache() / name
+            source = _canonical_negative_cache() / probe_directory_name(
+                registry_entry
+            )
             shutil.copytree(source, destination)
     request_path = destination / "probe.json"
     request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -438,10 +441,11 @@ def _safe_node(case_id, obligation_id, variant_id, target):
     return f"tests/synthetic/test_required.py::test_{stem}"
 
 
-def _make_manifest(root):
+def _make_manifest(root, *, compact=False):
     catalog = _catalog()
     profiles = _profiles(catalog)
     cases = []
+    compact_evidence_paths = {}
     for case in catalog["cases"]:
         executions = []
         for obligation in case["obligations"]:
@@ -466,6 +470,13 @@ def _make_manifest(root):
                                 evidence_path = f"evidence/{kind}--{suffix}.json"
                             else:
                                 evidence_path = f"evidence/{kind}.json"
+                            if compact:
+                                evidence_key = (kind, evidence_path)
+                                if evidence_key not in compact_evidence_paths:
+                                    compact_evidence_paths[evidence_key] = (
+                                        f"e/a{len(compact_evidence_paths):03d}.json"
+                                    )
+                                evidence_path = compact_evidence_paths[evidence_key]
                             evidence.append({"kind": kind, "path": evidence_path})
                     executions.append(
                         {
@@ -542,8 +553,18 @@ def _browser_performance_metric(unit, samples):
     }
 
 
-def _make_run(root, manifest_path, manifest, profiles, job_id, target):
-    run_dir = root / f"{job_id}-{target}"
+def _make_run(
+    root,
+    manifest_path,
+    manifest,
+    profiles,
+    job_id,
+    target,
+    *,
+    run_dir_name=None,
+    compact_support=False,
+):
+    run_dir = root / (run_dir_name or f"{job_id}-{target}")
     evidence_dir = run_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
@@ -556,10 +577,12 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
         }
     )
     artifacts = []
-    for kind, artifact_relative in evidence_refs:
+    for support_index, (kind, artifact_relative) in enumerate(evidence_refs):
         path = run_dir / artifact_relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        stem = path.stem
+        support_stem = (
+            f"a{support_index:03d}" if compact_support else path.stem
+        )
         producer_by_kind = {
             "architecture-report": "tools/check_utiki_architecture.py",
             "typecheck-report": "tools/run_utiki_typecheck.py",
@@ -578,9 +601,9 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
             )
         producer = PROJECT_ROOT / producer_by_kind[kind]
         launcher = PROJECT_ROOT / "tools" / "run_utiki_evidence.py"
-        input_path = path.parent / f"{stem}.input"
-        stdout_path = path.parent / f"{stem}.stdout"
-        stderr_path = path.parent / f"{stem}.stderr"
+        input_path = path.parent / f"{support_stem}.input"
+        stdout_path = path.parent / f"{support_stem}.stdout"
+        stderr_path = path.parent / f"{support_stem}.stderr"
         input_path.write_text("controlled input\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         outputs = []
@@ -612,8 +635,8 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
             stdout_path.write_text(rejection_token + "\n", encoding="utf-8")
             expectation = "NONZERO"
             observed_exit = 1
-            child_stdout = path.parent / f"{stem}.child.stdout"
-            child_stderr = path.parent / f"{stem}.child.stderr"
+            child_stdout = path.parent / f"{support_stem}.child.stdout"
+            child_stderr = path.parent / f"{support_stem}.child.stderr"
             child_stdout.write_text(rejection_token + "\n", encoding="utf-8")
             child_stderr.write_text("", encoding="utf-8")
             child_kind = registry_entry["child_kind"]
@@ -701,14 +724,14 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
             canonical_fixture = True
             probe_request_path, probe_request, raw_negative = (
                 _canonical_negative_fixture(
-                    path.parent / f"{stem}.probe",
+                    path.parent / f"{support_stem}.probe",
                     registry_entry,
                     child_stdout,
                     child_stderr,
                 )
             )
             if job_id == "browser-contract-isolated":
-                isolation_proof = path.parent / f"{stem}.isolation.json"
+                isolation_proof = path.parent / f"{support_stem}.isolation.json"
                 _write_json(
                     isolation_proof,
                     {
@@ -722,9 +745,9 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
                     "path": str(isolation_proof.resolve()),
                     "sha256": _sha256(isolation_proof),
                 }
-            producer_report = path.parent / f"{stem}.producer.json"
+            producer_report = path.parent / f"{support_stem}.producer.json"
             if not canonical_fixture:
-                probe_request_path = path.parent / f"{stem}.probe.json"
+                probe_request_path = path.parent / f"{support_stem}.probe.json"
                 probe_request["inputs"][0]["path"] = input_path.name
             _write_json(probe_request_path, probe_request)
             _write_json(producer_report, raw_negative)
@@ -820,7 +843,9 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
                 },
             }
             if kind == "typecheck-report":
-                coverage_context = path.parent / f"{stem}.coverage-context.json"
+                coverage_context = (
+                    path.parent / f"{support_stem}.coverage-context.json"
+                )
                 _write_json(
                     coverage_context,
                     {
@@ -1029,7 +1054,7 @@ def _make_run(root, manifest_path, manifest, profiles, job_id, target):
                     },
                     "threshold_policy": "P1 baseline establishment",
                 }
-            producer_report = path.parent / f"{stem}.producer.json"
+            producer_report = path.parent / f"{support_stem}.producer.json"
             _write_json(producer_report, producer_payloads[kind])
             stdout_path.write_text(
                 producer_report.read_text(encoding="utf-8"), encoding="utf-8"
@@ -2012,9 +2037,10 @@ def test_original_test_exit_cannot_be_overwritten(gate_inputs):
     assert "UPSTREAM_PROCESS_FAILED" in result.stdout
 
 
-def _make_run_index(case):
+def _make_run_index(case, *, compact=False):
     entries = []
     runs = []
+    run_index = 0
     for job_id, profile in case["profiles"][PHASE].items():
         for target in profile["targets"]:
             run = _make_run(
@@ -2024,7 +2050,10 @@ def _make_run_index(case):
                 case["profiles"],
                 job_id,
                 target,
+                run_dir_name=f"r{run_index:02d}" if compact else None,
+                compact_support=compact,
             )
+            run_index += 1
             runs.append(run)
             entries.append(
                 {

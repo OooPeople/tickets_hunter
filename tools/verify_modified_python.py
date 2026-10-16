@@ -452,7 +452,7 @@ def _safe_lstat(repo: Path, path: str, *, require_file: bool) -> os.stat_result 
 def _file_digest(repo: Path, path: str) -> tuple[str, tuple[int, int, int, int]]:
     before = _safe_lstat(repo, path, require_file=True)
     assert before is not None
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:

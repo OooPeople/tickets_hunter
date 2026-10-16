@@ -76,6 +76,7 @@ async def _run_browser_probes(peer, port):
         browser = await uc.start(
             user_data_dir=profile.name,
             headless=True,
+            sandbox=False,
             browser_args=[
                 "--disable-background-networking",
                 "--disable-default-apps",

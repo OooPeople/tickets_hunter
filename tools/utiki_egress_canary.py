@@ -253,6 +253,7 @@ async def _browser_negative_probe(host: str, port: int, mode: str) -> str:
         browser = await uc.start(
             user_data_dir=profile.name,
             headless=True,
+            sandbox=False,
             browser_args=[
                 "--disable-background-networking",
                 "--disable-default-apps",

@@ -282,17 +282,23 @@ async def _measure_browser(measurement: Mapping[str, Any]) -> dict[str, Any]:
     )
     fixture_body = base64.b64encode(fixture.encode("utf-8")).decode("ascii")
     try:
-        browser = await uc.start(
-            user_data_dir=profile.name,
-            headless=True,
-            browser_args=[
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                "--no-default-browser-check",
-                "--no-first-run",
-            ],
-        )
+        try:
+            browser = await uc.start(
+                user_data_dir=profile.name,
+                headless=True,
+                sandbox=False,
+                browser_args=[
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--no-default-browser-check",
+                    "--no-first-run",
+                ],
+            )
+        except Exception as exc:
+            raise PerformanceRunError(
+                f"isolated browser launch failed: {type(exc).__name__}"
+            ) from exc
         tab = browser.main_tab
 
         async def handle_request(event: Any) -> None:
@@ -426,6 +432,17 @@ async def _measure_browser(measurement: Mapping[str, Any]) -> dict[str, Any]:
                 await browser.stop()
         finally:
             profile.cleanup()
+
+
+def _run_browser_measurement(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return asyncio.run(_measure_browser(measurement))
+    except PerformanceRunError:
+        raise
+    except Exception as exc:
+        raise PerformanceRunError(
+            f"isolated browser boundary failed: {type(exc).__name__}"
+        ) from exc
 
 
 def _manifest_mappings(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -601,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
                 strict=True
             ),
         )
-        browser_result = asyncio.run(_measure_browser(contract["measurement"]))
+        browser_result = _run_browser_measurement(contract["measurement"])
         production_subjects = _loaded_production_subjects()
         if any(
             attested_files.get(item["path"]) != item["sha256"]

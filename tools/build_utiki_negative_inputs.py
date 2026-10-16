@@ -24,12 +24,14 @@ from xml.etree import ElementTree
 try:
     from tools.utiki_negative_contract import (
         NegativeContractError,
+        probe_directory_name,
         validate_registry_contract,
         validate_request_contract,
     )
 except ModuleNotFoundError:  # Direct execution from tools/.
     from utiki_negative_contract import (  # type: ignore[no-redef]
         NegativeContractError,
+        probe_directory_name,
         validate_registry_contract,
         validate_request_contract,
     )
@@ -200,7 +202,7 @@ def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> N
         "[mypy]\npython_version = 3.11\nstrict = True\nwarn_unused_configs = True\nmypy_path = src\n",
         encoding="utf-8",
     )
-    fake_mypy = root / "fake-mypy"
+    fake_mypy = root / "fake-mypy.py"
     fake_mypy.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
     fake_mypy.chmod(0o755)
     new_paths = {
@@ -299,8 +301,13 @@ def _ci_probe(
     previous_internal = os.environ.get("UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL")
     os.environ["UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL"] = "1"
     try:
+        # ``case/run-index.json`` is part of the reviewed aggregate-probe
+        # contract.  Keep that logical path stable while shortening only the
+        # opaque outer probe directory and non-contract support artifacts.
         case_root = root / "case"
-        manifest_path, manifest, catalog, profiles = gate._make_manifest(case_root)
+        manifest_path, manifest, catalog, profiles = gate._make_manifest(
+            case_root, compact=True
+        )
         run = gate._make_run(
             case_root,
             manifest_path,
@@ -308,6 +315,8 @@ def _ci_probe(
             profiles,
             "architecture-types",
             "source-linux-x64",
+            run_dir_name="r",
+            compact_support=True,
         )
         variant = entry["variant_id"]
         primary: Path
@@ -319,7 +328,7 @@ def _ci_probe(
                 "catalog": catalog,
                 "profiles": profiles,
             }
-            index_path, index, _ = gate._make_run_index(case)
+            index_path, index, _ = gate._make_run_index(case, compact=True)
             index["runs"].pop()
             gate._write_json(index_path, index)
             arguments = gate._index_arguments(manifest_path, index_path)
@@ -747,8 +756,11 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(item, dict)
             and arguments.environment in {"all", item.get("environment")}
         ]
-        for entry in selected:
-            root = output / _name(entry)
+        physical_names = [probe_directory_name(entry) for entry in selected]
+        if len(set(physical_names)) != len(physical_names):
+            raise BuildError("negative probe directory hash collision")
+        for entry, physical_name in zip(selected, physical_names):
+            root = output / physical_name
             root.mkdir()
             job_id = entry["job_id"]
             if entry["environment"] == "isolated":

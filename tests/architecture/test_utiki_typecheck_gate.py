@@ -41,7 +41,7 @@ warn_unused_configs = True
 mypy_path = src
 """,
     )
-    fake = tmp_path / "fake-mypy"
+    fake = tmp_path / "fake-mypy.py"
     _write(
         fake,
         """#!/usr/bin/env python3

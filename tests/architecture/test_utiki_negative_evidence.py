@@ -12,6 +12,7 @@ from tools import build_utiki_negative_inputs as negative_builder
 from tools import run_utiki_negative_job as negative_job
 from tools.utiki_negative_contract import (
     NegativeContractError,
+    probe_directory_name,
     validate_request_contract,
 )
 
@@ -162,29 +163,42 @@ def test_builder_and_host_negative_job_execute_real_per_key_children(tmp_path: P
     assert built.returncode == 0, built.stderr
     requests = list(input_root.glob("*/probe.json"))
     assert len(requests) == 45
+    simulated_windows_root = (
+        "C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/"
+        "pytest-999/test_negative_fixture_path_budget0/inputs/"
+    )
+    longest_projected_path = max(
+        len(simulated_windows_root + path.relative_to(input_root).as_posix())
+        for path in input_root.rglob("*")
+    )
+    assert longest_projected_path < 240
+    entries = json.loads(REGISTRY.read_text(encoding="utf-8"))["probes"]
+
+    def request_path(obligation_id: str, variant_id: str) -> Path:
+        entry = next(
+            item
+            for item in entries
+            if item["obligation_id"] == obligation_id
+            and item["variant_id"] == variant_id
+        )
+        return input_root / probe_directory_name(entry) / "probe.json"
 
     unknown = json.loads(
-        (
-            input_root
-            / "H05.arch.unknown-marker--unknown-marker"
-            / "probe.json"
-        ).read_text(encoding="utf-8")
+        request_path("H05.arch.unknown-marker", "unknown-marker").read_text(
+            encoding="utf-8"
+        )
     )
     assert unknown["child"]["working_directory"] == "{PROBE_ROOT}"
     typed = json.loads(
-        (
-            input_root
-            / "H08.arch.new-domain-file--new-domain-file"
-            / "probe.json"
-        ).read_text(encoding="utf-8")
+        request_path("H08.arch.new-domain-file", "new-domain-file").read_text(
+            encoding="utf-8"
+        )
     )
     assert typed["inputs"][0]["path"].endswith("/domain/state.py")
     assert "{PROBE_ROOT}/" + typed["inputs"][0]["path"] in typed["child"]["arguments"]
     ignored = json.loads(
-        (
-            input_root
-            / "H11.syntax.ignored-build-source--ignored-build-source"
-            / "probe.json"
+        request_path(
+            "H11.syntax.ignored-build-source", "ignored-build-source"
         ).read_text(encoding="utf-8")
     )
     assert ignored["inputs"][0]["path"] == "repo/generated_source.py"
@@ -219,7 +233,7 @@ def test_ci_checker_probe_keeps_absolute_evidence_bindings_in_place(
         if item["obligation_id"] == "A05.arch.zero-collected"
     )
     report_parent = tmp_path / "run" / "evidence" / "negative"
-    name = f"{entry['obligation_id']}--{entry['variant_id']}"
+    name = probe_directory_name(entry)
     probe_dir = report_parent / name
     probe_dir.mkdir(parents=True)
     negative_builder._ci_probe(PROJECT_ROOT, probe_dir, entry, "1" * 40)
@@ -492,7 +506,9 @@ def test_same_token_requests_cannot_be_relabelled_across_execution_keys(
     )
     for source_path in sorted(input_root.glob("*/probe.json")):
         source = json.loads(source_path.read_text(encoding="utf-8"))
-        source_name = source_path.parent.name
+        source_name = (
+            f"{source['obligation_id']}--{source['variant_id']}"
+        )
         for target in registry:
             target_name = f"{target['obligation_id']}--{target['variant_id']}"
             if (
@@ -539,8 +555,19 @@ def test_empty_addopts_cannot_reuse_unknown_marker_arguments(tmp_path: Path) -> 
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    empty_path = input_root / "H05.arch.empty-addopts--empty-addopts" / "probe.json"
-    unknown_path = input_root / "H05.arch.unknown-marker--unknown-marker" / "probe.json"
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))["probes"]
+    empty_entry = next(
+        item
+        for item in registry
+        if item["obligation_id"] == "H05.arch.empty-addopts"
+    )
+    unknown_entry = next(
+        item
+        for item in registry
+        if item["obligation_id"] == "H05.arch.unknown-marker"
+    )
+    empty_path = input_root / probe_directory_name(empty_entry) / "probe.json"
+    unknown_path = input_root / probe_directory_name(unknown_entry) / "probe.json"
     empty = json.loads(empty_path.read_text(encoding="utf-8"))
     unknown = json.loads(unknown_path.read_text(encoding="utf-8"))
     empty["child"]["arguments"] = unknown["child"]["arguments"]

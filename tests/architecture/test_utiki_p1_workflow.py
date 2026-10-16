@@ -112,6 +112,7 @@ def test_isolated_jobs_build_before_network_off_and_use_content_image_id() -> No
         assert "ISOLATION_IMAGE_ID=$(jq -r .image_id" in body
         assert '--image "$ISOLATION_IMAGE_ID"' in body
         assert "assemble_utiki_isolated_job.py" in body
+        assert "--required-catalog ci/utiki-required-cases.json" in body
         assert "--require-browser" in body
         assert "actions/upload-artifact@v7" in body
 
@@ -265,6 +266,7 @@ def test_workflow_family_runner_arguments_parse_with_checked_in_contracts(tmp_pa
     isolated = _module("tools/assemble_utiki_isolated_job.py")._parser()
     isolated_arguments = [
         *common,
+        "--required-catalog", "ci/utiki-required-cases.json",
         "--junit", str(tmp_path / "browser.xml"),
         "--reporter-result", str(tmp_path / "reporter.json"),
         "--inner-report", str(tmp_path / "inner.json"),

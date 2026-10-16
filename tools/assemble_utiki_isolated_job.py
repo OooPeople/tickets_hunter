@@ -130,6 +130,52 @@ def _mappings(
     return sorted(managed, key=lambda item: item["node_id"]), layers, evidence
 
 
+def _profile_layers(
+    catalog: dict[str, Any],
+    phase: str,
+    job_id: str,
+    target: str,
+    mapped_layers: set[str],
+) -> set[str]:
+    profiles = catalog.get("gate_profiles")
+    if not isinstance(profiles, dict):
+        raise AssembleError("required catalog has no gate profiles")
+    profile = profiles.get(phase)
+    if not isinstance(profile, dict):
+        raise AssembleError("required catalog has no matching phase profile")
+    jobs = profile.get("required_jobs")
+    if not isinstance(jobs, list):
+        raise AssembleError("required catalog phase has no required jobs")
+    matching = [
+        job
+        for job in jobs
+        if isinstance(job, dict) and job.get("job_id") == job_id
+    ]
+    if len(matching) != 1:
+        raise AssembleError("required catalog does not identify exactly one job profile")
+    job = matching[0]
+    targets = job.get("targets")
+    layers = job.get("layers")
+    if (
+        not isinstance(targets, list)
+        or any(not isinstance(item, str) or not item for item in targets)
+        or not isinstance(layers, list)
+        or not layers
+        or any(not isinstance(item, str) or not item for item in layers)
+    ):
+        raise AssembleError("required catalog job profile is invalid")
+    if (
+        target not in targets
+        or len(targets) != len(set(targets))
+        or len(layers) != len(set(layers))
+    ):
+        raise AssembleError("required catalog job profile is invalid")
+    profile_layers = set(layers)
+    if not mapped_layers.issubset(profile_layers):
+        raise AssembleError("execution manifest layer is absent from the job profile")
+    return profile_layers
+
+
 def _artifact(
     run_dir: Path, kind: str, raw_path: str
 ) -> tuple[dict[str, str], dict[str, Any], Path]:
@@ -354,6 +400,7 @@ def _marker_expression(command: list[str]) -> str:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, required=True)
+    parser.add_argument("--required-catalog", type=Path, required=True)
     parser.add_argument("--execution-manifest", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
@@ -388,13 +435,26 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path = arguments.execution_manifest.resolve(strict=True)
         manifest = _load(manifest_path)
         manifest_digest = _sha256(manifest_path)
+        catalog_path = arguments.required_catalog.resolve(strict=True)
+        catalog = _load(catalog_path)
+        if _sha256(catalog_path) != arguments.catalog_sha256:
+            raise AssembleError("required catalog digest mismatch")
         if manifest.get("phase") != arguments.phase:
             raise AssembleError("execution manifest phase mismatch")
         if manifest.get("catalog_sha256") != arguments.catalog_sha256:
             raise AssembleError("execution manifest catalog digest mismatch")
-        mappings, layers, expected_artifacts = _mappings(
+        mappings, mapped_layers, expected_artifacts = _mappings(
             manifest, arguments.job_id, arguments.target
         )
+        layers = _profile_layers(
+            catalog,
+            arguments.phase,
+            arguments.job_id,
+            arguments.target,
+            mapped_layers,
+        )
+        if not layers & RESOURCE_LAYERS:
+            raise AssembleError("isolated job profile has no resource layer")
 
         resources: list[dict[str, str]] = []
         seen_resources: set[str] = set()

@@ -17,7 +17,6 @@ JOB_ID = "browser-contract-isolated"
 PHASE = "P1"
 TARGET = "isolated-linux-x64"
 CANDIDATE_SHA = "a" * 40
-CATALOG_SHA256 = "b" * 64
 NODE_ID = "tests/browser/utiki/test_contract.py::test_required_contract"
 
 
@@ -52,6 +51,24 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     (repository / ".git").mkdir(parents=True)
     run_dir = tmp_path / "run"
     evidence = run_dir / "evidence"
+    catalog = tmp_path / "catalog.json"
+    _write_json(
+        catalog,
+        {
+            "gate_profiles": {
+                PHASE: {
+                    "required_jobs": [
+                        {
+                            "job_id": JOB_ID,
+                            "targets": [TARGET],
+                            "layers": ["browser-contract", "browser-isolation"],
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    catalog_digest = _digest(catalog)
     manifest = tmp_path / "manifest.json"
     mapping = {
         "case_id": "H01",
@@ -67,7 +84,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         {
             "schema_version": 1,
             "phase": PHASE,
-            "catalog_sha256": CATALOG_SHA256,
+            "catalog_sha256": catalog_digest,
             "cases": [
                 {
                     "id": "H01",
@@ -101,7 +118,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         "phase": PHASE,
         "target": TARGET,
         "candidate_sha": CANDIDATE_SHA,
-        "catalog_sha256": CATALOG_SHA256,
+        "catalog_sha256": catalog_digest,
         "execution_manifest_sha256": manifest_digest,
     }
 
@@ -239,6 +256,8 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     return {
         "repository": repository,
         "run_dir": run_dir,
+        "catalog": catalog,
+        "catalog_digest": catalog_digest,
         "manifest": manifest,
         "manifest_digest": manifest_digest,
         "fixture": fixture_path,
@@ -257,6 +276,8 @@ def _arguments(fixture: dict[str, object]) -> list[str]:
     return [
         "--repository-root",
         str(fixture["repository"]),
+        "--required-catalog",
+        str(fixture["catalog"]),
         "--execution-manifest",
         str(fixture["manifest"]),
         "--run-dir",
@@ -274,7 +295,7 @@ def _arguments(fixture: dict[str, object]) -> list[str]:
         "--candidate-sha",
         CANDIDATE_SHA,
         "--catalog-sha256",
-        CATALOG_SHA256,
+        str(fixture["catalog_digest"]),
         "--junit",
         str(fixture["junit"]),
         "--reporter-result",
@@ -329,6 +350,7 @@ def test_assembler_packages_byte_identical_managed_junit_and_bound_metadata(
     assert metadata["effective_flags"]["marker_expression"] == "browser and not live"
     assert metadata["exit_codes"] == {"test": 0, "collector": 0, "reporter": 0}
     assert metadata["selected_count"] == 1
+    assert metadata["layers"] == ["browser-contract", "browser-isolation"]
     assert metadata["isolation"]["verified"] is True
     assert {(item["kind"], item["path"]) for item in metadata["artifacts"]} == {
         ("browser-isolation-report", "evidence/browser-isolation-report.json"),
@@ -348,6 +370,7 @@ def test_assembler_packages_byte_identical_managed_junit_and_bound_metadata(
         "reporter-exit",
         "inner-pytest-exit",
         "stale-envelope",
+        "catalog-digest",
     ],
 )
 def test_assembler_rejects_incomplete_or_invented_isolated_results(
@@ -394,6 +417,8 @@ def test_assembler_rejects_incomplete_or_invented_isolated_results(
         envelope = json.loads(fixture["negative"].read_text(encoding="utf-8"))
         envelope["context"]["run_id"] = "p1-stale-attempt-1"
         _write_json(fixture["negative"], envelope)
+    elif mutation == "catalog-digest":
+        fixture["catalog"].write_text("{}\n", encoding="utf-8")
 
     exit_code = assembler.main(arguments)
 
@@ -410,3 +435,31 @@ def test_assembler_refuses_stale_metadata_destination(tmp_path, monkeypatch):
 
     assert exit_code != 0
     assert metadata.read_text(encoding="utf-8") == "{}\n"
+
+
+@pytest.mark.parametrize(
+    ("targets", "layers", "mapped_layers"),
+    [
+        (["other-target"], ["browser-isolation"], {"browser-isolation"}),
+        ([TARGET], ["browser-isolation", "browser-isolation"], {"browser-isolation"}),
+        ([TARGET], ["browser-isolation"], {"performance"}),
+    ],
+)
+def test_profile_layers_reject_target_duplicate_or_unadvertised_mapping(
+    targets, layers, mapped_layers
+):
+    assembler = _load_assembler()
+    catalog = {
+        "gate_profiles": {
+            PHASE: {
+                "required_jobs": [
+                    {"job_id": JOB_ID, "targets": targets, "layers": layers}
+                ]
+            }
+        }
+    }
+
+    with pytest.raises(assembler.AssembleError):
+        assembler._profile_layers(
+            catalog, PHASE, JOB_ID, TARGET, mapped_layers
+        )

@@ -841,7 +841,7 @@ def date_plan_matches_snapshot(snapshot: object, plan: object) -> bool:
     )
 
 
-def availability_has_tickets(status_text, ticket_number=1):
+def availability_has_tickets(status_text: object, ticket_number: object = 1) -> bool:
     """判斷區域庫存文字是否足以供應要求票數。"""
 
     requested = parse_nonnegative_count(ticket_number)
@@ -863,7 +863,40 @@ def availability_has_tickets(status_text, ticket_number=1):
     return isinstance(available, PresentField) and available.value >= requested.value
 
 
-def parse_area_send_action(href, expected_performance_id):
+class _AreaAction(TypedDict):
+    action_name: str
+    route: str
+    performance_id: str
+    price_area_id: str
+    group_id: str
+    stable_args: list[str]
+    status: str
+
+
+class _MapTitle(TypedDict):
+    area: str
+    price: str
+    status: str
+
+
+class _MapAreaTarget(TypedDict):
+    href: str
+    title: str
+
+
+class _AreaCandidate(TypedDict):
+    text: str
+    area: str
+    price: str
+    status: str
+    rel: str
+    map_action: _AreaAction
+    destination: _AreaAction | None
+
+
+def parse_area_send_action(
+    href: object, expected_performance_id: str
+) -> _AreaAction | None:
     """解析區域連結中的一般送出操作。"""
 
     match = re.fullmatch(
@@ -893,7 +926,9 @@ def parse_area_send_action(href, expected_performance_id):
     }
 
 
-def parse_area_send_a_action(href, expected_performance_id):
+def parse_area_send_a_action(
+    href: object, expected_performance_id: str
+) -> _AreaAction | None:
     """解析區域連結中的替代送出操作。"""
 
     match = re.fullmatch(
@@ -926,7 +961,7 @@ def parse_area_send_a_action(href, expected_performance_id):
     }
 
 
-def parse_map_title(title):
+def parse_map_title(title: object) -> _MapTitle | None:
     """解析座位區圖標題中的區域與票價資訊。"""
 
     match = re.fullmatch(
@@ -944,7 +979,12 @@ def parse_map_title(title):
     }
 
 
-def map_title_matches_available_row(map_title, area_text, price_text, ticket_number):
+def map_title_matches_available_row(
+    map_title: _MapTitle | None,
+    area_text: str,
+    price_text: str,
+    ticket_number: object,
+) -> bool:
     """判斷區域圖標題是否對應有足夠庫存的區域列。"""
 
     return bool(
@@ -955,24 +995,33 @@ def map_title_matches_available_row(map_title, area_text, price_text, ticket_num
     )
 
 
-def _index_map_areas(areas):
+def _index_map_areas(areas: object) -> dict[str, list[_MapAreaTarget]] | None:
     """依區域圖識別建立可查詢的區域索引。"""
 
     if not isinstance(areas, tuple) or not 0 < len(areas) <= 500:
         return None
-    indexed = {}
+    indexed: dict[str, list[_MapAreaTarget]] = {}
     for area in areas:
+        if not isinstance(area, MapArea):
+            return None
         if not re.fullmatch(r"[A-Za-z0-9_-]+", area.area_id) or not area.href:
             return None
         indexed.setdefault(area.area_id, []).append({"href": area.href, "title": area.title})
     return indexed
 
 
-def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
-                      expected_performance_id, ticket_number, require_direct):
+def _area_map_options(
+    indexed_areas: dict[str, list[_MapAreaTarget]],
+    rel_tokens: list[str],
+    area_text: str,
+    price_text: str,
+    expected_performance_id: str,
+    ticket_number: int,
+    require_direct: bool,
+) -> list[tuple[str, _AreaAction, _AreaAction | None]]:
     """建立一筆區域列可用的地圖目的地選項。"""
 
-    options = []
+    options: list[tuple[str, _AreaAction, _AreaAction | None]] = []
     for rel in rel_tokens:
         for map_area in indexed_areas.get(rel, []):
             map_title = parse_map_title(map_area["title"])
@@ -997,8 +1046,14 @@ def _area_map_options(indexed_areas, rel_tokens, area_text, price_text,
     return options
 
 
-def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
-                    ticket_number, require_direct):
+def _area_candidate(
+    row: AreaRow,
+    indexed_areas: dict[str, list[_MapAreaTarget]],
+    config_dict: dict[str, object],
+    expected_performance_id: str,
+    ticket_number: int,
+    require_direct: bool,
+) -> _AreaCandidate | None:
     """依設定與庫存將區域列轉成候選項目。"""
 
     area_text = re.sub(r"\s+", " ", row.area).strip()
@@ -1021,11 +1076,14 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
     if not options:
         return None
     if require_direct:
-        identities = {
-            (item[2]["route"], item[2]["performance_id"],
-             item[2]["price_area_id"], item[2]["group_id"])
-            for item in options
-        }
+        identities: set[tuple[str, str, str, str]] = set()
+        for _rel, _action, destination in options:
+            if destination is None:
+                return None
+            identities.add((
+                destination["route"], destination["performance_id"],
+                destination["price_area_id"], destination["group_id"],
+            ))
         if len(identities) != 1:
             return None
     rel, action, destination = options[0]
@@ -1036,8 +1094,12 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
     }
 
 
-def select_area_snapshot(snapshot, config_dict, expected_performance_id,
-                         require_direct_destination=True):
+def select_area_snapshot(
+    snapshot: object,
+    config_dict: dict[str, object],
+    expected_performance_id: str,
+    require_direct_destination: bool = True,
+) -> AreaActionPlan | None:
     """從批次 DOM 與地圖快照選出一個區域。"""
     snapshot = parse_area_snapshot(snapshot)
     if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
@@ -1051,22 +1113,29 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
     if not isinstance(requested, PresentField) or requested.value == 0:
         return None
     ticket_number = requested.value
-    candidates = []
+    candidates: list[_AreaCandidate] = []
     for row in snapshot.rows:
         candidate = _area_candidate(
             row, indexed_areas, config_dict, expected_performance_id,
             ticket_number, require_direct_destination,
         )
-        if candidate is False:
-            return None
         if candidate:
             candidates.append(candidate)
     area_config = config_dict.get("area_auto_select", {})
+    if not isinstance(area_config, Mapping):
+        return None
+    keyword = area_config.get("area_keyword", "")
+    mode = area_config.get("mode", "from top to bottom")
+    allow_fallback = config_dict.get("area_auto_fallback", False)
+    if (
+        not isinstance(keyword, str)
+        or not isinstance(mode, str)
+        or not isinstance(allow_fallback, bool)
+    ):
+        return None
     target_index = choose_candidate_index(
         candidates,
-        area_config.get("area_keyword", "").strip(),
-        area_config.get("mode", "from top to bottom"),
-        config_dict.get("area_auto_fallback", False),
+        keyword.strip(), mode, allow_fallback,
     )
     if target_index is None:
         return None

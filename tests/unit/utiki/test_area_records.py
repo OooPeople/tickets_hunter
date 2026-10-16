@@ -39,6 +39,20 @@ def test_area_request_rejects_boolean_and_nonfinite_counts() -> None:
         assert select_area_snapshot(raw, cfg, CTBC_TEST_PERFORMANCE_ID) is None
 
 
+def test_area_selection_rejects_malformed_config_without_action() -> None:
+    snapshot = parse_area_snapshot(make_ctbc_area_snapshot(include_back=False))
+    assert snapshot is not None
+    for key, malformed_value in (
+        ("area_auto_select", "invalid"),
+        ("area_auto_select", {"area_keyword": 1}),
+        ("area_auto_select", {"mode": 1}),
+        ("area_auto_fallback", 1),
+    ):
+        settings = config(area_keyword='"109區前排"')
+        settings[key] = malformed_value
+        assert select_area_snapshot(snapshot, settings, CTBC_TEST_PERFORMANCE_ID) is None
+
+
 def test_oversized_area_status_is_unavailable_without_exception() -> None:
     for status in ("9" * 5000, "0" * 40 + "2"):
         raw = make_ctbc_area_snapshot(include_back=False, front_row_status=status)

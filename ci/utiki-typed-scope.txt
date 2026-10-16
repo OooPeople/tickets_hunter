@@ -14,6 +14,7 @@ src/platforms/utiki/domain/__init__.py
 src/platforms/utiki/domain/identity.py
 src/platforms/utiki/domain/snapshots.py
 src/platforms/utiki/domain/plans.py
+src/platforms/utiki/domain/purchase.py
 src/platforms/utiki/domain/effects.py
 src/platforms/utiki/domain/inputs.py
 src/platforms/utiki/application/__init__.py

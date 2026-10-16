@@ -390,7 +390,7 @@ jobs:
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
           --producer tools/benchmarks/verify_utiki_p1_performance.py
           --input performance-contract repository ci/utiki-performance-isolation.json
-          --input isolation-report evidence performance-isolation-raw.json
+          --input performance-isolation-report evidence performance-isolation-raw.json
           --input raw-benchmark evidence raw-benchmark-report.json
           --input managed-junit evidence performance.xml
           --input reporter-result evidence performance-reporter-result.json

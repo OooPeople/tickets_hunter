@@ -116,6 +116,13 @@ def test_isolated_jobs_build_before_network_off_and_use_content_image_id() -> No
         assert "--require-browser" in body
         assert "actions/upload-artifact@v7" in body
 
+    performance = _job(text, "performance-contract")
+    assert (
+        "--input performance-isolation-report evidence performance-isolation-raw.json"
+        in performance
+    )
+    assert "--input isolation-report evidence performance-isolation-raw.json" not in performance
+
 
 def test_aggregate_requires_and_downloads_every_formal_job() -> None:
     body = _job(_text(), "aggregate")

@@ -33,6 +33,7 @@ from .profiles import (
     same_origin,
     unique_query,
 )
+from .domain.snapshots import PresentField, parse_nonnegative_count
 
 
 CONST_SERVER_ASSIGNED_QUANTITY_PATHS = tuple(
@@ -763,10 +764,8 @@ def _valid_area_commit_input(snapshot, plan, ticket_number, navigation_nonce):
         return False
     if not re.fullmatch(r"[a-f0-9]{32}", str(navigation_nonce or "")):
         return False
-    try:
-        return int(ticket_number) > 0
-    except (TypeError, ValueError):
-        return False
+    requested = parse_nonnegative_count(ticket_number)
+    return isinstance(requested, PresentField) and requested.value > 0
 
 
 async def commit_area(
@@ -785,7 +784,7 @@ async def commit_area(
     price_json = json.dumps(plan.price)
     action_name_json = json.dumps(plan.action_name)
     action_args_json = json.dumps(plan.stable_args)
-    ticket_number_json = json.dumps(int(ticket_number))
+    ticket_number_json = json.dumps(parse_nonnegative_count(ticket_number).value)
     nonce_json = json.dumps(navigation_nonce)
     marker_key_json = json.dumps(fast_marker_key)
     raw_result = await tab.evaluate(fr'''
@@ -806,14 +805,14 @@ async def commit_area(
                 const text = (value || '').replace(/\s+/g, '');
                 if (!text || text.includes('售完') ||
                     /^(0|0張|無)$/.test(text)) return false;
-                if (/^\d+$/.test(text)) {{
-                    return Number(text) >= ticketNumber;
-                }}
-                if (/(?:剩餘|尚餘|剩|餘)/.test(text)) {{
-                    const count = text.match(/(\d+)/);
-                    if (count && Number(count[1]) < ticketNumber) return false;
-                }}
-                return true;
+                if (text === '熱賣中') return true;
+                const count = text.match(
+                    /^(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?$/) ||
+                    text.match(/^([0-9]+)(?:張)?$/);
+                if (!count || count[1].length > 16) return false;
+                const available = Number(count[1]);
+                return Number.isSafeInteger(available) &&
+                    available >= ticketNumber;
             }};
             const parseAction = value => {{
                 const match = (value || '').match(
@@ -961,13 +960,13 @@ CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
                 if (!text || text.includes('售完') ||
                     /^(0|0張|無)$/.test(text)) return false;
                 if (text === '熱賣中') return true;
-                if (/^\d+$/.test(text)) {
-                    return Number(text) >= intent.ticketNumber;
-                }
                 const count = text.match(
-                    /^(?:剩餘|尚餘|剩|餘)[:：]?(\d+)(?:張)?$/);
-                if (count) return Number(count[1]) >= intent.ticketNumber;
-                return false;
+                    /^(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?$/) ||
+                    text.match(/^([0-9]+)(?:張)?$/);
+                if (!count || count[1].length > 16) return false;
+                const available = Number(count[1]);
+                return Number.isSafeInteger(available) &&
+                    available >= intent.ticketNumber;
             };
             const parseAction = value => {
                 const match = (value || '').match(
@@ -1110,7 +1109,7 @@ async def commit_server_assigned_area(
         "price": plan.price,
         "actionName": plan.action_name,
         "actionArgs": plan.stable_args,
-        "ticketNumber": int(ticket_number),
+        "ticketNumber": parse_nonnegative_count(ticket_number).value,
         "navigationNonce": navigation_nonce,
         "fastMarkerKey": fast_marker_key,
     }, ensure_ascii=False)

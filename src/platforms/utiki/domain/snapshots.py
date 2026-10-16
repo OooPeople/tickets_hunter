@@ -84,3 +84,28 @@ class QuantityRow:
     @property
     def value_observation(self) -> FieldObservation[int]:
         return parse_nonnegative_count(self.value)
+
+
+@dataclass(frozen=True, slots=True)
+class AreaRow:
+    area: str
+    price: str
+    status: str
+    rel: str
+
+    def __post_init__(self) -> None:
+        for name in ("area", "price", "status", "rel"):
+            if type(getattr(self, name)) is not str:
+                raise ValueError(f"{name} must be a string")
+
+
+@dataclass(frozen=True, slots=True)
+class MapArea:
+    area_id: str
+    href: str
+    title: str
+
+    def __post_init__(self) -> None:
+        for name in ("area_id", "href", "title"):
+            if type(getattr(self, name)) is not str:
+                raise ValueError(f"{name} must be a string")

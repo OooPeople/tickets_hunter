@@ -494,6 +494,15 @@ async def _assert_area_fixture(browser):
         "document.querySelector('#mapdata area#front').setAttribute("
         "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
         "'GROUP_FRONT','1')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '暫停銷售'",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'title', '票區:109區前排 票價：1600 尚餘：剩餘NaN')",
+        "document.querySelector('#mapdata area#front').setAttribute("
+        "'href', \"javascript:Send('0205','P16D0B8Z','PRICE_FRONT',"
+        "'GROUP_FRONT','暫停銷售')\")",
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '0000000000000000000000000000000000000002'",
     )
     for index, mutation in enumerate(availability_mutations):
         unavailable_tab = await _open_fixture(
@@ -587,6 +596,29 @@ async def _assert_area_fixture(browser):
     assert await server_tab.evaluate(
         "Number(document.body.dataset.rowClicks || 0)"
     ) == 1
+
+    oversized_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    oversized_snapshot = await read_area_snapshot(oversized_tab)
+    oversized_target = select_area_snapshot(
+        oversized_snapshot, cfg, "P16D0B8Z", require_direct_destination=False
+    )
+    assert oversized_target is not None
+    await oversized_tab.evaluate(
+        "document.querySelector('tr.saleTr[rel=\"front\"] "
+        "td[data-title^=\"空位\"]').textContent = '0000000000000000000000000000000000000002'"
+    )
+    assert await commit_server_assigned_area(
+        oversized_tab, oversized_snapshot, oversized_target,
+        cfg["ticket_number"], "b" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await oversized_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
 
     ambiguous_tab = await _open_fixture(
         browser,

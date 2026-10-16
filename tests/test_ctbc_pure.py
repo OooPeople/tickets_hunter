@@ -749,19 +749,28 @@ class CtbcPureSelectionTest(unittest.TestCase):
                         self.assertEqual("PRICE_FRONT", target.price_area_id)
 
     def test_area_selection_rejects_unavailable_status_from_each_source(self):
+        baseline = {
+            "front_row_status": "2",
+            "front_title_status": "2",
+            "front_action_status": "2",
+        }
+        self.assertIsNotNone(_select_ctbc_area_snapshot(
+            make_ctbc_area_snapshot(include_back=False, **baseline),
+            config(area_keyword='"109區前排"'),
+            CTBC_TEST_PERFORMANCE_ID,
+            require_direct_destination=True,
+        ))
         unavailable_by_source = (
             ("row", "front_row_status", "售完"),
             ("title", "front_title_status", "0"),
             ("action", "front_action_status", "1"),
+            ("row_unknown", "front_row_status", "暫停銷售"),
+            ("title_unknown", "front_title_status", "剩餘NaN"),
+            ("action_unknown", "front_action_status", "暫停銷售"),
         )
         for source, argument, unavailable in unavailable_by_source:
             with self.subTest(source=source):
-                statuses = {
-                    "front_row_status": "2",
-                    "front_title_status": "2",
-                    "front_action_status": "2",
-                    argument: unavailable,
-                }
+                statuses = {**baseline, argument: unavailable}
                 self.assertIsNone(_select_ctbc_area_snapshot(
                     make_ctbc_area_snapshot(include_back=False, **statuses),
                     config(area_keyword='"109區前排"'),

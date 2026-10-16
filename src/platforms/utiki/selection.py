@@ -13,7 +13,14 @@ from .profiles import (
     same_origin,
     unique_query,
 )
-from .domain.snapshots import InvalidField, PresentField, QuantityRow, parse_nonnegative_count
+from .domain.snapshots import (
+    AreaRow,
+    InvalidField,
+    MapArea,
+    PresentField,
+    QuantityRow,
+    parse_nonnegative_count,
+)
 
 
 DATE_CONTROL_FINGERPRINT_FIELDS = (
@@ -54,8 +61,8 @@ class AreaSnapshot:
     ok: bool
     page_url: str
     document_id: str
-    rows: tuple
-    areas: tuple
+    rows: tuple[AreaRow, ...]
+    areas: tuple[MapArea, ...]
     reason: str = ""
 
 
@@ -248,27 +255,23 @@ def parse_area_snapshot(raw_snapshot):
         return None
     if any(not isinstance(area, dict) for area in areas):
         return None
+    try:
+        frozen_rows = tuple(
+            AreaRow(row["area"], row["price"], row["status"], row["rel"])
+            for row in rows
+        )
+        frozen_areas = tuple(
+            MapArea(area["id"], area["href"], area["title"])
+            for area in areas
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
     return AreaSnapshot(
         ok=True,
         page_url=str(raw_snapshot.get("page_url") or ""),
         document_id=str(raw_snapshot.get("document_id") or ""),
-        rows=tuple(
-            (
-                str(row.get("area") or ""),
-                str(row.get("price") or ""),
-                str(row.get("status") or ""),
-                str(row.get("rel") or ""),
-            )
-            for row in rows
-        ),
-        areas=tuple(
-            (
-                str(area.get("id") or ""),
-                str(area.get("href") or ""),
-                str(area.get("title") or ""),
-            )
-            for area in areas
-        ),
+        rows=frozen_rows,
+        areas=frozen_areas,
     )
 
 
@@ -818,16 +821,23 @@ def date_plan_matches_snapshot(snapshot, plan):
 def availability_has_tickets(status_text, ticket_number=1):
     """判斷區域庫存文字是否足以供應要求票數。"""
 
+    requested = parse_nonnegative_count(ticket_number)
+    if not isinstance(requested, PresentField) or requested.value == 0:
+        return False
+    if type(status_text) is not str:
+        return False
     text = re.sub(r"\s+", "", status_text or "")
     if not text or "售完" in text or text in {"0", "0張", "無"}:
         return False
-    if re.fullmatch(r"\d+", text):
-        return int(text) >= int(ticket_number)
-    if any(marker in text for marker in ("剩餘", "尚餘", "剩", "餘")):
-        match = re.search(r"(\d+)", text)
-        if match and int(match.group(1)) < int(ticket_number):
-            return False
-    return True
+    if text == "熱賣中":
+        return True
+    match = re.fullmatch(r"([0-9]+)(?:張)?", text)
+    if match is None:
+        match = re.fullmatch(r"(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?", text)
+    if match is None:
+        return False
+    available = parse_nonnegative_count(match.group(1))
+    return isinstance(available, PresentField) and available.value >= requested.value
 
 
 def parse_area_send_action(href, expected_performance_id):
@@ -928,10 +938,10 @@ def _index_map_areas(areas):
     if not isinstance(areas, tuple) or not 0 < len(areas) <= 500:
         return None
     indexed = {}
-    for area_id, href, title in areas:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", area_id) or not href:
+    for area in areas:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", area.area_id) or not area.href:
             return None
-        indexed.setdefault(area_id, []).append({"href": href, "title": title})
+        indexed.setdefault(area.area_id, []).append({"href": area.href, "title": area.title})
     return indexed
 
 
@@ -968,11 +978,10 @@ def _area_candidate(row, indexed_areas, config_dict, expected_performance_id,
                     ticket_number, require_direct):
     """依設定與庫存將區域列轉成候選項目。"""
 
-    area, price, status, rel = row
-    area_text = re.sub(r"\s+", " ", area).strip()
-    price_text = re.sub(r"\s+", " ", price).strip()
-    status_text = re.sub(r"\s+", " ", status).strip()
-    rel_tokens = rel.split()
+    area_text = re.sub(r"\s+", " ", row.area).strip()
+    price_text = re.sub(r"\s+", " ", row.price).strip()
+    status_text = re.sub(r"\s+", " ", row.status).strip()
+    rel_tokens = row.rel.split()
     if not area_text or not rel_tokens or not availability_has_tickets(
         status_text, ticket_number
     ):
@@ -1015,7 +1024,10 @@ def select_area_snapshot(snapshot, config_dict, expected_performance_id,
     indexed_areas = _index_map_areas(snapshot.areas)
     if indexed_areas is None:
         return None
-    ticket_number = int(config_dict.get("ticket_number", 1))
+    requested = parse_nonnegative_count(config_dict.get("ticket_number", 1))
+    if not isinstance(requested, PresentField) or requested.value == 0:
+        return None
+    ticket_number = requested.value
     candidates = []
     for row in snapshot.rows:
         candidate = _area_candidate(

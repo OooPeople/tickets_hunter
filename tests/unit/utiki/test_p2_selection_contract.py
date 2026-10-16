@@ -17,10 +17,18 @@ from platforms.utiki.selection import (
     date_plan_matches_snapshot,
     parse_date_snapshot,
     parse_quantity_snapshot,
+    select_area_snapshot,
     select_date_snapshot,
+    select_seat_indexes,
     select_quantity_snapshot,
 )
-from tests.ctbc_support import config, make_ctbc_date_snapshot, make_ctbc_quantity_snapshot
+from tests.ctbc_support import (
+    CTBC_TEST_PERFORMANCE_ID,
+    config,
+    make_ctbc_area_snapshot,
+    make_ctbc_date_snapshot,
+    make_ctbc_quantity_snapshot,
+)
 
 
 def _three_dates() -> object:
@@ -166,3 +174,81 @@ def test_d06_invalid_count_cannot_become_a_quantity_plan(count: object) -> None:
     assert select_quantity_snapshot(raw, "全票", 2) is not None
     assert isinstance(parse_nonnegative_count(count), InvalidField)
     assert select_quantity_snapshot(raw, "全票", count) is None
+
+
+@pytest.mark.parametrize(
+    "changed_source",
+    [
+        pytest.param("front_row_status", id="inventory-table"),
+        pytest.param("front_title_status", id="inventory-map"),
+        pytest.param("front_action_status", id="action-status"),
+    ],
+)
+def test_d08_each_inventory_source_must_independently_cover_quantity(
+    changed_source: str,
+) -> None:
+    statuses = {
+        "front_row_status": "5",
+        "front_title_status": "4",
+        "front_action_status": "3",
+    }
+    settings = config(area_keyword='"109區前排"')
+    settings["ticket_number"] = 2
+    valid = select_area_snapshot(
+        make_ctbc_area_snapshot(include_back=False, **statuses),
+        settings,
+        CTBC_TEST_PERFORMANCE_ID,
+    )
+    assert valid is not None and valid.rel == "front"
+
+    statuses[changed_source] = "1"
+    assert select_area_snapshot(
+        make_ctbc_area_snapshot(include_back=False, **statuses),
+        settings,
+        CTBC_TEST_PERFORMANCE_ID,
+    ) is None
+
+
+def test_d09_seat_adjacency_sorting_and_stable_tie_break() -> None:
+    seats = [
+        {"index": 0, "title": "A區-3排-3號", "row_index": 1, "cell_index": 0, "available": True, "selected": False},
+        {"index": 1, "title": "A區-3排-2號", "row_index": 1, "cell_index": 1, "available": True, "selected": False},
+        {"index": 2, "title": "A區-3排-1號", "row_index": 1, "cell_index": 3, "available": True, "selected": False},
+        {"index": 3, "title": "A區-1排-2號", "row_index": 2, "cell_index": 0, "available": True, "selected": False},
+        {"index": 4, "title": "A區-1排-1號", "row_index": 2, "cell_index": 1, "available": True, "selected": False},
+    ]
+    assert select_seat_indexes(seats, 2, seat_sorting="display") == [0, 1]
+    assert select_seat_indexes(seats, 2, seat_sorting="row_seat") == [3, 4]
+    assert select_seat_indexes(seats, 2, seat_sorting="row_desc_seat_asc") == [0, 1]
+    assert select_seat_indexes(seats, 2, seat_sorting="display") == [0, 1]
+    gap_seats = seats[:3]
+    assert select_seat_indexes(gap_seats, 2, seat_sorting="display") == [0, 1]
+    seats[1]["available"] = False
+    assert select_seat_indexes(gap_seats, 2, seat_sorting="display") == []
+
+    tied_edges = [
+        {"index": index, "title": f"A區-1排-{number}號", "row_index": 1,
+         "cell_index": number - 1, "available": True, "selected": False}
+        for index, number in enumerate((3, 4, 1, 2))
+    ]
+    assert select_seat_indexes(tied_edges, 2, seat_sorting="row_seat") == [2, 3]
+    assert select_seat_indexes(tied_edges, 2, seat_sorting="row_asc_aisle") == [0, 1]
+    assert select_seat_indexes(tied_edges, 2, seat_sorting="row_asc_seat_desc") == [0, 1]
+
+    horizontal = [
+        {"index": index, "title": f"A區-1排-{index + 1}號", "row_index": 0,
+         "cell_index": index, "center_x": 10 + index * 20, "center_y": 10,
+         "width": 20, "height": 20, "available": True, "selected": False}
+        for index in range(2)
+    ]
+    assert select_seat_indexes(horizontal, 2, seat_sorting="row_seat") == [0, 1]
+    horizontal[1]["center_x"] = 100
+    assert select_seat_indexes(horizontal, 2, seat_sorting="row_seat") == []
+
+    rotated = [
+        {"index": index, "title": f"B1區-1排-{index + 1}號", "row_index": index,
+         "cell_index": 1, "center_x": 100, "center_y": 10 + index * 20,
+         "width": 20, "height": 20, "available": True, "selected": False}
+        for index in range(2)
+    ]
+    assert select_seat_indexes(rotated, 2, seat_sorting="row_seat") == [0, 1]

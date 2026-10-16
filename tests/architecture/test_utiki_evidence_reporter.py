@@ -1,11 +1,11 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from xml.etree import ElementTree
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORTER_MODULE = "tools.utiki_pytest_reporter"
@@ -331,7 +331,7 @@ def test_non_pytest_assembler_writes_empty_harness_junit_without_fake_case(tmp_p
     _write_json(
         artifact,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "python-syntax-report",
             "context": artifact_context,
             "status": "PASS",
@@ -387,11 +387,15 @@ def test_non_pytest_assembler_writes_empty_harness_junit_without_fake_case(tmp_p
 def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
-    injected = evidence_dir / "test_probe.py"
+    probe_dir = evidence_dir / "probe"
+    probe_dir.mkdir()
+    injected = probe_dir / "test_probe.py"
     injected.write_text(
         "import pytest\n\n@pytest.mark.utiki_unknown_marker\ndef test_probe():\n    pass\n",
         encoding="utf-8",
     )
+    pytest_config = probe_dir / "pytest.ini"
+    pytest_config.write_text("[pytest]\n", encoding="utf-8")
     manifest = evidence_dir / "manifest.json"
     manifest_value = {
         "cases": [
@@ -418,7 +422,7 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
     _write_json(manifest, manifest_value)
     report = evidence_dir / "checker-exit-nonzero.json"
     transcript = evidence_dir / "negative-transcript.json"
-    probe_input = evidence_dir / "probe-input.json"
+    probe_input = probe_dir / "probe.json"
     registry = evidence_dir / "negative-registry.json"
     _write_json(
         registry,
@@ -448,9 +452,7 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
             ],
         },
     )
-    _write_json(
-        probe_input,
-        {
+    request = {
             "schema_version": 1,
             "case_id": "H05",
             "obligation_id": "H05.arch.unknown-marker",
@@ -465,6 +467,8 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
                 "kind": "pytest-module",
                 "producer": "pytest",
                 "arguments": [
+                    "-c",
+                    "{PROBE_ROOT}/pytest.ini",
                     "--strict-config",
                     "--strict-markers",
                     "{PROBE_ROOT}/test_probe.py",
@@ -476,10 +480,15 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
                     "kind": "pytest-probe-source",
                     "path": injected.name,
                     "sha256": _sha256(injected),
-                }
+                },
+                {
+                    "kind": "pytest-config",
+                    "path": pytest_config.name,
+                    "sha256": _sha256(pytest_config),
+                },
             ],
-        },
-    )
+        }
+    _write_json(probe_input, request)
 
     completed = subprocess.run(
         [
@@ -489,6 +498,8 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
             str(PROJECT_ROOT),
             "--execution-manifest",
             str(manifest),
+            "--artifact-root",
+            str(evidence_dir),
             "--report",
             str(report),
             "--kind",
@@ -511,11 +522,11 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
             "tools/run_utiki_negative_probe.py",
             "--input",
             "injected-probe",
-            "evidence",
-            probe_input.name,
+            "artifact",
+            probe_input.relative_to(evidence_dir).as_posix(),
             "--input",
             "probe-registry",
-            "evidence",
+            "artifact",
             registry.name,
             "--producer-report",
             transcript.name,
@@ -606,6 +617,8 @@ def test_evidence_launcher_captures_actual_positive_producer_stdout(tmp_path):
             str(PROJECT_ROOT),
             "--execution-manifest",
             str(manifest),
+            "--artifact-root",
+            str(evidence_dir),
             "--report",
             str(report),
             "--kind",
@@ -656,3 +669,179 @@ def test_evidence_launcher_captures_actual_positive_producer_stdout(tmp_path):
     )
     assert payload["status"] == "PASS"
     assert payload["checked_files"]
+
+
+def test_evidence_launcher_rejects_an_input_changed_by_its_producer(tmp_path):
+    repository = tmp_path / "repo"
+    tools = repository / "tools"
+    tools.mkdir(parents=True)
+    launcher = tools / "run_utiki_evidence.py"
+    shutil.copyfile(EVIDENCE_LAUNCHER, launcher)
+    producer = tools / "mutating_producer.py"
+    producer.write_text(
+        """from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+report = Path(sys.argv[2])
+source.write_text("mutated\\n", encoding="utf-8")
+report.write_text("{}\\n", encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    manifest = artifact_root / "manifest.json"
+    _write_json(
+        manifest,
+        {
+            "cases": [
+                {
+                    "id": "A05",
+                    "executions": [
+                        {
+                            "status": "MAPPED",
+                            "job_id": "architecture-types",
+                            "target": "source-linux-x64",
+                            "obligation_id": "A05.arch.check",
+                            "variant_id": "default",
+                            "evidence": [{"kind": "architecture-report"}],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    source = artifact_root / "input.txt"
+    source.write_text("original\n", encoding="utf-8")
+    raw_report = artifact_root / "raw.json"
+    envelope = artifact_root / "envelope.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(launcher),
+            "--repository-root",
+            str(repository),
+            "--execution-manifest",
+            str(manifest),
+            "--artifact-root",
+            str(artifact_root),
+            "--report",
+            str(envelope),
+            "--kind",
+            "architecture-report",
+            "--run-id",
+            "mutation-test-attempt-1",
+            "--attempt",
+            "1",
+            "--job-id",
+            "architecture-types",
+            "--phase",
+            "P1",
+            "--target",
+            "source-linux-x64",
+            "--candidate-sha",
+            "1" * 40,
+            "--catalog-sha256",
+            "2" * 64,
+            "--producer",
+            "tools/mutating_producer.py",
+            "--input",
+            "controlled-input",
+            "artifact",
+            source.name,
+            "--producer-report",
+            raw_report.name,
+            "--",
+            str(source),
+            str(raw_report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "declared input changed" in completed.stderr
+
+
+def test_evidence_launcher_rejects_producer_report_capture_alias(tmp_path):
+    repository = tmp_path / "repo"
+    tools = repository / "tools"
+    tools.mkdir(parents=True)
+    launcher = tools / "run_utiki_evidence.py"
+    shutil.copyfile(EVIDENCE_LAUNCHER, launcher)
+    producer = tools / "producer.py"
+    producer.write_text("raise AssertionError('must not execute')\n", encoding="utf-8")
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    manifest = artifact_root / "manifest.json"
+    _write_json(
+        manifest,
+        {
+            "cases": [
+                {
+                    "id": "H11",
+                    "executions": [
+                        {
+                            "status": "MAPPED",
+                            "job_id": "modified-python-syntax",
+                            "target": "source-linux-x64",
+                            "obligation_id": "H11.syntax.check",
+                            "variant_id": "default",
+                            "evidence": [{"kind": "python-syntax-report"}],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    envelope = artifact_root / "syntax.json"
+    aliased_report = artifact_root / "syntax.stderr"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(launcher),
+            "--repository-root",
+            str(repository),
+            "--execution-manifest",
+            str(manifest),
+            "--artifact-root",
+            str(artifact_root),
+            "--report",
+            str(envelope),
+            "--kind",
+            "python-syntax-report",
+            "--run-id",
+            "alias-test-attempt-1",
+            "--attempt",
+            "1",
+            "--job-id",
+            "modified-python-syntax",
+            "--phase",
+            "P1",
+            "--target",
+            "source-linux-x64",
+            "--candidate-sha",
+            "1" * 40,
+            "--catalog-sha256",
+            "2" * 64,
+            "--producer",
+            "tools/producer.py",
+            "--producer-report",
+            aliased_report.name,
+            "--",
+            "--report",
+            str(aliased_report),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "distinct from captured output" in completed.stderr
+    assert not envelope.exists()
+    assert not envelope.exists()

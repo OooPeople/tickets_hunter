@@ -205,6 +205,24 @@ launcher exit code `0` 才是當次 PASS，`1` 是已建立隔離後發現違規
 inner canary、production-origin report，以及 container 內實際執行的 12 份 negative
 probe envelope digest；缺任一項都不能封裝為 PASS。
 
+正式 evidence envelope 使用 schema v2。可供 aggregate 定位檔案的欄位只接受兩種 scope：
+`repository` 以 candidate checkout 為根，`artifact` 以該 job 的 artifact root 為根；兩者都必須
+是無反斜線、磁碟代號、`.`、`..` 或 symlink traversal 的 POSIX 相對路徑，並以 SHA-256 綁定
+內容。producer raw report 內的 absolute path、command 或 working directory 僅能是診斷資料，
+不得作為搬移後 artifact 的定位依據。launcher 會在執行前完成 scope、路徑、producer、input、
+output 與 execution-key preflight，並在執行後確認 producer、manifest 與所有 input 未於收集期間
+改變，避免把執行後狀態冒充實際輸入。
+
+每種 evidence 的 input/output 種類、scope 與相對路徑都是 reviewed contract，不接受只因 digest
+正確就改指其他檔案。除 architecture report 明確以 captured stdout 作 producer report 外，stdout、
+stderr、producer report 與額外 capture 必須各自使用契約指定且不重疊的路徑；因此不能用同一個
+空檔同時冒充 stdout/stderr，也不能用 repository 內含 rejection token 的檔案冒充執行輸出。
+
+negative transcript 使用 schema v2，只記錄 reviewed request／registry digest、child producer 身分、
+stdout／stderr digest、真實 nonzero exit 與必要的 isolation proof。最終 checker 從 envelope 的
+artifact-relative references 重新取得檔案、重跑 request contract，並比對同一份 captured output；
+不再記錄或猜測 CI runner 的 absolute command、cwd 與暫存目錄，也沒有舊 schema fallback。
+
 production-origin 測試保留真實 origin/path，於 CDP request stage 僅允許已核准的
 脫敏 fixture 並拒絕未知 request；故意未安裝 interception 的 browser/driver canary
 則驗證 OS 邊界仍會攔截。兩者都禁止以連線真售票站作 canary。proxy、hosts、

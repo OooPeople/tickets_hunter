@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 KINDS = {
     "architecture-report",
     "typecheck-report",
@@ -64,10 +64,30 @@ def _sha256(path: Path) -> str:
 
 
 def _safe_relative(value: str) -> str:
+    if not value or "\\" in value or "\x00" in value or ":" in value:
+        raise LaunchError(f"unsafe relative path: {value!r}")
     path = PurePosixPath(value)
-    if not value or path.is_absolute() or ".." in path.parts or str(path) != value:
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or path == PurePosixPath(".")
+        or str(path) != value
+    ):
         raise LaunchError(f"unsafe relative path: {value!r}")
     return value
+
+
+def _contained_path(root: Path, value: str, *, label: str) -> tuple[str, Path]:
+    relative = _safe_relative(value)
+    current = root
+    for part in PurePosixPath(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise LaunchError(f"{label} may not traverse a symlink: {value!r}")
+    path = current.resolve()
+    if root not in path.parents:
+        raise LaunchError(f"{label} escapes its trusted root: {value!r}")
+    return relative, path
 
 
 def _reference(
@@ -76,19 +96,31 @@ def _reference(
     value: str,
     *,
     repository: Path,
-    evidence_dir: Path,
+    artifact_root: Path,
 ) -> dict[str, str]:
-    relative = _safe_relative(value)
     if scope == "repository":
         root = repository
-    elif scope == "evidence":
-        root = evidence_dir
+    elif scope == "artifact":
+        root = artifact_root
     else:
         raise LaunchError(f"unsupported reference scope: {scope}")
-    path = root / relative
-    if path.is_symlink() or not path.is_file():
+    relative, path = _contained_path(root, value, label="evidence reference")
+    if not path.is_file():
         raise LaunchError(f"evidence reference is not a regular file: {value}")
     return {"kind": kind, "scope": scope, "path": relative, "sha256": _sha256(path)}
+
+
+def _command_mentions_path(command: list[str], expected: Path, *, cwd: Path) -> bool:
+    for value in command[1:]:
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        try:
+            if candidate.resolve() == expected:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _execution_results(
@@ -164,6 +196,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--execution-manifest", type=Path, required=True)
+    parser.add_argument("--artifact-root", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--kind", choices=sorted(KINDS), required=True)
     parser.add_argument("--run-id", required=True)
@@ -186,7 +219,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--producer-report",
-        help="Evidence-relative producer JSON, or the literal 'stdout'.",
+        help="Artifact-root-relative producer JSON, or the literal 'stdout'.",
+    )
+    parser.add_argument(
+        "--producer-output",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("KIND", "ARTIFACT_PATH"),
     )
     parser.add_argument("--rejection-token")
     parser.add_argument("producer_arguments", nargs=argparse.REMAINDER)
@@ -197,20 +237,34 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         repository = arguments.repository_root.resolve(strict=True)
+        artifact_root = arguments.artifact_root.resolve(strict=True)
+        if not repository.is_dir() or not artifact_root.is_dir():
+            raise LaunchError("repository root and artifact root must be directories")
         report_path = arguments.report.resolve()
+        if artifact_root != report_path and artifact_root not in report_path.parents:
+            raise LaunchError("report is outside the artifact root")
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_dir = report_path.parent
+        stem = report_path.stem
+        stdout_path = report_path.with_name(f"{stem}.stdout")
+        stderr_path = report_path.with_name(f"{stem}.stderr")
+        if any(path.exists() for path in (report_path, stdout_path, stderr_path)):
+            raise LaunchError("evidence output already exists; refusing stale-output reuse")
         manifest = _load_json(arguments.execution_manifest)
         manifest_digest = _sha256(arguments.execution_manifest)
-        producer_relative = _safe_relative(arguments.producer)
-        producer_path = repository / producer_relative
-        if producer_path.is_symlink() or not producer_path.is_file():
+        producer_relative, producer_path = _contained_path(
+            repository,
+            arguments.producer,
+            label="producer",
+        )
+        if not producer_path.is_file():
             raise LaunchError("producer is not a regular repository file")
+        producer_digest = _sha256(producer_path)
         launcher_path = Path(__file__).resolve()
         try:
             launcher_relative = launcher_path.relative_to(repository).as_posix()
         except ValueError as exc:
             raise LaunchError("launcher is outside the repository") from exc
+        launcher_digest = _sha256(launcher_path)
 
         command = [sys.executable, str(producer_path)]
         producer_arguments = list(arguments.producer_arguments)
@@ -219,58 +273,6 @@ def main(argv: list[str] | None = None) -> int:
         command.extend(producer_arguments)
         expectation = (
             "NONZERO" if arguments.kind == "checker-exit-nonzero" else "ZERO"
-        )
-        if not arguments.producer_report:
-            raise LaunchError("evidence requires --producer-report")
-        if expectation == "ZERO":
-            if arguments.producer_report != "stdout":
-                producer_report_before = evidence_dir / _safe_relative(
-                    arguments.producer_report
-                )
-                if producer_report_before.exists():
-                    raise LaunchError(
-                        "producer report already exists; refusing stale-output reuse"
-                    )
-                if str(producer_report_before.resolve()) not in command:
-                    raise LaunchError(
-                        "producer command does not identify its report output"
-                    )
-        elif arguments.producer_report == "stdout":
-            raise LaunchError("negative evidence requires a separate child transcript report")
-        else:
-            producer_report_before = evidence_dir / _safe_relative(
-                arguments.producer_report
-            )
-            if producer_report_before.exists():
-                raise LaunchError(
-                    "producer report already exists; refusing stale-output reuse"
-                )
-            if str(producer_report_before.resolve()) not in command:
-                raise LaunchError(
-                    "negative producer command does not identify its transcript report"
-                )
-        for _, scope, raw_path in arguments.input:
-            input_path = (
-                repository / raw_path if scope == "repository" else evidence_dir / raw_path
-            ).resolve()
-            if str(input_path) not in command:
-                raise LaunchError("producer command does not consume a declared input")
-        completed = subprocess.run(
-            command,
-            cwd=repository,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        stem = report_path.stem
-        stdout_path = evidence_dir / f"{stem}.stdout"
-        stderr_path = evidence_dir / f"{stem}.stderr"
-        stdout_path.write_bytes(completed.stdout)
-        stderr_path.write_bytes(completed.stderr)
-
-        expectation_met = (
-            completed.returncode != 0 if expectation == "NONZERO" else completed.returncode == 0
         )
         if expectation == "NONZERO" and not arguments.rejection_token:
             raise LaunchError("negative evidence requires --rejection-token")
@@ -288,49 +290,185 @@ def main(argv: list[str] | None = None) -> int:
         if expectation == "ZERO" and any(selectors):
             raise LaunchError("positive shared evidence may not use a partial key selector")
         selected_key = selectors if all(selectors) else None
-
-        inputs = [
-            _reference(
+        results = _execution_results(
+            manifest,
+            arguments.kind,
+            arguments.job_id,
+            arguments.target,
+            selected_key,
+        )
+        if not arguments.producer_report:
+            raise LaunchError("evidence requires --producer-report")
+        producer_report_before: Path
+        if expectation == "ZERO":
+            if arguments.producer_report == "stdout":
+                if (
+                    arguments.kind != "architecture-report"
+                    or arguments.job_id != "architecture-types"
+                ):
+                    raise LaunchError(
+                        "only the reviewed architecture producer may use stdout as its report"
+                    )
+                producer_report_before = stdout_path
+            else:
+                _, producer_report_before = _contained_path(
+                    artifact_root,
+                    arguments.producer_report,
+                    label="producer report",
+                )
+                if producer_report_before.exists():
+                    raise LaunchError(
+                        "producer report already exists; refusing stale-output reuse"
+                    )
+                if not _command_mentions_path(
+                    command, producer_report_before, cwd=repository
+                ):
+                    raise LaunchError(
+                        "producer command does not identify its report output"
+                    )
+        elif arguments.producer_report == "stdout":
+            raise LaunchError("negative evidence requires a separate child transcript report")
+        else:
+            _, producer_report_before = _contained_path(
+                artifact_root,
+                arguments.producer_report,
+                label="producer report",
+            )
+            if producer_report_before.exists():
+                raise LaunchError(
+                    "producer report already exists; refusing stale-output reuse"
+                )
+            if not _command_mentions_path(
+                command, producer_report_before, cwd=repository
+            ):
+                raise LaunchError(
+                    "negative producer command does not identify its transcript report"
+                )
+        if producer_report_before == report_path:
+            raise LaunchError("producer report may not overwrite the evidence envelope")
+        if (
+            arguments.producer_report != "stdout"
+            and producer_report_before in {stdout_path, stderr_path}
+        ):
+            raise LaunchError("producer report path must be distinct from captured output")
+        declared_output_paths: dict[str, Path] = {}
+        reserved_output_kinds = {"stdout", "stderr", "producer-report"}
+        reserved_output_paths = {
+            report_path,
+            stdout_path,
+            stderr_path,
+            producer_report_before,
+        }
+        for kind, raw_path in arguments.producer_output:
+            if kind in reserved_output_kinds or kind in declared_output_paths:
+                raise LaunchError(f"duplicate/reserved producer output kind: {kind!r}")
+            _, output_path = _contained_path(
+                artifact_root,
+                raw_path,
+                label="producer output",
+            )
+            if output_path.exists():
+                raise LaunchError(
+                    "producer output already exists; refusing stale-output reuse"
+                )
+            if (
+                output_path in reserved_output_paths
+                or output_path in declared_output_paths.values()
+            ):
+                raise LaunchError("producer output paths must be unique")
+            if not _command_mentions_path(command, output_path, cwd=repository):
+                raise LaunchError("producer command does not identify a declared output")
+            declared_output_paths[kind] = output_path
+        inputs: list[dict[str, str]] = []
+        input_paths: list[Path] = []
+        input_kinds: set[str] = set()
+        for kind, scope, raw_path in arguments.input:
+            if kind in input_kinds:
+                raise LaunchError(f"duplicate evidence input kind: {kind!r}")
+            reference = _reference(
                 kind,
                 scope,
-                path,
+                raw_path,
                 repository=repository,
-                evidence_dir=evidence_dir,
+                artifact_root=artifact_root,
             )
-            for kind, scope, path in arguments.input
-        ]
+            root = repository if scope == "repository" else artifact_root
+            _, input_path = _contained_path(root, raw_path, label="evidence input")
+            if not _command_mentions_path(command, input_path, cwd=repository):
+                raise LaunchError("producer command does not consume a declared input")
+            input_kinds.add(kind)
+            inputs.append(reference)
+            input_paths.append(input_path)
+        completed = subprocess.run(
+            command,
+            cwd=repository,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        stdout_path.write_bytes(completed.stdout)
+        stderr_path.write_bytes(completed.stderr)
+
+        if _sha256(producer_path) != producer_digest:
+            raise LaunchError("producer changed while evidence was being collected")
+        if _sha256(launcher_path) != launcher_digest:
+            raise LaunchError("launcher changed while evidence was being collected")
+        if _sha256(arguments.execution_manifest) != manifest_digest:
+            raise LaunchError("execution manifest changed while evidence was being collected")
+        for reference, input_path in zip(inputs, input_paths, strict=True):
+            if _sha256(input_path) != reference["sha256"]:
+                raise LaunchError("declared input changed while evidence was being collected")
+
+        expectation_met = (
+            completed.returncode != 0 if expectation == "NONZERO" else completed.returncode == 0
+        )
         outputs = [
             _reference(
                 "stdout",
-                "evidence",
-                stdout_path.name,
+                "artifact",
+                stdout_path.relative_to(artifact_root).as_posix(),
                 repository=repository,
-                evidence_dir=evidence_dir,
+                artifact_root=artifact_root,
             ),
             _reference(
                 "stderr",
-                "evidence",
-                stderr_path.name,
+                "artifact",
+                stderr_path.relative_to(artifact_root).as_posix(),
                 repository=repository,
-                evidence_dir=evidence_dir,
+                artifact_root=artifact_root,
             ),
         ]
         if arguments.producer_report == "stdout":
             producer_report = stdout_path
         elif arguments.producer_report:
-            producer_report = evidence_dir / _safe_relative(arguments.producer_report)
+            _, producer_report = _contained_path(
+                artifact_root,
+                arguments.producer_report,
+                label="producer report",
+            )
         else:
             raise LaunchError("evidence requires --producer-report")
         _load_json(producer_report)
         outputs.append(
             _reference(
                 "producer-report",
-                "evidence",
-                producer_report.relative_to(evidence_dir).as_posix(),
+                "artifact",
+                producer_report.relative_to(artifact_root).as_posix(),
                 repository=repository,
-                evidence_dir=evidence_dir,
+                artifact_root=artifact_root,
             )
         )
+        for kind, output_path in declared_output_paths.items():
+            outputs.append(
+                _reference(
+                    kind,
+                    "artifact",
+                    output_path.relative_to(artifact_root).as_posix(),
+                    repository=repository,
+                    artifact_root=artifact_root,
+                )
+            )
 
         report = {
             "schema_version": SCHEMA_VERSION,
@@ -347,25 +485,18 @@ def main(argv: list[str] | None = None) -> int:
             },
             "producer": {
                 "path": producer_relative,
-                "sha256": _sha256(producer_path),
-                "command": command,
+                "sha256": producer_digest,
             },
             "launcher": {
                 "path": launcher_relative,
-                "sha256": _sha256(launcher_path),
+                "sha256": launcher_digest,
             },
             "inputs": inputs,
             "outputs": outputs,
             "expectation": expectation,
             "observed_exit_code": completed.returncode,
             "status": "PASS" if expectation_met else "FAIL",
-            "results": _execution_results(
-                manifest,
-                arguments.kind,
-                arguments.job_id,
-                arguments.target,
-                selected_key,
-            ),
+            "results": results,
             "rejection_token": arguments.rejection_token,
         }
         report_path.write_text(

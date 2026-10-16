@@ -162,6 +162,26 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
         raise GateError("REPORT_WRITE_FAILED") from exc
 
 
+def _write_bytes(path: Path, value: bytes) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    except OSError as exc:
+        raise GateError("CAPTURE_WRITE_FAILED") from exc
+
+
 def _safe_regular(root: Path, relative: str, missing_reason: str) -> None:
     current = root
     parts = PurePosixPath(relative).parts
@@ -345,6 +365,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe-subject", type=Path)
     parser.add_argument("--mypy", type=Path)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--stdout-report", type=Path)
+    parser.add_argument("--stderr-report", type=Path)
     return parser
 
 
@@ -357,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
     coverage: dict[str, Any] = {}
     try:
         root = arguments.root.resolve(strict=True)
+        if (arguments.stdout_report is None) != (arguments.stderr_report is None):
+            raise GateError("CAPTURE_OUTPUT_INVALID")
         if arguments.probe_subject is not None:
             subject = arguments.probe_subject.resolve(strict=True)
             try:
@@ -388,7 +412,6 @@ def main(argv: list[str] | None = None) -> int:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
                 check=False,
             )
         except OSError as exc:
@@ -400,11 +423,14 @@ def main(argv: list[str] | None = None) -> int:
         report["effective_flags"] = ["--strict", "--no-incremental"]
         report["mypy_exit_code"] = completed.returncode
         report["stdout_sha256"] = hashlib.sha256(
-            completed.stdout.encode("utf-8")
+            completed.stdout
         ).hexdigest()
         report["stderr_sha256"] = hashlib.sha256(
-            completed.stderr.encode("utf-8")
+            completed.stderr
         ).hexdigest()
+        if arguments.stdout_report is not None and arguments.stderr_report is not None:
+            _write_bytes(arguments.stdout_report, completed.stdout)
+            _write_bytes(arguments.stderr_report, completed.stderr)
         if completed.returncode == 0:
             report["status"] = "PASS"
             exit_code = 0
@@ -413,9 +439,9 @@ def main(argv: list[str] | None = None) -> int:
             report["failure_reasons"] = ["MYPY_FAILED"]
             exit_code = 1
             if completed.stdout:
-                sys.stderr.write(completed.stdout)
+                sys.stderr.buffer.write(completed.stdout)
             if completed.stderr:
-                sys.stderr.write(completed.stderr)
+                sys.stderr.buffer.write(completed.stderr)
         _emit(report, arguments.report)
         return exit_code
     except GateError as exc:

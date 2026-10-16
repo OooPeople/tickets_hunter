@@ -25,6 +25,7 @@ try:
     from tools.utiki_negative_contract import (
         NegativeContractError,
         probe_directory_name,
+        validate_probe_output_contract,
         validate_registry_contract,
         validate_request_contract,
     )
@@ -32,6 +33,7 @@ except ModuleNotFoundError:  # Direct execution from tools/.
     from utiki_negative_contract import (  # type: ignore[no-redef]
         NegativeContractError,
         probe_directory_name,
+        validate_probe_output_contract,
         validate_registry_contract,
         validate_request_contract,
     )
@@ -222,15 +224,7 @@ def _token(value: str) -> str:
 
 
 def _stage_probe_input(source_dir: Path, report_parent: Path, name: str) -> Path:
-    """Keep portable probe fixtures in place, otherwise freeze a copied input.
-
-    Some generated probes contain evidence envelopes whose producer commands
-    bind absolute paths below the probe directory.  Copying those probes after
-    generation changes the evidence location and correctly causes the checker
-    to reject the stale binding.  CI therefore generates probes directly in
-    the final evidence directory; older callers with an external input root
-    retain the copy-and-freeze behavior for fully relocatable probes.
-    """
+    """Place one immutable probe fixture beside its final evidence envelope."""
 
     source = source_dir.resolve(strict=True)
     parent = report_parent.resolve(strict=True)
@@ -338,9 +332,15 @@ def main(argv: list[str] | None = None) -> int:
                 probe_root=copied_dir.resolve(),
                 repository_root=repository,
             )
+            validate_probe_output_contract(
+                entry,
+                request,
+                probe_request_path=copied_request,
+                probe_root=copied_dir.resolve(),
+            )
             producer_report = report.with_name(f"{report.stem}.producer.json")
-            input_relative = copied_request.relative_to(report.parent).as_posix()
-            producer_report_relative = producer_report.relative_to(report.parent).as_posix()
+            input_relative = copied_request.relative_to(run_dir).as_posix()
+            producer_report_relative = producer_report.relative_to(run_dir).as_posix()
             command = [
                 sys.executable,
                 str(launcher),
@@ -348,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(repository),
                 "--execution-manifest",
                 str(manifest_path),
+                "--artifact-root",
+                str(run_dir),
                 "--report",
                 str(report),
                 "--kind",
@@ -376,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
                 key[2],
                 "--input",
                 "injected-probe",
-                "evidence",
+                "artifact",
                 input_relative,
                 "--input",
                 "probe-registry",

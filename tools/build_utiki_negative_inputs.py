@@ -25,6 +25,7 @@ try:
     from tools.utiki_negative_contract import (
         NegativeContractError,
         probe_directory_name,
+        validate_probe_output_contract,
         validate_registry_contract,
         validate_request_contract,
     )
@@ -32,6 +33,7 @@ except ModuleNotFoundError:  # Direct execution from tools/.
     from utiki_negative_contract import (  # type: ignore[no-redef]
         NegativeContractError,
         probe_directory_name,
+        validate_probe_output_contract,
         validate_registry_contract,
         validate_request_contract,
     )
@@ -98,6 +100,7 @@ def _request(
     *,
     arguments: list[str | Path],
     input_path: Path,
+    support_inputs: list[tuple[str, Path]] | None = None,
     working_directory: Path | None = None,
 ) -> None:
     input_kinds = entry["input_kinds"]
@@ -113,47 +116,54 @@ def _request(
     if concrete not in normalized_arguments:
         raise BuildError(f"child command does not consume probe input: {_name(entry)}")
     child_cwd = _placeholder(working_directory, root) if working_directory else None
-    _write_json(
-        root / "probe.json",
-        {
-            "schema_version": SCHEMA_VERSION,
-            **{
-                field: entry[field]
-                for field in (
-                    "case_id",
-                    "obligation_id",
-                    "variant_id",
-                    "job_id",
-                    "target",
-                )
-            },
-            "candidate_sha": candidate_sha,
-            "environment": entry["environment"],
-            "mutation": entry["mutation"],
-            "rejection_token": entry["rejection_token"],
-            "child": {
-                "kind": entry["child_kind"],
-                "producer": entry["child_producer"],
-                "arguments": normalized_arguments,
-                "working_directory": child_cwd,
-            },
-            "inputs": [
-                {
-                    "kind": input_kinds[0],
-                    "path": input_path.relative_to(root).as_posix(),
-                    "sha256": _sha256(input_path),
-                }
-            ],
+    concrete_inputs = [(input_kinds[0], input_path), *(support_inputs or [])]
+    if len({kind for kind, _ in concrete_inputs}) != len(concrete_inputs):
+        raise BuildError(f"probe input kind is duplicated: {_name(entry)}")
+    if len({path.resolve() for _, path in concrete_inputs}) != len(concrete_inputs):
+        raise BuildError(f"probe input path is duplicated: {_name(entry)}")
+    for kind, path in concrete_inputs:
+        if not kind or root not in path.resolve().parents or not path.is_file():
+            raise BuildError(f"probe support input is invalid: {_name(entry)}")
+    request = {
+        "schema_version": SCHEMA_VERSION,
+        **{
+            field: entry[field]
+            for field in (
+                "case_id",
+                "obligation_id",
+                "variant_id",
+                "job_id",
+                "target",
+            )
         },
-    )
+        "candidate_sha": candidate_sha,
+        "environment": entry["environment"],
+        "mutation": entry["mutation"],
+        "rejection_token": entry["rejection_token"],
+        "child": {
+            "kind": entry["child_kind"],
+            "producer": entry["child_producer"],
+            "arguments": normalized_arguments,
+            "working_directory": child_cwd,
+        },
+        "inputs": [
+            {
+                "kind": kind,
+                "path": path.relative_to(root).as_posix(),
+                "sha256": _sha256(path),
+            }
+            for kind, path in concrete_inputs
+        ],
+    }
+    _write_json(root / "probe.json", request)
 
 
 def _pytest_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> None:
     source = root / "test_probe.py"
+    config = root / "pytest.ini"
     variant = entry["variant_id"]
     if variant == "invalid-pytest-config":
         source.write_text("def test_probe():\n    pass\n", encoding="utf-8")
-        config = root / "pytest.ini"
         config.write_text("[pytest]\nutiki_unknown_config = true\n", encoding="utf-8")
         arguments: list[str | Path] = [
             "-c",
@@ -163,7 +173,9 @@ def _pytest_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> None
             source,
         ]
         input_path = config
+        support_inputs = [("pytest-probe-source", source)]
     else:
+        config.write_text("[pytest]\n", encoding="utf-8")
         source.write_text(
             "import pytest\n\n@pytest.mark.utiki_unknown_marker\ndef test_probe():\n    pass\n",
             encoding="utf-8",
@@ -171,14 +183,16 @@ def _pytest_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> None
         arguments = []
         if variant == "empty-addopts":
             arguments.extend(["-o", "addopts="])
-        arguments.extend(["--strict-config", "--strict-markers", source])
+        arguments.extend(["-c", config, "--strict-config", "--strict-markers", source])
         input_path = source
+        support_inputs = [("pytest-config", config)]
     _request(
         root,
         entry,
         candidate_sha,
         arguments=arguments,
         input_path=input_path,
+        support_inputs=support_inputs,
         working_directory=root,
     )
 
@@ -249,6 +263,14 @@ def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> N
             *(["--probe-subject", input_path] if variant in new_paths else []),
         ],
         input_path=input_path,
+        support_inputs=[
+            ("typecheck-manifest", manifest),
+            *([("typecheck-config", config)] if input_path != config else []),
+            ("typecheck-mypy", fake_mypy),
+            ("typecheck-seed-auth", fixture / seed_files[0]),
+            ("typecheck-seed-profiles", fixture / seed_files[1]),
+            ("typecheck-seed-selection", fixture / seed_files[2]),
+        ],
     )
 
 
@@ -783,6 +805,12 @@ def main(argv: list[str] | None = None) -> int:
                 request,
                 probe_root=root.resolve(),
                 repository_root=repository,
+            )
+            validate_probe_output_contract(
+                entry,
+                request,
+                probe_request_path=(root / "probe.json").resolve(),
+                probe_root=root.resolve(),
             )
         index = {
             "schema_version": 1,

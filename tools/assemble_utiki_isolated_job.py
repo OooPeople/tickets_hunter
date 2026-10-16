@@ -181,7 +181,7 @@ def _artifact(
 ) -> tuple[dict[str, str], dict[str, Any], Path]:
     path = _inside_file(run_dir, raw_path, label=f"{kind} artifact")
     envelope = _load(path)
-    if envelope.get("schema_version") != 1 or envelope.get("kind") != kind:
+    if envelope.get("schema_version") != 2 or envelope.get("kind") != kind:
         raise AssembleError(f"{kind} artifact is not a formal evidence envelope")
     if envelope.get("status") != "PASS":
         raise AssembleError(f"{kind} evidence producer did not pass")
@@ -279,7 +279,7 @@ def _validate_junit(
         raise AssembleError("managed JUnit execution set differs from manifest")
 
 
-def _producer_output(envelope: dict[str, Any], envelope_path: Path) -> Path:
+def _producer_output(envelope: dict[str, Any], run_dir: Path) -> Path:
     outputs = envelope.get("outputs")
     if not isinstance(outputs, list):
         raise AssembleError("isolation envelope has no outputs")
@@ -291,14 +291,16 @@ def _producer_output(envelope: dict[str, Any], envelope_path: Path) -> Path:
     if len(producer_outputs) != 1:
         raise AssembleError("isolation envelope does not bind one producer report")
     item = producer_outputs[0]
-    if item.get("scope") != "evidence":
+    if item.get("scope") != "artifact":
         raise AssembleError("isolation producer report has an invalid scope")
     relative = item.get("path")
     if not isinstance(relative, str) or not relative:
         raise AssembleError("isolation producer report path is invalid")
-    path = (envelope_path.parent / relative).resolve()
-    if envelope_path.parent.resolve() not in path.parents:
-        raise AssembleError("isolation producer report escapes the evidence directory")
+    path = _inside_file(
+        run_dir,
+        run_dir / relative,
+        label="isolation producer report",
+    )
     if path.is_symlink() or not path.is_file() or _sha256(path) != item.get("sha256"):
         raise AssembleError("isolation producer report digest mismatch")
     return path
@@ -501,8 +503,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if len(isolation_items) != 1:
             raise AssembleError("isolated job must have one isolation evidence envelope")
-        isolation_envelope, isolation_envelope_path = isolation_items[0]
-        raw_path = _producer_output(isolation_envelope, isolation_envelope_path)
+        isolation_envelope, _ = isolation_items[0]
+        raw_path = _producer_output(isolation_envelope, run_dir)
         raw = _load(raw_path)
         inner_path = _inside_file(run_dir, arguments.inner_report, label="inner report")
         inner = _load(inner_path)

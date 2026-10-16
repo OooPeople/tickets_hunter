@@ -24,16 +24,23 @@ from typing import Any
 try:
     from tools.utiki_negative_contract import (
         NegativeContractError,
+        probe_semantic_output,
+        validate_probe_execution_contract,
+        validate_probe_output_contract,
         validate_request_contract,
     )
 except ModuleNotFoundError:  # Direct execution from tools/.
     from utiki_negative_contract import (  # type: ignore[no-redef]
         NegativeContractError,
+        probe_semantic_output,
+        validate_probe_execution_contract,
+        validate_probe_output_contract,
         validate_request_contract,
     )
 
 
-SCHEMA_VERSION = 1
+REQUEST_SCHEMA_VERSION = 1
+TRANSCRIPT_SCHEMA_VERSION = 2
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -85,8 +92,13 @@ def _safe_relative(value: Any, label: str) -> str:
 
 def _safe_file(root: Path, value: Any, digest: Any, label: str) -> Path:
     relative = _safe_relative(value, label)
-    path = (root / relative).resolve()
-    if root not in path.parents or path.is_symlink() or not path.is_file():
+    current = root
+    for part in PurePosixPath(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ProbeError(f"{label} traverses a symlink")
+    path = current.resolve()
+    if root not in path.parents or not path.is_file():
         raise ProbeError(f"{label} is not a regular file inside the probe directory")
     if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
         raise ProbeError(f"{label} digest is invalid")
@@ -109,7 +121,9 @@ def _expand_probe_path(root: Path, value: str, *, label: str) -> str:
     return str(path)
 
 
-def _require_isolation(proof: Path | None, request: dict[str, Any]) -> dict[str, Any] | None:
+def _require_isolation(
+    proof: Path | None, request: dict[str, Any], probe_root: Path
+) -> dict[str, Any] | None:
     environment = request["environment"]
     if environment == "host":
         if proof is not None:
@@ -121,7 +135,10 @@ def _require_isolation(proof: Path | None, request: dict[str, Any]) -> dict[str,
         raise ProbeError("isolated negative probe cannot run on the host")
     if proof is None:
         raise ProbeError("isolated negative probe requires an isolation proof")
-    payload = _load(proof)
+    resolved = proof.resolve(strict=True)
+    if probe_root not in resolved.parents or proof.is_symlink():
+        raise ProbeError("isolation proof must be inside the probe directory")
+    payload = _load(resolved)
     if (
         payload.get("schema_version") != 1
         or payload.get("status") != "PASS"
@@ -130,8 +147,8 @@ def _require_isolation(proof: Path | None, request: dict[str, Any]) -> dict[str,
     ):
         raise ProbeError("isolation proof does not bind this isolated run")
     return {
-        "path": str(proof.resolve()),
-        "sha256": _sha256(proof),
+        "path": resolved.relative_to(probe_root).as_posix(),
+        "sha256": _sha256(resolved),
     }
 
 
@@ -191,17 +208,32 @@ def _registry_entry(registry_path: Path, request: dict[str, Any]) -> dict[str, A
         raise ProbeError("probe request is not uniquely reviewed in the registry")
     entry = matches[0]
     child = request["child"]
+    if not isinstance(child, dict):
+        raise ProbeError("probe child is not an object")
     raw_inputs = request["inputs"]
-    actual_input_kinds = sorted(
-        item.get("kind") for item in raw_inputs if isinstance(item, dict)
-    )
+    if not isinstance(raw_inputs, list) or not raw_inputs:
+        raise ProbeError("probe inputs are not a non-empty array")
+    actual_input_kinds: set[str] = set()
+    for item in raw_inputs:
+        if not isinstance(item, dict):
+            raise ProbeError("probe input is not an object")
+        kind = item.get("kind")
+        if not isinstance(kind, str) or not kind:
+            raise ProbeError("probe input kind is invalid")
+        if kind in actual_input_kinds:
+            raise ProbeError("probe input kind is duplicated")
+        actual_input_kinds.add(kind)
+    mutation_input_kinds = entry["input_kinds"]
     if (
         request["environment"] != entry["environment"]
         or request["mutation"] != entry["mutation"]
         or request["rejection_token"] != entry["rejection_token"]
         or child.get("kind") != entry["child_kind"]
         or child.get("producer") != entry["child_producer"]
-        or actual_input_kinds != sorted(entry["input_kinds"])
+        or not isinstance(mutation_input_kinds, list)
+        or len(mutation_input_kinds) != 1
+        or any(not isinstance(kind, str) or not kind for kind in mutation_input_kinds)
+        or any(kind not in actual_input_kinds for kind in mutation_input_kinds)
     ):
         raise ProbeError("probe request differs from its reviewed registry entry")
     return entry
@@ -242,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
             },
             "probe input",
         )
-        if request["schema_version"] != SCHEMA_VERSION:
+        if request["schema_version"] != REQUEST_SCHEMA_VERSION:
             raise ProbeError("unknown probe input schema")
         registry_entry = _registry_entry(
             arguments.probe_registry.resolve(strict=True), request
@@ -253,10 +285,16 @@ def main(argv: list[str] | None = None) -> int:
             probe_root=probe_root,
             repository_root=repository,
         )
+        validate_probe_output_contract(
+            registry_entry,
+            request,
+            probe_request_path=probe_input,
+            probe_root=probe_root,
+        )
         token = request["rejection_token"]
         if not isinstance(token, str) or not token:
             raise ProbeError("probe rejection token is invalid")
-        isolation = _require_isolation(arguments.isolation_proof, request)
+        isolation = _require_isolation(arguments.isolation_proof, request, probe_root)
 
         child = request["child"]
         if not isinstance(child, dict):
@@ -304,12 +342,23 @@ def main(argv: list[str] | None = None) -> int:
         elif child_kind == "pytest-module":
             if producer != "pytest":
                 raise ProbeError("pytest child producer must be the pytest module")
-            command = [sys.executable, "-m", "pytest", *expanded_arguments]
-            producer_digest = hashlib.sha256(b"python-module:pytest").hexdigest()
+            command = [
+                sys.executable,
+                "-I",
+                "-B",
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "--noconftest",
+                *expanded_arguments,
+            ]
+            producer_digest = hashlib.sha256(
+                b"python-isolated-module:pytest"
+            ).hexdigest()
         else:
             raise ProbeError("unsupported child kind")
 
-        concrete_inputs: list[dict[str, str]] = []
         raw_inputs = request["inputs"]
         if not isinstance(raw_inputs, list) or not raw_inputs:
             raise ProbeError("negative probe has no concrete child inputs")
@@ -317,28 +366,49 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(item, dict):
                 raise ProbeError("negative probe input entry is invalid")
             _exact(item, {"kind", "path", "sha256"}, f"inputs[{index}]")
-            path = _safe_file(probe_root, item["path"], item["sha256"], f"inputs[{index}]")
-            if str(path) not in command:
-                raise ProbeError("child command does not consume a concrete mutation input")
-            concrete_inputs.append(
-                {"kind": item["kind"], "path": str(path), "sha256": item["sha256"]}
-            )
+            _safe_file(probe_root, item["path"], item["sha256"], f"inputs[{index}]")
 
+        child_environment = os.environ.copy()
+        child_environment["GIT_OPTIONAL_LOCKS"] = "0"
+        if child_kind == "pytest-module":
+            child_environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+            child_environment.pop("PYTEST_ADDOPTS", None)
+            child_environment.pop("PYTEST_PLUGINS", None)
         completed = subprocess.run(
             command,
             cwd=child_working_directory,
+            env=child_environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
         )
+        validate_probe_execution_contract(
+            registry_entry,
+            request,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+        )
+        validate_probe_output_contract(
+            registry_entry,
+            request,
+            probe_request_path=probe_input,
+            probe_root=probe_root,
+            require_outputs=True,
+        )
+        semantic = probe_semantic_output(
+            registry_entry, request, probe_root=probe_root
+        )
+        semantic_output = None
+        if semantic is not None:
+            semantic_relative, semantic_path = semantic
+            semantic_output = {
+                "path": semantic_relative,
+                "sha256": _sha256(semantic_path),
+            }
         report_path = arguments.producer_report.resolve()
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        stem = report_path.stem
-        stdout_path = report_path.with_name(f"{stem}.child.stdout")
-        stderr_path = report_path.with_name(f"{stem}.child.stderr")
-        stdout_path.write_bytes(completed.stdout)
-        stderr_path.write_bytes(completed.stderr)
         combined = completed.stdout.decode("utf-8", errors="replace") + completed.stderr.decode(
             "utf-8", errors="replace"
         )
@@ -348,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
             else "INVALID_PROBE_RESULT"
         )
         report = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": TRANSCRIPT_SCHEMA_VERSION,
             "report_kind": "utiki-negative-probe-transcript",
             "key": {
                 name: request[name]
@@ -357,18 +427,16 @@ def main(argv: list[str] | None = None) -> int:
             "candidate_sha": request["candidate_sha"],
             "environment": request["environment"],
             "mutation": request["mutation"],
+            "request_sha256": _sha256(probe_input),
+            "registry_sha256": _sha256(arguments.probe_registry.resolve(strict=True)),
             "child": {
                 "kind": child_kind,
                 "producer": producer,
                 "producer_sha256": producer_digest,
-                "command": command,
-                "working_directory": str(child_working_directory),
             },
-            "inputs": concrete_inputs,
-            "outputs": [
-                {"kind": "stdout", "path": str(stdout_path), "sha256": _sha256(stdout_path)},
-                {"kind": "stderr", "path": str(stderr_path), "sha256": _sha256(stderr_path)},
-            ],
+            "stdout_sha256": hashlib.sha256(completed.stdout).hexdigest(),
+            "stderr_sha256": hashlib.sha256(completed.stderr).hexdigest(),
+            "semantic_output": semantic_output,
             "observed_exit_code": completed.returncode,
             "rejection_token": token,
             "isolation_proof": isolation,

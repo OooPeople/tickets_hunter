@@ -317,7 +317,7 @@
       "child_producer": "pytest",
       "environment": "host",
       "input_kinds": [
-        "pytest-probe-source"
+        "pytest-config"
       ],
       "job_id": "unit-contract",
       "mutation": "invalid-pytest-config",

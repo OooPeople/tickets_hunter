@@ -89,31 +89,68 @@ def _canonical_negative_fixture(
     request_path = destination / "probe.json"
     request = json.loads(request_path.read_text(encoding="utf-8"))
     child = request["child"]
-    arguments = [
-        _expand_probe_value(destination, value) for value in child["arguments"]
-    ]
+    semantic_output = None
+    if child["producer"] == "tools/run_utiki_typecheck.py":
+        affected = {
+            "new-domain-file": "src/platforms/utiki/domain/state.py",
+            "new-application-file": "src/platforms/utiki/application/engine.py",
+            "new-port-file": "src/platforms/utiki/application/ports.py",
+            "new-adapter-file": "src/platforms/utiki/adapters/browser.py",
+            "new-bootstrap-file": "src/platforms/utiki/bootstrap.py",
+            "new-current-config-file": "src/utiki_config.py",
+            "new-keyword-file": "src/keyword_rules.py",
+            "new-core-bridge-file": "src/utiki_core_services.py",
+            "new-upgrade-tool-file": "tools/migrations/convert_utiki_config.py",
+        }.get(request["variant_id"])
+        typecheck_report = destination / "typecheck-report.json"
+        _write_json(
+            typecheck_report,
+            {
+                "schema_version": 1,
+                "status": "FAIL",
+                "failure_reasons": [
+                    "TYPED_SCOPE_MISSING" if affected else "UNSAFE_MYPY_CONFIG"
+                ],
+                "affected_paths": [affected] if affected else [],
+                "mypy_exit_code": None,
+            },
+        )
+        semantic_output = {
+            "path": typecheck_report.relative_to(destination).as_posix(),
+            "sha256": _sha256(typecheck_report),
+        }
+    elif child["producer"] == "tools/verify_modified_python.py" and "--report" in child["arguments"]:
+        syntax_report = destination / "syntax-report.json"
+        subject = request["inputs"][0]["path"].removeprefix("repo/")
+        reason = request["rejection_token"]
+        _write_json(
+            syntax_report,
+            {
+                "schema_version": 1,
+                "overall_status": "FAIL",
+                "exit_code": 1,
+                "failure_reasons": [reason],
+                "manifest_sha256": _sha256(destination / "modified-python.json"),
+                "files": (
+                    [{"path": subject, "reason": reason, "status": "FAIL"}]
+                    if reason == "SYNTAX_ERROR"
+                    else []
+                ),
+            },
+        )
+        semantic_output = {
+            "path": syntax_report.relative_to(destination).as_posix(),
+            "sha256": _sha256(syntax_report),
+        }
     if child["kind"] == "repository-python":
         producer_path = PROJECT_ROOT / child["producer"]
-        command = [sys.executable, str(producer_path.resolve()), *arguments]
         producer_digest = _sha256(producer_path)
     else:
-        command = [sys.executable, "-m", "pytest", *arguments]
-        producer_digest = hashlib.sha256(b"python-module:pytest").hexdigest()
-    cwd = (
-        PROJECT_ROOT
-        if child["working_directory"] is None
-        else Path(_expand_probe_value(destination, child["working_directory"]))
-    )
-    inputs = [
-        {
-            "kind": item["kind"],
-            "path": str((destination / item["path"]).resolve()),
-            "sha256": item["sha256"],
-        }
-        for item in request["inputs"]
-    ]
+        producer_digest = hashlib.sha256(
+            b"python-isolated-module:pytest"
+        ).hexdigest()
     raw = {
-        "schema_version": 1,
+        "schema_version": 2,
         "report_kind": "utiki-negative-probe-transcript",
         "key": {
             field: request[field]
@@ -122,18 +159,16 @@ def _canonical_negative_fixture(
         "candidate_sha": request["candidate_sha"],
         "environment": request["environment"],
         "mutation": request["mutation"],
+        "request_sha256": _sha256(request_path),
+        "registry_sha256": _sha256(NEGATIVE_REGISTRY),
         "child": {
             "kind": child["kind"],
             "producer": child["producer"],
             "producer_sha256": producer_digest,
-            "command": command,
-            "working_directory": str(cwd.resolve()),
         },
-        "inputs": inputs,
-        "outputs": [
-            {"kind": "stdout", "path": str(child_stdout.resolve()), "sha256": _sha256(child_stdout)},
-            {"kind": "stderr", "path": str(child_stderr.resolve()), "sha256": _sha256(child_stderr)},
-        ],
+        "stdout_sha256": _sha256(child_stdout),
+        "stderr_sha256": _sha256(child_stderr),
+        "semantic_output": semantic_output,
         "observed_exit_code": 1,
         "rejection_token": request["rejection_token"],
         "isolation_proof": None,
@@ -564,6 +599,7 @@ def _make_run(
     run_dir_name=None,
     compact_support=False,
 ):
+    del compact_support
     run_dir = root / (run_dir_name or f"{job_id}-{target}")
     evidence_dir = run_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -574,15 +610,19 @@ def _make_run(
             (evidence["kind"], evidence["path"])
             for _, mapping in mappings
             for evidence in mapping["evidence"]
-        }
+        },
+        key=lambda item: (
+            {"browser-isolation-report": 0, "benchmark-report": 1}.get(
+                item[0], 2
+            ),
+            item,
+        ),
     )
     artifacts = []
-    for support_index, (kind, artifact_relative) in enumerate(evidence_refs):
+    for kind, artifact_relative in evidence_refs:
         path = run_dir / artifact_relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        support_stem = (
-            f"a{support_index:03d}" if compact_support else path.stem
-        )
+        support_stem = path.stem
         producer_by_kind = {
             "architecture-report": "tools/check_utiki_architecture.py",
             "typecheck-report": "tools/run_utiki_typecheck.py",
@@ -608,7 +648,7 @@ def _make_run(
         stderr_path.write_text("", encoding="utf-8")
         outputs = []
         extra_inputs = []
-        extra_command_args = []
+        extra_outputs = []
         if kind == "checker-exit-nonzero":
             negative_result = next(
                 {
@@ -632,96 +672,72 @@ def _make_run(
                 if all(entry[name] == negative_result[name] for name in negative_result)
             )
             rejection_token = registry_entry["rejection_token"]
-            stdout_path.write_text(rejection_token + "\n", encoding="utf-8")
+            pytest_rejections = {
+                "unknown-marker": (
+                    2,
+                    "'utiki_unknown_marker' not found in `markers` configuration option\n",
+                ),
+                "empty-addopts": (
+                    2,
+                    "'utiki_unknown_marker' not found in `markers` configuration option\n",
+                ),
+                "invalid-pytest-config": (
+                    4,
+                    "ERROR: Unknown config option: utiki_unknown_config\n",
+                ),
+            }
+            producer_name = registry_entry["child_producer"]
+            observed_exit, captured_output = pytest_rejections.get(
+                registry_entry["variant_id"], (1, rejection_token + "\n")
+            )
+            child_error = ""
+            if producer_name == "tools/verify_utiki_ci_results.py":
+                synthetic_code = (
+                    "RUN_INDEX_SET_MISMATCH"
+                    if registry_entry["variant_id"] == "missing-job-or-target"
+                    else rejection_token
+                )
+                variant = registry_entry["variant_id"]
+                synthetic_subject = (
+                    registry_entry["obligation_id"]
+                    if variant in {
+                        "test-and-mapping-removed",
+                        "removed-test-and-mapping",
+                        "duplicate-or-unknown-id",
+                        "missing-obligation-variant",
+                        "forged-not-applicable",
+                    }
+                    else {
+                        "zero-collected": "JUnit lacks",
+                        "empty-or-missing-result": "JUnit lacks",
+                        "catalog-unapproved-change": "approval record",
+                        "stale-run-or-sha": "candidate SHA",
+                        "digest-mismatch": "JUnit digest",
+                        "duplicate-result-or-wrong-layer": "duplicate JUnit execution result",
+                        "missing-job-or-target": "run index job/target",
+                        "failure-exit-overwritten": "original test exit code",
+                    }.get(variant, "testcase[0]")
+                )
+                captured_output = json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "FAIL",
+                        "error_code": synthetic_code,
+                        "message": f"{synthetic_subject}: {job_id} synthetic {variant} rejection",
+                    }
+                ) + "\n"
+            elif producer_name == "tools/verify_modified_python.py":
+                if registry_entry["variant_id"] in {"ignored-build-source", "wrong-base-or-sha"}:
+                    observed_exit = 2
+                child_error = f"verify_modified_python: {rejection_token}\n"
+                captured_output = ""
+            stdout_path.write_text(captured_output, encoding="utf-8")
+            stderr_path.write_text(child_error, encoding="utf-8")
             expectation = "NONZERO"
-            observed_exit = 1
             child_stdout = path.parent / f"{support_stem}.child.stdout"
             child_stderr = path.parent / f"{support_stem}.child.stderr"
-            child_stdout.write_text(rejection_token + "\n", encoding="utf-8")
-            child_stderr.write_text("", encoding="utf-8")
-            child_kind = registry_entry["child_kind"]
-            child_producer_value = registry_entry["child_producer"]
-            if child_kind == "repository-python":
-                child_producer = PROJECT_ROOT / child_producer_value
-                child_digest = _sha256(child_producer)
-                child_command = [
-                    sys.executable,
-                    str(child_producer),
-                    "--controlled-input",
-                    str(input_path.resolve()),
-                ]
-            else:
-                child_digest = hashlib.sha256(b"python-module:pytest").hexdigest()
-                child_command = [
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    str(input_path.resolve()),
-                ]
-            probe_request = {
-                "schema_version": 1,
-                **negative_result,
-                "candidate_sha": CANDIDATE_SHA,
-                "environment": registry_entry["environment"],
-                "mutation": registry_entry["mutation"],
-                "rejection_token": rejection_token,
-                "child": {
-                    "kind": child_kind,
-                    "producer": child_producer_value,
-                    "arguments": ["--controlled-input", str(input_path.resolve())],
-                    "working_directory": None,
-                },
-                "inputs": [],
-            }
-            input_path.write_text("controlled mutation\n", encoding="utf-8")
-            probe_request["inputs"] = [
-                {
-                    "kind": registry_entry["input_kinds"][0],
-                    "path": input_path.name,
-                    "sha256": _sha256(input_path),
-                }
-            ]
-            raw_negative = {
-                "schema_version": 1,
-                "report_kind": "utiki-negative-probe-transcript",
-                "key": {
-                    **negative_result,
-                },
-                "candidate_sha": CANDIDATE_SHA,
-                "environment": registry_entry["environment"],
-                "mutation": registry_entry["mutation"],
-                "child": {
-                    "kind": child_kind,
-                    "producer": child_producer_value,
-                    "producer_sha256": child_digest,
-                    "command": child_command,
-                    "working_directory": str(PROJECT_ROOT.resolve()),
-                },
-                "inputs": [
-                    {
-                        "kind": registry_entry["input_kinds"][0],
-                        "path": str(input_path.resolve()),
-                        "sha256": _sha256(input_path),
-                    }
-                ],
-                "outputs": [
-                    {
-                        "kind": "stdout",
-                        "path": str(child_stdout.resolve()),
-                        "sha256": _sha256(child_stdout),
-                    },
-                    {
-                        "kind": "stderr",
-                        "path": str(child_stderr.resolve()),
-                        "sha256": _sha256(child_stderr),
-                    },
-                ],
-                "observed_exit_code": 1,
-                "rejection_token": rejection_token,
-                "isolation_proof": None,
-                "status": "EXPECTED_REJECTION",
-            }
-            canonical_fixture = True
+            child_stdout.write_text(captured_output, encoding="utf-8")
+            child_stderr.write_text(child_error, encoding="utf-8")
             probe_request_path, probe_request, raw_negative = (
                 _canonical_negative_fixture(
                     path.parent / f"{support_stem}.probe",
@@ -730,8 +746,9 @@ def _make_run(
                     child_stderr,
                 )
             )
+            raw_negative["observed_exit_code"] = observed_exit
             if job_id == "browser-contract-isolated":
-                isolation_proof = path.parent / f"{support_stem}.isolation.json"
+                isolation_proof = probe_request_path.parent / "isolation-proof.json"
                 _write_json(
                     isolation_proof,
                     {
@@ -742,20 +759,18 @@ def _make_run(
                     },
                 )
                 raw_negative["isolation_proof"] = {
-                    "path": str(isolation_proof.resolve()),
+                    "path": isolation_proof.relative_to(probe_request_path.parent).as_posix(),
                     "sha256": _sha256(isolation_proof),
                 }
             producer_report = path.parent / f"{support_stem}.producer.json"
-            if not canonical_fixture:
-                probe_request_path = path.parent / f"{support_stem}.probe.json"
-                probe_request["inputs"][0]["path"] = input_path.name
             _write_json(probe_request_path, probe_request)
+            raw_negative["request_sha256"] = _sha256(probe_request_path)
             _write_json(producer_report, raw_negative)
             outputs.append(
                 {
                     "kind": "producer-report",
-                    "scope": "evidence",
-                    "path": producer_report.name,
+                    "scope": "artifact",
+                    "path": producer_report.relative_to(run_dir).as_posix(),
                     "sha256": _sha256(producer_report),
                 }
             )
@@ -843,31 +858,54 @@ def _make_run(
                 },
             }
             if kind == "typecheck-report":
-                coverage_context = (
-                    path.parent / f"{support_stem}.coverage-context.json"
+                fixture_root = (
+                    PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "typecheck-p1"
                 )
-                _write_json(
-                    coverage_context,
+                typed_manifest = fixture_root / "manifest.txt"
+                mypy_config = fixture_root / "mypy.ini"
+                coverage_context = fixture_root / "context.json"
+                for input_kind, input_file in (
+                    ("typed-manifest", typed_manifest),
+                    ("mypy-config", mypy_config),
+                    ("coverage-context", coverage_context),
+                ):
+                    extra_inputs.append(
+                        {
+                            "kind": input_kind,
+                            "scope": "repository",
+                            "path": input_file.relative_to(PROJECT_ROOT).as_posix(),
+                            "sha256": _sha256(input_file),
+                        }
+                    )
+                typecheck_stdout = path.parent / "typecheck-mypy.stdout"
+                typecheck_stderr = path.parent / "typecheck-mypy.stderr"
+                typecheck_stdout.write_text("Success: no issues found\n", encoding="utf-8")
+                typecheck_stderr.write_text("", encoding="utf-8")
+                producer_payloads[kind].update(
                     {
-                        "schema_version": 1,
-                        "coverage_kind": "controlled-runner-contract",
-                        "purpose": "Synthetic checker contract fixture.",
-                        "production_scope_status": "NOT_CLAIMED",
-                        "legacy_seed_scope_status": "KNOWN_FAILING_DEBT",
-                    },
-                )
-                producer_payloads[kind]["coverage_context_sha256"] = _sha256(
-                    coverage_context
-                )
-                extra_inputs.append(
-                    {
-                        "kind": "coverage-context",
-                        "scope": "evidence",
-                        "path": coverage_context.name,
-                        "sha256": _sha256(coverage_context),
+                        "manifest_sha256": _sha256(typed_manifest),
+                        "config_sha256": _sha256(mypy_config),
+                        "coverage_context_sha256": _sha256(coverage_context),
+                        "stdout_sha256": _sha256(typecheck_stdout),
+                        "stderr_sha256": _sha256(typecheck_stderr),
                     }
                 )
-                extra_command_args.append(str(coverage_context.resolve()))
+                extra_outputs.extend(
+                    [
+                        {
+                            "kind": "typecheck-stdout",
+                            "scope": "artifact",
+                            "path": typecheck_stdout.relative_to(run_dir).as_posix(),
+                            "sha256": _sha256(typecheck_stdout),
+                        },
+                        {
+                            "kind": "typecheck-stderr",
+                            "scope": "artifact",
+                            "path": typecheck_stderr.relative_to(run_dir).as_posix(),
+                            "sha256": _sha256(typecheck_stderr),
+                        },
+                    ]
+                )
             if job_id == "performance-contract" and kind == "browser-isolation-report":
                 sibling_files = {
                     "inner_report_sha256": path.parent / "inner-performance-report.json",
@@ -877,7 +915,7 @@ def _make_run(
                 }
                 for index, sibling in enumerate(sibling_files.values(), start=1):
                     sibling.write_text(f"controlled performance output {index}\n", encoding="utf-8")
-                build_evidence = path.parent / "performance-image-build.json"
+                build_evidence = run_dir / "evidence" / "image-build.json"
                 build_base_image = "python:3.11@sha256:" + "4" * 64
                 build_image_id = "sha256:" + "5" * 64
                 build_inputs = [
@@ -906,12 +944,11 @@ def _make_run(
                 extra_inputs.append(
                     {
                         "kind": "image-build",
-                        "scope": "evidence",
-                        "path": build_evidence.name,
+                        "scope": "artifact",
+                        "path": build_evidence.relative_to(run_dir).as_posix(),
                         "sha256": _sha256(build_evidence),
                     }
                 )
-                extra_command_args.append(str(build_evidence.resolve()))
                 producer_payloads[kind] = {
                     "schema_version": 1,
                     "report_kind": "utiki-browser-isolation-launcher",
@@ -975,27 +1012,35 @@ def _make_run(
                 }
             if job_id == "performance-contract" and kind == "benchmark-report":
                 performance_inputs = {
-                    "performance-contract": path.parent / "verified-performance-contract.json",
-                    "performance-isolation-report": path.parent / "verified-performance-isolation.json",
-                    "raw-benchmark-report": path.parent / "verified-raw-benchmark.json",
-                    "managed-junit": path.parent / "verified-performance.xml",
-                    "reporter-result": path.parent / "verified-reporter-result.json",
+                    "performance-isolation-report": run_dir / "evidence" / "performance-isolation-raw.json",
+                    "raw-benchmark-report": run_dir / "evidence" / "raw-benchmark-report.json",
+                    "managed-junit": run_dir / "evidence" / "performance.xml",
+                    "reporter-result": run_dir / "evidence" / "performance-reporter-result.json",
                 }
                 for index, (input_kind, input_file) in enumerate(
                     performance_inputs.items(), start=1
                 ):
-                    input_file.write_text(
-                        f"controlled {input_kind} {index}\n", encoding="utf-8"
-                    )
+                    if not input_file.exists():
+                        input_file.write_text(
+                            f"controlled {input_kind} {index}\n", encoding="utf-8"
+                        )
                     extra_inputs.append(
                         {
                             "kind": input_kind,
-                            "scope": "evidence",
-                            "path": input_file.name,
+                            "scope": "artifact",
+                            "path": input_file.relative_to(run_dir).as_posix(),
                             "sha256": _sha256(input_file),
                         }
                     )
-                    extra_command_args.append(str(input_file.resolve()))
+                performance_contract = PROJECT_ROOT / "ci" / "utiki-performance-isolation.json"
+                extra_inputs.append(
+                    {
+                        "kind": "performance-contract",
+                        "scope": "repository",
+                        "path": performance_contract.relative_to(PROJECT_ROOT).as_posix(),
+                        "sha256": _sha256(performance_contract),
+                    }
+                )
                 source_metrics = {"event_loop.scheduling_lag": _source_performance_metric(300)}
                 for source_case in ("date", "area", "seat", "quantity"):
                     source_metrics[f"{source_case}.cold_import"] = _source_performance_metric(3)
@@ -1029,7 +1074,7 @@ def _make_run(
                     },
                     "digests": {
                         "contract_sha256": _sha256(
-                            performance_inputs["performance-contract"]
+                            performance_contract
                         ),
                         "execution_manifest_sha256": _sha256(manifest_path),
                         "fixture_sha256": "8" * 64,
@@ -1090,16 +1135,35 @@ def _make_run(
                     },
                     "threshold_policy": "P1 baseline establishment",
                 }
-            producer_report = path.parent / f"{support_stem}.producer.json"
+            if kind == "architecture-report":
+                producer_report = stdout_path
+            elif kind == "typecheck-report":
+                producer_report = path.parent / "typecheck-raw.json"
+            elif kind == "python-syntax-report":
+                producer_report = path.parent / "python-syntax-raw.json"
+            elif job_id == "performance-contract" and kind == "browser-isolation-report":
+                producer_report = path.parent / "performance-isolation-raw.json"
+            elif (
+                job_id == "browser-contract-isolated"
+                and kind == "browser-isolation-report"
+            ):
+                producer_report = path.parent / "browser-isolation-raw.json"
+            elif kind == "production-origin-report":
+                producer_report = path.parent / "production-origin-verified.json"
+            elif job_id == "performance-contract" and kind == "benchmark-report":
+                producer_report = path.parent / "performance-verification-raw.json"
+            else:
+                producer_report = path.parent / f"{support_stem}.producer.json"
             _write_json(producer_report, producer_payloads[kind])
-            stdout_path.write_text(
-                producer_report.read_text(encoding="utf-8"), encoding="utf-8"
-            )
+            if stdout_path != producer_report:
+                stdout_path.write_text(
+                    producer_report.read_text(encoding="utf-8"), encoding="utf-8"
+                )
             outputs.append(
                 {
                     "kind": "producer-report",
-                    "scope": "evidence",
-                    "path": producer_report.name,
+                    "scope": "artifact",
+                    "path": producer_report.relative_to(run_dir).as_posix(),
                     "sha256": _sha256(producer_report),
                 }
             )
@@ -1110,53 +1174,136 @@ def _make_run(
             [
                 {
                     "kind": "stdout",
-                    "scope": "evidence",
-                    "path": stdout_path.name,
+                    "scope": "artifact",
+                    "path": stdout_path.relative_to(run_dir).as_posix(),
                     "sha256": _sha256(stdout_path),
                 },
                 {
                     "kind": "stderr",
-                    "scope": "evidence",
-                    "path": stderr_path.name,
+                    "scope": "artifact",
+                    "path": stderr_path.relative_to(run_dir).as_posix(),
                     "sha256": _sha256(stderr_path),
                 },
             ]
         )
+        outputs.extend(extra_outputs)
         if kind == "checker-exit-nonzero":
-            producer_command = [
-                sys.executable,
-                str(producer),
-                "--probe-input",
-                str(probe_request_path.resolve()),
-                "--probe-registry",
-                str(NEGATIVE_REGISTRY.resolve()),
-                "--producer-report",
-                str(producer_report.resolve()),
+            evidence_inputs = [
+                {
+                    "kind": "injected-probe",
+                    "scope": "artifact",
+                    "path": probe_request_path.relative_to(run_dir).as_posix(),
+                    "sha256": _sha256(probe_request_path),
+                },
+                {
+                    "kind": "probe-registry",
+                    "scope": "repository",
+                    "path": NEGATIVE_REGISTRY.relative_to(PROJECT_ROOT).as_posix(),
+                    "sha256": _sha256(NEGATIVE_REGISTRY),
+                },
             ]
         elif kind == "architecture-report":
-            producer_command = [
-                sys.executable,
-                str(producer),
-                "--root",
-                str(PROJECT_ROOT.resolve()),
-                "--core-inventory",
-                str(input_path.resolve()),
-                "--candidate-sha",
-                CANDIDATE_SHA,
-                "--strict",
-                str(producer_report.resolve()),
+            inventory = (
+                PROJECT_ROOT
+                / "docs"
+                / "02-development"
+                / "utiki-refactor"
+                / "core-integration-inventory.md"
+            )
+            evidence_inputs = [
+                {
+                    "kind": "core-inventory",
+                    "scope": "repository",
+                    "path": inventory.relative_to(PROJECT_ROOT).as_posix(),
+                    "sha256": _sha256(inventory),
+                }
             ]
+        elif kind == "typecheck-report":
+            evidence_inputs = extra_inputs
+        elif kind == "python-syntax-report":
+            run_context = run_dir / "evidence" / "run-context.json"
+            modified_manifest = run_dir / "evidence" / "modified-python-manifest.json"
+            _write_json(run_context, {"schema_version": 1})
+            _write_json(modified_manifest, {"schema_version": 1})
+            evidence_inputs = [
+                {
+                    "kind": "run-context",
+                    "scope": "artifact",
+                    "path": "evidence/run-context.json",
+                    "sha256": _sha256(run_context),
+                },
+                {
+                    "kind": "modified-python-manifest",
+                    "scope": "artifact",
+                    "path": "evidence/modified-python-manifest.json",
+                    "sha256": _sha256(modified_manifest),
+                },
+            ]
+        elif job_id == "browser-contract-isolated" and kind == "browser-isolation-report":
+            image_build = run_dir / "evidence" / "image-build.json"
+            _write_json(image_build, {"schema_version": 1})
+            evidence_inputs = [
+                {
+                    "kind": "isolation-contract",
+                    "scope": "repository",
+                    "path": "ci/utiki-browser-isolation.json",
+                    "sha256": _sha256(PROJECT_ROOT / "ci/utiki-browser-isolation.json"),
+                },
+                {
+                    "kind": "execution-manifest",
+                    "scope": "repository",
+                    "path": "tests/fixtures/utiki/manifest.json",
+                    "sha256": _sha256(PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"),
+                },
+                {
+                    "kind": "image-build",
+                    "scope": "artifact",
+                    "path": "evidence/image-build.json",
+                    "sha256": _sha256(image_build),
+                },
+            ]
+        elif kind == "production-origin-report":
+            isolation_raw = run_dir / "evidence" / "browser-isolation-raw.json"
+            origin_raw = run_dir / "evidence" / "production-origin-raw.json"
+            if not isolation_raw.exists():
+                _write_json(isolation_raw, {"schema_version": 1})
+            _write_json(origin_raw, {"schema_version": 1})
+            evidence_inputs = [
+                {
+                    "kind": "isolation-report",
+                    "scope": "artifact",
+                    "path": "evidence/browser-isolation-raw.json",
+                    "sha256": _sha256(isolation_raw),
+                },
+                {
+                    "kind": "origin-report",
+                    "scope": "artifact",
+                    "path": "evidence/production-origin-raw.json",
+                    "sha256": _sha256(origin_raw),
+                },
+            ]
+        elif job_id == "performance-contract" and kind == "browser-isolation-report":
+            evidence_inputs = [
+                {
+                    "kind": "performance-contract",
+                    "scope": "repository",
+                    "path": "ci/utiki-performance-isolation.json",
+                    "sha256": _sha256(PROJECT_ROOT / "ci/utiki-performance-isolation.json"),
+                },
+                {
+                    "kind": "execution-manifest",
+                    "scope": "repository",
+                    "path": "tests/fixtures/utiki/manifest.json",
+                    "sha256": _sha256(PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"),
+                },
+                *[item for item in extra_inputs if item["kind"] == "image-build"],
+            ]
+        elif job_id == "performance-contract" and kind == "benchmark-report":
+            evidence_inputs = extra_inputs
         else:
-            producer_command = [
-                sys.executable,
-                str(producer),
-                "--controlled",
-                str(input_path.resolve()),
-                str(producer_report.resolve()),
-                *extra_command_args,
-            ]
+            raise AssertionError((job_id, kind))
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": kind,
             "context": {
                 "run_id": RUN_ID,
@@ -1171,41 +1318,12 @@ def _make_run(
             "producer": {
                 "path": producer.relative_to(PROJECT_ROOT).as_posix(),
                 "sha256": _sha256(producer),
-                "command": producer_command,
             },
             "launcher": {
                 "path": launcher.relative_to(PROJECT_ROOT).as_posix(),
                 "sha256": _sha256(launcher),
             },
-            "inputs": [
-                {
-                    "kind": "injected-probe" if kind == "checker-exit-nonzero" else "configuration",
-                    "scope": "evidence",
-                    "path": (
-                        probe_request_path.relative_to(path.parent).as_posix()
-                        if kind == "checker-exit-nonzero"
-                        else input_path.name
-                    ),
-                    "sha256": _sha256(
-                        probe_request_path
-                        if kind == "checker-exit-nonzero"
-                        else input_path
-                    ),
-                },
-                *extra_inputs,
-                *(
-                    [
-                        {
-                            "kind": "probe-registry",
-                            "scope": "repository",
-                            "path": NEGATIVE_REGISTRY.relative_to(PROJECT_ROOT).as_posix(),
-                            "sha256": _sha256(NEGATIVE_REGISTRY),
-                        }
-                    ]
-                    if kind == "checker-exit-nonzero"
-                    else []
-                ),
-            ],
+            "inputs": evidence_inputs,
             "outputs": outputs,
             "expectation": expectation,
             "observed_exit_code": observed_exit,
@@ -1740,7 +1858,7 @@ def test_negative_envelope_cannot_overwrite_actual_child_exit(gate_inputs):
     producer_output = next(
         output for output in envelope["outputs"] if output["kind"] == "producer-report"
     )
-    producer_report = artifact.parent / producer_output["path"]
+    producer_report = case["run"]["metadata"].parent / producer_output["path"]
     raw = json.loads(producer_report.read_text(encoding="utf-8"))
     raw["observed_exit_code"] = envelope["observed_exit_code"] + 1
     _write_json(producer_report, raw)
@@ -1752,6 +1870,142 @@ def test_negative_envelope_cannot_overwrite_actual_child_exit(gate_inputs):
 
     assert result.returncode != 0
     assert "INVALID_NEGATIVE_PROBE" in result.stdout
+
+
+def test_h05_token_only_output_cannot_replace_the_reviewed_pytest_reason(
+    gate_inputs,
+):
+    case = gate_inputs
+    metadata = json.loads(case["run"]["metadata"].read_text(encoding="utf-8"))
+    for artifact_entry in metadata["artifacts"]:
+        if artifact_entry["kind"] != "checker-exit-nonzero":
+            continue
+        artifact = case["run"]["dir"] / artifact_entry["path"]
+        envelope = json.loads(artifact.read_text(encoding="utf-8"))
+        if envelope["results"][0]["obligation_id"] == "H05.arch.unknown-marker":
+            break
+    else:
+        raise AssertionError("missing H05 unknown-marker negative evidence")
+
+    outputs = {item["kind"]: item for item in envelope["outputs"]}
+    stdout = case["run"]["dir"] / outputs["stdout"]["path"]
+    stdout.write_text("utiki_unknown_marker\n", encoding="utf-8")
+    outputs["stdout"]["sha256"] = _sha256(stdout)
+    producer_report = case["run"]["dir"] / outputs["producer-report"]["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    raw["stdout_sha256"] = _sha256(stdout)
+    _write_json(producer_report, raw)
+    outputs["producer-report"]["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    artifact_entry["sha256"] = _sha256(artifact)
+    _write_json(case["run"]["metadata"], metadata)
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], case["run"]))
+
+    assert result.returncode != 0
+    assert "INVALID_NEGATIVE_PROBE" in result.stdout
+
+
+def test_negative_registry_must_remain_repository_scoped(gate_inputs):
+    case = gate_inputs
+    artifact = _artifact_path(case["run"], "checker-exit-nonzero")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    registry_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "probe-registry"
+    )
+    copied_registry = case["run"]["dir"] / "evidence" / "copied-registry.json"
+    shutil.copyfile(NEGATIVE_REGISTRY, copied_registry)
+    registry_input.update(
+        {
+            "scope": "artifact",
+            "path": copied_registry.relative_to(case["run"]["dir"]).as_posix(),
+            "sha256": _sha256(copied_registry),
+        }
+    )
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(case["run"], "checker-exit-nonzero")
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], case["run"]))
+
+    assert result.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in result.stdout
+
+
+def test_negative_capture_outputs_must_remain_artifact_scoped(gate_inputs):
+    case = gate_inputs
+    artifact = _artifact_path(case["run"], "checker-exit-nonzero")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    stdout_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "stdout"
+    )
+    stdout_output.update(
+        {
+            "scope": "repository",
+            "path": NEGATIVE_REGISTRY.relative_to(PROJECT_ROOT).as_posix(),
+            "sha256": _sha256(NEGATIVE_REGISTRY),
+        }
+    )
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(case["run"], "checker-exit-nonzero")
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], case["run"]))
+
+    assert result.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in result.stdout
+
+
+def test_negative_capture_outputs_may_not_alias_each_other(gate_inputs):
+    case = gate_inputs
+    artifact = _artifact_path(case["run"], "checker-exit-nonzero")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    outputs = {item["kind"]: item for item in envelope["outputs"]}
+    outputs["stderr"].update(
+        {
+            "path": outputs["stdout"]["path"],
+            "sha256": outputs["stdout"]["sha256"],
+        }
+    )
+    producer_report = case["run"]["dir"] / outputs["producer-report"]["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    raw["stderr_sha256"] = outputs["stdout"]["sha256"]
+    _write_json(producer_report, raw)
+    outputs["producer-report"]["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(case["run"], "checker-exit-nonzero")
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], case["run"]))
+
+    assert result.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in result.stdout
+
+
+def test_negative_request_rejects_unknown_top_level_fields(gate_inputs):
+    case = gate_inputs
+    artifact = _artifact_path(case["run"], "checker-exit-nonzero")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    request_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "injected-probe"
+    )
+    request_path = case["run"]["dir"] / request_input["path"]
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["unreviewed"] = True
+    _write_json(request_path, request)
+    request_input["sha256"] = _sha256(request_path)
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = case["run"]["dir"] / producer_output["path"]
+    transcript = json.loads(producer_report.read_text(encoding="utf-8"))
+    transcript["request_sha256"] = _sha256(request_path)
+    _write_json(producer_report, transcript)
+    producer_output["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(case["run"], "checker-exit-nonzero")
+
+    result = _run_checker(*_single_arguments(case["manifest_path"], case["run"]))
+
+    assert result.returncode != 0
+    assert "INVALID_SCHEMA" in result.stdout
 
 
 def test_evidence_producer_digest_is_not_self_authoritative(gate_inputs):
@@ -1798,6 +2052,157 @@ def test_one_negative_transcript_cannot_cover_two_execution_keys(gate_inputs):
     assert "NEGATIVE_EVIDENCE_NOT_INDEPENDENT" in result.stdout
 
 
+def test_h08_negative_report_keeps_exact_reason_and_subject(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    arguments = _single_arguments(
+        case["manifest_path"],
+        run,
+        job_id="architecture-types",
+        target="source-linux-x64",
+    )
+    baseline = _run_checker(*arguments)
+    assert baseline.returncode == 0, baseline.stderr or baseline.stdout
+
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    request_path = None
+    artifact_path = None
+    artifact_entry = None
+    producer_output = None
+    producer_report = None
+    for entry in metadata["artifacts"]:
+        if entry["kind"] != "checker-exit-nonzero":
+            continue
+        candidate_artifact = run["dir"] / entry["path"]
+        envelope = json.loads(candidate_artifact.read_text(encoding="utf-8"))
+        if envelope["results"][0]["obligation_id"] == "H08.arch.new-domain-file":
+            request_input = next(
+                item for item in envelope["inputs"] if item["kind"] == "injected-probe"
+            )
+            request_path = run["dir"] / request_input["path"]
+            artifact_path = candidate_artifact
+            artifact_entry = entry
+            producer_output = next(
+                item
+                for item in envelope["outputs"]
+                if item["kind"] == "producer-report"
+            )
+            producer_report = run["dir"] / producer_output["path"]
+            break
+    assert all(
+        value is not None
+        for value in (
+            request_path,
+            artifact_path,
+            artifact_entry,
+            producer_output,
+            producer_report,
+        )
+    )
+    typecheck_report = request_path.parent / "typecheck-report.json"
+    original = json.loads(typecheck_report.read_text(encoding="utf-8"))
+
+    def refresh_semantic_binding() -> None:
+        raw = json.loads(producer_report.read_text(encoding="utf-8"))
+        raw["semantic_output"]["sha256"] = _sha256(typecheck_report)
+        _write_json(producer_report, raw)
+        producer_output["sha256"] = _sha256(producer_report)
+        _write_json(artifact_path, envelope)
+        artifact_entry["sha256"] = _sha256(artifact_path)
+        _write_json(run["metadata"], metadata)
+
+    wrong_reason = copy.deepcopy(original)
+    wrong_reason["failure_reasons"] = ["UNSAFE_MYPY_CONFIG"]
+    _write_json(typecheck_report, wrong_reason)
+    result = _run_checker(*arguments)
+    assert result.returncode != 0
+    assert "EVIDENCE_DIGEST_MISMATCH" in result.stdout
+
+    refresh_semantic_binding()
+    result = _run_checker(*arguments)
+    assert result.returncode != 0
+    assert "INVALID_NEGATIVE_PROBE" in result.stdout
+
+    wrong_subject = copy.deepcopy(original)
+    wrong_subject["affected_paths"] = ["src/platforms/utiki/domain/other.py"]
+    _write_json(typecheck_report, wrong_subject)
+    refresh_semantic_binding()
+    result = _run_checker(*arguments)
+    assert result.returncode != 0
+    assert "INVALID_NEGATIVE_PROBE" in result.stdout
+
+
+def test_a05_negative_transcript_requires_exact_code_and_subject(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    arguments = _single_arguments(
+        case["manifest_path"], run, "architecture-types", "source-linux-x64"
+    )
+    baseline = _run_checker(*arguments)
+    assert baseline.returncode == 0, baseline.stderr or baseline.stdout
+
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    for artifact_entry in metadata["artifacts"]:
+        if artifact_entry["kind"] != "checker-exit-nonzero":
+            continue
+        artifact = run["dir"] / artifact_entry["path"]
+        envelope = json.loads(artifact.read_text(encoding="utf-8"))
+        if envelope["results"][0]["obligation_id"] == "A05.arch.zero-collected":
+            break
+    else:
+        raise AssertionError("missing A05 zero-collected negative evidence")
+    outputs = {item["kind"]: item for item in envelope["outputs"]}
+    stdout = run["dir"] / outputs["stdout"]["path"]
+    producer_report = run["dir"] / outputs["producer-report"]["path"]
+
+    def replace_child_result(payload):
+        _write_json(stdout, payload)
+        outputs["stdout"]["sha256"] = _sha256(stdout)
+        raw = json.loads(producer_report.read_text(encoding="utf-8"))
+        raw["stdout_sha256"] = _sha256(stdout)
+        _write_json(producer_report, raw)
+        outputs["producer-report"]["sha256"] = _sha256(producer_report)
+        _write_json(artifact, envelope)
+        artifact_entry["sha256"] = _sha256(artifact)
+        _write_json(run["metadata"], metadata)
+
+    wrong_code = {
+        "schema_version": 1,
+        "status": "FAIL",
+        "error_code": "REQUIRED_OUTCOME_NOT_PASS",
+        "message": "EMPTY_OR_MISSING_RESULT JUnit lacks required results",
+    }
+    replace_child_result(wrong_code)
+    result = _run_checker(*arguments)
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["error_code"] == "INVALID_NEGATIVE_PROBE"
+
+    wrong_subject = {
+        "schema_version": 1,
+        "status": "FAIL",
+        "error_code": "EMPTY_OR_MISSING_RESULT",
+        "message": "EMPTY_OR_MISSING_RESULT unrelated object",
+    }
+    replace_child_result(wrong_subject)
+    result = _run_checker(*arguments)
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["error_code"] == "INVALID_NEGATIVE_PROBE"
+
+
 def test_positive_report_payload_is_semantically_checked(gate_inputs):
     case = gate_inputs
     run = _make_run(
@@ -1809,14 +2214,18 @@ def test_positive_report_payload_is_semantically_checked(gate_inputs):
         "source-linux-x64",
     )
     evidence_dir = run["dir"] / "evidence"
-    producer_payload = evidence_dir / "architecture-report.producer.json"
+    artifact = evidence_dir / "architecture-report.json"
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_payload = run["dir"] / producer_output["path"]
     payload = json.loads(producer_payload.read_text(encoding="utf-8"))
     payload["checked_files"] = []
     _write_json(producer_payload, payload)
-    artifact = evidence_dir / "architecture-report.json"
-    report = json.loads(artifact.read_text(encoding="utf-8"))
+    report = envelope
     for output in report["outputs"]:
-        if output["kind"] == "producer-report":
+        if output["path"] == producer_output["path"]:
             output["sha256"] = _sha256(producer_payload)
     _write_json(artifact, report)
     _refresh_artifact_digest(run, "architecture-report")
@@ -1864,6 +2273,8 @@ def test_actual_architecture_producer_launcher_and_checker_are_end_to_end(gate_i
             str(PROJECT_ROOT),
             "--execution-manifest",
             str(case["manifest_path"]),
+            "--artifact-root",
+            str(run["metadata"].parent),
             "--report",
             str(artifact),
             "--kind",
@@ -1955,6 +2366,8 @@ def test_architecture_report_cannot_substitute_a_benign_temporary_root(
             str(PROJECT_ROOT),
             "--execution-manifest",
             str(case["manifest_path"]),
+            "--artifact-root",
+            str(run["metadata"].parent),
             "--report",
             str(artifact),
             "--kind",
@@ -2010,7 +2423,7 @@ def test_architecture_report_cannot_substitute_a_benign_temporary_root(
     )
 
     assert result.returncode != 0
-    assert "UNTRUSTED_EVIDENCE_PRODUCER" in result.stdout
+    assert "INVALID_EVIDENCE_CONTENT" in result.stdout
 
 
 @pytest.mark.parametrize("tampered", ["fixture", "script", "report"])
@@ -2087,7 +2500,6 @@ def _make_run_index(case, *, compact=False):
                 job_id,
                 target,
                 run_dir_name=f"r{run_index:02d}" if compact else None,
-                compact_support=compact,
             )
             run_index += 1
             runs.append(run)
@@ -2165,16 +2577,12 @@ def test_aggregate_accepts_digest_bound_artifacts_relocated_after_production(
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_relocated_evidence_rejects_same_name_with_wrong_artifact_suffix(gate_inputs):
+def test_relocated_evidence_rejects_unsafe_artifact_path(gate_inputs):
     case = gate_inputs
     artifact = _artifact_path(case["run"], "checker-exit-nonzero")
     envelope = json.loads(artifact.read_text(encoding="utf-8"))
-    declared = next(item for item in envelope["inputs"] if item["scope"] == "evidence")
-    declared_path = (artifact.parent / declared["path"]).resolve()
-    command = envelope["producer"]["command"]
-    command[command.index(str(declared_path))] = str(
-        declared_path.parent / "wrong-directory" / declared_path.name
-    )
+    declared = next(item for item in envelope["inputs"] if item["scope"] == "artifact")
+    declared["path"] = "../outside/probe.json"
     _write_json(artifact, envelope)
     _refresh_artifact_digest(case["run"], "checker-exit-nonzero")
     relocated_root = case["root"].with_name(case["root"].name + "-relocated")
@@ -2187,7 +2595,7 @@ def test_relocated_evidence_rejects_same_name_with_wrong_artifact_suffix(gate_in
     result = _run_checker(*_single_arguments(case["manifest_path"], relocated_run))
 
     assert result.returncode != 0
-    assert "UNBOUND_EVIDENCE_INPUT" in result.stdout
+    assert "UNSAFE_PATH" in result.stdout
 
 
 def test_relocated_evidence_still_rejects_declared_input_digest_mismatch(gate_inputs):
@@ -2200,8 +2608,8 @@ def test_relocated_evidence_still_rejects_declared_input_digest_mismatch(gate_in
     }
     artifact = _artifact_path(relocated_run, "checker-exit-nonzero")
     envelope = json.loads(artifact.read_text(encoding="utf-8"))
-    declared = next(item for item in envelope["inputs"] if item["scope"] == "evidence")
-    declared_path = artifact.parent / declared["path"]
+    declared = next(item for item in envelope["inputs"] if item["scope"] == "artifact")
+    declared_path = relocated_run["metadata"].parent / declared["path"]
     declared_path.write_bytes(declared_path.read_bytes() + b"tampered\n")
 
     result = _run_checker(*_single_arguments(case["manifest_path"], relocated_run))
@@ -2225,7 +2633,7 @@ def test_repository_only_typecheck_inputs_bind_relocated_producer_report(gate_in
     producer_output = next(
         item for item in envelope["outputs"] if item["kind"] == "producer-report"
     )
-    producer_report = artifact.parent / producer_output["path"]
+    producer_report = run["metadata"].parent / producer_output["path"]
     raw = json.loads(producer_report.read_text(encoding="utf-8"))
     fixture_root = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "typecheck-p1"
     typed_manifest = fixture_root / "manifest.txt"
@@ -2255,20 +2663,6 @@ def test_repository_only_typecheck_inputs_bind_relocated_producer_report(gate_in
             "sha256": _sha256(coverage_context),
         },
     ]
-    envelope["producer"]["command"] = [
-        sys.executable,
-        str(PROJECT_ROOT / "tools" / "run_utiki_typecheck.py"),
-        "--root",
-        str(fixture_root),
-        "--manifest",
-        str(typed_manifest),
-        "--config",
-        str(mypy_config),
-        "--coverage-context",
-        str(coverage_context),
-        "--report",
-        str(producer_report.resolve()),
-    ]
     _write_json(artifact, envelope)
     _refresh_artifact_digest(run, "typecheck-report")
     relocated_root = case["root"].with_name(case["root"].name + "-relocated")
@@ -2290,7 +2684,197 @@ def test_repository_only_typecheck_inputs_bind_relocated_producer_report(gate_in
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_performance_image_build_cannot_substitute_same_digest_sibling(gate_inputs):
+def test_typecheck_inputs_must_match_the_reviewed_repository_contract(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    artifact = _artifact_path(run, "typecheck-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    config_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "mypy-config"
+    )
+    copied = run["dir"] / "evidence" / "copied-mypy.ini"
+    shutil.copyfile(
+        PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "typecheck-p1" / "mypy.ini",
+        copied,
+    )
+    config_input.update(
+        {
+            "scope": "artifact",
+            "path": copied.relative_to(run["dir"]).as_posix(),
+            "sha256": _sha256(copied),
+        }
+    )
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "typecheck-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "architecture-types",
+            "source-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in result.stdout
+
+
+def test_typecheck_report_must_bind_the_reviewed_config_digest(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    artifact = _artifact_path(run, "typecheck-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = run["dir"] / producer_output["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    raw["config_sha256"] = "f" * 64
+    _write_json(producer_report, raw)
+    producer_output["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "typecheck-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "architecture-types",
+            "source-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "EVIDENCE_DIGEST_MISMATCH" in result.stdout
+
+
+def test_typecheck_report_must_bind_the_exact_captured_output(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    artifact = _artifact_path(run, "typecheck-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    captured_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "typecheck-stdout"
+    )
+    captured_path = run["dir"] / captured_output["path"]
+    captured_path.write_bytes(captured_path.read_bytes() + b"forged success\n")
+    captured_output["sha256"] = _sha256(captured_path)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "typecheck-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "architecture-types",
+            "source-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "EVIDENCE_DIGEST_MISMATCH" in result.stdout
+
+
+def test_typecheck_captures_may_not_be_substituted_or_aliased(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    artifact = _artifact_path(run, "typecheck-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    outputs = {item["kind"]: item for item in envelope["outputs"]}
+    outputs["typecheck-stdout"].update(
+        {
+            "path": outputs["typecheck-stderr"]["path"],
+            "sha256": outputs["typecheck-stderr"]["sha256"],
+        }
+    )
+    producer_report = run["dir"] / outputs["producer-report"]["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    raw["stdout_sha256"] = outputs["typecheck-stderr"]["sha256"]
+    _write_json(producer_report, raw)
+    outputs["producer-report"]["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "typecheck-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "architecture-types",
+            "source-linux-x64",
+        )
+    )
+
+    assert result.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in result.stdout
+
+
+def test_architecture_repository_root_is_diagnostic_not_a_locator(gate_inputs):
+    case = gate_inputs
+    run = _make_run(
+        case["root"],
+        case["manifest_path"],
+        case["manifest"],
+        case["profiles"],
+        "architecture-types",
+        "source-linux-x64",
+    )
+    artifact = _artifact_path(run, "architecture-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = run["dir"] / producer_output["path"]
+    raw = json.loads(producer_report.read_text(encoding="utf-8"))
+    raw["repository_root"] = "Z:/old-runner/relocated-checkout"
+    _write_json(producer_report, raw)
+    for output in envelope["outputs"]:
+        if output["path"] == producer_output["path"]:
+            output["sha256"] = _sha256(producer_report)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "architecture-report")
+
+    result = _run_checker(
+        *_single_arguments(
+            case["manifest_path"],
+            run,
+            "architecture-types",
+            "source-linux-x64",
+        )
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_performance_diagnostic_path_is_not_a_filesystem_locator(gate_inputs):
     case = gate_inputs
     run = _make_run(
         case["root"],
@@ -2305,10 +2889,10 @@ def test_performance_image_build_cannot_substitute_same_digest_sibling(gate_inpu
     producer_output = next(
         item for item in envelope["outputs"] if item["kind"] == "producer-report"
     )
-    producer_report = artifact.parent / producer_output["path"]
+    producer_report = run["metadata"].parent / producer_output["path"]
     raw = json.loads(producer_report.read_text(encoding="utf-8"))
     bound_input = next(item for item in envelope["inputs"] if item["kind"] == "image-build")
-    bound_path = artifact.parent / bound_input["path"]
+    bound_path = run["metadata"].parent / bound_input["path"]
     substitute = bound_path.with_name("substituted-image-build.json")
     shutil.copyfile(bound_path, substitute)
     raw["image_build_evidence"]["path"] = str(substitute.resolve())
@@ -2316,6 +2900,33 @@ def test_performance_image_build_cannot_substitute_same_digest_sibling(gate_inpu
     producer_output["sha256"] = _sha256(producer_report)
     _write_json(artifact, envelope)
     _refresh_artifact_digest(run, "browser-isolation-report")
+    benchmark_artifact = _artifact_path(run, "benchmark-report")
+    benchmark_envelope = json.loads(
+        benchmark_artifact.read_text(encoding="utf-8")
+    )
+    performance_input = next(
+        item
+        for item in benchmark_envelope["inputs"]
+        if item["kind"] == "performance-isolation-report"
+    )
+    performance_input["sha256"] = _sha256(producer_report)
+    benchmark_output = next(
+        item
+        for item in benchmark_envelope["outputs"]
+        if item["kind"] == "producer-report"
+    )
+    benchmark_report = run["dir"] / benchmark_output["path"]
+    benchmark_raw = json.loads(benchmark_report.read_text(encoding="utf-8"))
+    benchmark_raw["hard_egress_isolation"]["isolation_report_sha256"] = _sha256(
+        producer_report
+    )
+    _write_json(benchmark_report, benchmark_raw)
+    benchmark_output["sha256"] = _sha256(benchmark_report)
+    _write_json(benchmark_artifact, benchmark_envelope)
+    _refresh_artifact_digest(run, "benchmark-report")
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    metadata["isolation"]["report_sha256"] = _sha256(artifact)
+    _write_json(run["metadata"], metadata)
 
     result = _run_checker(
         *_single_arguments(
@@ -2326,8 +2937,7 @@ def test_performance_image_build_cannot_substitute_same_digest_sibling(gate_inpu
         )
     )
 
-    assert result.returncode != 0
-    assert "performance image build path differs" in result.stdout
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_performance_image_build_must_match_current_candidate_inputs(gate_inputs):
@@ -2345,10 +2955,10 @@ def test_performance_image_build_must_match_current_candidate_inputs(gate_inputs
     producer_output = next(
         item for item in envelope["outputs"] if item["kind"] == "producer-report"
     )
-    producer_report = artifact.parent / producer_output["path"]
+    producer_report = run["metadata"].parent / producer_output["path"]
     raw = json.loads(producer_report.read_text(encoding="utf-8"))
     bound_input = next(item for item in envelope["inputs"] if item["kind"] == "image-build")
-    bound_path = artifact.parent / bound_input["path"]
+    bound_path = run["metadata"].parent / bound_input["path"]
     build = json.loads(bound_path.read_text(encoding="utf-8"))
     build["inputs"][0]["sha256"] = "f" * 64
     _write_json(bound_path, build)
@@ -2398,10 +3008,10 @@ def test_performance_image_build_rejects_invalid_base_image_reference(
     producer_output = next(
         item for item in envelope["outputs"] if item["kind"] == "producer-report"
     )
-    producer_report = artifact.parent / producer_output["path"]
+    producer_report = run["metadata"].parent / producer_output["path"]
     raw = json.loads(producer_report.read_text(encoding="utf-8"))
     bound_input = next(item for item in envelope["inputs"] if item["kind"] == "image-build")
-    bound_path = artifact.parent / bound_input["path"]
+    bound_path = run["metadata"].parent / bound_input["path"]
     build = json.loads(bound_path.read_text(encoding="utf-8"))
     build["base_image"] = base_image
     _write_json(bound_path, build)

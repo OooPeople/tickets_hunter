@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -51,6 +52,8 @@ import sys
 from pathlib import Path
 
 Path(os.environ["FAKE_MYPY_LOG"]).write_text(json.dumps(sys.argv[1:]))
+sys.stdout.buffer.write(b"controlled mypy stdout\\n")
+sys.stderr.buffer.write(b"controlled mypy stderr\\n")
 raise SystemExit(int(os.environ.get("FAKE_MYPY_EXIT", "0")))
 """,
     )
@@ -78,6 +81,10 @@ def _run(root, manifest, config, mypy, tmp_path, *, fake_exit="0"):
             str(mypy),
             "--report",
             str(report),
+            "--stdout-report",
+            str(tmp_path / "mypy.stdout"),
+            "--stderr-report",
+            str(tmp_path / "mypy.stderr"),
         ],
         capture_output=True,
         text=True,
@@ -99,6 +106,14 @@ def test_runner_invokes_strict_mypy_with_every_manifest_file(tmp_path):
     arguments = json.loads(log.read_text(encoding="utf-8"))
     assert report["status"] == "PASS"
     assert report["files"] == files
+    assert (tmp_path / "mypy.stdout").read_bytes() == b"controlled mypy stdout\n"
+    assert (tmp_path / "mypy.stderr").read_bytes() == b"controlled mypy stderr\n"
+    assert report["stdout_sha256"] == hashlib.sha256(
+        (tmp_path / "mypy.stdout").read_bytes()
+    ).hexdigest()
+    assert report["stderr_sha256"] == hashlib.sha256(
+        (tmp_path / "mypy.stderr").read_bytes()
+    ).hexdigest()
     assert "--strict" in arguments
     assert "--no-incremental" in arguments
     for path in files:
@@ -118,7 +133,12 @@ def test_new_domain_file_omitted_from_manifest_fails_before_mypy(tmp_path):
 
     assert result.returncode != 0
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert "TYPED_SCOPE_MISSING" in report["failure_reasons"]
+    assert report["status"] == "FAIL"
+    assert report["failure_reasons"] == ["TYPED_SCOPE_MISSING"]
+    assert report["affected_paths"] == [
+        "src/platforms/utiki/domain/state.py"
+    ]
+    assert report["mypy_exit_code"] is None
     assert not log.exists()
 
 

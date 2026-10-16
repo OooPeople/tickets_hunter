@@ -116,6 +116,10 @@ def _write_manifest(case: dict[str, object], manifest: dict[str, object]) -> Non
 
 def test_a05_zero_collected_is_rejected_by_real_checker(tmp_path):
     case = _ci_case(tmp_path)
+    positive = _run_ci_case(case)
+    assert positive.returncode == 0, positive.stderr or positive.stdout
+    assert json.loads(positive.stdout)["status"] == "PASS"
+
     tree = ElementTree.parse(case["run"]["junit"])
     suite = tree.getroot()
     for testcase in list(suite.findall("testcase")):
@@ -130,7 +134,10 @@ def test_a05_zero_collected_is_rejected_by_real_checker(tmp_path):
     result = _run_ci_case(case)
 
     assert result.returncode != 0
-    assert "EMPTY_OR_MISSING_RESULT" in result.stdout
+    rejection = json.loads(result.stdout)
+    assert rejection["status"] == "FAIL"
+    assert rejection["error_code"] == "EMPTY_OR_MISSING_RESULT"
+    assert "architecture-types" in rejection["message"]
 
 
 def test_a05_all_skipped_is_rejected_by_real_checker(tmp_path):

@@ -46,6 +46,7 @@ UNTRACKED_EXCLUDES = (
     ":(glob,exclude)**/.pytest_cache/**",
     ":(glob,exclude)**/.ruff_cache/**",
 )
+EXCLUDED_OUTPUT_ROOTS = (".venv/", "venv/", ".tox/", ".nox/", "build/", "dist/", "artifacts/")
 
 
 class GateError(Exception):
@@ -296,7 +297,17 @@ def _untracked_paths(repo: Path, *, ignored: bool = False) -> list[str]:
     if ignored:
         arguments.insert(2, "--ignored")
     output = _run_git(repo, [*arguments, *_untracked_pathspec()])
-    return [_decode_git_field(field) for field in _split_nul(output)]
+    paths: list[str] = []
+    for field in _split_nul(output):
+        # Git can report an ignored nested repository as a directory ending
+        # in '/', even when the pathspec excludes generated output below it.
+        # Only those already-excluded output roots may be skipped here.
+        if field.endswith(b"/"):
+            directory = _decode_git_field(field[:-1])
+            if directory.startswith(EXCLUDED_OUTPUT_ROOTS):
+                continue
+        paths.append(_decode_git_field(field))
+    return paths
 
 
 def _is_dirty(repo: Path) -> bool:

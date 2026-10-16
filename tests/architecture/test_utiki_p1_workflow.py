@@ -53,6 +53,19 @@ def test_p1_workflow_has_exact_required_jobs_and_minimal_permissions() -> None:
     assert "PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}" in text
 
 
+def test_formal_aggregate_requires_independent_catalog_approval() -> None:
+    text = _text()
+    aggregate = _job(text, "aggregate")
+
+    assert "FORMAL_APPROVED_CATALOG_SHA256: ${{ vars.UTIKI_P1_APPROVED_CATALOG_SHA256 }}" in aggregate
+    assert "Require independent catalog approval" in aggregate
+    assert 'if [[ ! "$FORMAL_APPROVED_CATALOG_SHA256" =~ ^[0-9a-f]{64}$ ]]' in aggregate
+    assert "exit 2" in aggregate
+    assert '--approved-catalog-sha256 "$FORMAL_APPROVED_CATALOG_SHA256"' in aggregate
+    assert aggregate.count('--approved-catalog-sha256 "$FORMAL_APPROVED_CATALOG_SHA256"') == 2
+    assert '--approved-catalog-sha256 "$APPROVED_CATALOG_SHA256"' not in aggregate
+
+
 def test_p1_workflow_does_not_use_step_only_runner_context_in_job_env() -> None:
     text = _text()
 
@@ -118,12 +131,12 @@ def test_isolated_jobs_build_before_network_off_and_use_content_image_id() -> No
 
     performance = _job(text, "performance-contract")
     assert (
-        "--input performance-isolation-report evidence performance-isolation-raw.json"
+            "--input performance-isolation-report artifact evidence/performance-isolation-raw.json"
         in performance
     )
-    assert "--input raw-benchmark-report evidence raw-benchmark-report.json" in performance
-    assert "--input isolation-report evidence performance-isolation-raw.json" not in performance
-    assert "--input raw-benchmark evidence raw-benchmark-report.json" not in performance
+    assert "--input raw-benchmark-report artifact evidence/raw-benchmark-report.json" in performance
+    assert "--input isolation-report artifact evidence/performance-isolation-raw.json" not in performance
+    assert "--input raw-benchmark artifact evidence/raw-benchmark-report.json" not in performance
 
 
 def test_aggregate_requires_and_downloads_every_formal_job() -> None:
@@ -141,6 +154,36 @@ def test_aggregate_requires_and_downloads_every_formal_job() -> None:
     assert body.index("build_utiki_run_index.py") < body.index(
         "verify_utiki_ci_results.py"
     )
+
+
+def test_evidence_commands_match_reviewed_artifact_output_contracts() -> None:
+    text = _text()
+    assert text.count("python tools/run_utiki_evidence.py") == text.count(
+        '--artifact-root "$JOB_RUN_DIR"'
+    )
+    expected = {
+        "modified-python-syntax": [
+            "--producer-report evidence/python-syntax-raw.json",
+        ],
+        "architecture-types": [
+            "--producer-report stdout",
+            "--producer-report evidence/typecheck-raw.json",
+            "--producer-output typecheck-stdout evidence/typecheck-mypy.stdout",
+            "--producer-output typecheck-stderr evidence/typecheck-mypy.stderr",
+        ],
+        "browser-contract-isolated": [
+            "--producer-report evidence/browser-isolation-raw.json",
+            "--producer-report evidence/production-origin-verified.json",
+        ],
+        "performance-contract": [
+            "--producer-report evidence/performance-isolation-raw.json",
+            "--producer-report evidence/performance-verification-raw.json",
+        ],
+    }
+    for job_id, fragments in expected.items():
+        body = _job(text, job_id)
+        for fragment in fragments:
+            assert fragment in body
 
 
 def test_browser_workflow_arguments_are_accepted_by_real_parser(tmp_path) -> None:
@@ -254,6 +297,7 @@ def test_workflow_family_runner_arguments_parse_with_checked_in_contracts(tmp_pa
         [
             "--repository-root", str(PROJECT_ROOT),
             "--execution-manifest", "tests/fixtures/utiki/manifest.json",
+            "--artifact-root", str(tmp_path / "run"),
             "--report", str(tmp_path / "run/evidence/architecture-report.json"),
             "--kind", "architecture-report",
             "--run-id", "p1-parser-attempt-1",

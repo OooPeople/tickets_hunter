@@ -188,7 +188,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     _write_json(
         negative_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "checker-exit-nonzero",
             "status": "PASS",
             "context": context,
@@ -239,15 +239,15 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     _write_json(
         isolation_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "browser-isolation-report",
             "status": "PASS",
             "context": context,
             "outputs": [
                 {
                     "kind": "producer-report",
-                    "scope": "evidence",
-                    "path": raw_path.name,
+                    "scope": "artifact",
+                    "path": raw_path.relative_to(run_dir).as_posix(),
                     "sha256": _digest(raw_path),
                 }
             ],

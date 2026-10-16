@@ -83,38 +83,254 @@ def _safe_relative(value: Any, label: str) -> str:
     return value
 
 
-def _input_path(request: dict[str, Any], probe_root: Path) -> Path:
+def _input_paths(
+    request: dict[str, Any], probe_root: Path
+) -> dict[str, tuple[str, Path]]:
     inputs = request.get("inputs")
-    if not isinstance(inputs, list) or len(inputs) != 1 or not isinstance(inputs[0], dict):
-        raise NegativeContractError("canonical negative probe requires exactly one input")
-    item = inputs[0]
-    if set(item) != {"kind", "path", "sha256"}:
-        raise NegativeContractError("canonical negative input schema is invalid")
-    relative = _safe_relative(item["path"], "negative input path")
-    path = (probe_root / relative).resolve()
-    if probe_root != path and probe_root not in path.parents:
-        raise NegativeContractError("negative input escapes its probe directory")
-    if path.is_symlink() or not path.is_file():
-        raise NegativeContractError("negative input is not a regular file")
-    digest = item.get("sha256")
-    if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
-        raise NegativeContractError("negative input digest is invalid")
-    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-        raise NegativeContractError("negative input digest does not match")
-    return path
+    if not isinstance(inputs, list) or not inputs:
+        raise NegativeContractError("canonical negative probe requires concrete inputs")
+    result: dict[str, tuple[str, Path]] = {}
+    seen_paths: set[Path] = set()
+    root = probe_root.resolve(strict=True)
+    for index, item in enumerate(inputs):
+        if not isinstance(item, dict) or set(item) != {"kind", "path", "sha256"}:
+            raise NegativeContractError("canonical negative input schema is invalid")
+        kind = item.get("kind")
+        if not isinstance(kind, str) or not kind or kind in result:
+            raise NegativeContractError("canonical negative input kind is invalid")
+        relative = _safe_relative(item["path"], f"negative input {index} path")
+        current = root
+        for part in PurePosixPath(relative).parts:
+            current = current / part
+            if current.is_symlink():
+                raise NegativeContractError("negative input path traverses a symlink")
+        path = current.resolve()
+        if root != path and root not in path.parents:
+            raise NegativeContractError("negative input escapes its probe directory")
+        if path.is_symlink() or not path.is_file() or path in seen_paths:
+            raise NegativeContractError("negative input is not a unique regular file")
+        digest = item.get("sha256")
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            raise NegativeContractError("negative input digest is invalid")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise NegativeContractError("negative input digest does not match")
+        result[kind] = (relative, path)
+        seen_paths.add(path)
+    return result
 
 
-def _expand(probe_root: Path, value: str) -> str:
-    if value == PROBE_ROOT:
-        return str(probe_root)
-    prefix = PROBE_ROOT + "/"
-    if not value.startswith(prefix):
-        return value
-    relative = _safe_relative(value[len(prefix) :], "negative argument path")
-    path = (probe_root / relative).resolve()
-    if probe_root not in path.parents:
-        raise NegativeContractError("negative argument path escapes its probe directory")
-    return str(path)
+def probe_semantic_output(
+    entry: dict[str, Any], request: dict[str, Any], *, probe_root: Path
+) -> tuple[str, Path] | None:
+    """Return the reviewed semantic child report, when this producer has one."""
+
+    producer = entry.get("child_producer")
+    if producer not in {"tools/run_utiki_typecheck.py", "tools/verify_modified_python.py"}:
+        return None
+    _, arguments = _child(request)
+    values = _option_map(
+        arguments,
+        flags={"--include-worktree"} if producer == "tools/verify_modified_python.py" else None,
+    )
+    if producer == "tools/verify_modified_python.py" and "--report" not in values:
+        return None
+    raw_report = values.get("--report")
+    if not isinstance(raw_report, str) or not raw_report.startswith(PROBE_ROOT + "/"):
+        raise NegativeContractError("negative result path is not canonical")
+    relative = _safe_relative(
+        raw_report.removeprefix(PROBE_ROOT + "/"), "negative result path"
+    )
+    root = probe_root.resolve(strict=True)
+    path = root
+    for part in PurePosixPath(relative).parts:
+        path = path / part
+        if path.is_symlink():
+            raise NegativeContractError("negative result path traverses a symlink")
+    if path.exists() and not path.is_file():
+        raise NegativeContractError("negative result path is not a regular file")
+    return relative, path
+
+
+def validate_probe_output_contract(
+    entry: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    probe_request_path: Path,
+    probe_root: Path,
+    require_outputs: bool = False,
+) -> None:
+    """Validate exact child outputs for producers with semantic reports."""
+
+    del probe_request_path
+    semantic_output = probe_semantic_output(entry, request, probe_root=probe_root)
+    if semantic_output is None:
+        return
+    _, report_path = semantic_output
+    if not require_outputs:
+        if report_path.exists() or report_path.is_symlink():
+            raise NegativeContractError("negative probe contains a stale child result")
+        return
+    result = _json(report_path)
+    if entry.get("child_producer") == "tools/verify_modified_python.py":
+        if (
+            result.get("schema_version") != 1
+            or result.get("overall_status") != "FAIL"
+            or result.get("failure_reasons") != [entry["rejection_token"]]
+        ):
+            raise NegativeContractError("syntax child rejected for the wrong reason")
+        if entry["rejection_token"] == "SYNTAX_ERROR":
+            subject = request["inputs"][0]["path"].removeprefix("repo/")
+            if not any(
+                item.get("path") == subject and item.get("reason") == "SYNTAX_ERROR"
+                for item in result.get("files", [])
+                if isinstance(item, dict)
+            ):
+                raise NegativeContractError("syntax child rejected an unrelated path")
+        elif entry["rejection_token"] == "MANIFEST_MISMATCH":
+            manifest = probe_root / "modified-python.json"
+            if result.get("manifest_sha256") != hashlib.sha256(manifest.read_bytes()).hexdigest():
+                raise NegativeContractError("syntax child rejected an unrelated manifest")
+        return
+    variant = entry.get("variant_id")
+    if result.get("schema_version") != 1 or result.get("status") != "FAIL":
+        raise NegativeContractError("typecheck child result did not fail")
+    expected_reason = (
+        "TYPED_SCOPE_MISSING" if variant in TYPECHECK_PATHS else "UNSAFE_MYPY_CONFIG"
+    )
+    if result.get("failure_reasons") != [expected_reason]:
+        raise NegativeContractError("typecheck child rejected for the wrong reason")
+    if result.get("mypy_exit_code") is not None:
+        raise NegativeContractError("typecheck mutation unexpectedly reached mypy")
+    if variant in TYPECHECK_PATHS:
+        expected_affected = [TYPECHECK_PATHS[variant].removeprefix("repo/")]
+        if result.get("affected_paths") != expected_affected:
+            raise NegativeContractError("typecheck child rejected an unrelated path")
+    elif result.get("affected_paths") not in (None, []):
+        raise NegativeContractError("typecheck child reported unrelated paths")
+
+
+def validate_probe_execution_contract(
+    entry: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    stdout: bytes,
+    stderr: bytes,
+    exit_code: int,
+) -> None:
+    """Validate variant-specific process rejection semantics."""
+
+    producer = entry.get("child_producer")
+    if producer == "tools/verify_utiki_ci_results.py":
+        variant = entry["variant_id"]
+        expected_code = (
+            "RUN_INDEX_SET_MISMATCH"
+            if variant == "missing-job-or-target"
+            else entry["rejection_token"]
+        )
+        if exit_code != 1 or stderr:
+            raise NegativeContractError("CI checker child rejected at the wrong stage")
+        try:
+            result = json.loads(
+                stdout.decode("utf-8"), object_pairs_hook=_strict_object
+            )
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise NegativeContractError("CI checker child did not return JSON") from exc
+        if (
+            not isinstance(result, dict)
+            or result.get("status") != "FAIL"
+            or result.get("error_code") != expected_code
+            or not isinstance(result.get("message"), str)
+            or not result["message"]
+        ):
+            raise NegativeContractError("CI checker child rejected for the wrong reason")
+        subject = (
+            entry["obligation_id"]
+            if variant in {
+                "test-and-mapping-removed",
+                "removed-test-and-mapping",
+                "duplicate-or-unknown-id",
+                "missing-obligation-variant",
+                "forged-not-applicable",
+            }
+            else {
+                "zero-collected": "JUnit lacks",
+                "empty-or-missing-result": "JUnit lacks",
+                "catalog-unapproved-change": "approval record",
+                "stale-run-or-sha": "candidate SHA",
+                "digest-mismatch": "JUnit digest",
+                "duplicate-result-or-wrong-layer": "duplicate JUnit execution result",
+                "missing-job-or-target": "run index job/target",
+                "failure-exit-overwritten": "original test exit code",
+            }.get(variant, "testcase[0]")
+        )
+        if subject not in result["message"]:
+            raise NegativeContractError("CI checker child rejected an unrelated object")
+        return
+    if producer == "tools/verify_modified_python.py":
+        expected_exit = (
+            2 if entry["variant_id"] in {"ignored-build-source", "wrong-base-or-sha"} else 1
+        )
+        if (
+            exit_code != expected_exit
+            or stdout
+            or stderr.decode("utf-8", errors="replace").strip()
+            != f"verify_modified_python: {entry['rejection_token']}"
+        ):
+            raise NegativeContractError("syntax child rejected at the wrong stage")
+        return
+    if producer != "pytest":
+        return
+    expected = {
+        "unknown-marker": (
+            2,
+            "'utiki_unknown_marker' not found in `markers` configuration option",
+        ),
+        "empty-addopts": (
+            2,
+            "'utiki_unknown_marker' not found in `markers` configuration option",
+        ),
+        "invalid-pytest-config": (
+            4,
+            "Unknown config option: utiki_unknown_config",
+        ),
+    }.get(entry.get("variant_id"))
+    if expected is None:
+        raise NegativeContractError("unknown pytest negative execution contract")
+    expected_exit, expected_reason = expected
+    combined = stdout.decode("utf-8", errors="replace") + stderr.decode(
+        "utf-8", errors="replace"
+    )
+    if exit_code != expected_exit:
+        raise NegativeContractError("pytest child rejected at the wrong stage")
+    if expected_reason not in combined:
+        raise NegativeContractError("pytest child rejected for the wrong reason")
+
+
+TYPECHECK_SEED_FILES = (
+    "src/platforms/utiki/auth.py",
+    "src/platforms/utiki/profiles.py",
+    "src/platforms/utiki/selection.py",
+)
+TYPECHECK_SEED_CONTENT = "VALUE: int = 1\n"
+TYPECHECK_MANIFEST_CONTENT = "\n".join(TYPECHECK_SEED_FILES) + "\n"
+TYPECHECK_CONFIG_CONTENT = (
+    "[mypy]\n"
+    "python_version = 3.11\n"
+    "strict = True\n"
+    "warn_unused_configs = True\n"
+    "mypy_path = src\n"
+)
+TYPECHECK_FAKE_MYPY_CONTENT = "#!/usr/bin/env python3\nraise SystemExit(0)\n"
+PYTEST_CONFIG_CONTENT = "[pytest]\n"
+
+
+def _canonical_text_file(path: Path, expected: str, label: str) -> None:
+    try:
+        actual = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise NegativeContractError(f"{label} is unreadable") from exc
+    if actual != expected:
+        raise NegativeContractError(f"{label} differs from its reviewed content")
 
 
 def _child(request: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -175,28 +391,46 @@ def _properties(testcase: ElementTree.Element) -> dict[str, str]:
 
 
 def _validate_pytest(
-    variant: str, arguments: list[str], input_path: Path, child: dict[str, Any]
+    variant: str,
+    arguments: list[str],
+    inputs: dict[str, tuple[str, Path]],
+    child: dict[str, Any],
 ) -> None:
     marker_source = "import pytest\n\n@pytest.mark.utiki_unknown_marker\ndef test_probe():\n    pass\n"
     source_ref = f"{PROBE_ROOT}/test_probe.py"
+    config_ref = f"{PROBE_ROOT}/pytest.ini"
     if child.get("working_directory") != PROBE_ROOT:
         raise NegativeContractError("pytest negative probe cwd is not canonical")
+    if variant in {"unknown-marker", "empty-addopts"}:
+        if set(inputs) != {"pytest-probe-source", "pytest-config"}:
+            raise NegativeContractError("pytest source input contract differs from review")
+        relative, source = inputs["pytest-probe-source"]
+        if relative != "test_probe.py" or source.read_text(encoding="utf-8") != marker_source:
+            raise NegativeContractError("pytest marker source is not canonical")
+        config_relative, config = inputs["pytest-config"]
+        if config_relative != "pytest.ini":
+            raise NegativeContractError("pytest config path is not canonical")
+        _canonical_text_file(config, PYTEST_CONFIG_CONTENT, "pytest config")
     if variant == "unknown-marker":
-        if arguments != ["--strict-config", "--strict-markers", source_ref]:
+        if arguments != [
+            "-c",
+            config_ref,
+            "--strict-config",
+            "--strict-markers",
+            source_ref,
+        ]:
             raise NegativeContractError("unknown-marker arguments are not canonical")
-        if input_path.name != "test_probe.py" or input_path.read_text(encoding="utf-8") != marker_source:
-            raise NegativeContractError("unknown-marker payload is not canonical")
     elif variant == "empty-addopts":
         if arguments != [
             "-o",
             "addopts=",
+            "-c",
+            config_ref,
             "--strict-config",
             "--strict-markers",
             source_ref,
         ]:
             raise NegativeContractError("empty-addopts arguments are not canonical")
-        if input_path.name != "test_probe.py" or input_path.read_text(encoding="utf-8") != marker_source:
-            raise NegativeContractError("empty-addopts payload is not canonical")
     elif variant == "invalid-pytest-config":
         if arguments != [
             "-c",
@@ -206,10 +440,18 @@ def _validate_pytest(
             source_ref,
         ]:
             raise NegativeContractError("invalid-config arguments are not canonical")
-        if input_path.name != "pytest.ini" or input_path.read_text(encoding="utf-8") != (
+        if set(inputs) != {"pytest-config", "pytest-probe-source"}:
+            raise NegativeContractError("invalid-config input contract differs from review")
+        config_relative, config = inputs["pytest-config"]
+        source_relative, source = inputs["pytest-probe-source"]
+        if config_relative != "pytest.ini" or config.read_text(encoding="utf-8") != (
             "[pytest]\nutiki_unknown_config = true\n"
         ):
             raise NegativeContractError("invalid-config payload is not canonical")
+        if source_relative != "test_probe.py" or source.read_text(
+            encoding="utf-8"
+        ) != "def test_probe():\n    pass\n":
+            raise NegativeContractError("invalid-config test source is not canonical")
     else:
         raise NegativeContractError("unknown pytest negative contract")
 
@@ -245,10 +487,48 @@ TYPECHECK_PATHS = {
     "new-core-bridge-file": "repo/src/utiki_core_services.py",
     "new-upgrade-tool-file": "repo/tools/migrations/convert_utiki_config.py",
 }
+TYPECHECK_REQUIRED_ROOTS = (
+    "src/platforms/utiki/domain",
+    "src/platforms/utiki/application",
+    "src/platforms/utiki/adapters",
+)
+TYPECHECK_SUPPORT_PATHS = {
+    "typecheck-manifest": "repo/ci/utiki-typed-scope.txt",
+    "typecheck-mypy": "fake-mypy.py",
+    "typecheck-seed-auth": "repo/src/platforms/utiki/auth.py",
+    "typecheck-seed-profiles": "repo/src/platforms/utiki/profiles.py",
+    "typecheck-seed-selection": "repo/src/platforms/utiki/selection.py",
+}
+
+
+def _typecheck_relevant_sources(probe_root: Path) -> set[str]:
+    repo = probe_root / "repo"
+    paths: set[str] = set()
+    for relative_root in TYPECHECK_REQUIRED_ROOTS:
+        directory = repo / relative_root
+        if directory.is_dir() and not directory.is_symlink():
+            paths.update(
+                path.relative_to(repo).as_posix()
+                for path in directory.rglob("*.py")
+                if path.is_file() and not path.is_symlink()
+            )
+    candidate_singletons = {
+        *TYPECHECK_SEED_FILES,
+        *(value.removeprefix("repo/") for value in TYPECHECK_PATHS.values()),
+    }
+    paths.update(
+        relative
+        for relative in candidate_singletons
+        if (repo / relative).is_file() and not (repo / relative).is_symlink()
+    )
+    return paths
 
 
 def _validate_typecheck(
-    variant: str, arguments: list[str], input_path: Path, request: dict[str, Any]
+    variant: str,
+    arguments: list[str],
+    inputs: dict[str, tuple[str, Path]],
+    probe_root: Path,
 ) -> None:
     flags = {
         "--root",
@@ -269,21 +549,48 @@ def _validate_typecheck(
     }
     if any(values.get(key) != value for key, value in expected_static.items()):
         raise NegativeContractError("typecheck arguments are not canonical")
-    relative = request["inputs"][0]["path"]
+    expected_inputs = dict(TYPECHECK_SUPPORT_PATHS)
+    expected_inputs["mutated-typecheck-input"] = (
+        TYPECHECK_PATHS.get(variant, "repo/ci/mypy-utiki.ini")
+    )
     if variant in TYPECHECK_PATHS:
-        if relative != TYPECHECK_PATHS[variant] or values.get("--probe-subject") != (
-            PROBE_ROOT + "/" + relative
+        expected_inputs["typecheck-config"] = "repo/ci/mypy-utiki.ini"
+    if {kind: relative for kind, (relative, _) in inputs.items()} != expected_inputs:
+        raise NegativeContractError("typecheck input set differs from review")
+    for kind, relative in TYPECHECK_SUPPORT_PATHS.items():
+        _, path = inputs[kind]
+        if kind == "typecheck-manifest":
+            _canonical_text_file(path, TYPECHECK_MANIFEST_CONTENT, kind)
+        elif kind == "typecheck-mypy":
+            _canonical_text_file(path, TYPECHECK_FAKE_MYPY_CONTENT, kind)
+            if path.stat().st_mode & 0o111 == 0:
+                raise NegativeContractError("typecheck mypy fixture is not executable")
+        else:
+            _canonical_text_file(path, TYPECHECK_SEED_CONTENT, kind)
+    config = inputs.get("typecheck-config", inputs["mutated-typecheck-input"])[1]
+    expected_config = TYPECHECK_CONFIG_CONTENT
+    if variant == "broad-ignore-any":
+        expected_config += "ignore_errors = True\n"
+    _canonical_text_file(config, expected_config, "typecheck config")
+    mutation_relative, mutation_path = inputs["mutated-typecheck-input"]
+    if variant in TYPECHECK_PATHS:
+        if values.get("--probe-subject") != (
+            PROBE_ROOT + "/" + mutation_relative
         ):
             raise NegativeContractError("typecheck subject does not match its execution key")
-        if input_path.read_text(encoding="utf-8") != "VALUE: int = 1\n":
-            raise NegativeContractError("typecheck new-file payload is not canonical")
+        _canonical_text_file(
+            mutation_path, TYPECHECK_SEED_CONTENT, "typecheck mutation subject"
+        )
     elif variant == "broad-ignore-any":
-        if relative != "repo/ci/mypy-utiki.ini" or "ignore_errors = True" not in input_path.read_text(
-            encoding="utf-8"
-        ).splitlines():
-            raise NegativeContractError("unsafe mypy-config payload is not canonical")
+        if "--probe-subject" in values:
+            raise NegativeContractError("unsafe-config probe has an unexpected subject")
     else:
         raise NegativeContractError("unknown typecheck negative contract")
+    expected_sources = set(TYPECHECK_SEED_FILES)
+    if variant in TYPECHECK_PATHS:
+        expected_sources.add(TYPECHECK_PATHS[variant].removeprefix("repo/"))
+    if _typecheck_relevant_sources(probe_root) != expected_sources:
+        raise NegativeContractError("typecheck relevant source set differs from review")
 
 
 def _validate_syntax(
@@ -567,14 +874,15 @@ def validate_request_contract(
     del repository_root  # Reserved for future repository-bound contracts.
     validate_registry_contract(entry)
     child, arguments = _child(request)
-    input_path = _input_path(request, probe_root)
-    actual_input_kinds = sorted(
-        item.get("kind")
-        for item in request["inputs"]
-        if isinstance(item, dict)
-    )
-    if actual_input_kinds != sorted(entry.get("input_kinds", [])):
-        raise NegativeContractError("negative input kinds differ from review")
+    inputs = _input_paths(request, probe_root)
+    mutation_kinds = entry.get("input_kinds", [])
+    if (
+        not isinstance(mutation_kinds, list)
+        or len(mutation_kinds) != 1
+        or mutation_kinds[0] not in inputs
+    ):
+        raise NegativeContractError("negative mutation input differs from review")
+    input_path = inputs[mutation_kinds[0]][1]
     if request.get("mutation") != entry.get("mutation"):
         raise NegativeContractError("negative request mutation differs from review")
     producer = entry.get("child_producer")
@@ -582,47 +890,20 @@ def validate_request_contract(
     if child.get("producer") != producer or child.get("kind") != entry.get("child_kind"):
         raise NegativeContractError("negative child identity differs from review")
     if producer == "pytest":
-        _validate_pytest(variant, arguments, input_path, child)
+        _validate_pytest(variant, arguments, inputs, child)
     elif producer in {"tools/utiki_egress_canary.py", "tools/run_utiki_browser_isolation.py"}:
+        if set(inputs) != set(mutation_kinds):
+            raise NegativeContractError("negative input set differs from review")
         _validate_egress(variant, arguments, input_path)
     elif producer == "tools/run_utiki_typecheck.py":
-        _validate_typecheck(variant, arguments, input_path, request)
+        _validate_typecheck(variant, arguments, inputs, probe_root)
     elif producer == "tools/verify_modified_python.py":
+        if set(inputs) != set(mutation_kinds):
+            raise NegativeContractError("negative input set differs from review")
         _validate_syntax(variant, arguments, input_path, request, probe_root)
     elif producer == "tools/verify_utiki_ci_results.py":
+        if set(inputs) != set(mutation_kinds):
+            raise NegativeContractError("negative input set differs from review")
         _validate_ci(entry, arguments, input_path, request)
     else:
         raise NegativeContractError("negative producer has no canonical contract")
-
-
-def validate_transcript_contract(
-    entry: dict[str, Any],
-    request: dict[str, Any],
-    transcript_child: dict[str, Any],
-    *,
-    probe_root: Path,
-    repository_root: Path,
-) -> None:
-    """Bind a captured command/cwd transcript back to the concrete request."""
-
-    validate_request_contract(
-        entry, request, probe_root=probe_root, repository_root=repository_root
-    )
-    child, arguments = _child(request)
-    expanded = [_expand(probe_root, value) for value in arguments]
-    command = transcript_child.get("command")
-    if not isinstance(command, list) or any(not isinstance(item, str) for item in command):
-        raise NegativeContractError("negative transcript command is invalid")
-    if child["kind"] == "repository-python":
-        producer_path = str((repository_root / child["producer"]).resolve())
-        if command[1:] != [producer_path, *expanded]:
-            raise NegativeContractError("negative transcript command differs from request")
-    elif child["kind"] == "pytest-module":
-        if command[1:] != ["-m", "pytest", *expanded]:
-            raise NegativeContractError("negative pytest transcript differs from request")
-    else:
-        raise NegativeContractError("negative transcript child kind is invalid")
-    raw_cwd = child.get("working_directory")
-    expected_cwd = repository_root if raw_cwd is None else Path(_expand(probe_root, raw_cwd))
-    if Path(str(transcript_child.get("working_directory"))).resolve() != expected_cwd.resolve():
-        raise NegativeContractError("negative transcript cwd differs from request")

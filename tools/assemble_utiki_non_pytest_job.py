@@ -102,7 +102,7 @@ def _artifact(run_dir: Path, kind: str, raw_path: str) -> dict[str, str]:
     if path.is_symlink() or not path.is_file():
         raise AssembleError("artifact is not a regular file")
     envelope = _load(path)
-    if envelope.get("schema_version") != 1 or envelope.get("kind") != kind:
+    if envelope.get("schema_version") != 2 or envelope.get("kind") != kind:
         raise AssembleError("artifact is not a formal evidence envelope")
     if envelope.get("status") != "PASS":
         raise AssembleError("evidence producer did not pass")

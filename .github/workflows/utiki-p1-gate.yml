@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 env:
+  # Diagnostic producer context only; the aggregate requires an independent value.
   APPROVED_CATALOG_SHA256: d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1
   P1_BASE_SHA: a1374bddc44cabfd5887d9ce991f5657e4c9628b
   P1_RUN_ID: p1-${{ github.run_id }}-${{ github.run_attempt }}-attempt-${{ github.run_attempt }}
@@ -152,6 +153,7 @@ jobs:
           python tools/run_utiki_evidence.py
           --repository-root .
           --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/python-syntax-report.json"
           --kind python-syntax-report
           --run-id "$P1_RUN_ID"
@@ -162,9 +164,9 @@ jobs:
           --candidate-sha "$CANDIDATE_SHA"
           --catalog-sha256 "$APPROVED_CATALOG_SHA256"
           --producer tools/verify_modified_python.py
-          --input run-context evidence run-context.json
-          --input modified-python-manifest evidence modified-python-manifest.json
-          --producer-report python-syntax-raw.json
+          --input run-context artifact evidence/run-context.json
+          --input modified-python-manifest artifact evidence/modified-python-manifest.json
+          --producer-report evidence/python-syntax-raw.json
           --
           --base-ref "$P1_BASE_SHA"
           --candidate-ref "$CANDIDATE_SHA"
@@ -215,6 +217,7 @@ jobs:
       - name: Produce architecture evidence
         run: >-
           python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/architecture-report.json" --kind architecture-report --run-id "$P1_RUN_ID"
           --attempt "${{ github.run_attempt }}" --job-id architecture-types --phase P1 --target source-linux-x64
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
@@ -224,6 +227,7 @@ jobs:
       - name: Produce controlled strict typecheck evidence
         run: >-
           python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/typecheck-report.json" --kind typecheck-report --run-id "$P1_RUN_ID"
           --attempt "${{ github.run_attempt }}" --job-id architecture-types --phase P1 --target source-linux-x64
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
@@ -231,12 +235,16 @@ jobs:
           --input typed-manifest repository tests/fixtures/utiki/typecheck-p1/manifest.txt
           --input mypy-config repository tests/fixtures/utiki/typecheck-p1/mypy.ini
           --input coverage-context repository tests/fixtures/utiki/typecheck-p1/context.json
-          --producer-report typecheck-raw.json --
+          --producer-output typecheck-stdout evidence/typecheck-mypy.stdout
+          --producer-output typecheck-stderr evidence/typecheck-mypy.stderr
+          --producer-report evidence/typecheck-raw.json --
           --root "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1"
           --manifest "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1/manifest.txt"
           --config "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1/mypy.ini"
           --coverage-context "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1/context.json"
           --report "$JOB_RUN_DIR/evidence/typecheck-raw.json"
+          --stdout-report "$JOB_RUN_DIR/evidence/typecheck-mypy.stdout"
+          --stderr-report "$JOB_RUN_DIR/evidence/typecheck-mypy.stderr"
       - name: Build and execute concrete negative probes
         run: |
           python tools/build_utiki_negative_inputs.py --repository-root . --probe-registry ci/utiki-p1-negative-probes.json --output-root "$PROBE_INPUT_ROOT" --candidate-sha "$CANDIDATE_SHA" --environment host
@@ -292,14 +300,15 @@ jobs:
       - name: Run isolated browser producer and formal envelope
         run: >-
           python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/browser-isolation-report.json" --kind browser-isolation-report --run-id "$P1_RUN_ID"
           --attempt "${{ github.run_attempt }}" --job-id browser-contract-isolated --phase P1 --target isolated-linux-x64
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
           --producer tools/run_utiki_browser_isolation.py
           --input isolation-contract repository ci/utiki-browser-isolation.json
           --input execution-manifest repository tests/fixtures/utiki/manifest.json
-          --input image-build evidence image-build.json
-          --producer-report browser-isolation-raw.json --
+          --input image-build artifact evidence/image-build.json
+          --producer-report evidence/browser-isolation-raw.json --
           --contract "$GITHUB_WORKSPACE/ci/utiki-browser-isolation.json" --image "$ISOLATION_IMAGE_ID"
           --image-build-evidence "$JOB_RUN_DIR/evidence/image-build.json"
           --execution-manifest "$GITHUB_WORKSPACE/tests/fixtures/utiki/manifest.json" --run-dir "$JOB_RUN_DIR/evidence"
@@ -308,13 +317,14 @@ jobs:
       - name: Produce production-origin evidence envelope
         run: >-
           python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/production-origin-report.json" --kind production-origin-report --run-id "$P1_RUN_ID"
           --attempt "${{ github.run_attempt }}" --job-id browser-contract-isolated --phase P1 --target isolated-linux-x64
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
           --producer tools/run_utiki_browser_isolation.py
-          --input isolation-report evidence browser-isolation-raw.json
-          --input origin-report evidence production-origin-raw.json
-          --producer-report production-origin-verified.json --
+          --input isolation-report artifact evidence/browser-isolation-raw.json
+          --input origin-report artifact evidence/production-origin-raw.json
+          --producer-report evidence/production-origin-verified.json --
           --verify-existing-origin --isolation-report "$JOB_RUN_DIR/evidence/browser-isolation-raw.json"
           --origin-report "$JOB_RUN_DIR/evidence/production-origin-raw.json"
           --report "$JOB_RUN_DIR/evidence/production-origin-verified.json"
@@ -369,14 +379,15 @@ jobs:
       - name: Produce isolated performance envelope
         run: >-
           python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/browser-isolation-report.json" --kind browser-isolation-report --run-id "$P1_RUN_ID"
           --attempt "${{ github.run_attempt }}" --job-id performance-contract --phase P1 --target isolated-linux-x64
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
           --producer tools/run_utiki_performance_isolation.py
           --input performance-contract repository ci/utiki-performance-isolation.json
           --input execution-manifest repository tests/fixtures/utiki/manifest.json
-          --input image-build evidence image-build.json
-          --producer-report performance-isolation-raw.json --
+          --input image-build artifact evidence/image-build.json
+          --producer-report evidence/performance-isolation-raw.json --
           --contract "$GITHUB_WORKSPACE/ci/utiki-performance-isolation.json" --image "$ISOLATION_IMAGE_ID"
           --image-build-evidence "$JOB_RUN_DIR/evidence/image-build.json"
           --execution-manifest "$GITHUB_WORKSPACE/tests/fixtures/utiki/manifest.json" --run-dir "$JOB_RUN_DIR/evidence"
@@ -385,16 +396,17 @@ jobs:
       - name: Verify and envelope benchmark evidence
         run: >-
           python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
           --report "$JOB_RUN_DIR/evidence/benchmark-report.json" --kind benchmark-report --run-id "$P1_RUN_ID"
           --attempt "${{ github.run_attempt }}" --job-id performance-contract --phase P1 --target isolated-linux-x64
           --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
           --producer tools/benchmarks/verify_utiki_p1_performance.py
           --input performance-contract repository ci/utiki-performance-isolation.json
-          --input performance-isolation-report evidence performance-isolation-raw.json
-          --input raw-benchmark-report evidence raw-benchmark-report.json
-          --input managed-junit evidence performance.xml
-          --input reporter-result evidence performance-reporter-result.json
-          --producer-report performance-verification-raw.json --
+          --input performance-isolation-report artifact evidence/performance-isolation-raw.json
+          --input raw-benchmark-report artifact evidence/raw-benchmark-report.json
+          --input managed-junit artifact evidence/performance.xml
+          --input reporter-result artifact evidence/performance-reporter-result.json
+          --producer-report evidence/performance-verification-raw.json --
           --contract "$GITHUB_WORKSPACE/ci/utiki-performance-isolation.json"
           --isolation-report "$JOB_RUN_DIR/evidence/performance-isolation-raw.json"
           --raw-benchmark-report "$JOB_RUN_DIR/evidence/raw-benchmark-report.json"
@@ -426,6 +438,7 @@ jobs:
     timeout-minutes: 15
     env:
       AGGREGATE_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/aggregate
+      FORMAL_APPROVED_CATALOG_SHA256: ${{ vars.UTIKI_P1_APPROVED_CATALOG_SHA256 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -468,10 +481,17 @@ jobs:
         with:
           name: utiki-p1-performance-contract
           path: ${{ env.AGGREGATE_DIR }}/performance-contract
+      - name: Require independent catalog approval
+        shell: bash
+        run: |
+          if [[ ! "$FORMAL_APPROVED_CATALOG_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error title=uTiki P1 catalog approval missing::A maintainer-controlled approved catalog digest is required for the formal aggregate." >&2
+            exit 2
+          fi
       - name: Build digest-bound run index
         run: >-
           python tools/build_utiki_run_index.py --required-catalog ci/utiki-required-cases.json
-          --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json
+          --approved-catalog-sha256 "$FORMAL_APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json
           --phase P1 --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --candidate-sha "$CANDIDATE_SHA"
           --output "$AGGREGATE_DIR/gate-runs.json"
           --run unit-contract source-linux-x64 "$AGGREGATE_DIR/unit-contract"
@@ -482,7 +502,7 @@ jobs:
       - name: Verify aggregate P1 gate
         run: >-
           python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json
-          --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json
+          --approved-catalog-sha256 "$FORMAL_APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json
           --run-index "$AGGREGATE_DIR/gate-runs.json" --phase P1 --run-id "$P1_RUN_ID"
           --candidate-sha "$CANDIDATE_SHA" --report "$AGGREGATE_DIR/gate-report.json"
       - name: Upload aggregate evidence

@@ -477,6 +477,25 @@ def test_generated_output_roots_are_not_treated_as_project_source(gate_repo):
     assert report["overall_status"] == "NO_PYTHON_CHANGES"
 
 
+def test_ignored_nested_probe_repository_under_artifacts_is_excluded(gate_repo):
+    case = gate_repo
+    _write(case["repo"] / ".gitignore", "artifacts/\n")
+    candidate = _commit(case["repo"], "ignore generated artifacts")
+    nested = case["repo"] / "artifacts" / "probe" / "repo"
+    nested.mkdir(parents=True)
+    _git(nested, "init", "-b", "main")
+    _write(nested / "broken.py", "def broken(:\n")
+
+    _, manifest, context = _generate(case, case["base"], candidate)
+    result, report_path = _verify(
+        case, case["base"], candidate, manifest, context, check=True
+    )
+
+    assert result.returncode == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["overall_status"] == "NO_PYTHON_CHANGES"
+
+
 def test_digest_pinned_ignored_build_source_is_compiled(gate_repo):
     case = gate_repo
     repo = case["repo"]

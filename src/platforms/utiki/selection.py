@@ -1158,7 +1158,37 @@ def select_area_snapshot(
     )
 
 
-def seats_are_physically_adjacent(first, second):
+class _SeatGeometry(TypedDict, total=False):
+    center_x: int | float
+    center_y: int | float
+    width: int | float
+    height: int | float
+
+
+class _SeatChoice(_SeatGeometry):
+    index: int
+    title: str
+    row_index: int
+    cell_index: int
+    available: bool
+    selected: bool
+
+
+class _ParsedSeatChoice(_SeatChoice):
+    _row_number: int
+    _seat_number: int
+
+
+class _SeatBlock(TypedDict):
+    seats: list[_ParsedSeatChoice]
+    row_number: int
+    min_seat_number: int
+    max_seat_number: int
+    dom_index: int
+    touches_aisle: bool
+
+
+def seats_are_physically_adjacent(first: _SeatChoice, second: _SeatChoice) -> bool:
     """判斷 uTiki 水平或旋轉垂直座位圖中的兩席是否相鄰。"""
     geometry = ("center_x", "center_y", "width", "height")
     if all(
@@ -1182,7 +1212,7 @@ def seats_are_physically_adjacent(first, second):
     )
 
 
-def _seat_number(seat):
+def _seat_number(seat: _SeatChoice) -> tuple[int, int] | None:
     """解析座位資料中的數字座號。"""
 
     match = re.search(r"-(\d+)排-(\d+)號\s*$", str(seat.get("title") or ""))
@@ -1196,10 +1226,12 @@ def _seat_number(seat):
     return row, number
 
 
-def _seat_row_edges(seats, strict_titles):
+def _seat_row_edges(
+    seats: Sequence[_SeatChoice], strict_titles: bool
+) -> dict[int, list[int]] | None:
     """找出各排座位在目前清單中的邊界。"""
 
-    edges = {}
+    edges: dict[int, list[int]] = {}
     for seat in seats:
         numbers = _seat_number(seat)
         if numbers is None:
@@ -1213,17 +1245,21 @@ def _seat_row_edges(seats, strict_titles):
     return edges
 
 
-def _seat_block_candidates(available, needed, row_edges):
+def _seat_block_candidates(
+    available: Sequence[_SeatChoice], needed: int, row_edges: dict[int, list[int]]
+) -> list[_SeatBlock]:
     """建立符合張數需求的連續座位區塊候選。"""
 
-    rows = {}
+    rows: dict[int, list[_ParsedSeatChoice]] = {}
     for seat in available:
         numbers = _seat_number(seat)
         if numbers is None:
             continue
-        parsed = dict(seat, _row_number=numbers[0], _seat_number=numbers[1])
+        parsed = cast(_ParsedSeatChoice, dict(
+            seat, _row_number=numbers[0], _seat_number=numbers[1]
+        ))
         rows.setdefault(numbers[0], []).append(parsed)
-    candidates = []
+    candidates: list[_SeatBlock] = []
     for row_number, row in rows.items():
         ordered = sorted(row, key=lambda item: item["_seat_number"])
         for start in range(len(ordered) - needed + 1):
@@ -1245,14 +1281,17 @@ def _seat_block_candidates(available, needed, row_edges):
     return candidates
 
 
-def _sort_seat_blocks(candidates, seat_sorting):
+def _sort_seat_blocks(
+    candidates: list[_SeatBlock], seat_sorting: str
+) -> list[_SeatBlock]:
     """依座位排序設定排列連續座位區塊。"""
 
+    if seat_sorting == "display":
+        return sorted(candidates, key=lambda item: item["dom_index"])
+    key: Callable[[_SeatBlock], tuple[int, ...]]
     if seat_sorting == "row_asc_aisle":
         candidates = [item for item in candidates if item["touches_aisle"]]
         key = lambda item: (item["row_number"], item["dom_index"])
-    elif seat_sorting == "display":
-        key = lambda item: item["dom_index"]
     elif seat_sorting == "row_asc_seat_desc":
         key = lambda item: (
             item["row_number"], -item["max_seat_number"], item["dom_index"]
@@ -1268,7 +1307,9 @@ def _sort_seat_blocks(candidates, seat_sorting):
     return sorted(candidates, key=key)
 
 
-def _numeric_seat_key(seat, seat_sorting):
+def _numeric_seat_key(
+    seat: _SeatChoice, seat_sorting: str
+) -> tuple[int, int, int, int, int]:
     """建立數字座號的排序鍵。"""
 
     numbers = _seat_number(seat)
@@ -1285,8 +1326,12 @@ def _numeric_seat_key(seat, seat_sorting):
     )
 
 
-def select_seat_indexes(seats, needed, allow_non_adjacent=False,
-                        seat_sorting="row_seat"):
+def select_seat_indexes(
+    seats: Sequence[_SeatChoice],
+    needed: int,
+    allow_non_adjacent: bool = False,
+    seat_sorting: str = "row_seat",
+) -> list[int]:
     """保留既有優先規則後選出劃位座位索引。"""
     if needed <= 0:
         return []
@@ -1320,7 +1365,7 @@ def select_seat_indexes(seats, needed, allow_non_adjacent=False,
     return [seat["index"] for seat in available[:needed]]
 
 
-def _seat_snapshot_route_is_valid(snapshot):
+def _seat_snapshot_route_is_valid(snapshot: SeatSnapshot) -> bool:
     """驗證座位快照所屬的頁面路由。"""
 
     query = unique_query(snapshot.page_url)
@@ -1340,7 +1385,7 @@ def _seat_snapshot_route_is_valid(snapshot):
     )
 
 
-def _counter_value(raw_value):
+def _counter_value(raw_value: object) -> int | None:
     """將票種計數值正規化為整數。"""
 
     if type(raw_value) is not str or raw_value != raw_value.strip():
@@ -1349,7 +1394,7 @@ def _counter_value(raw_value):
     return observed.value if isinstance(observed, PresentField) else None
 
 
-def _seat_snapshot_structure_is_valid(snapshot):
+def _seat_snapshot_structure_is_valid(snapshot: SeatSnapshot) -> bool:
     """驗證座位快照必要欄位與結構。"""
 
     if not _seat_snapshot_route_is_valid(snapshot):
@@ -1376,12 +1421,19 @@ def _seat_snapshot_structure_is_valid(snapshot):
     )
 
 
-def _target_seat_ticket_type(snapshot, keyword):
+class _TicketTypeCandidate(TypedDict):
+    text: str
+    ticket_type: TicketTypeRow
+
+
+def _target_seat_ticket_type(
+    snapshot: SeatSnapshot, keyword: str | None
+) -> tuple[TicketTypeRow | None, str]:
     """依關鍵字從座位快照選出目標票種。"""
 
-    candidates = []
-    seen_fingerprints = set()
-    seen_type_ids = set()
+    candidates: list[_TicketTypeCandidate] = []
+    seen_fingerprints: set[SeatFingerprint] = set()
+    seen_type_ids: set[str] = set()
     counter_map = {counter.type_id: counter.raw for counter in snapshot.counters}
     for ticket_type in snapshot.ticket_types:
         fingerprint = ticket_type.fingerprint
@@ -1412,8 +1464,12 @@ def _target_seat_ticket_type(snapshot, keyword):
     return candidates[target_index]["ticket_type"], ""
 
 
-def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
-                            ticket_type_name):
+def seat_selection_is_valid(
+    snapshot: object,
+    ticket_number: object,
+    ticket_type_id: str,
+    ticket_type_name: str,
+) -> bool:
     """稽核畫面座位、送出資料與所有票種計數。"""
     snapshot = parse_seat_snapshot(snapshot)
     observed_request = parse_nonnegative_count(ticket_number)
@@ -1439,11 +1495,11 @@ def seat_selection_is_valid(snapshot, ticket_number, ticket_type_id,
     targets = [value for type_id, value in counts if type_id == ticket_type_id]
     return (
         len(targets) == 1 and targets[0] == requested
-        and sum(value for _type_id, value in counts) == requested
+        and sum(cast(int, value) for _type_id, value in counts) == requested
     )
 
 
-def _seat_request(snapshot, ticket_number):
+def _seat_request(snapshot: SeatSnapshot, ticket_number: object) -> int | None:
     """建立座位選擇所需的張數與目前狀態。"""
 
     observed_request = parse_nonnegative_count(ticket_number)
@@ -1456,10 +1512,10 @@ def _seat_request(snapshot, ticket_number):
     return requested
 
 
-def _seat_dicts(snapshot):
+def _seat_dicts(snapshot: SeatSnapshot) -> list[_SeatChoice]:
     """將座位快照項目整理成可供決策的字典清單。"""
 
-    return [
+    return cast(list[_SeatChoice], [
         {
             "index": index, "title": seat.title, "row_index": seat.row_index,
             "cell_index": seat.cell_index, "center_x": seat.center_x,
@@ -1468,24 +1524,38 @@ def _seat_dicts(snapshot):
             "selected": seat.selected,
         }
         for index, seat in enumerate(snapshot.seats)
-    ]
+    ])
 
 
-def _seat_targets_are_adjacent(snapshot, fingerprints):
+def _seat_targets_are_adjacent(
+    snapshot: SeatSnapshot, fingerprints: Sequence[SeatFingerprint]
+) -> bool:
     """判斷目標座位指紋是否形成連續座位。"""
 
     by_fingerprint = dict(zip(
         (seat.fingerprint for seat in snapshot.seats), _seat_dicts(snapshot)
     ))
-    targets = [by_fingerprint.get(fingerprint) for fingerprint in fingerprints]
-    return bool(all(targets)) and all(
+    targets: list[_SeatChoice] = []
+    for fingerprint in fingerprints:
+        target = by_fingerprint.get(fingerprint)
+        if target is None:
+            return False
+        targets.append(target)
+    return all(
         seats_are_physically_adjacent(targets[index], targets[index + 1])
         for index in range(len(targets) - 1)
     )
 
 
-def _make_seat_plan(snapshot, ticket_type, action, requested,
-                    selected=(), targets=(), require_adjacency=False):
+def _make_seat_plan(
+    snapshot: SeatSnapshot,
+    ticket_type: TicketTypeRow,
+    action: str,
+    requested: int,
+    selected: Sequence[SeatFingerprint] = (),
+    targets: Sequence[SeatFingerprint] = (),
+    require_adjacency: bool = False,
+) -> SeatActionPlan:
     """建立包含身分與相鄰限制的座位操作計畫。"""
 
     return SeatActionPlan(
@@ -1506,7 +1576,7 @@ def _make_seat_plan(snapshot, ticket_type, action, requested,
     )
 
 
-def _seat_state_is_clean(snapshot):
+def _seat_state_is_clean(snapshot: SeatSnapshot) -> bool:
     """判斷座位頁是否尚未殘留任何選擇。"""
 
     return (
@@ -1517,8 +1587,13 @@ def _seat_state_is_clean(snapshot):
     )
 
 
-def select_seat_snapshot(snapshot, keyword, ticket_number,
-                         allow_non_adjacent=False, seat_sorting="row_seat"):
+def select_seat_snapshot(
+    snapshot: object,
+    keyword: str | None,
+    ticket_number: object,
+    allow_non_adjacent: bool = False,
+    seat_sorting: str = "row_seat",
+) -> tuple[SeatActionPlan | None, str]:
     """從劃位快照規劃清除、選擇或就緒操作。"""
     snapshot = parse_seat_snapshot(snapshot)
     if not isinstance(snapshot, SeatSnapshot) or not _seat_snapshot_structure_is_valid(snapshot):
@@ -1566,7 +1641,9 @@ def select_seat_snapshot(snapshot, keyword, ticket_number,
     ), ""
 
 
-def _seat_plan_identity_matches(snapshot, plan):
+def _seat_plan_identity_matches(
+    snapshot: SeatSnapshot, plan: SeatActionPlan
+) -> bool:
     """驗證座位計畫與快照的頁面身分一致。"""
 
     if (
@@ -1596,7 +1673,7 @@ def _seat_plan_identity_matches(snapshot, plan):
     )
 
 
-def seat_plan_matches_snapshot(snapshot, plan):
+def seat_plan_matches_snapshot(snapshot: object, plan: object) -> bool:
     """在瀏覽器端原子驗證前檢查座位操作文法。"""
     snapshot = parse_seat_snapshot(snapshot)
     if (

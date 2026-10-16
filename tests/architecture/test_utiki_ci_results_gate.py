@@ -2,18 +2,13 @@ import copy
 import hashlib
 import json
 import re
-import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
-
-from tools.utiki_negative_contract import probe_directory_name
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHECKER = PROJECT_ROOT / "tools" / "verify_utiki_ci_results.py"
@@ -24,7 +19,6 @@ APPROVED_CATALOG_SHA256 = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af918
 PHASE = "P1"
 RUN_ID = "utiki-p1-attempt-1"
 CANDIDATE_SHA = "1" * 40
-_NEGATIVE_CACHE: Path | None = None
 
 
 def _expand_probe_value(root: Path, value: str) -> str:
@@ -36,40 +30,6 @@ def _expand_probe_value(root: Path, value: str) -> str:
     return value
 
 
-def _canonical_negative_cache() -> Path:
-    global _NEGATIVE_CACHE
-    if _NEGATIVE_CACHE is not None:
-        return _NEGATIVE_CACHE
-    root = Path(tempfile.mkdtemp(prefix="utiki-negative-test-fixtures-"))
-    environment = os.environ.copy()
-    environment["UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL"] = "1"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            str(PROJECT_ROOT / "tools" / "build_utiki_negative_inputs.py"),
-            "--repository-root",
-            str(PROJECT_ROOT),
-            "--probe-registry",
-            str(NEGATIVE_REGISTRY),
-            "--output-root",
-            str(root),
-            "--candidate-sha",
-            CANDIDATE_SHA,
-            "--environment",
-            "all",
-        ],
-        cwd=PROJECT_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError(completed.stderr)
-    _NEGATIVE_CACHE = root
-    return root
-
-
 def _canonical_negative_fixture(
     destination: Path,
     registry_entry: dict[str, object],
@@ -79,13 +39,7 @@ def _canonical_negative_fixture(
     if not (destination / "probe.json").is_file():
         if destination.exists():
             raise AssertionError(f"incomplete canonical fixture destination: {destination}")
-        if os.environ.get("UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL") == "1":
-            _internal_negative_request(destination, registry_entry)
-        else:
-            source = _canonical_negative_cache() / probe_directory_name(
-                registry_entry
-            )
-            shutil.copytree(source, destination)
+        _internal_negative_request(destination, registry_entry)
     request_path = destination / "probe.json"
     request = json.loads(request_path.read_text(encoding="utf-8"))
     child = request["child"]
@@ -350,6 +304,29 @@ def _internal_negative_request(
         arguments=arguments,
         input_path=primary,
     )
+
+
+def test_negative_fixture_builds_only_the_requested_case(tmp_path, monkeypatch):
+    registry = json.loads(NEGATIVE_REGISTRY.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in registry["probes"] if item["variant_id"] == "unknown-marker"
+    )
+    child_stdout = tmp_path / "child.stdout"
+    child_stderr = tmp_path / "child.stderr"
+    child_stdout.write_text("controlled rejection\n", encoding="utf-8")
+    child_stderr.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("fixture launched the full probe builder"),
+    )
+
+    request_path, request, _ = _canonical_negative_fixture(
+        tmp_path / "probe", entry, child_stdout, child_stderr
+    )
+
+    assert request_path.is_file()
+    assert request["obligation_id"] == entry["obligation_id"]
 
 
 def _sha256(path):

@@ -130,6 +130,146 @@ def test_exact_content_image_id_must_match_inspected_id(monkeypatch):
         launcher._validate_image("docker", requested)
 
 
+def _resource_inspect(launcher, kind, name, owner="ours"):
+    resource = {"Id": ("a" if kind == "container" else "b") * 64}
+    if kind == "container":
+        resource.update({
+            "Name": "/" + name,
+            "Config": {"Labels": {launcher.OWNER_LABEL: owner}},
+        })
+    else:
+        resource.update({
+            "Name": name,
+            "Labels": {launcher.OWNER_LABEL: owner},
+        })
+    return json.dumps(resource)
+
+
+def test_cleanup_removes_only_owned_resource_ids(monkeypatch):
+    launcher = _load_launcher()
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[2] == "inspect":
+            return subprocess.CompletedProcess(
+                command, 0, _resource_inspect(launcher, command[1], command[3]), ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(launcher, "_run", run)
+    assert launcher._cleanup("docker", ["owned-container"], "owned-network", "ours") == []
+    assert [command for command in commands if command[1] == "rm"] == [
+        ["docker", "rm", "-f", "a" * 64],
+    ]
+    assert [command for command in commands if command[1:3] == ["network", "rm"]] == [
+        ["docker", "network", "rm", "b" * 64],
+    ]
+
+
+def test_cleanup_accepts_not_found_only_after_successful_absence_query(monkeypatch):
+    launcher = _load_launcher()
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if command[2] == "inspect":
+            detail = (
+                "Error: No such object: owned-container"
+                if command[1] == "container"
+                else "Error: No such network: owned-network"
+            )
+            return subprocess.CompletedProcess(command, 1, "", detail)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(launcher, "_run", run)
+    assert launcher._cleanup("docker", ["owned-container"], "owned-network", "ours") == []
+    assert not any(command[1] == "rm" or command[1:3] == ["network", "rm"] for command in commands)
+
+
+def test_cleanup_rejects_exit_one_when_resource_still_exists(monkeypatch):
+    launcher = _load_launcher()
+
+    def run(command, **_kwargs):
+        if command[2] == "inspect":
+            name = "owned-container" if command[1] == "container" else "owned-network"
+            return subprocess.CompletedProcess(
+                command, 0, _resource_inspect(launcher, command[1], name), ""
+            )
+        kind = "container" if command[1] == "rm" else "network"
+        resource_id = ("a" if kind == "container" else "b") * 64
+        return subprocess.CompletedProcess(command, 1, "", f"No such {kind}: {resource_id}")
+
+    monkeypatch.setattr(launcher, "_run", run)
+    errors = launcher._cleanup("docker", ["owned-container"], "owned-network", "ours")
+    assert len(errors) == 2
+    assert all("cannot confirm" in error for error in errors)
+
+
+def test_cleanup_rejects_unverifiable_absence_and_permission_denial(monkeypatch):
+    launcher = _load_launcher()
+
+    def unavailable_query(command, **_kwargs):
+        if command[1:3] == ["container", "inspect"]:
+            return subprocess.CompletedProcess(command, 1, "", "No such object: owned-container")
+        if command[1:3] == ["container", "ls"]:
+            raise launcher.IsolationBlocked("daemon unavailable")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(launcher, "_run", unavailable_query)
+    errors = launcher._cleanup("docker", ["owned-container"], "owned-network", "ours")
+    assert "cannot confirm container owned-container is absent" in errors[0]
+    assert "daemon unavailable" in errors[0]
+
+    def permission_denied(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "permission denied")
+
+    monkeypatch.setattr(launcher, "_run", permission_denied)
+    errors = launcher._cleanup("docker", ["owned-container"], "owned-network", "ours")
+    assert len(errors) == 2
+    assert all("permission denied" in error for error in errors)
+
+
+def test_cleanup_rejects_foreign_owner_and_mixed_error(monkeypatch):
+    launcher = _load_launcher()
+    commands = []
+
+    def foreign(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command, 0, _resource_inspect(launcher, "container", "owned-container", "other"), ""
+        )
+
+    monkeypatch.setattr(launcher, "_run", foreign)
+    errors = launcher._cleanup("docker", ["owned-container"], "owned-network", "ours")
+    assert all("belongs to this run" in error for error in errors)
+    assert not any(command[1] == "rm" or command[1:3] == ["network", "rm"] for command in commands)
+
+    def mixed_error(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command, 1, "", "No such object: owned-container\npermission denied"
+        )
+
+    monkeypatch.setattr(launcher, "_run", mixed_error)
+    errors = launcher._cleanup("docker", ["owned-container"], "owned-network", "ours")
+    assert "cannot inspect container" in errors[0]
+    assert "permission denied" in errors[0]
+
+
+def test_cleanup_preflight_rejects_preexisting_generated_name(monkeypatch):
+    launcher = _load_launcher()
+
+    def run(command, **_kwargs):
+        names = "other\nowned-container\n" if command[1] == "container" else ""
+        return subprocess.CompletedProcess(command, 0, names, "")
+
+    monkeypatch.setattr(launcher, "_run", run)
+    with pytest.raises(launcher.IsolationBlocked, match="resource name already exists"):
+        launcher._require_unused_cleanup_names(
+            "docker", ["owned-container"], "owned-network"
+        )
+
+
 def test_launcher_refuses_to_overwrite_stale_outer_report(tmp_path):
     launcher = _load_launcher()
     report = tmp_path / "browser-isolation-raw.json"
@@ -284,9 +424,11 @@ def test_isolated_command_cannot_restore_network_or_privilege(
         "P1",
         "c" * 64,
         "b" * 40,
+        "ours",
     )
 
     assert command[command.index("--network") + 1] == "none"
+    assert command[command.index("--label") + 1] == f"{launcher.OWNER_LABEL}=ours"
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert command[command.index("--security-opt") + 1] == "no-new-privileges"
     assert "--privileged" not in command

@@ -22,11 +22,15 @@ P1 candidate。本文採 findings-first：本機測試通過只代表 P1 基礎�
   GitHub Actions 執行五個 jobs 與 aggregate。本文不自行填入未核准 digest，也未修改
   repository 設定。
 
-- **[P2／P1 gate blocker] source jobs 尚未對最終 clean candidate 形成同輪 formal evidence。**
+- **[P2／P1 gate blocker] source jobs 尚未在 `source-linux-x64` 對最終 clean candidate
+  形成同輪 formal evidence。**
   modified-Python gate、sanitized `git archive` 與 formal run metadata 都要求 `HEAD` 等於
-  candidate SHA 且 working tree clean。本文件中的 P1 本機回歸是開發驗證；正式 gate仍須
-  以最終 commit SHA重新產生 source三個jobs的同輪 evidence，再與isolated jobs組成
-  aggregate。在此之前不能把45個host probe的開發驗證寫成45個formal obligation PASS。
+  candidate SHA、working tree clean、作業系統及架構符合 target。本文件中的 P1 本機回歸
+  是開發驗證；以 clean SHA `8ef7983dab33ae383dfb5bbcc2172b69f873d730` 嘗試正式
+  `unit-contract/source-linux-x64` 時，checker 正確以 `RUN_CONTEXT_MISMATCH` 拒絕 macOS
+  arm64 證據。正式 gate仍須在Linux x64以最終 commit SHA重新產生source三個jobs的同輪
+  evidence，再與isolated jobs組成aggregate。在此之前不能把45個host probe的開發驗證
+  寫成45個formal obligation PASS。
 
 - **[P3／已知邊界] P1 strict typecheck 證明 gate 能力，不宣稱 legacy production scope 已
   型別清零。** 受控 P1 fixture 以 `mypy --strict` 通過，漏列新 domain/application/port/
@@ -77,9 +81,9 @@ P1 candidate。本文採 findings-first：本機測試通過只代表 P1 基礎�
 
 | Job | 到期數 | 本機可核對結果 | Formal P1 狀態 |
 |---|---:|---|---|
-| `unit-contract` | 3 | 3 個真實 host negative probes通過；完整 pytest／unittest通過 | 等待 clean commit 的同輪 source evidence |
-| `modified-python-syntax` | 12 | 12 個真實 host probes通過；Git-derived manifest與逐檔 compile gate通過 | 等待 clean commit 的正式 syntax report |
-| `architecture-types` | 30 | 30 個真實 host probes、canonical-root攻擊與 controlled strict mypy通過 | 等待 clean commit 的正式 architecture/type evidence |
+| `unit-contract` | 3 | 3 個真實 host negative probes通過；完整 pytest／unittest通過 | **BLOCKED：`source-linux-x64` CI未執行** |
+| `modified-python-syntax` | 12 | 12 個真實 host probes通過；Git-derived manifest與逐檔 compile gate通過 | **BLOCKED：`source-linux-x64` CI未執行** |
+| `architecture-types` | 30 | 30 個真實 host probes、canonical-root攻擊與 controlled strict mypy通過 | **BLOCKED：`source-linux-x64` CI未執行** |
 | `browser-contract-isolated` | 13 | launcher／assembler／H04 fail-closed測試通過 | **BLOCKED：未執行 Linux hard isolation** |
 | `performance-contract` | 5 | source contract與 no-`.git` attestation測試通過 | **BLOCKED：未執行 isolated Chromium/CDP measurement** |
 | **合計** | **63** | 45 個 source obligation 的 harness可執行；18 個 isolated obligation未執行 | **aggregate 未通過** |
@@ -98,6 +102,9 @@ P1 candidate。本文採 findings-first：本機測試通過只代表 P1 基礎�
 - H04 host fail-closed nodes：2 passed。
 - fresh host negative E2E：45／45 `EXPECTED_REJECTION`；same-token pairwise relabel：
   0 accepted。
+- clean commit `8ef7983…` 的 formal unit source attempt：由於 host 是 macOS arm64而 target
+  是 `source-linux-x64`，checker以 `RUN_CONTEXT_MISMATCH` 非零拒絕；沒有把跨target結果
+  寫成PASS。
 - execution manifest `--check`：153 cases、490 executions、63 mapped，digest與 checked-in檔一致。
 - 修改／新增 Python 檔案 `py_compile`、workflow YAML parse、`git diff --check`：通過。
 - 未執行 live site、登入、選票、提交、付款、release或部署；P1 也不授權這些操作。
@@ -108,6 +115,6 @@ P1 的程式、測試、隔離 launcher與 evidence chain 已具備進入正式 
 execution manifest、內容驗證、negative probe可互換、architecture假 root、private checkout
 mount及 no-`.git` performance 問題都已修正並加入回歸測試。
 
-但 P1 尚未通過。下一個合法步驟是把本 candidate 提交為 clean SHA，核准並配置 exact
-`UTIKI_P1_BASE_IMAGE`，在 Linux GitHub Actions執行五個 jobs與 aggregate。只有 63 個到期
-obligations 在同一正式 run 全部 PASS，才可進入 P2。
+但 P1 尚未通過。下一個合法步驟是核准並配置 exact `UTIKI_P1_BASE_IMAGE`、推送最終
+candidate，在 Linux GitHub Actions執行五個 jobs與 aggregate。只有 63 個到期 obligations
+在同一正式 run 全部 PASS，才可進入 P2。

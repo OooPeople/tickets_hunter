@@ -236,3 +236,69 @@ class SeatCounter:
     def __post_init__(self) -> None:
         if type(self.type_id) is not str or type(self.raw) is not str:
             raise ValueError("seat counter values must be strings")
+
+
+@dataclass(frozen=True, slots=True)
+class DateSnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    rows: tuple[DateRow, ...]
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AreaSnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    rows: tuple[AreaRow, ...]
+    areas: tuple[MapArea, ...]
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class QuantitySnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    performance_id: str
+    group_id: str
+    price_area_id: str
+    quantity_limit_raw: str
+    rows: tuple[QuantityRow, ...]
+    product_id: str = ""
+    reason: str = ""
+    performance_hidden_present: bool = False
+    product_hidden_present: bool = False
+    group_hidden_present: bool = False
+    price_area_hidden_present: bool = False
+    quantity_limit_present: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SeatSnapshot:
+    ok: bool
+    page_url: str
+    document_id: str
+    performance_id: str = ""
+    group_id: str = ""
+    price_area_id: str = ""
+    product_id: str = ""
+    product_hidden_present: bool = False
+    quantity_limit_present: bool = False
+    quantity_limit_raw: str = ""
+    ticket_types: tuple[TicketTypeRow, ...] = ()
+    seats: tuple[SeatRow, ...] = ()
+    submitted_seats: tuple[SubmittedSeat, ...] = ()
+    counters: tuple[SeatCounter, ...] = ()
+    visual_selected_count: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DialogSnapshot:
+    page_url: str
+    document_id: str
+    visible_count: int
+    text: str

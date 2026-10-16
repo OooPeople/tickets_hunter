@@ -12,6 +12,7 @@ def test_domain_import_is_pure_without_zendriver(tmp_path: Path) -> None:
         "import sys; "
         "from platforms.utiki.domain.identity import TabKey, DocumentKey; "
         "from platforms.utiki.domain.snapshots import parse_nonnegative_count; "
+        "from platforms.utiki.domain.plans import DateActionPlan; "
         "from platforms.utiki.domain.effects import ClaimId; "
         "from platforms.utiki.domain.inputs import InputAttemptId; "
         "assert 'zendriver' not in sys.modules; "
@@ -86,3 +87,13 @@ def test_existing_workflow_exports_still_resolve() -> None:
 
     assert utiki.nodriver_ctbc_main is workflow.nodriver_ctbc_main
     assert utiki.nodriver_utiki_main is workflow.nodriver_ctbc_main
+
+
+def test_selection_uses_the_same_domain_snapshot_and_plan_classes() -> None:
+    from platforms.utiki import selection
+    from platforms.utiki.domain import plans, snapshots
+
+    for name in ("DateSnapshot", "AreaSnapshot", "QuantitySnapshot", "SeatSnapshot", "DialogSnapshot"):
+        assert getattr(selection, name) is getattr(snapshots, name)
+    for name in ("DateActionPlan", "AreaActionPlan", "QuantityPlan", "SeatActionPlan", "SubmitPlan"):
+        assert getattr(selection, name) is getattr(plans, name)

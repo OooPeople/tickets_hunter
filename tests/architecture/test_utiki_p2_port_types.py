@@ -9,14 +9,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "ci" / "mypy-utiki.ini"
 
 _FAKE_SOURCE = """
-from platforms.utiki.application.ports import QuantityBrowserPort
+from platforms.utiki.application.ports import QuantityBrowserPort, QuantityObservation
 from platforms.utiki.domain.effects import EffectReceipt, RunningEffect
 from platforms.utiki.domain.identity import OperationStamp
 from platforms.utiki.domain.plans import QuantityPlan
-from platforms.utiki.domain.snapshots import QuantitySnapshot
 
 class Fake:
-    async def observe_page(self, expected_context: OperationStamp) -> QuantitySnapshot:
+    async def observe_page(self, expected_context: OperationStamp) -> QuantityObservation:
         raise NotImplementedError
 
     async def commit_quantity(self, plan: QuantityPlan{claim_parameter}) -> {result_type}:

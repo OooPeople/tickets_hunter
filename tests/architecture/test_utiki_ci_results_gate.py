@@ -2498,9 +2498,9 @@ def _make_run_index(case, *, compact=False):
                 {
                     "job_id": job_id,
                     "target": target,
-                    "junit_path": str(run["junit"].relative_to(case["root"])),
+                    "junit_path": run["junit"].relative_to(case["root"]).as_posix(),
                     "junit_sha256": _sha256(run["junit"]),
-                    "run_metadata_path": str(run["metadata"].relative_to(case["root"])),
+                    "run_metadata_path": run["metadata"].relative_to(case["root"]).as_posix(),
                     "run_metadata_sha256": _sha256(run["metadata"]),
                 }
             )
@@ -2540,7 +2540,12 @@ def _index_arguments(manifest_path, index_path):
 
 def test_aggregate_revalidates_every_required_p1_job_target(gate_inputs):
     case = gate_inputs
-    index_path, _, _ = _make_run_index(case)
+    index_path, index, _ = _make_run_index(case)
+    assert all(
+        "\\" not in run[field]
+        for run in index["runs"]
+        for field in ("junit_path", "run_metadata_path")
+    )
 
     result = _run_checker(*_index_arguments(case["manifest_path"], index_path))
 
@@ -3053,7 +3058,7 @@ def test_aggregate_cannot_hide_a_failed_test_process(gate_inputs):
     metadata["exit_codes"]["test"] = 7
     _write_json(failed_run["metadata"], metadata)
     for entry in index["runs"]:
-        if entry["run_metadata_path"] == str(failed_run["metadata"].relative_to(case["root"])):
+        if entry["run_metadata_path"] == failed_run["metadata"].relative_to(case["root"]).as_posix():
             entry["run_metadata_sha256"] = _sha256(failed_run["metadata"])
             break
     _write_json(index_path, index)

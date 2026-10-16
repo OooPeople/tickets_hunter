@@ -3,7 +3,7 @@
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TypedDict
+from typing import Callable, TypeVar, TypedDict, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import util
@@ -38,6 +38,7 @@ from .domain.snapshots import (
     QuantityRow,
     QuantitySnapshot,
     SeatCounter,
+    SeatFingerprint,
     SeatRow,
     SeatSnapshot,
     SubmittedSeat,
@@ -46,7 +47,7 @@ from .domain.snapshots import (
 )
 
 
-def _freeze_date_control(raw_control):
+def _freeze_date_control(raw_control: object) -> DateControl | None:
     """將場次控制項轉成不可變的安全資料。"""
 
     if not isinstance(raw_control, dict):
@@ -65,7 +66,7 @@ def _freeze_date_control(raw_control):
     return DateControl(actionable, fingerprint)
 
 
-def parse_date_snapshot(raw_snapshot):
+def parse_date_snapshot(raw_snapshot: object) -> DateSnapshot | None:
     """固定一份無副作用的場次表觀察快照。"""
     if isinstance(raw_snapshot, DateSnapshot):
         return raw_snapshot
@@ -82,17 +83,20 @@ def parse_date_snapshot(raw_snapshot):
     rows = raw_snapshot.get("rows")
     if not isinstance(rows, list):
         return None
-    frozen_rows = []
+    frozen_rows: list[DateRow] = []
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("text"), str):
             return None
         controls = row.get("controls")
         if not isinstance(controls, list):
             return None
-        frozen_controls = tuple(_freeze_date_control(item) for item in controls)
-        if any(item is None for item in frozen_controls):
-            return None
-        frozen_rows.append(DateRow(row["text"], frozen_controls))
+        frozen_controls: list[DateControl] = []
+        for item in controls:
+            control = _freeze_date_control(item)
+            if control is None:
+                return None
+            frozen_controls.append(control)
+        frozen_rows.append(DateRow(row["text"], tuple(frozen_controls)))
     page_url = raw_snapshot.get("page_url")
     document_id = raw_snapshot.get("document_id")
     if not isinstance(page_url, str) or not isinstance(document_id, str):
@@ -100,7 +104,7 @@ def parse_date_snapshot(raw_snapshot):
     return DateSnapshot(True, page_url, document_id, tuple(frozen_rows))
 
 
-def parse_area_snapshot(raw_snapshot):
+def parse_area_snapshot(raw_snapshot: object) -> AreaSnapshot | None:
     """在區域快照進入決策邏輯前轉成不可變資料。"""
     if isinstance(raw_snapshot, AreaSnapshot):
         return raw_snapshot
@@ -242,19 +246,22 @@ def parse_quantity_snapshot(raw_snapshot: object) -> QuantitySnapshot | None:
     )
 
 
-def _freeze_scalar_tuple(value):
+def _freeze_scalar_tuple(value: object) -> SeatFingerprint | None:
     """將純量序列轉成不可變元組。"""
 
     if not isinstance(value, (list, tuple)) or not value:
         return None
-    if any(not isinstance(item, (str, int, float, bool)) for item in value):
-        return None
-    if any(type(item) is float and not math.isfinite(item) for item in value):
-        return None
-    return tuple(value)
+    items: list[str | int | float | bool] = []
+    for item in value:
+        if not isinstance(item, (str, int, float, bool)):
+            return None
+        if type(item) is float and not math.isfinite(item):
+            return None
+        items.append(item)
+    return tuple(items)
 
 
-def _freeze_ticket_type(raw_type):
+def _freeze_ticket_type(raw_type: object) -> TicketTypeRow | None:
     """將票種資料轉成不可變快照。"""
 
     if not isinstance(raw_type, dict):
@@ -278,7 +285,7 @@ def _freeze_ticket_type(raw_type):
     )
 
 
-def _freeze_seat(raw_seat):
+def _freeze_seat(raw_seat: object) -> SeatRow | None:
     """將可選座位資料轉成不可變快照。"""
 
     if not isinstance(raw_seat, dict):
@@ -312,7 +319,7 @@ def _freeze_seat(raw_seat):
     )
 
 
-def _freeze_submitted_seat(raw_seat):
+def _freeze_submitted_seat(raw_seat: object) -> SubmittedSeat | None:
     """將已送出的座位資料轉成不可變快照。"""
 
     if not isinstance(raw_seat, dict):
@@ -322,7 +329,7 @@ def _freeze_submitted_seat(raw_seat):
     return SubmittedSeat(raw_seat["A"], raw_seat["Y"], raw_seat["Z"])
 
 
-def _freeze_seat_counter(raw_counter):
+def _freeze_seat_counter(raw_counter: object) -> SeatCounter | None:
     """將座位票種計數資料轉成不可變快照。"""
 
     if not isinstance(raw_counter, dict):
@@ -334,57 +341,122 @@ def _freeze_seat_counter(raw_counter):
     return SeatCounter(raw_counter["id"], raw_counter["counter_raw"])
 
 
-def parse_seat_snapshot(raw_snapshot):
+_Item = TypeVar("_Item")
+
+
+def _freeze_seat_items(
+    raw_snapshot: dict[str, object], name: str, parser: Callable[[object], _Item | None]
+) -> tuple[_Item, ...] | None:
+    raw_items = raw_snapshot.get(name)
+    if not isinstance(raw_items, list):
+        return None
+    try:
+        frozen = tuple(parser(item) for item in raw_items)
+    except (TypeError, ValueError):
+        return None
+    if any(item is None for item in frozen):
+        return None
+    return cast(tuple[_Item, ...], frozen)
+
+
+class _SeatScalars(TypedDict):
+    page_url: str
+    document_id: str
+    performance_id: str
+    group_id: str
+    price_area_id: str
+    product_id: str
+    product_hidden_present: bool
+    quantity_limit_present: bool
+    quantity_limit_raw: str
+    visual_selected_count: int
+
+
+def _seat_scalars(raw: dict[str, object]) -> _SeatScalars | None:
+    page_url = raw.get("page_url")
+    document_id = raw.get("document_id")
+    performance_id = raw.get("performance_id")
+    group_id = raw.get("group_id")
+    price_area_id = raw.get("price_area_id")
+    product_id = raw.get("product_id")
+    product_hidden_present = raw.get("product_hidden_present")
+    quantity_limit_present = raw.get("quantity_limit_present")
+    quantity_limit_raw = raw.get("quantity_limit_raw")
+    visual_selected_count = raw.get("visual_selected_count")
+    if not (
+        isinstance(page_url, str) and type(page_url) is str
+        and isinstance(document_id, str) and type(document_id) is str
+        and isinstance(performance_id, str) and type(performance_id) is str
+        and isinstance(group_id, str) and type(group_id) is str
+        and isinstance(price_area_id, str) and type(price_area_id) is str
+        and isinstance(product_id, str) and type(product_id) is str
+        and isinstance(quantity_limit_raw, str) and type(quantity_limit_raw) is str
+        and isinstance(product_hidden_present, bool) and type(product_hidden_present) is bool
+        and isinstance(quantity_limit_present, bool) and type(quantity_limit_present) is bool
+        and isinstance(visual_selected_count, int) and type(visual_selected_count) is int
+        and visual_selected_count >= 0
+    ):
+        return None
+    return {
+        "page_url": page_url,
+        "document_id": document_id,
+        "performance_id": performance_id,
+        "group_id": group_id,
+        "price_area_id": price_area_id,
+        "product_id": product_id,
+        "product_hidden_present": product_hidden_present,
+        "quantity_limit_present": quantity_limit_present,
+        "quantity_limit_raw": quantity_limit_raw,
+        "visual_selected_count": visual_selected_count,
+    }
+
+
+def parse_seat_snapshot(raw_snapshot: object) -> SeatSnapshot | None:
     """固定票種與劃位座位的合併觀察快照。"""
     if isinstance(raw_snapshot, SeatSnapshot):
         return raw_snapshot
     if not isinstance(raw_snapshot, dict):
         return None
-    if raw_snapshot.get("ok") is False:
+    raw: dict[str, object] = raw_snapshot
+    if raw.get("ok") is False:
         return SeatSnapshot(
             ok=False,
-            page_url=str(raw_snapshot.get("page_url") or ""),
-            document_id=str(raw_snapshot.get("document_id") or ""),
-            reason=str(raw_snapshot.get("reason") or "invalid-result"),
+            page_url=str(raw.get("page_url") or ""),
+            document_id=str(raw.get("document_id") or ""),
+            reason=str(raw.get("reason") or "invalid-result"),
         )
-    collections = {}
-    parsers = {
-        "ticket_types": _freeze_ticket_type,
-        "seats": _freeze_seat,
-        "submitted_seats": _freeze_submitted_seat,
-        "counters": _freeze_seat_counter,
-    }
-    for name, parser in parsers.items():
-        raw_items = raw_snapshot.get(name)
-        if not isinstance(raw_items, list):
-            return None
-        try:
-            items = tuple(parser(item) for item in raw_items)
-        except (TypeError, ValueError):
-            return None
-        if any(item is None for item in items):
-            return None
-        collections[name] = items
-    scalar_types = {
-        "page_url": str, "document_id": str, "performance_id": str,
-        "group_id": str, "price_area_id": str, "product_id": str,
-        "product_hidden_present": bool,
-        "quantity_limit_present": bool, "quantity_limit_raw": str,
-        "visual_selected_count": int,
-    }
-    if any(
-        type(raw_snapshot.get(name)) is not expected
-        for name, expected in scalar_types.items()
-    ):
+    ticket_types: tuple[TicketTypeRow, ...] | None = _freeze_seat_items(
+        raw, "ticket_types", _freeze_ticket_type
+    )
+    if ticket_types is None:
         return None
-    if raw_snapshot["visual_selected_count"] < 0:
+    seats: tuple[SeatRow, ...] | None = _freeze_seat_items(raw, "seats", _freeze_seat)
+    if seats is None:
         return None
-    return SeatSnapshot(ok=True, **collections, **{
-        name: raw_snapshot[name] for name in scalar_types
-    })
+    submitted_seats: tuple[SubmittedSeat, ...] | None = _freeze_seat_items(
+        raw, "submitted_seats", _freeze_submitted_seat
+    )
+    if submitted_seats is None:
+        return None
+    counters: tuple[SeatCounter, ...] | None = _freeze_seat_items(
+        raw, "counters", _freeze_seat_counter
+    )
+    if counters is None:
+        return None
+    scalars = _seat_scalars(raw)
+    if scalars is None:
+        return None
+    return SeatSnapshot(
+        ok=True,
+        ticket_types=ticket_types,
+        seats=seats,
+        submitted_seats=submitted_seats,
+        counters=counters,
+        **scalars,
+    )
 
 
-def parse_dialog_snapshot(raw_snapshot):
+def parse_dialog_snapshot(raw_snapshot: object) -> DialogSnapshot | None:
     """固定一份無副作用的可見送出對話框快照。"""
     if isinstance(raw_snapshot, DialogSnapshot):
         return raw_snapshot
@@ -400,9 +472,7 @@ def parse_dialog_snapshot(raw_snapshot):
     page_url = raw_snapshot.get("page_url")
     document_id = raw_snapshot.get("document_id")
     text = raw_snapshot.get("text")
-    if not all(isinstance(value, str) for value in (
-        page_url, document_id, text
-    )):
+    if not isinstance(page_url, str) or not isinstance(document_id, str) or not isinstance(text, str):
         return None
     if not page_url or not document_id:
         return None

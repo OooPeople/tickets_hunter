@@ -76,3 +76,17 @@ def test_seat_record_constructor_and_wire_reject_invalid_values() -> None:
     changed = deepcopy(raw)
     changed["seats"][0]["selected"] = 1
     assert parse_seat_snapshot(changed) is None
+
+
+def test_invalid_first_seat_collection_does_not_parse_later_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = make_ctbc_seat_snapshot()
+    assert parse_seat_snapshot(raw) is not None
+    raw["ticket_types"] = None
+
+    def unexpected_seat_parse(_item: object) -> None:
+        raise AssertionError("later seat collection was parsed")
+
+    monkeypatch.setattr("platforms.utiki.selection._freeze_seat", unexpected_seat_parse)
+    assert parse_seat_snapshot(raw) is None

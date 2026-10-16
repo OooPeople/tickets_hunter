@@ -2,7 +2,7 @@
 
 **文件說明**：定義目前 repository 可執行的驗證層級、命令與結果陳述方式。
 
-**最後更新**：2026-10-15
+**最後更新**：2026-10-16
 
 ## 1. 原則
 
@@ -143,6 +143,103 @@ Remove-Item Env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
 
 runner 每次建立暫存 browser profile，並只在 `finally` 停止該次測試自行啟動的
 browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程序。
+
+#### uTiki production-origin fixture 與 hard-egress
+
+`file://` fixture 只驗 DOM/browser contract，不是 production-origin 或網路硬隔離證據。
+uTiki 的 production-origin fixture 必須由
+`tools/run_utiki_browser_isolation.py` 啟動；launcher 只接受已存在本機、以
+repository `@sha256:` 或 exact content-addressed `sha256:` image ID 固定的 Linux
+image，且不會在測試期間 pull、build 或安裝依賴。browser、driver
+與其子程序都在 `--network none`、read-only root、drop-all-capabilities 的同一個
+container 中。另一個 internal-only network 的受控 peer 只用於正向控制；隔離
+container 不加入該 network。
+
+```bash
+python tools/run_utiki_browser_isolation.py \
+  --image 'sha256:64_HEX_IMAGE_ID' \
+  --image-build-evidence artifacts/utiki-isolation/IMAGE_BUILD.json \
+  --execution-manifest tests/fixtures/utiki/manifest.json \
+  --run-dir artifacts/utiki-isolation/RUN_ID/evidence \
+  --report artifacts/utiki-isolation/RUN_ID/evidence/browser-isolation-raw.json \
+  --run-id RUN_ID \
+  --attempt 1 \
+  --phase P1 \
+  --catalog-sha256 APPROVED_64_HEX_CATALOG_DIGEST \
+  --candidate-sha EXACT_40_HEX_GIT_SHA
+```
+
+上述 image、build evidence 與 SHA 必須由當次受審查的 CI context 代入，範例字串
+本身不能執行。GitHub Actions 的正式 P1 workflow 另要求 repository variable
+`UTIKI_P1_BASE_IMAGE`；其值只能是維護者已審查的 `repository@sha256:<64-hex>`。
+目前 repository 尚未配置此變數，因此 browser／performance required job 會在 build 前
+明確以 `BLOCKED` prerequisite 失敗；不得改用 mutable tag、臨時解析 tag，或把空值視為
+skip／PASS。build evidence 要綁定 digest-pinned base image、實際 image ID，以及
+`ci/utiki-isolation/Dockerfile`、`requirement.txt`、`requirements-dev.txt` 的當次
+SHA-256；builder 只會把這三個檔案複製到暫存的最小 Docker build context，不會把
+checkout 或私人設定送入 Docker daemon。image 必須先在隔離測試開始前完成 build/load。
+正式執行前，launcher 另會要求 `HEAD` 等於 candidate SHA 且 working tree 乾淨，並以
+該 SHA 的 `git archive` 建立暫存 workspace。Container 只會唯讀掛載這份 tracked-file
+snapshot，不會掛載原 checkout，因此 ignored／untracked 的 `src/settings.json`、browser
+profile 或 artifacts 不會進入隔離測試域；archive digest 會寫入 outer evidence。
+launcher exit code `0` 才是當次 PASS，`1` 是已建立隔離後發現違規，`2` 是
+`BLOCKED`（例如 runtime／image／權限／證據不足）。`BLOCKED` 不得轉成 skip 或
+等效 PASS。raw report 只寫到明示的 `--report`；正式 job 另須由
+`tools/run_utiki_evidence.py` 封裝成 execution manifest 所列的
+`evidence/browser-isolation-report.json`。raw report 綁定 managed JUnit、reporter result、
+inner canary、production-origin report，以及 container 內實際執行的 12 份 negative
+probe envelope digest；缺任一項都不能封裝為 PASS。
+
+production-origin 測試保留真實 origin/path，於 CDP request stage 僅允許已核准的
+脫敏 fixture 並拒絕未知 request；故意未安裝 interception 的 browser/driver canary
+則驗證 OS 邊界仍會攔截。兩者都禁止以連線真售票站作 canary。proxy、hosts、
+host-resolver、socket monkeypatch 或 browser flag 都不能單獨充當 hard-egress 證據。
+
+目前 launcher 的可執行參考環境是 Linux container。Windows/macOS native job 必須
+另有涵蓋整個 process tree 的 VM／防火牆證據；沒有證據時維持 `BLOCKED`，不能借用
+Linux 結果宣稱 native browser 已通過。
+
+#### uTiki P1 performance-contract
+
+P1 的五個 V12／V13 效能義務不是 benchmark 工具的單元測試。正式節點位於
+`tests/performance/utiki/test_p1_performance_contract.py`，只能由
+`tools/run_utiki_performance_isolation.py` 在 `isolated-linux-x64`、digest-pinned image、
+核對過的 image build evidence 與 `--network none` 中執行：
+
+```bash
+python tools/run_utiki_performance_isolation.py \
+  --image 'sha256:64_HEX_IMAGE_ID' \
+  --image-build-evidence artifacts/utiki-isolation/IMAGE_BUILD.json \
+  --execution-manifest tests/fixtures/utiki/manifest.json \
+  --run-dir artifacts/utiki-ci/RUN_ID/performance-contract/isolated-linux-x64/evidence \
+  --report artifacts/utiki-ci/RUN_ID/performance-contract/isolated-linux-x64/evidence/performance-isolation-raw.json \
+  --run-id RUN_ID \
+  --attempt 1 \
+  --phase P1 \
+  --catalog-sha256 APPROVED_64_HEX_CATALOG_DIGEST \
+  --candidate-sha EXACT_40_HEX_GIT_SHA
+```
+
+這個命令和 browser isolation 共用預先建好的 image 與 build evidence，但以獨立 container
+執行效能量測，避免只證明另一個 browser process 被隔離。固定方法由
+`ci/utiki-performance-isolation.json` 定義：source cold 3 samples／case、warm 300、
+event-loop 300，以及 production-origin date fixture 的 5 次 warm-up 與 30 次 reader
+量測。每次 reader 直接計數實際 `tab.send` protocol command、ticketing request 與 latency；
+fixture 只透過 CDP Request-stage interception fulfillment，不連真站。source 的四個
+`case_results` 也必須逐一等於 P0 基線的 semantic digest，不能只以樣本數與零失敗冒充
+行為一致。效能 container 同樣只讀 sanitized `git archive`；outer launcher 另產生並綁定
+candidate workspace attestation，inner harness 逐檔核對 tree／subject digests，source
+benchmark 由該 attestation 取得 candidate SHA 與 clean-tree metadata，不需要把 `.git`
+或原 checkout 掛入 container。
+
+inner report 在 controlled-peer 尚未由外層核對前只能是 `PENDING_OUTER_AUDIT`。outer report
+確認 image/build、container security、peer positive controls、outbound count 0，且綁定 raw
+samples、五個 managed JUnit nodes及 reporter digest 後，才可成為
+`browser-isolation-report` 的 raw producer。接著
+`tools/benchmarks/verify_utiki_p1_performance.py` 同時核對 outer PASS、raw benchmark、JUnit、
+source/fixture/production subject manifest digests，產生 `benchmark-report` 的 raw producer。
+兩者仍須分別由正式 evidence launcher封裝；缺 Docker、image、build evidence、Linux x64、
+Chrome、完整樣本或任一 digest 時為 `BLOCKED`／nonzero，不能降級成 source-only PASS。
 
 需要觀察覆蓋範圍時：
 

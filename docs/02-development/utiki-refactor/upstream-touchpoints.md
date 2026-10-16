@@ -37,6 +37,7 @@
 | `build_scripts/settings.spec` | current validator及 config self-test | settings bundle不應 import engine/converter | 只收實際 reachability；不為共用 `_internal` 強加 engine import |
 | `build_scripts/build_local.py`、`build_and_test.bat` | final merged resource/frozen gate | 本機／Windows發布流程 | target manifest驅動；檢查合併衝突、任意cwd、兩 executable；upgrader保持獨立 |
 | `.github/workflows/build-release.yml` | Windows/macOS bot/settings/upgrader artifacts | tag/release與 provenance/checksum政策 | 建各OS正式target、獨立upgrader、SHA256SUMS/manifest；release仍需另行授權 |
+| `.github/workflows/utiki-p1-gate.yml` | P1 source、hard-egress browser、performance與aggregate gate | workflow權限、runner/image trust root及既有CI成本 | 僅新增Issue #17的獨立fail-closed gate；不改release workflow；base image須以受審查的repository digest配置 |
 | `requirement.txt`／`requirements-dev.txt` | runtime/build/type/test依賴 | 所有平台與PyInstaller | 純 upgrader優先stdlib；新依賴精確pin並分清 runtime/dev；不為重構升級整組依賴 |
 
 ## Fork-only family paths

@@ -570,6 +570,39 @@ def _run_git(repo_root: Path, *args: str) -> bytes | None:
 
 
 def _git_metadata(repo_root: Path) -> dict[str, Any]:
+    attestation_value = os.environ.get("TICKETS_HUNTER_CANDIDATE_ATTESTATION")
+    if attestation_value:
+        try:
+            attestation_path = Path(attestation_value).resolve(strict=True)
+            attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BenchmarkOperationError(
+                "candidate workspace attestation is unreadable"
+            ) from exc
+        if not isinstance(attestation, dict):
+            raise BenchmarkOperationError(
+                "candidate workspace attestation is invalid"
+            )
+        candidate_sha = attestation.get("candidate_sha")
+        tree_sha256 = attestation.get("tree_sha256")
+        if (
+            attestation.get("schema_version") != 1
+            or attestation.get("attestation_kind")
+            != "utiki-sanitized-candidate-workspace"
+            or attestation.get("git_directory_present") is not False
+            or not isinstance(candidate_sha, str)
+            or len(candidate_sha) != 40
+            or not isinstance(tree_sha256, str)
+            or len(tree_sha256) != 64
+        ):
+            raise BenchmarkOperationError(
+                "candidate workspace attestation is invalid"
+            )
+        return {
+            "candidate_sha": candidate_sha,
+            "dirty": False,
+            "working_tree_digest": tree_sha256,
+        }
     head = _run_git(repo_root, "rev-parse", "HEAD")
     status = _run_git(repo_root, "status", "--porcelain=v1", "-z")
     if head is None or status is None:
@@ -825,7 +858,9 @@ def run_benchmark(
             "hardware": _hardware_metadata(),
             "scope": "offline-source-only",
             "mode": mode,
-            "hard_egress_isolation": False,
+            "hard_egress_isolation": (
+                os.environ.get("TICKETS_HUNTER_HARD_EGRESS_ACTIVE") == "1"
+            ),
         },
         "digests": {
             "fixture_sha256": _sha256_json(fixtures),

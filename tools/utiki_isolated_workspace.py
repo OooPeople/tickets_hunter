@@ -81,6 +81,7 @@ def _file_manifest(workspace: Path) -> list[dict[str, Any]]:
                 "executable": bool(path.stat().st_mode & 0o111),
             }
         )
+    result.sort(key=lambda item: item["path"])
     return result
 
 

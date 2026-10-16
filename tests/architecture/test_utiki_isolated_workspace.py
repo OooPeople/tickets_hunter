@@ -7,6 +7,7 @@ import pytest
 
 from tools.utiki_isolated_workspace import (
     WorkspaceError,
+    _file_manifest,
     materialize_candidate,
     require_clean_candidate,
 )
@@ -75,3 +76,15 @@ def test_clean_candidate_rejects_a_different_sha(tmp_path):
 
     with pytest.raises(WorkspaceError, match="does not equal"):
         require_clean_candidate(repository, "0" * 40)
+
+
+def test_file_manifest_uses_canonical_posix_path_order(tmp_path):
+    nested = tmp_path / "docs" / "guide.md"
+    sibling = tmp_path / "docs.md"
+    nested.parent.mkdir()
+    nested.write_text("nested\n", encoding="utf-8")
+    sibling.write_text("sibling\n", encoding="utf-8")
+
+    manifest = _file_manifest(tmp_path)
+
+    assert [item["path"] for item in manifest] == ["docs.md", "docs/guide.md"]

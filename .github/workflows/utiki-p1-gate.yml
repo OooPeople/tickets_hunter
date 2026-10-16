@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 45
     env:
       JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/unit-contract-source-linux-x64
-      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/probes/unit-contract-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/unit-contract-source-linux-x64/evidence/negative
     steps:
       - uses: actions/checkout@v7
         with:
@@ -124,7 +124,7 @@ jobs:
     timeout-minutes: 20
     env:
       JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/modified-python-syntax-source-linux-x64
-      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/probes/modified-python-syntax-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/modified-python-syntax-source-linux-x64/evidence/negative
     steps:
       - uses: actions/checkout@v7
         with:
@@ -197,7 +197,7 @@ jobs:
     timeout-minutes: 30
     env:
       JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/architecture-types-source-linux-x64
-      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/probes/architecture-types-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/architecture-types-source-linux-x64/evidence/negative
     steps:
       - uses: actions/checkout@v7
         with:
@@ -433,6 +433,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11.9"
+      - name: Require every producer job to succeed
+        env:
+          UNIT_CONTRACT_RESULT: ${{ needs.unit-contract.result }}
+          MODIFIED_PYTHON_SYNTAX_RESULT: ${{ needs.modified-python-syntax.result }}
+          ARCHITECTURE_TYPES_RESULT: ${{ needs.architecture-types.result }}
+          BROWSER_CONTRACT_ISOLATED_RESULT: ${{ needs.browser-contract-isolated.result }}
+          PERFORMANCE_CONTRACT_RESULT: ${{ needs.performance-contract.result }}
+        run: |
+          mkdir -p "$AGGREGATE_DIR"
+          env | grep '_RESULT=' | sort > "$AGGREGATE_DIR/producer-results.txt"
+          test "$UNIT_CONTRACT_RESULT" = success
+          test "$MODIFIED_PYTHON_SYNTAX_RESULT" = success
+          test "$ARCHITECTURE_TYPES_RESULT" = success
+          test "$BROWSER_CONTRACT_ISOLATED_RESULT" = success
+          test "$PERFORMANCE_CONTRACT_RESULT" = success
       - uses: actions/download-artifact@v8
         with:
           name: utiki-p1-unit-contract

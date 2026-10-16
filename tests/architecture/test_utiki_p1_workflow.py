@@ -75,6 +75,8 @@ def test_source_jobs_are_fail_closed_and_unit_preserves_full_suites() -> None:
         assert "if-no-files-found: error" in body
         assert "build_utiki_negative_inputs.py" in body
         assert "--environment host" in body
+        assert "PROBE_INPUT_ROOT:" in body
+        assert "/evidence/negative" in body.split("PROBE_INPUT_ROOT:", 1)[1].splitlines()[0]
 
     unit = _job(text, "unit-contract")
     assert "python -m pytest --strict-config --strict-markers" in unit
@@ -118,9 +120,11 @@ def test_aggregate_requires_and_downloads_every_formal_job() -> None:
     body = _job(_text(), "aggregate")
 
     assert "if: always()" in body
+    assert "Require every producer job to succeed" in body
     for job_id in sorted(REQUIRED_JOBS):
         assert f"- {job_id}" in body
         assert f"name: utiki-p1-{job_id}" in body
+        assert f"needs.{job_id}.result" in body
     assert body.count("actions/download-artifact@v8") == 5
     assert "build_utiki_run_index.py" in body
     assert "verify_utiki_ci_results.py" in body

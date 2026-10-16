@@ -8,6 +8,8 @@ import sys
 import pytest
 
 from tools import utiki_egress_canary as canary
+from tools import build_utiki_negative_inputs as negative_builder
+from tools import run_utiki_negative_job as negative_job
 from tools.utiki_negative_contract import (
     NegativeContractError,
     validate_request_contract,
@@ -207,6 +209,50 @@ def test_builder_and_host_negative_job_execute_real_per_key_children(tmp_path: P
     )
 
 
+def test_ci_checker_probe_keeps_absolute_evidence_bindings_in_place(
+    tmp_path: Path,
+) -> None:
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    entry = next(
+        item
+        for item in registry["probes"]
+        if item["obligation_id"] == "A05.arch.zero-collected"
+    )
+    report_parent = tmp_path / "run" / "evidence" / "negative"
+    name = f"{entry['obligation_id']}--{entry['variant_id']}"
+    probe_dir = report_parent / name
+    probe_dir.mkdir(parents=True)
+    negative_builder._ci_probe(PROJECT_ROOT, probe_dir, entry, "1" * 40)
+
+    staged = negative_job._stage_probe_input(probe_dir, report_parent, name)
+    assert staged == probe_dir.resolve()
+
+    producer_report = report_parent / "producer.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "tools" / "run_utiki_negative_probe.py"),
+            "--repository-root",
+            str(PROJECT_ROOT),
+            "--probe-registry",
+            str(REGISTRY),
+            "--probe-input",
+            str(staged / "probe.json"),
+            "--producer-report",
+            str(producer_report),
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert entry["rejection_token"] in completed.stdout + completed.stderr
+    transcript = json.loads(producer_report.read_text(encoding="utf-8"))
+    assert transcript["status"] == "EXPECTED_REJECTION"
+
+
 def test_builder_emits_every_isolated_request_without_host_execution(tmp_path: Path) -> None:
     input_root = tmp_path / "isolated-inputs"
     completed = subprocess.run(
@@ -303,6 +349,36 @@ def test_inner_canary_wires_all_isolated_negative_outputs_to_formal_job(
     assert builder_command[builder_command.index("--environment") + 1] == "isolated"
     assert "--isolation-proof" in runner_command
     assert runner_command[runner_command.index("--run-dir") + 1] == str(job_run_dir)
+
+
+def test_inner_canary_loads_project_config_and_preserves_pytest_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    context = tmp_path / "browser-pytest-context.json"
+    _write_json(context, {"mappings": [{"node_id": "tests/example.py::test_one"}]})
+    junit = tmp_path / "browser.xml"
+    reporter_result = tmp_path / "browser-reporter-result.json"
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        assert kwargs["stdout"] is subprocess.PIPE
+        assert kwargs["stderr"] is subprocess.PIPE
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 4, b"pytest stdout\n", b"pytest stderr\n")
+
+    monkeypatch.setattr(canary.subprocess, "run", fake_run)
+    exit_code, command = canary._run_pytest(
+        junit,
+        context,
+        reporter_result,
+        PROJECT_ROOT,
+    )
+
+    assert exit_code == 4
+    assert command == commands[0]
+    assert command[command.index("-c") + 1] == str(PROJECT_ROOT / "pytest.ini")
+    assert (tmp_path / "browser-pytest.stdout").read_bytes() == b"pytest stdout\n"
+    assert (tmp_path / "browser-pytest.stderr").read_bytes() == b"pytest stderr\n"
 
 
 @pytest.mark.parametrize("mutation", ["top-level-field", "entry-field", "duplicate-key"])

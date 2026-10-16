@@ -437,6 +437,8 @@ def _run_pytest(
         "pytest",
         "--rootdir",
         str(repository),
+        "-c",
+        str(repository / "pytest.ini"),
         "-o",
         "addopts=",
         "--strict-config",
@@ -453,7 +455,14 @@ def _run_pytest(
         str(reporter_result),
         *node_ids,
     ]
-    completed = subprocess.run(command, check=False)
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    junit.with_name("browser-pytest.stdout").write_bytes(completed.stdout)
+    junit.with_name("browser-pytest.stderr").write_bytes(completed.stderr)
     return completed.returncode, command
 
 

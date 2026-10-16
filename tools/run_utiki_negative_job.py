@@ -219,6 +219,31 @@ def _token(value: str) -> str:
     return token
 
 
+def _stage_probe_input(source_dir: Path, report_parent: Path, name: str) -> Path:
+    """Keep portable probe fixtures in place, otherwise freeze a copied input.
+
+    Some generated probes contain evidence envelopes whose producer commands
+    bind absolute paths below the probe directory.  Copying those probes after
+    generation changes the evidence location and correctly causes the checker
+    to reject the stale binding.  CI therefore generates probes directly in
+    the final evidence directory; older callers with an external input root
+    retain the copy-and-freeze behavior for fully relocatable probes.
+    """
+
+    source = source_dir.resolve(strict=True)
+    parent = report_parent.resolve(strict=True)
+    if source.parent == parent:
+        if source_dir.is_symlink():
+            raise JobError(f"probe input directory is a symlink: {name}")
+        return source
+
+    copied = parent / f"{name}.probe"
+    if copied.exists():
+        raise JobError(f"probe input destination already exists: {name}")
+    shutil.copytree(source, copied, symlinks=False)
+    return copied
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository-root", type=Path, required=True)
@@ -297,10 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise JobError(f"concrete probe input is missing: {name}")
             report = run_dir / evidence_paths[key]
             report.parent.mkdir(parents=True, exist_ok=True)
-            copied_dir = report.parent / f"{name}.probe"
-            if copied_dir.exists():
-                raise JobError(f"probe input destination already exists: {name}")
-            shutil.copytree(source_dir, copied_dir, symlinks=False)
+            copied_dir = _stage_probe_input(source_dir, report.parent, name)
             copied_request = copied_dir / "probe.json"
             request = _load(copied_request)
             if _key(request) != key:

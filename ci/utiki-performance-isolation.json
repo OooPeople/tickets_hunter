@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "contract_id": "utiki-p1-performance-hard-egress-v1",
+  "job_id": "performance-contract",
+  "target": "isolated-linux-x64",
+  "runtime": {
+    "kind": "docker-linux-container",
+    "image_must_be_digest_pinned": true,
+    "build_evidence_required": true,
+    "network_mode": "none",
+    "read_only_root": true,
+    "cap_drop": [
+      "ALL"
+    ],
+    "no_new_privileges": true,
+    "privileged": false,
+    "repository_mount": "read-only",
+    "artifact_mount": "write-only-purpose"
+  },
+  "canary": {
+    "controlled_peer_network": "internal-only",
+    "positive_control_required": true,
+    "required_inner_probes": [
+      "loopback-positive-control",
+      "only-loopback-interface",
+      "no-default-ipv4-route",
+      "no-default-ipv6-route",
+      "driver-direct-ipv4",
+      "driver-direct-ipv6",
+      "driver-dns",
+      "driver-udp",
+      "child-process-netns"
+    ],
+    "forbidden_peer_paths": [
+      "/driver-http",
+      "/driver-ipv6",
+      "/child-http"
+    ],
+    "forbidden_peer_events": [
+      "PEER_EVENT udp kind=dns-query",
+      "PEER_EVENT udp kind=quic"
+    ]
+  },
+  "measurement": {
+    "source_mode": "all",
+    "seed": 1701,
+    "warm_samples": 300,
+    "warmup_per_batch": 20,
+    "batches": 3,
+    "cold_samples_per_case": 3,
+    "event_loop_samples": 300,
+    "browser_warmup": 5,
+    "browser_samples": 30,
+    "source_cases": [
+      "date",
+      "area",
+      "seat",
+      "quantity"
+    ],
+    "production_origin": "https://tix.ctbcsports.com",
+    "production_path": "/BROTHERS/UTK0201_",
+    "unknown_request_action": "deny-and-fail",
+    "live_authorization_used": false
+  },
+  "semantic_baseline": {
+    "source_case_results": {
+      "area": "b19b4557991c69cc677e4860efdc87dcb7bba4c989df70ab0db24deedf91041d",
+      "date": "dc7d892478f42f861c82097ea07a7db7ffe31b48fce9387c309826a2968eecff",
+      "quantity": "8f2cdf62b1266ab3025343419058332e6b1c2c72bb3e3a1c01c45b18f45be8b3",
+      "seat": "99f3513d1481a78f1c47b890cade7f212257b92be19ea9432b568de65d14f342"
+    }
+  },
+  "required_execution_results": [
+    {
+      "case_id": "V12",
+      "obligation_id": "V12.perf.baseline-source-cold",
+      "variant_id": "baseline-source-cold"
+    },
+    {
+      "case_id": "V12",
+      "obligation_id": "V12.perf.baseline-source-warm",
+      "variant_id": "baseline-source-warm"
+    },
+    {
+      "case_id": "V12",
+      "obligation_id": "V12.perf.baseline-cdp-command-count",
+      "variant_id": "baseline-cdp-command-count"
+    },
+    {
+      "case_id": "V12",
+      "obligation_id": "V12.perf.baseline-event-loop-lag",
+      "variant_id": "baseline-event-loop-lag"
+    },
+    {
+      "case_id": "V13",
+      "obligation_id": "V13.perf.source-cold-start",
+      "variant_id": "source-cold-start"
+    }
+  ]
+}

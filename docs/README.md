@@ -1,6 +1,6 @@
 **文件說明**：Tickets Hunter 公開技術文件導覽與索引
 
-**最後更新**：2026-10-15
+**最後更新**：2026-10-16
 
 ---
 
@@ -31,7 +31,9 @@ docs/
 │   ├── code-boundaries.md                             <- 程式碼邊界（模組職責、依賴 DAG、命名）
 │   ├── engineering-review.md                          <- 工程審查嚴重度、範圍與輸出格式
 │   ├── ticket_automation_standard.md                  <- 標準功能定義 (12 階段)
-│   ├── utiki-refactor-plan.md                         <- uTiki2 家族重構提案（待核准）
+│   ├── utiki-root-refactor-plan-v1.5.md               <- uTiki 根本重構正式計劃（Issue #17）
+│   ├── utiki-refactor/                                <- v1.5 採用與 P0 證據
+│   ├── utiki-refactor-plan.md                         <- 先前 uTiki2 重構計劃（歷史）
 │   ├── structure.md                                   <- 程式架構與函數索引
 │   ├── development_guide.md                           <- 開發規範與檢查清單
 │   ├── coding_templates.md                            <- 程式寫法範本
@@ -125,7 +127,9 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 | [code-boundaries.md](02-development/code-boundaries.md) | 模組責任與依賴邊界 | 開發者／審查者 |
 | [testing_execution_guide.md](02-development/testing_execution_guide.md) | 實際驗證命令與結果陳述 | 開發者／審查者 |
 | [engineering-review.md](02-development/engineering-review.md) | findings-first 工程審查 | 審查者 |
-| [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | uTiki2 家族分階段重構提案 | 維護者 |
+| [utiki-root-refactor-plan-v1.5.md](02-development/utiki-root-refactor-plan-v1.5.md) | uTiki 根本重構正式計劃與 P0–P8 gates | Issue #17 實作者／審查者 |
+| [utiki-refactor/adoption.md](02-development/utiki-refactor/adoption.md) | v1.5 採用、breaking 決策與授權邊界 | 維護者／審查者 |
+| [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | 先前 uTiki2 家族重構計劃（歷史） | 歷史查閱 |
 | [structure.md](02-development/structure.md) | 程式架構索引與完成度評分 | 所有人 |
 | [zendriver_api_guide.md](06-api-reference/zendriver_api_guide.md) | Zendriver API 指南（主要參考） | 開發者 |
 | [cdp_protocol_reference.md](06-api-reference/cdp_protocol_reference.md) | CDP 協定完整參考 | Zendriver 開發者 |

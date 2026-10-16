@@ -8,6 +8,26 @@
 
 > 適用於所有新程式碼。歷史遺留程式碼可能早於本規則，看到不代表可以仿效。
 
+## uTiki v1.5 過渡規則
+
+Issue #17 已依 [採用紀錄](utiki-refactor/adoption.md) 採用
+[uTiki 根本重構計劃 v1.5](utiki-root-refactor-plan-v1.5.md)，但 baseline
+`f307f7caba054fb40aab807a4629c891e69fb200` 仍是 legacy workflow 架構。本文件因此明確
+區分兩種狀態：
+
+- **現行 legacy owner**：`platforms/utiki/workflow.py` 持有 module `_state` 與 tab
+  registry；`refresh.py` 接收並直接修改其 runtime。這只描述切換前的 production事實，
+  不可作為新增架構的範本。
+- **已採用 target owner**：一個由 `platforms.utiki.bootstrap.create_engine(...)` 建立的
+  engine instance持有唯一 registry；application session writer是唯一 state writer，
+  navigation/purchase（含 input）/refresh reducers只產生 proposal，所有頁面 mutation由
+  session arbiter與唯一 `ActiveEffect` 授權。這是 P2–P6 的實作目標，**目前尚未存在**。
+
+切換前同一 tab只能由現行 workflow dispatch；新引擎僅可在隔離 harness做 shadow
+decision，不得 shadow effect。P6a production candidate切換後則只能有新 owner，不得以
+舊 workflow/facade作 fallback。P6b真站 gate與 final-delete覆核完成前，不得執行 P6c
+最後刪除。
+
 ---
 
 ## 1. 模組職責
@@ -15,10 +35,15 @@
 - **`nodriver_tixcraft.py`** — 主迴圈與路由：URL 分派、瀏覽器啟動、設定熱重載。平台邏輯已全數拆至 `platforms/`。禁止：通用 DOM 工具（屬 `nodriver_common.py`）、設定 CRUD（屬 `settings.py`）。
 - **`nodriver_common.py`** — 共用瀏覽器基礎設施：DOM 操作、暫停機制、Cloudflare、瀏覽器初始化、OCR 工廠、通知。禁止：平台業務邏輯、import `platforms/*` 或 `nodriver_tixcraft`。
 - **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔；legacy facade 只可明示轉接到同一家族 package，不得持有狀態或流程邏輯。禁止：跨平台 import、import `nodriver_tixcraft`。
-- **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是模組 `_state` 與 per-tab runtime 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。離開家族 route、關閉瀏覽器或 handler 終止時，由 workflow 以 non-allocating lookup 精確移除該 tab runtime；checkout 只取消 refresh work，必須保留 runtime 的通知去重狀態。不得只因網站外觀相似就納入同一家族。
-- **`platforms/utiki/refresh.py`** — uTiki document inspection、429 circuit breaker、跨程序 refresh reservation／commit／wait／pause／cancel 與 reload event。queued／reserved pause 會以節流的 exact-token cleanup 釋放共享工作；commit 後的 request 必須保留到觀察到不同的 canonical document token，URL 漂移或 browser command 回傳不得視為完成，也不得重送。每個 request 必須有非空 reason 與唯一 token；一個 intent 的 completion 不得回傳給另一個 caller，terminal recovery probe 也必須同步停止其 lease task。logical request 仍由 workflow 的 canonical per-tab runtime 持有，resume 不得重算 eligibility、延長 deadline 或回捲 committed phase。只能由 workflow 傳入 runtime、tab identity 與 cancel-task registry；禁止 import workflow、持有 `_state`、建立 mirror runtime，或處理購票選擇／提交。
+- **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向；profile、auth、selection 等葉節點不得反向 import orchestration/runtime owner 或 legacy facade。不得只因網站外觀相似就納入同一家族。未採新架構的 family仍遵守現行 workflow owner規則；uTiki新程式依下列 target責任。
+- **現行 `platforms/utiki/workflow.py`** — 切換前的 module `_state`、per-tab registry與購票流程 owner。離開家族 route、關閉瀏覽器或 handler終止時以 non-allocating lookup清理；checkout只取消 refresh work並保留通知去重。此檔是 P6c removal candidate，不再擴張新 state模型或 API。
+- **現行 `platforms/utiki/refresh.py`** — document inspection、429 circuit breaker、跨程序 refresh reservation／commit／wait／pause／cancel與 reload event。logical request目前由 workflow runtime持有；refresh不得反向 import workflow、持有 `_state` 或建立 mirror registry。既有 interval/cooldown/lease/SQLite語意在 target中保留，但 direct runtime mutation與 bool結果需由 P5 typed controller/receipt取代。
+- **target `platforms/utiki/bootstrap.py`** — 只組裝一個 engine instance、validated current policy、browser adapters與窄 ports；不代理舊 API、不接受 legacy dict、不持有第二個 registry。目前尚未實作。
+- **target `platforms/utiki/domain/`** — 純 identity/snapshot/plan/state/reducer/arbitration；不得 import browser、ports、settings、大型 `util`、workflow或 legacy facade，不做 I/O、log、sleep、task、clock或全域 random。目前尚未實作。
+- **target `platforms/utiki/application/`** — session writer持有唯一 state/claim更新權；reducers只提 proposal，I/O task/lease/OCR只回 typed receipt。短 lock不得跨 CDP、SQLite、OCR或等待。目前尚未實作。
+- **target `platforms/utiki/adapters/`** — browser/codec/script loader具體能力；所有 mutation須持有 session grant並回傳可歸屬 receipt。adapter不得自行修改 SessionState或建立購票/刷新 owner。目前尚未實作。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
-- **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
+- **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。現行只使用 `global_settings` 與 `util`；P2 起另允許匯入不依賴 engine／platform 的窄 `utiki_config` current-config validator，除此以外不得擴張專案內依賴。
 - **`global_settings.py`** — 跨 profile 的全域設定驗證與原子化檔案存取。僅允許 import `util`。
 - **`refresh_coordinator.py`** — 跨程序刷新節流與 429 恢復狀態。僅允許 import `util` 與 Python 標準函式庫。
 
@@ -26,17 +51,22 @@
 
 ## 2. 依賴方向（嚴格 DAG）
 
-```
-nodriver_tixcraft  -->  nodriver_common, platforms/*, platforms/{family}, util, settings
-platforms/*        -->  nodriver_common, global_settings, refresh_coordinator, util
-platforms/{family}/workflow
-                   -->  同 package 葉節點與核准 infrastructure 模組,
+切換前 production baseline：
+
+```text
+nodriver_tixcraft  -->  nodriver_common, platforms/*, platforms.utiki, util, settings
+platforms.utiki.__init__
+                   -->  profiles, workflow
+platforms.utiki.workflow
+                   -->  auth, dom, profiles, refresh, selection,
                         nodriver_common, util
-platforms/utiki/refresh
-                   -->  platforms/utiki/profiles, nodriver_common,
-                        global_settings, refresh_coordinator, util
-platforms/{family}/葉節點
-                   -->  同 package 更底層葉節點, Python 標準函式庫
+platforms.utiki.dom
+                   -->  selection, profiles, util
+platforms.utiki.selection
+                   -->  profiles, util
+platforms.utiki.refresh
+                   -->  profiles, nodriver_common, global_settings,
+                        refresh_coordinator, util
 nodriver_common    -->  util, settings
 settings           -->  global_settings, util
 global_settings    -->  util
@@ -44,10 +74,25 @@ refresh_coordinator --> util
 util               -->  (無專案內部匯入)
 ```
 
-禁止反向依賴。不同平台／家族之間禁止互相 import；legacy facade 只能單向 import
-其 canonical family package。package 內不得 import legacy facade。`utiki/refresh.py`
-不得反向 import `utiki/workflow.py`；runtime ownership 必須維持 workflow → refresh
-單向傳入。
+已採用 target（尚未實作／切換）：
+
+```text
+main              -->  utiki bootstrap + current policy + 必要 current-core provider
+bootstrap         -->  application + browser adapters + typed ports
+application       -->  domain + profiles + current policy + ports
+browser/codec     -->  domain + profiles + ports + zendriver
+current-core provider
+                  -->  核准的 core helpers/coordinator + ports
+pure domain/profile/config/keyword
+                  -->  Python標準函式庫 + 已核准純來源
+settings          -->  current-config validator（不經 engine）
+```
+
+禁止反向依賴。不同平台／家族之間禁止互相 import；切換前 legacy facade只能單向 import
+其 canonical family package，package內不得 import legacy facade。現行 `utiki/refresh.py`
+不得反向 import `utiki/workflow.py`。target模組不得 import main、舊 workflow、舊 alias或
+外部 service bridge；domain不得 import ports/browser/settings。core provider不持有
+PurchaseState、不選票、不改 gate、不直接 browser reload。
 
 ---
 
@@ -88,8 +133,8 @@ util               -->  (無專案內部匯入)
 
 ## 5. 平台模組狀態管理
 
-各平台使用模組層級 `_state = {}` dict 管理跨迴圈狀態。家族 package 只能由
-workflow 模組持有一份 `_state`；facade 與葉節點不得複製：
+未採新 session架構的平台目前使用模組層級 `_state = {}` dict管理跨迴圈狀態。切換前
+family package只能由 workflow持有一份 registry；facade與葉節點不得複製：
 
 ```python
 # platforms/xxx.py
@@ -110,6 +155,19 @@ async def nodriver_xxx_main(tab, url, config_dict):
 - family workflow、facade 各自建立一份 state 或同時執行 handler
 - infrastructure 模組保存 workflow runtime 的 mirror、fallback 或第二份 tab registry
 
+uTiki target不沿用上述 `_state` 範本：
+
+- bootstrap與main共同組裝的只有一個 engine instance與一份 per-engine registry；
+- 每個 tab一個 `SessionHandle`／generation，application session writer是唯一 state writer；
+- navigation、purchase（包含 InputState）與 refresh reducer只回 immutable next state與
+  bounded proposals；
+- session arbiter每次至多 grant一個不相容 mutation，唯一 `ActiveEffect`保存精確 owner；
+- adapter、OCR、coordinator與lease task只回 receipt，不能直接清/改 SessionState；
+- unresolved submit、held effect與其 evidence不得因 timeout、URL/config變化或 history
+  eviction而恢復自動發送權；
+- lifecycle cleanup順序為 non-allocating lookup -> closing/revoke/generation退休 ->
+  owned tasks有界收尾 -> exact cleanup/未知結果保留 -> registry回收。
+
 ---
 
 ## 6. 禁止的跨模組模式
@@ -118,20 +176,31 @@ async def nodriver_xxx_main(tab, url, config_dict):
 - 業務邏輯中寫死設定值（必須從 `config_dict` 讀取）
 - 可選欄位用 `config_dict["key"]` 而非 `.get()`（會 KeyError）
 - 使用 `print()` 輸出除錯訊息（必須用 `DebugLogger`）
-- `settings.py` 匯入 `nodriver_tixcraft.py`（循環依賴；僅可匯入 `global_settings` 與 `util`）
+- `settings.py` 匯入 `nodriver_tixcraft.py`、engine 或 platform（循環／責任倒置；只可匯入 `global_settings`、`util` 與 P2 起的窄 `utiki_config` validator）
 - `platforms/*.py` 匯入 `nodriver_tixcraft`（循環依賴）
 - `platforms/*.py` 之間互相匯入（跨平台依賴）
 - family package 匯入自己的 legacy facade，或 profile/auth 葉節點反向匯入 workflow
 - `nodriver_common.py` 匯入 `platforms/*`（反向依賴）
+- uTiki reducer/adapter繞過 session arbiter直接 click、reload、fill、submit或 navigate
+- uTiki bootstrap包裝每個舊 API名稱、接受 legacy dict或建立第二個 singleton/registry
+- 外部 core provider另建 Arbiter/PurchaseState或直接修改 session state
+- 複製 keyword/native setter body製造第二個 source-of-truth
 
 ---
 
 ## 7. 新增設定欄位流程
 
+一般平台：
+
 1. `settings.py` 的 `get_default_config()` 加入欄位 + 安全預設值
-2. 若取代舊欄位，在 `migrate_config()` 加遷移邏輯
+2. 若取代舊欄位，依該平台已核准的相容政策處理遷移
 3. 業務邏輯透過 `config_dict.get(...)` 讀取
 4. 在面向使用者的訊息中使用設定項的 UI 名稱，不用內部鍵名
+
+uTiki v1.5採嚴格唯一格式：正式 runtime只接受 canonical `utiki` behavior section；
+legacy-only及所有 mixed格式由獨立 offline upgrader分類並另存輸出，current loader/settings/
+hot reload不得在正式路徑轉換或覆寫原檔。`accounts.ctbc_*` 是真實 tenant外部契約，
+不屬於要移除的 behavior mirror。
 
 ---
 

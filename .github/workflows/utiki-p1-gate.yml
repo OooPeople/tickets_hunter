@@ -1,0 +1,514 @@
+name: uTiki P1 Gate
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Diagnostic producer context only; the aggregate requires an independent value.
+  APPROVED_CATALOG_SHA256: d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1
+  P1_BASE_SHA: a1374bddc44cabfd5887d9ce991f5657e4c9628b
+  P1_RUN_ID: p1-${{ github.run_id }}-${{ github.run_attempt }}-attempt-${{ github.run_attempt }}
+  CANDIDATE_SHA: ${{ github.sha }}
+
+jobs:
+  unit-contract:
+    name: unit-contract / source-linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/unit-contract-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/unit-contract-source-linux-x64/evidence/negative
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Prepare evidence directory and verify manifest
+        run: |
+          mkdir -p "$JOB_RUN_DIR/auxiliary"
+          python tools/generate_utiki_execution_manifest.py \
+            --root . \
+            --required-catalog ci/utiki-required-cases.json \
+            --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" \
+            --binding-registry ci/utiki-p1-execution-bindings.json \
+            --output tests/fixtures/utiki/manifest.json \
+            --check
+      - name: Run complete strict pytest suite
+        run: >-
+          python -m pytest --strict-config --strict-markers
+          --junitxml "$JOB_RUN_DIR/auxiliary/full-pytest.xml"
+      - name: Preserve unittest discovery compatibility
+        run: >-
+          python -m unittest discover -v
+          2> "$JOB_RUN_DIR/auxiliary/unittest.stderr"
+          > "$JOB_RUN_DIR/auxiliary/unittest.stdout"
+      - name: Build concrete negative probe inputs
+        run: >-
+          python tools/build_utiki_negative_inputs.py
+          --repository-root .
+          --probe-registry ci/utiki-p1-negative-probes.json
+          --output-root "$PROBE_INPUT_ROOT"
+          --candidate-sha "$CANDIDATE_SHA"
+          --environment host
+      - name: Produce per-key negative evidence
+        run: >-
+          python tools/run_utiki_negative_job.py
+          --repository-root .
+          --required-catalog ci/utiki-required-cases.json
+          --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --execution-manifest tests/fixtures/utiki/manifest.json
+          --probe-registry ci/utiki-p1-negative-probes.json
+          --probe-input-root "$PROBE_INPUT_ROOT"
+          --run-dir "$JOB_RUN_DIR"
+          --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}"
+          --job-id unit-contract
+          --phase P1
+          --target source-linux-x64
+          --candidate-sha "$CANDIDATE_SHA"
+          --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+      - name: Run exact catalog-managed unit nodes
+        shell: bash
+        run: |
+          artifact_args=()
+          while IFS=$'\t' read -r kind relative; do
+            artifact_args+=(--artifact "$kind" "$JOB_RUN_DIR/$relative")
+          done < <(jq -r '.cases[] | .executions[] | select(.status == "MAPPED" and .job_id == "unit-contract" and .target == "source-linux-x64") | .evidence[] | [.kind, .path] | @tsv' tests/fixtures/utiki/manifest.json | sort -u)
+          python tools/run_utiki_pytest_job.py \
+            --repository-root . \
+            --execution-manifest tests/fixtures/utiki/manifest.json \
+            --run-dir "$JOB_RUN_DIR" \
+            --run-id "$P1_RUN_ID" \
+            --attempt "${{ github.run_attempt }}" \
+            --job-id unit-contract \
+            --phase P1 \
+            --target source-linux-x64 \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --catalog-sha256 "$APPROVED_CATALOG_SHA256" \
+            "${artifact_args[@]}"
+      - name: Verify formal unit evidence
+        run: >-
+          python tools/verify_utiki_ci_results.py
+          --required-catalog ci/utiki-required-cases.json
+          --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --execution-manifest tests/fixtures/utiki/manifest.json
+          --junit "$JOB_RUN_DIR/junit.xml"
+          --run-metadata "$JOB_RUN_DIR/run-metadata.json"
+          --phase P1
+          --run-id "$P1_RUN_ID"
+          --job-id unit-contract
+          --target source-linux-x64
+          --candidate-sha "$CANDIDATE_SHA"
+          --report "$JOB_RUN_DIR/gate-report.json"
+      - name: Upload unit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p1-unit-contract
+          path: ${{ env.JOB_RUN_DIR }}
+          if-no-files-found: error
+
+  modified-python-syntax:
+    name: modified-python-syntax / source-linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/modified-python-syntax-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/modified-python-syntax-source-linux-x64/evidence/negative
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Prepare evidence and verify manifest
+        run: |
+          mkdir -p "$JOB_RUN_DIR/evidence"
+          python tools/generate_utiki_execution_manifest.py --root . --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --binding-registry ci/utiki-p1-execution-bindings.json --output tests/fixtures/utiki/manifest.json --check
+          python -c 'import json,os,pathlib; pathlib.Path(os.environ["JOB_RUN_DIR"],"evidence","run-context.json").write_text(json.dumps({"schema_version":1,"run_id":os.environ["P1_RUN_ID"],"job_id":"modified-python-syntax","phase":"P1","base_sha":os.environ["P1_BASE_SHA"],"candidate_sha":os.environ["CANDIDATE_SHA"]},sort_keys=True)+"\n",encoding="utf-8")'
+      - name: Freeze modified-Python input manifest
+        run: >-
+          python tools/verify_modified_python.py
+          --base-ref "$P1_BASE_SHA"
+          --candidate-ref "$CANDIDATE_SHA"
+          --run-metadata "$JOB_RUN_DIR/evidence/run-context.json"
+          --write-manifest "$JOB_RUN_DIR/evidence/modified-python-manifest.json"
+      - name: Produce positive syntax evidence
+        run: >-
+          python tools/run_utiki_evidence.py
+          --repository-root .
+          --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/python-syntax-report.json"
+          --kind python-syntax-report
+          --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}"
+          --job-id modified-python-syntax
+          --phase P1
+          --target source-linux-x64
+          --candidate-sha "$CANDIDATE_SHA"
+          --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/verify_modified_python.py
+          --input run-context artifact evidence/run-context.json
+          --input modified-python-manifest artifact evidence/modified-python-manifest.json
+          --producer-report evidence/python-syntax-raw.json
+          --
+          --base-ref "$P1_BASE_SHA"
+          --candidate-ref "$CANDIDATE_SHA"
+          --run-metadata "$JOB_RUN_DIR/evidence/run-context.json"
+          --manifest "$JOB_RUN_DIR/evidence/modified-python-manifest.json"
+          --report "$JOB_RUN_DIR/evidence/python-syntax-raw.json"
+          --cache-dir "$JOB_RUN_DIR/evidence/pyc-cache"
+      - name: Build and execute concrete negative probes
+        run: |
+          python tools/build_utiki_negative_inputs.py --repository-root . --probe-registry ci/utiki-p1-negative-probes.json --output-root "$PROBE_INPUT_ROOT" --candidate-sha "$CANDIDATE_SHA" --environment host
+          python tools/run_utiki_negative_job.py --repository-root . --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --probe-registry ci/utiki-p1-negative-probes.json --probe-input-root "$PROBE_INPUT_ROOT" --run-dir "$JOB_RUN_DIR" --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --job-id modified-python-syntax --phase P1 --target source-linux-x64 --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+      - name: Assemble and verify syntax job
+        shell: bash
+        run: |
+          artifact_args=()
+          while IFS=$'\t' read -r kind relative; do artifact_args+=(--artifact "$kind" "$JOB_RUN_DIR/$relative"); done < <(jq -r '.cases[] | .executions[] | select(.status == "MAPPED" and .job_id == "modified-python-syntax" and .target == "source-linux-x64") | .evidence[] | [.kind, .path] | @tsv' tests/fixtures/utiki/manifest.json | sort -u)
+          python tools/assemble_utiki_non_pytest_job.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json --run-dir "$JOB_RUN_DIR" --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --job-id modified-python-syntax --phase P1 --target source-linux-x64 --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256" "${artifact_args[@]}"
+          python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --junit "$JOB_RUN_DIR/junit.xml" --run-metadata "$JOB_RUN_DIR/run-metadata.json" --phase P1 --run-id "$P1_RUN_ID" --job-id modified-python-syntax --target source-linux-x64 --candidate-sha "$CANDIDATE_SHA" --report "$JOB_RUN_DIR/gate-report.json"
+      - name: Upload syntax evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p1-modified-python-syntax
+          path: ${{ env.JOB_RUN_DIR }}
+          if-no-files-found: error
+
+  architecture-types:
+    name: architecture-types / source-linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/architecture-types-source-linux-x64
+      PROBE_INPUT_ROOT: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/architecture-types-source-linux-x64/evidence/negative
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Prepare evidence and verify manifest
+        run: |
+          mkdir -p "$JOB_RUN_DIR/evidence"
+          python tools/generate_utiki_execution_manifest.py --root . --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --binding-registry ci/utiki-p1-execution-bindings.json --output tests/fixtures/utiki/manifest.json --check
+      - name: Produce architecture evidence
+        run: >-
+          python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/architecture-report.json" --kind architecture-report --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --job-id architecture-types --phase P1 --target source-linux-x64
+          --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/check_utiki_architecture.py
+          --input core-inventory repository docs/02-development/utiki-refactor/core-integration-inventory.md
+          --producer-report stdout -- --root "$GITHUB_WORKSPACE" --core-inventory "$GITHUB_WORKSPACE/docs/02-development/utiki-refactor/core-integration-inventory.md" --candidate-sha "$CANDIDATE_SHA" --strict
+      - name: Produce controlled strict typecheck evidence
+        run: >-
+          python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/typecheck-report.json" --kind typecheck-report --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --job-id architecture-types --phase P1 --target source-linux-x64
+          --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/run_utiki_typecheck.py
+          --input typed-manifest repository tests/fixtures/utiki/typecheck-p1/manifest.txt
+          --input mypy-config repository tests/fixtures/utiki/typecheck-p1/mypy.ini
+          --input coverage-context repository tests/fixtures/utiki/typecheck-p1/context.json
+          --producer-output typecheck-stdout evidence/typecheck-mypy.stdout
+          --producer-output typecheck-stderr evidence/typecheck-mypy.stderr
+          --producer-report evidence/typecheck-raw.json --
+          --root "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1"
+          --manifest "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1/manifest.txt"
+          --config "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1/mypy.ini"
+          --coverage-context "$GITHUB_WORKSPACE/tests/fixtures/utiki/typecheck-p1/context.json"
+          --report "$JOB_RUN_DIR/evidence/typecheck-raw.json"
+          --stdout-report "$JOB_RUN_DIR/evidence/typecheck-mypy.stdout"
+          --stderr-report "$JOB_RUN_DIR/evidence/typecheck-mypy.stderr"
+      - name: Build and execute concrete negative probes
+        run: |
+          python tools/build_utiki_negative_inputs.py --repository-root . --probe-registry ci/utiki-p1-negative-probes.json --output-root "$PROBE_INPUT_ROOT" --candidate-sha "$CANDIDATE_SHA" --environment host
+          python tools/run_utiki_negative_job.py --repository-root . --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --probe-registry ci/utiki-p1-negative-probes.json --probe-input-root "$PROBE_INPUT_ROOT" --run-dir "$JOB_RUN_DIR" --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --job-id architecture-types --phase P1 --target source-linux-x64 --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+      - name: Run managed architecture nodes and verify
+        shell: bash
+        run: |
+          artifact_args=()
+          while IFS=$'\t' read -r kind relative; do artifact_args+=(--artifact "$kind" "$JOB_RUN_DIR/$relative"); done < <(jq -r '.cases[] | .executions[] | select(.status == "MAPPED" and .job_id == "architecture-types" and .target == "source-linux-x64") | .evidence[] | [.kind, .path] | @tsv' tests/fixtures/utiki/manifest.json | sort -u)
+          python tools/run_utiki_pytest_job.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json --run-dir "$JOB_RUN_DIR" --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --job-id architecture-types --phase P1 --target source-linux-x64 --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256" "${artifact_args[@]}"
+          python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --junit "$JOB_RUN_DIR/junit.xml" --run-metadata "$JOB_RUN_DIR/run-metadata.json" --phase P1 --run-id "$P1_RUN_ID" --job-id architecture-types --target source-linux-x64 --candidate-sha "$CANDIDATE_SHA" --report "$JOB_RUN_DIR/gate-report.json"
+      - name: Upload architecture evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p1-architecture-types
+          path: ${{ env.JOB_RUN_DIR }}
+          if-no-files-found: error
+
+  browser-contract-isolated:
+    name: browser-contract-isolated / isolated-linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/browser-contract-isolated-linux-x64
+      ISOLATION_IMAGE_TAG: utiki-p1-browser:${{ github.run_id }}-${{ github.run_attempt }}
+      PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify digest-pinned base image prerequisite
+        shell: bash
+        run: |
+          if [[ ! "$PINNED_BASE_IMAGE" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=uTiki P1 isolation prerequisite missing::Set repository variable UTIKI_P1_BASE_IMAGE to a reviewed repository@sha256 digest." >&2
+            exit 2
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Prepare browser evidence resources
+        run: |
+          mkdir -p "$JOB_RUN_DIR/evidence" "$JOB_RUN_DIR/resources"
+          cp tests/fixtures/ctbc/UTK0201_date.html "$JOB_RUN_DIR/resources/fixture.html"
+          cp tools/utiki_egress_canary.py "$JOB_RUN_DIR/resources/script.py"
+          python tools/generate_utiki_execution_manifest.py --root . --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --binding-registry ci/utiki-p1-execution-bindings.json --output tests/fixtures/utiki/manifest.json --check
+      - name: Prebuild digest-pinned isolation image
+        run: |
+          python tools/build_utiki_isolation_image.py --repository-root . --base-image "$PINNED_BASE_IMAGE" --tag "$ISOLATION_IMAGE_TAG" --evidence "$JOB_RUN_DIR/evidence/image-build.json"
+          echo "ISOLATION_IMAGE_ID=$(jq -r .image_id "$JOB_RUN_DIR/evidence/image-build.json")" >> "$GITHUB_ENV"
+      - name: Run isolated browser producer and formal envelope
+        run: >-
+          python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/browser-isolation-report.json" --kind browser-isolation-report --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --job-id browser-contract-isolated --phase P1 --target isolated-linux-x64
+          --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/run_utiki_browser_isolation.py
+          --input isolation-contract repository ci/utiki-browser-isolation.json
+          --input execution-manifest repository tests/fixtures/utiki/manifest.json
+          --input image-build artifact evidence/image-build.json
+          --producer-report evidence/browser-isolation-raw.json --
+          --contract "$GITHUB_WORKSPACE/ci/utiki-browser-isolation.json" --image "$ISOLATION_IMAGE_ID"
+          --image-build-evidence "$JOB_RUN_DIR/evidence/image-build.json"
+          --execution-manifest "$GITHUB_WORKSPACE/tests/fixtures/utiki/manifest.json" --run-dir "$JOB_RUN_DIR/evidence"
+          --report "$JOB_RUN_DIR/evidence/browser-isolation-raw.json" --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --phase P1 --catalog-sha256 "$APPROVED_CATALOG_SHA256" --candidate-sha "$CANDIDATE_SHA"
+      - name: Produce production-origin evidence envelope
+        run: >-
+          python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/production-origin-report.json" --kind production-origin-report --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --job-id browser-contract-isolated --phase P1 --target isolated-linux-x64
+          --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/run_utiki_browser_isolation.py
+          --input isolation-report artifact evidence/browser-isolation-raw.json
+          --input origin-report artifact evidence/production-origin-raw.json
+          --producer-report evidence/production-origin-verified.json --
+          --verify-existing-origin --isolation-report "$JOB_RUN_DIR/evidence/browser-isolation-raw.json"
+          --origin-report "$JOB_RUN_DIR/evidence/production-origin-raw.json"
+          --report "$JOB_RUN_DIR/evidence/production-origin-verified.json"
+      - name: Assemble and verify isolated browser job
+        shell: bash
+        run: |
+          artifact_args=()
+          while IFS=$'\t' read -r kind relative; do artifact_args+=(--artifact "$kind" "$JOB_RUN_DIR/$relative"); done < <(jq -r '.cases[] | .executions[] | select(.status == "MAPPED" and .job_id == "browser-contract-isolated" and .target == "isolated-linux-x64") | .evidence[] | [.kind, .path] | @tsv' tests/fixtures/utiki/manifest.json | sort -u)
+          python tools/assemble_utiki_isolated_job.py --repository-root . --required-catalog ci/utiki-required-cases.json --execution-manifest tests/fixtures/utiki/manifest.json --run-dir "$JOB_RUN_DIR" --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --job-id browser-contract-isolated --phase P1 --target isolated-linux-x64 --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256" --junit "$JOB_RUN_DIR/evidence/browser.xml" --reporter-result "$JOB_RUN_DIR/evidence/browser-reporter-result.json" --inner-report "$JOB_RUN_DIR/evidence/inner-isolation-report.json" --resource fixture "$JOB_RUN_DIR/resources/fixture.html" --resource script "$JOB_RUN_DIR/resources/script.py" "${artifact_args[@]}"
+          python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --junit "$JOB_RUN_DIR/junit.xml" --run-metadata "$JOB_RUN_DIR/run-metadata.json" --phase P1 --run-id "$P1_RUN_ID" --job-id browser-contract-isolated --target isolated-linux-x64 --candidate-sha "$CANDIDATE_SHA" --require-browser --report "$JOB_RUN_DIR/gate-report.json"
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p1-browser-contract-isolated
+          path: ${{ env.JOB_RUN_DIR }}
+          if-no-files-found: error
+
+  performance-contract:
+    name: performance-contract / isolated-linux-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      JOB_RUN_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/performance-contract-isolated-linux-x64
+      ISOLATION_IMAGE_TAG: utiki-p1-performance:${{ github.run_id }}-${{ github.run_attempt }}
+      PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify digest-pinned base image prerequisite
+        shell: bash
+        run: |
+          if [[ ! "$PINNED_BASE_IMAGE" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=uTiki P1 isolation prerequisite missing::Set repository variable UTIKI_P1_BASE_IMAGE to a reviewed repository@sha256 digest." >&2
+            exit 2
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Prepare performance resources
+        run: |
+          mkdir -p "$JOB_RUN_DIR/evidence" "$JOB_RUN_DIR/resources"
+          cp tests/fixtures/ctbc/UTK0201_date.html "$JOB_RUN_DIR/resources/fixture.html"
+          cp src/platforms/utiki/dom.py "$JOB_RUN_DIR/resources/script.py"
+          python tools/generate_utiki_execution_manifest.py --root . --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --binding-registry ci/utiki-p1-execution-bindings.json --output tests/fixtures/utiki/manifest.json --check
+      - name: Prebuild digest-pinned isolation image
+        run: |
+          python tools/build_utiki_isolation_image.py --repository-root . --base-image "$PINNED_BASE_IMAGE" --tag "$ISOLATION_IMAGE_TAG" --evidence "$JOB_RUN_DIR/evidence/image-build.json"
+          echo "ISOLATION_IMAGE_ID=$(jq -r .image_id "$JOB_RUN_DIR/evidence/image-build.json")" >> "$GITHUB_ENV"
+      - name: Produce isolated performance envelope
+        run: >-
+          python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/browser-isolation-report.json" --kind browser-isolation-report --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --job-id performance-contract --phase P1 --target isolated-linux-x64
+          --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/run_utiki_performance_isolation.py
+          --input performance-contract repository ci/utiki-performance-isolation.json
+          --input execution-manifest repository tests/fixtures/utiki/manifest.json
+          --input image-build artifact evidence/image-build.json
+          --producer-report evidence/performance-isolation-raw.json --
+          --contract "$GITHUB_WORKSPACE/ci/utiki-performance-isolation.json" --image "$ISOLATION_IMAGE_ID"
+          --image-build-evidence "$JOB_RUN_DIR/evidence/image-build.json"
+          --execution-manifest "$GITHUB_WORKSPACE/tests/fixtures/utiki/manifest.json" --run-dir "$JOB_RUN_DIR/evidence"
+          --report "$JOB_RUN_DIR/evidence/performance-isolation-raw.json" --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --phase P1 --catalog-sha256 "$APPROVED_CATALOG_SHA256" --candidate-sha "$CANDIDATE_SHA"
+      - name: Verify and envelope benchmark evidence
+        run: >-
+          python tools/run_utiki_evidence.py --repository-root . --execution-manifest tests/fixtures/utiki/manifest.json
+          --artifact-root "$JOB_RUN_DIR"
+          --report "$JOB_RUN_DIR/evidence/benchmark-report.json" --kind benchmark-report --run-id "$P1_RUN_ID"
+          --attempt "${{ github.run_attempt }}" --job-id performance-contract --phase P1 --target isolated-linux-x64
+          --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256"
+          --producer tools/benchmarks/verify_utiki_p1_performance.py
+          --input performance-contract repository ci/utiki-performance-isolation.json
+          --input performance-isolation-report artifact evidence/performance-isolation-raw.json
+          --input raw-benchmark-report artifact evidence/raw-benchmark-report.json
+          --input managed-junit artifact evidence/performance.xml
+          --input reporter-result artifact evidence/performance-reporter-result.json
+          --producer-report evidence/performance-verification-raw.json --
+          --contract "$GITHUB_WORKSPACE/ci/utiki-performance-isolation.json"
+          --isolation-report "$JOB_RUN_DIR/evidence/performance-isolation-raw.json"
+          --raw-benchmark-report "$JOB_RUN_DIR/evidence/raw-benchmark-report.json"
+          --junit "$JOB_RUN_DIR/evidence/performance.xml"
+          --reporter-result "$JOB_RUN_DIR/evidence/performance-reporter-result.json"
+          --output "$JOB_RUN_DIR/evidence/performance-verification-raw.json"
+      - name: Assemble and verify isolated performance job
+        run: |
+          python tools/assemble_utiki_isolated_job.py --repository-root . --required-catalog ci/utiki-required-cases.json --execution-manifest tests/fixtures/utiki/manifest.json --run-dir "$JOB_RUN_DIR" --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --job-id performance-contract --phase P1 --target isolated-linux-x64 --candidate-sha "$CANDIDATE_SHA" --catalog-sha256 "$APPROVED_CATALOG_SHA256" --junit "$JOB_RUN_DIR/evidence/performance.xml" --reporter-result "$JOB_RUN_DIR/evidence/performance-reporter-result.json" --inner-report "$JOB_RUN_DIR/evidence/inner-performance-report.json" --resource fixture "$JOB_RUN_DIR/resources/fixture.html" --resource script "$JOB_RUN_DIR/resources/script.py" --artifact browser-isolation-report "$JOB_RUN_DIR/evidence/browser-isolation-report.json" --artifact benchmark-report "$JOB_RUN_DIR/evidence/benchmark-report.json"
+          python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --junit "$JOB_RUN_DIR/junit.xml" --run-metadata "$JOB_RUN_DIR/run-metadata.json" --phase P1 --run-id "$P1_RUN_ID" --job-id performance-contract --target isolated-linux-x64 --candidate-sha "$CANDIDATE_SHA" --require-browser --report "$JOB_RUN_DIR/gate-report.json"
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p1-performance-contract
+          path: ${{ env.JOB_RUN_DIR }}
+          if-no-files-found: error
+
+  aggregate:
+    name: aggregate / P1
+    if: always()
+    needs:
+      - unit-contract
+      - modified-python-syntax
+      - architecture-types
+      - browser-contract-isolated
+      - performance-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      AGGREGATE_DIR: /tmp/utiki-p1-${{ github.run_id }}-${{ github.run_attempt }}/aggregate
+      FORMAL_APPROVED_CATALOG_SHA256: ${{ vars.UTIKI_P1_APPROVED_CATALOG_SHA256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+      - name: Require every producer job to succeed
+        env:
+          UNIT_CONTRACT_RESULT: ${{ needs.unit-contract.result }}
+          MODIFIED_PYTHON_SYNTAX_RESULT: ${{ needs.modified-python-syntax.result }}
+          ARCHITECTURE_TYPES_RESULT: ${{ needs.architecture-types.result }}
+          BROWSER_CONTRACT_ISOLATED_RESULT: ${{ needs.browser-contract-isolated.result }}
+          PERFORMANCE_CONTRACT_RESULT: ${{ needs.performance-contract.result }}
+        run: |
+          mkdir -p "$AGGREGATE_DIR"
+          env | grep '_RESULT=' | sort > "$AGGREGATE_DIR/producer-results.txt"
+          test "$UNIT_CONTRACT_RESULT" = success
+          test "$MODIFIED_PYTHON_SYNTAX_RESULT" = success
+          test "$ARCHITECTURE_TYPES_RESULT" = success
+          test "$BROWSER_CONTRACT_ISOLATED_RESULT" = success
+          test "$PERFORMANCE_CONTRACT_RESULT" = success
+      - uses: actions/download-artifact@v8
+        with:
+          name: utiki-p1-unit-contract
+          path: ${{ env.AGGREGATE_DIR }}/unit-contract
+      - uses: actions/download-artifact@v8
+        with:
+          name: utiki-p1-modified-python-syntax
+          path: ${{ env.AGGREGATE_DIR }}/modified-python-syntax
+      - uses: actions/download-artifact@v8
+        with:
+          name: utiki-p1-architecture-types
+          path: ${{ env.AGGREGATE_DIR }}/architecture-types
+      - uses: actions/download-artifact@v8
+        with:
+          name: utiki-p1-browser-contract-isolated
+          path: ${{ env.AGGREGATE_DIR }}/browser-contract-isolated
+      - uses: actions/download-artifact@v8
+        with:
+          name: utiki-p1-performance-contract
+          path: ${{ env.AGGREGATE_DIR }}/performance-contract
+      - name: Require independent catalog approval
+        shell: bash
+        run: |
+          if [[ ! "$FORMAL_APPROVED_CATALOG_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error title=uTiki P1 catalog approval missing::A maintainer-controlled approved catalog digest is required for the formal aggregate." >&2
+            exit 2
+          fi
+      - name: Build digest-bound run index
+        run: >-
+          python tools/build_utiki_run_index.py --required-catalog ci/utiki-required-cases.json
+          --approved-catalog-sha256 "$FORMAL_APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json
+          --phase P1 --run-id "$P1_RUN_ID" --attempt "${{ github.run_attempt }}" --candidate-sha "$CANDIDATE_SHA"
+          --output "$AGGREGATE_DIR/gate-runs.json"
+          --run unit-contract source-linux-x64 "$AGGREGATE_DIR/unit-contract"
+          --run modified-python-syntax source-linux-x64 "$AGGREGATE_DIR/modified-python-syntax"
+          --run architecture-types source-linux-x64 "$AGGREGATE_DIR/architecture-types"
+          --run browser-contract-isolated isolated-linux-x64 "$AGGREGATE_DIR/browser-contract-isolated"
+          --run performance-contract isolated-linux-x64 "$AGGREGATE_DIR/performance-contract"
+      - name: Verify aggregate P1 gate
+        run: >-
+          python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json
+          --approved-catalog-sha256 "$FORMAL_APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json
+          --run-index "$AGGREGATE_DIR/gate-runs.json" --phase P1 --run-id "$P1_RUN_ID"
+          --candidate-sha "$CANDIDATE_SHA" --report "$AGGREGATE_DIR/gate-report.json"
+      - name: Upload aggregate evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p1-aggregate
+          path: ${{ env.AGGREGATE_DIR }}
+          if-no-files-found: error

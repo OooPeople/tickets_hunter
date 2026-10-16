@@ -3,3 +3,7 @@
 # "text=auto" would renormalize every existing file.
 *.command text eol=lf
 *.sh text eol=lf
+
+# P1 evidence identities are byte-pinned and must survive Windows checkout.
+ci/utiki-*.json text eol=lf
+tests/fixtures/utiki/manifest.json text eol=lf

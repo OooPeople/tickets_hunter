@@ -549,6 +549,7 @@ def test_h08_probe_reaches_exact_reason_and_subject(
 ) -> None:
     entry = _registry_entry(f"H08.arch.{variant}")
     negative_builder._typecheck_probe(tmp_path, entry, "1" * 40)
+    (tmp_path / "fake-mypy.py").chmod(0o644)
     completed, transcript = _run_probe(tmp_path)
 
     assert completed.returncode == 1

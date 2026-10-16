@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -2571,6 +2572,42 @@ def test_aggregate_accepts_digest_bound_artifacts_relocated_after_production(
     result = _run_checker(*_index_arguments(relocated_manifest, relocated_index))
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_aggregate_accepts_artifacts_after_file_modes_are_normalized(
+    gate_inputs,
+):
+    case = gate_inputs
+    index_path, _, _ = _make_run_index(case, compact=True)
+    original = _run_checker(*_index_arguments(case["manifest_path"], index_path))
+    assert original.returncode == 0, original.stderr or original.stdout
+
+    artifact_root = case["root"].with_name(case["root"].name + "-artifact")
+    shutil.copytree(case["root"], artifact_root)
+    original_fixture = next(case["root"].rglob("fake-mypy.py"))
+    copied_fixture = artifact_root / original_fixture.relative_to(case["root"])
+    fixture_sha256 = _sha256(original_fixture)
+    index_sha256 = _sha256(index_path)
+    for path in artifact_root.rglob("*"):
+        assert not path.is_symlink()
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    artifact_root.chmod(0o755)
+    if os.name != "nt":
+        assert copied_fixture.stat().st_mode & 0o111 == 0
+    assert _sha256(copied_fixture) == fixture_sha256
+    assert _sha256(artifact_root / index_path.relative_to(case["root"])) == index_sha256
+
+    result = _run_checker(
+        *_index_arguments(
+            artifact_root / case["manifest_path"].relative_to(case["root"]),
+            artifact_root / index_path.relative_to(case["root"]),
+        )
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    report = json.loads(result.stdout)
+    assert report["status"] == "PASS"
+    assert report["scope"] == "phase"
+    assert report["required"] == 63
 
 
 def test_relocated_evidence_rejects_unsafe_artifact_path(gate_inputs):

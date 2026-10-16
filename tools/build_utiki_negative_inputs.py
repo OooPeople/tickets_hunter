@@ -218,7 +218,6 @@ def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> N
     )
     fake_mypy = root / "fake-mypy.py"
     fake_mypy.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
-    fake_mypy.chmod(0o755)
     new_paths = {
         "new-domain-file": "src/platforms/utiki/domain/state.py",
         "new-application-file": "src/platforms/utiki/application/engine.py",

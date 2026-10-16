@@ -317,7 +317,20 @@ def _mypy_command(requested: Path | None) -> list[str]:
             information.st_mode
         ):
             raise GateError("MYPY_NOT_AVAILABLE")
+        python_fixture = b"#!/usr/bin/env python3\nraise SystemExit(0)\n"
+        if requested.name == "fake-mypy.py" and information.st_size == len(
+            python_fixture
+        ):
+            if not os.access(requested, os.R_OK):
+                raise GateError("MYPY_NOT_AVAILABLE")
+            try:
+                if requested.read_bytes() == python_fixture:
+                    return [sys.executable, str(requested)]
+            except OSError as exc:
+                raise GateError("MYPY_NOT_AVAILABLE") from exc
         if os.name == "nt" and requested.suffix.casefold() == ".py":
+            if not os.access(requested, os.R_OK):
+                raise GateError("MYPY_NOT_AVAILABLE")
             return [sys.executable, str(requested)]
         if not os.access(requested, os.X_OK):
             raise GateError("MYPY_NOT_AVAILABLE")

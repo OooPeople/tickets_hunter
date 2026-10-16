@@ -120,6 +120,53 @@ def test_runner_invokes_strict_mypy_with_every_manifest_file(tmp_path):
         assert path in arguments
 
 
+def test_python_fixture_runs_without_execute_bit(tmp_path):
+    root, manifest, config, fake, _ = _fixture(tmp_path)
+    fake.write_bytes(b"#!/usr/bin/env python3\nraise SystemExit(0)\n")
+    fake.chmod(0o644)
+
+    result, report_path, log = _run(root, manifest, config, fake, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not log.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "PASS"
+    assert report["mypy_exit_code"] == 0
+
+
+def test_direct_executable_still_requires_execute_bit(tmp_path):
+    root, manifest, config, fake, _ = _fixture(tmp_path)
+    direct = tmp_path / "fake-mypy"
+    direct.write_bytes(fake.read_bytes())
+    direct.chmod(0o644)
+
+    result, report_path, log = _run(root, manifest, config, direct, tmp_path)
+
+    assert result.returncode != 0
+    assert not log.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "BLOCKED"
+    assert report["failure_reasons"] == ["MYPY_NOT_AVAILABLE"]
+
+
+def test_same_name_nonfixture_keeps_platform_launch_contract(tmp_path):
+    root, manifest, config, fake, _ = _fixture(tmp_path)
+    fake.chmod(0o644)
+
+    result, report_path, log = _run(root, manifest, config, fake, tmp_path)
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if os.name == "nt":
+        assert result.returncode == 0
+        assert log.exists()
+        assert report["status"] == "PASS"
+    else:
+        assert result.returncode != 0
+        assert not log.exists()
+        assert report["status"] == "BLOCKED"
+        assert report["failure_reasons"] == ["MYPY_NOT_AVAILABLE"]
+
+
 def test_new_domain_file_omitted_from_manifest_fails_before_mypy(tmp_path):
     root, manifest, config, fake, _ = _fixture(tmp_path)
     _write(

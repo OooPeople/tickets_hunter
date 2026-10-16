@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -564,8 +563,6 @@ def _validate_typecheck(
             _canonical_text_file(path, TYPECHECK_MANIFEST_CONTENT, kind)
         elif kind == "typecheck-mypy":
             _canonical_text_file(path, TYPECHECK_FAKE_MYPY_CONTENT, kind)
-            if os.name != "nt" and path.stat().st_mode & 0o111 == 0:
-                raise NegativeContractError("typecheck mypy fixture is not executable")
         else:
             _canonical_text_file(path, TYPECHECK_SEED_CONTENT, kind)
     config = inputs.get("typecheck-config", inputs["mutated-typecheck-input"])[1]

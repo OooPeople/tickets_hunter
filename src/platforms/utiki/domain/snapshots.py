@@ -109,3 +109,45 @@ class MapArea:
         for name in ("area_id", "href", "title"):
             if type(getattr(self, name)) is not str:
                 raise ValueError(f"{name} must be a string")
+
+
+DATE_CONTROL_FINGERPRINT_FIELDS = (
+    "tag_name", "id", "href", "resolved_href", "role", "type",
+    "target", "download", "ping", "formaction", "has_form", "onclick",
+)
+
+DateFingerprint: TypeAlias = tuple[tuple[str, str | bool], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DateControl:
+    actionable: bool
+    fingerprint: DateFingerprint
+
+    def __post_init__(self) -> None:
+        if type(self.actionable) is not bool:
+            raise ValueError("actionable must be a boolean")
+        if type(self.fingerprint) is not tuple or len(self.fingerprint) != len(
+            DATE_CONTROL_FINGERPRINT_FIELDS
+        ):
+            raise ValueError("fingerprint must contain every control field")
+        for expected_name, item in zip(DATE_CONTROL_FINGERPRINT_FIELDS, self.fingerprint):
+            if (
+                type(item) is not tuple
+                or len(item) != 2
+                or item[0] != expected_name
+                or type(item[1]) is not (bool if expected_name == "has_form" else str)
+            ):
+                raise ValueError(f"invalid control fingerprint field: {expected_name}")
+
+
+@dataclass(frozen=True, slots=True)
+class DateRow:
+    text: str
+    controls: tuple[DateControl, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.text) is not str or type(self.controls) is not tuple or any(
+            not isinstance(control, DateControl) for control in self.controls
+        ):
+            raise ValueError("date row must contain text and controls")

@@ -338,8 +338,8 @@ async def _assert_date_fixture(browser):
     tab, snapshot = await open_snapshot()
     assert snapshot.document_id
     assert len(snapshot.rows) == 2
-    assert snapshot.rows[0][1][0][0]
-    assert not snapshot.rows[1][1][0][0]
+    assert snapshot.rows[0].controls[0].actionable
+    assert not snapshot.rows[1].controls[0].actionable
     assert await tab.evaluate("Number(document.body.dataset.dateClicks || 0)") == 0
 
     plan = plan_for(snapshot)

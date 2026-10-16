@@ -15,6 +15,9 @@ from .profiles import (
 )
 from .domain.snapshots import (
     AreaRow,
+    DATE_CONTROL_FINGERPRINT_FIELDS,
+    DateControl,
+    DateRow,
     InvalidField,
     MapArea,
     PresentField,
@@ -23,18 +26,12 @@ from .domain.snapshots import (
 )
 
 
-DATE_CONTROL_FINGERPRINT_FIELDS = (
-    "tag_name", "id", "href", "resolved_href", "role", "type",
-    "target", "download", "ping", "formaction", "has_form", "onclick",
-)
-
-
 @dataclass(frozen=True)
 class DateSnapshot:
     ok: bool
     page_url: str
     document_id: str
-    rows: tuple
+    rows: tuple[DateRow, ...]
     reason: str = ""
 
 
@@ -194,7 +191,7 @@ def _freeze_date_control(raw_control):
         (field, has_form if field == "has_form" else raw_control.get(field, ""))
         for field in DATE_CONTROL_FINGERPRINT_FIELDS
     )
-    return actionable, fingerprint
+    return DateControl(actionable, fingerprint)
 
 
 def parse_date_snapshot(raw_snapshot):
@@ -224,7 +221,7 @@ def parse_date_snapshot(raw_snapshot):
         frozen_controls = tuple(_freeze_date_control(item) for item in controls)
         if any(item is None for item in frozen_controls):
             return None
-        frozen_rows.append((row["text"], frozen_controls))
+        frozen_rows.append(DateRow(row["text"], frozen_controls))
     page_url = raw_snapshot.get("page_url")
     document_id = raw_snapshot.get("document_id")
     if not isinstance(page_url, str) or not isinstance(document_id, str):
@@ -705,21 +702,21 @@ def _date_candidates(snapshot, config_dict):
     """從場次快照建立符合設定的候選清單。"""
 
     candidates = []
-    for row_index, (row_text, controls) in enumerate(snapshot.rows):
+    for row_index, row in enumerate(snapshot.rows):
         actionable = [
-            (index, fingerprint)
-            for index, (is_actionable, fingerprint) in enumerate(controls)
-            if is_actionable
+            (index, control.fingerprint)
+            for index, control in enumerate(row.controls)
+            if control.actionable
         ]
-        if len(actionable) != 1 or not row_text:
+        if len(actionable) != 1 or not row.text:
             continue
-        if util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
+        if util.reset_row_text_if_match_keyword_exclude(config_dict, row.text):
             continue
         control_index, fingerprint = actionable[0]
         action = _classify_date_control(fingerprint, snapshot.page_url)
         if action:
             candidates.append({
-                "text": row_text,
+                "text": row.text,
                 "row_index": row_index,
                 "control_index": control_index,
                 "fingerprint": fingerprint,
@@ -785,12 +782,13 @@ def date_plan_matches_snapshot(snapshot, plan):
         or not 0 <= plan.row_index < len(snapshot.rows)
     ):
         return False
-    row_text, controls = snapshot.rows[plan.row_index]
-    if not 0 <= plan.control_index < len(controls):
+    row = snapshot.rows[plan.row_index]
+    if not 0 <= plan.control_index < len(row.controls):
         return False
-    actionable, fingerprint = controls[plan.control_index]
+    control = row.controls[plan.control_index]
+    fingerprint = control.fingerprint
     if (
-        not actionable or plan.text != row_text
+        not control.actionable or plan.text != row.text
         or plan.control_fingerprint != fingerprint
         or tuple(key for key, _value in fingerprint)
         != DATE_CONTROL_FINGERPRINT_FIELDS

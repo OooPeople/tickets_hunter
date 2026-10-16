@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import stat
+import sys
 import tempfile
 import unicodedata
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Literal, cast
+
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from utiki_config import (
     DEFAULT_BEHAVIOR,
@@ -239,6 +244,33 @@ def write_profile_batch(requests: tuple[ProfileRequest, ...], output_dir: Path) 
     return result
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Offline uTiki profile conversion")
+    parser.add_argument("--input", required=True, type=Path)
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--dry-run", action="store_true")
+    output_group.add_argument("--output", type=Path)
+    parser.add_argument("--conflict-policy", choices=("canonical", "legacy"))
+    arguments = parser.parse_args(argv)
+    try:
+        prepared = prepare_profile(
+            arguments.input, conflict_policy=arguments.conflict_policy
+        )
+        if arguments.output is None:
+            digest = hashlib.sha256(prepared.output_bytes).hexdigest()
+            print(f"READY source_sha256={prepared.source_digest} output_sha256={digest}")
+        else:
+            digest = write_new_profile(prepared, arguments.output)
+            print(f"WRITTEN source_sha256={prepared.source_digest} output_sha256={digest}")
+    except ConfigError as exc:
+        print(f"ERROR {exc.code}", file=sys.stderr)
+        return 2
+    except OSError:
+        print("ERROR IO_FAILURE", file=sys.stderr)
+        return 3
+    return 0
+
+
 def convert_profile_mapping(
     profile: dict[str, object], *, conflict_policy: ConflictPolicy | None = None
 ) -> dict[str, object]:
@@ -268,3 +300,7 @@ def convert_profile_mapping(
     converted.pop("ctbc", None)
     converted["utiki"] = asdict(policy)
     return converted
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

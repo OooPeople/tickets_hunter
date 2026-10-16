@@ -27,6 +27,7 @@ from .domain.snapshots import (
     AreaSnapshot,
     DATE_CONTROL_FINGERPRINT_FIELDS,
     DateControl,
+    DateFingerprint,
     DateRow,
     DateSnapshot,
     DialogSnapshot,
@@ -554,7 +555,30 @@ def choose_candidate_index(
     return None
 
 
-def _parse_date_target_url(target_value, current_url):
+class _DateTarget(TypedDict):
+    target_url: str
+    performance_id: str
+    product_id: str
+    tenant_path: str
+    host: str
+    map_namespace: str
+    fast_area_prefetch: bool
+
+
+_DateAction = tuple[str, _DateTarget | None, str]
+
+
+class _DateCandidate(TypedDict):
+    text: str
+    row_index: int
+    control_index: int
+    fingerprint: DateFingerprint
+    action: _DateAction
+
+
+def _parse_date_target_url(
+    target_value: object, current_url: str
+) -> _DateTarget | None:
     """從場次目標解析並驗證導覽網址。"""
 
     if classify_utiki_page(current_url) != PageKind.DATE:
@@ -602,7 +626,7 @@ def _parse_date_target_url(target_value, current_url):
     }
 
 
-def _parse_date_target(onclick, current_url):
+def _parse_date_target(onclick: object, current_url: str) -> _DateTarget | None:
     """從場次按鈕事件解析一般導覽目標。"""
 
     match = re.fullmatch(
@@ -613,7 +637,7 @@ def _parse_date_target(onclick, current_url):
     return _parse_date_target_url(match.group("url"), current_url) if match else None
 
 
-def _parse_vip_date_token(onclick, current_url):
+def _parse_vip_date_token(onclick: object, current_url: str) -> str | None:
     """從場次按鈕事件解析 VIP 導覽識別。"""
 
     if classify_utiki_page(current_url) != PageKind.DATE:
@@ -630,7 +654,7 @@ def _parse_vip_date_token(onclick, current_url):
     return match.group("token") if match else None
 
 
-def _safe_date_button_handler(onclick):
+def _safe_date_button_handler(onclick: object) -> bool:
     """驗證場次按鈕事件是否屬於允許的安全格式。"""
 
     source = str(onclick or "").strip()
@@ -652,12 +676,14 @@ def _safe_date_button_handler(onclick):
     )
 
 
-def _classify_date_control(fingerprint, current_url):
+def _classify_date_control(
+    fingerprint: DateFingerprint, current_url: str
+) -> _DateAction | None:
     """依控制項指紋與目前網址判別場次操作類型。"""
 
     control = dict(fingerprint)
-    tag_name = control.get("tag_name", "").upper()
-    onclick = control.get("onclick", "")
+    tag_name = cast(str, control.get("tag_name", "")).upper()
+    onclick = cast(str, control.get("onclick", ""))
     if tag_name == "A":
         if onclick or any(control.get(key, "") for key in ("target", "download", "ping")):
             return None
@@ -672,7 +698,7 @@ def _classify_date_control(fingerprint, current_url):
     vip_token = _parse_vip_date_token(onclick, current_url)
     if vip_token:
         return "vip_native", None, vip_token
-    control_type = control.get("type", "").lower()
+    control_type = cast(str, control.get("type", "")).lower()
     if (
         tag_name != "BUTTON"
         or control.get("formaction", "")
@@ -684,10 +710,12 @@ def _classify_date_control(fingerprint, current_url):
     return "structural_native", None, ""
 
 
-def _date_candidates(snapshot, config_dict):
+def _date_candidates(
+    snapshot: DateSnapshot, config_dict: dict[str, object]
+) -> list[_DateCandidate]:
     """從場次快照建立符合設定的候選清單。"""
 
-    candidates = []
+    candidates: list[_DateCandidate] = []
     for row_index, row in enumerate(snapshot.rows):
         actionable = [
             (index, control.fingerprint)
@@ -711,7 +739,9 @@ def _date_candidates(snapshot, config_dict):
     return candidates
 
 
-def select_date_snapshot(snapshot, config_dict):
+def select_date_snapshot(
+    snapshot: object, config_dict: dict[str, object]
+) -> DateActionPlan | None:
     """從不可變場次快照選出一個安全操作。"""
     snapshot = parse_date_snapshot(snapshot)
     if (
@@ -725,36 +755,45 @@ def select_date_snapshot(snapshot, config_dict):
         return None
     candidates = _date_candidates(snapshot, config_dict)
     date_config = config_dict.get("date_auto_select", {})
+    if not isinstance(date_config, Mapping):
+        return None
+    keyword = date_config.get("date_keyword", "")
+    mode = date_config.get("mode", "from top to bottom")
+    allow_fallback = config_dict.get("date_auto_fallback", False)
+    if (
+        not isinstance(keyword, str)
+        or not isinstance(mode, str)
+        or not isinstance(allow_fallback, bool)
+    ):
+        return None
     target_index = choose_candidate_index(
         candidates,
-        date_config.get("date_keyword", "").strip(),
-        date_config.get("mode", "from top to bottom"),
-        config_dict.get("date_auto_fallback", False),
+        keyword.strip(), mode, allow_fallback,
     )
     if target_index is None:
         return None
     target = candidates[target_index]
     action_kind, date_target, action_token = target["action"]
-    date_target = date_target or {}
+    target_data: Mapping[str, object] = date_target or {}
     return DateActionPlan(
         row_index=target["row_index"],
         control_index=target["control_index"],
         text=target["text"],
         action_kind=action_kind,
-        onclick=dict(target["fingerprint"]).get("onclick", ""),
+        onclick=cast(str, dict(target["fingerprint"]).get("onclick", "")),
         control_fingerprint=target["fingerprint"],
-        target_url=date_target.get("target_url", ""),
-        performance_id=date_target.get("performance_id", ""),
-        product_id=date_target.get("product_id", ""),
-        tenant_path=date_target.get("tenant_path", ""),
-        host=date_target.get("host", ""),
-        map_namespace=date_target.get("map_namespace", ""),
-        fast_area_prefetch=bool(date_target.get("fast_area_prefetch", False)),
+        target_url=cast(str, target_data.get("target_url", "")),
+        performance_id=cast(str, target_data.get("performance_id", "")),
+        product_id=cast(str, target_data.get("product_id", "")),
+        tenant_path=cast(str, target_data.get("tenant_path", "")),
+        host=cast(str, target_data.get("host", "")),
+        map_namespace=cast(str, target_data.get("map_namespace", "")),
+        fast_area_prefetch=bool(target_data.get("fast_area_prefetch", False)),
         action_token=action_token,
     )
 
 
-def date_plan_matches_snapshot(snapshot, plan):
+def date_plan_matches_snapshot(snapshot: object, plan: object) -> bool:
     """驗證不可變場次計畫確實由指定快照產生。"""
     if not isinstance(snapshot, DateSnapshot) or not isinstance(
         plan, DateActionPlan
@@ -785,7 +824,7 @@ def date_plan_matches_snapshot(snapshot, plan):
     if not action:
         return False
     action_kind, target, action_token = action
-    target = target or {}
+    target_data: Mapping[str, object] = target or {}
     return (
         plan.action_kind == action_kind
         and plan.action_token == action_token
@@ -794,10 +833,10 @@ def date_plan_matches_snapshot(snapshot, plan):
             plan.tenant_path, plan.host, plan.map_namespace,
             plan.fast_area_prefetch,
         ) == (
-            target.get("target_url", ""), target.get("performance_id", ""),
-            target.get("product_id", ""), target.get("tenant_path", ""),
-            target.get("host", ""), target.get("map_namespace", ""),
-            bool(target.get("fast_area_prefetch", False)),
+            target_data.get("target_url", ""), target_data.get("performance_id", ""),
+            target_data.get("product_id", ""), target_data.get("tenant_path", ""),
+            target_data.get("host", ""), target_data.get("map_namespace", ""),
+            bool(target_data.get("fast_area_prefetch", False)),
         )
     )
 
@@ -1700,7 +1739,7 @@ def select_quantity_snapshot(
     )
 
 
-def _seat_submit_payload(plan):
+def _seat_submit_payload(plan: object) -> tuple[object, ...] | None:
     """建立劃位計畫的最終送出資料。"""
 
     if not isinstance(plan, SeatActionPlan) or plan.action not in {
@@ -1751,7 +1790,7 @@ def _seat_submit_payload(plan):
     )
 
 
-def _quantity_submit_payload(plan):
+def _quantity_submit_payload(plan: object) -> tuple[object, ...] | None:
     """建立票數計畫的最終送出資料。"""
 
     if not isinstance(plan, QuantityPlan):
@@ -1797,10 +1836,10 @@ def _quantity_submit_payload(plan):
     )
 
 
-def build_submit_plan(selection_plan):
+def build_submit_plan(selection_plan: object) -> SubmitPlan | None:
     """從選擇計畫固定一份不含敏感資料的最終送出意圖。"""
     if isinstance(selection_plan, SeatActionPlan):
-        page_kind = PageKind.RESERVED_SEAT
+        page_kind: PageKind | None = PageKind.RESERVED_SEAT
         payload = _seat_submit_payload(selection_plan)
     elif isinstance(selection_plan, QuantityPlan):
         page_kind = {
@@ -1821,7 +1860,7 @@ def build_submit_plan(selection_plan):
     )
 
 
-def submit_plan_is_valid(plan):
+def submit_plan_is_valid(plan: object) -> bool:
     """重建純資料指紋以拒絕遭竄改的送出資訊。"""
     if not isinstance(plan, SubmitPlan):
         return False
@@ -1835,7 +1874,7 @@ def submit_plan_is_valid(plan):
     )
 
 
-def is_auth_error(dialog_text):
+def is_auth_error(dialog_text: str | None) -> bool:
     """判斷對話框文字是否表示登入狀態失效。"""
 
     return (
@@ -1847,7 +1886,7 @@ def is_auth_error(dialog_text):
     )
 
 
-def classify_submit_dialog(dialog_text):
+def classify_submit_dialog(dialog_text: object) -> str | None:
     """依對話框文字判別送出結果與後續處理類型。"""
 
     text = str(dialog_text or "").strip()

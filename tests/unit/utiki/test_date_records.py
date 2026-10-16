@@ -59,6 +59,21 @@ def test_date_control_rejects_non_boolean_actionability() -> None:
     raw["rows"][0]["controls"][0]["actionable"] = 1
     assert parse_date_snapshot(raw) is None
 
+
+def test_date_selection_rejects_malformed_config_without_action() -> None:
+    snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
+    assert snapshot is not None
+    for key, malformed_value in (
+        ("date_auto_select", "invalid"),
+        ("date_auto_select", {"date_keyword": 1}),
+        ("date_auto_select", {"mode": 1}),
+        ("date_auto_fallback", 1),
+    ):
+        settings = config(date_keyword='"9/10"')
+        settings[key] = malformed_value
+        assert select_date_snapshot(snapshot, settings) is None
+
+
 def test_date_control_rejects_invalid_direct_fingerprint_construction() -> None:
     raw = make_ctbc_date_snapshot()
     snapshot = parse_date_snapshot(raw)

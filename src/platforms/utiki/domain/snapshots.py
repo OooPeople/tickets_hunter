@@ -56,3 +56,31 @@ def parse_nonnegative_count(value: object) -> FieldObservation[int]:
                 return InvalidField("out-of-range")
             return PresentField(count)
     return InvalidField("not-integer")
+
+
+@dataclass(frozen=True, slots=True)
+class QuantityRow:
+    key: str
+    name: str
+    text: str
+    disabled: bool
+    remaining_present: bool
+    remaining_raw: str
+    value: str
+
+    def __post_init__(self) -> None:
+        for name in ("key", "name", "text", "remaining_raw", "value"):
+            if type(getattr(self, name)) is not str:
+                raise ValueError(f"{name} must be a string")
+        if type(self.disabled) is not bool or type(self.remaining_present) is not bool:
+            raise ValueError("quantity flags must be booleans")
+
+    @property
+    def remaining_observation(self) -> FieldObservation[int]:
+        if not self.remaining_present:
+            return MissingField() if not self.remaining_raw else InvalidField("presence-mismatch")
+        return parse_nonnegative_count(self.remaining_raw)
+
+    @property
+    def value_observation(self) -> FieldObservation[int]:
+        return parse_nonnegative_count(self.value)

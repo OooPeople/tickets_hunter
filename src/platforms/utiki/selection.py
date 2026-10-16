@@ -13,6 +13,7 @@ from .profiles import (
     same_origin,
     unique_query,
 )
+from .domain.snapshots import InvalidField, PresentField, QuantityRow, parse_nonnegative_count
 
 
 DATE_CONTROL_FINGERPRINT_FIELDS = (
@@ -84,7 +85,7 @@ class QuantitySnapshot:
     group_id: str
     price_area_id: str
     quantity_limit_raw: str
-    rows: tuple
+    rows: tuple[QuantityRow, ...]
     product_id: str = ""
     reason: str = ""
     performance_hidden_present: bool = False
@@ -320,6 +321,28 @@ def parse_quantity_snapshot(raw_snapshot):
         not isinstance(row, dict) for row in rows
     ):
         return None
+    if type(raw_snapshot.get("quantity_limit_raw", "")) is not str:
+        return None
+    if (
+        "quantity_limit_present" in raw_snapshot
+        and type(raw_snapshot["quantity_limit_present"]) is not bool
+    ):
+        return None
+    try:
+        frozen_rows = tuple(
+            QuantityRow(
+                key=row["key"],
+                name=row["name"],
+                text=row["text"],
+                disabled=row["disabled"],
+                remaining_present=row["remaining_present"],
+                remaining_raw=row["remaining_raw"],
+                value=row["value"],
+            )
+            for row in rows
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
     return QuantitySnapshot(
         ok=True,
         page_url=str(raw_snapshot.get("page_url") or ""),
@@ -328,18 +351,7 @@ def parse_quantity_snapshot(raw_snapshot):
         group_id=str(raw_snapshot.get("group_id") or ""),
         price_area_id=str(raw_snapshot.get("price_area_id") or ""),
         quantity_limit_raw=str(raw_snapshot.get("quantity_limit_raw") or ""),
-        rows=tuple(
-            (
-                str(row.get("key") or ""),
-                str(row.get("name") or ""),
-                str(row.get("text") or ""),
-                bool(row.get("disabled")),
-                bool(row.get("remaining_present")),
-                str(row.get("remaining_raw") or ""),
-                str(row.get("value") or ""),
-            )
-            for row in rows
-        ),
+        rows=frozen_rows,
         product_id=str(raw_snapshot.get("product_id") or ""),
         **_quantity_presence_fields(raw_snapshot),
     )
@@ -1535,10 +1547,10 @@ def quantity_audit_is_valid(quantities, target_key, ticket_number):
 def _parse_quantity_request(snapshot, ticket_number):
     """從票數快照解析要求張數與既有選擇。"""
 
-    try:
-        requested = int(ticket_number)
-    except (TypeError, ValueError):
+    observed_request = parse_nonnegative_count(ticket_number)
+    if not isinstance(observed_request, PresentField):
         return None
+    requested = observed_request.value
     if requested <= 0 or not snapshot.page_url or not snapshot.document_id:
         return None
     token = re.compile(r"[A-Za-z0-9_-]+")
@@ -1548,11 +1560,14 @@ def _parse_quantity_request(snapshot, ticket_number):
         or (snapshot.group_id and not token.fullmatch(snapshot.group_id))
     ):
         return None
-    if snapshot.quantity_limit_raw:
-        if not re.fullmatch(r"\d+", snapshot.quantity_limit_raw):
+    if snapshot.quantity_limit_present:
+        observed_limit = parse_nonnegative_count(snapshot.quantity_limit_raw)
+        if not isinstance(observed_limit, PresentField):
             return None
-        quantity_limit = int(snapshot.quantity_limit_raw)
+        quantity_limit = observed_limit.value
     else:
+        if snapshot.quantity_limit_raw:
+            return None
         quantity_limit = 0
     if quantity_limit and requested > quantity_limit:
         return None
@@ -1565,25 +1580,23 @@ def _quantity_candidates(snapshot, requested):
     token = re.compile(r"[A-Za-z0-9_-]+")
     if not 0 < len(snapshot.rows) <= 100:
         return None
-    keys = [row[0] for row in snapshot.rows]
+    keys = [row.key for row in snapshot.rows]
     if any(not token.fullmatch(key) for key in keys) or len(set(keys)) != len(keys):
         return None
 
     candidates = []
-    for key, name, text, disabled, remaining_present, remaining_raw, _value in (
-        snapshot.rows
-    ):
-        if disabled or "售完" in text or not name:
+    for row in snapshot.rows:
+        if row.disabled or "售完" in row.text or not row.name:
             continue
-        if remaining_present:
-            if not re.fullmatch(r"\d+", remaining_raw):
-                continue
-            if int(remaining_raw) < requested:
-                continue
+        remaining = row.remaining_observation
+        if isinstance(remaining, InvalidField):
+            continue
+        if isinstance(remaining, PresentField) and remaining.value < requested:
+            continue
         candidates.append({
-            "text": name,
-            "key": key,
-            "remaining_present": remaining_present,
+            "text": row.name,
+            "key": row.key,
+            "remaining_present": row.remaining_present,
         })
     return candidates
 

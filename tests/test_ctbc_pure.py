@@ -1499,7 +1499,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertTrue(plan.quantity_limit_present)
         self.assertTrue(plan.target_remaining_present)
         raw["rows"][0]["key"] = "MUTATED"
-        self.assertEqual("FULL", snapshot.rows[0][0])
+        self.assertEqual("FULL", snapshot.rows[0].key)
 
         malformed = dict(raw, rows=[{
             "key": "FULL", "name": "全票", "text": "全票",

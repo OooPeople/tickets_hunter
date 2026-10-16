@@ -1740,8 +1740,9 @@ CONST_QUANTITY_SNAPSHOT_SCRIPT = r'''
                         disabled: !!input.disabled ||
                             input.getAttribute('aria-disabled') === 'true',
                         remaining_present: remaining.length > 0,
-                        remaining_raw: remaining.length === 1 ?
-                            (remaining[0].value || '').trim() : '__invalid__',
+                        remaining_raw: remaining.length === 0 ? '' :
+                            remaining.length === 1 ?
+                                (remaining[0].value || '').trim() : '__invalid__',
                         value: (input.value || '').trim()
                     };
                 })

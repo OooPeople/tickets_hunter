@@ -1619,6 +1619,42 @@ async def _assert_quantity_fixture(browser):
         "Number(document.body.dataset.quantityEvents || 0)"
     ) == 0
 
+    missing_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await missing_tab.evaluate('''document.querySelector(
+        'input.numbox[key="FULL"]'
+    ).closest('tr').querySelector('input[key="LAST_AMOUNT"]').remove()''')
+    missing_snapshot = await read_quantity_snapshot(missing_tab)
+    missing_row = next(row for row in missing_snapshot.rows if row.key == "FULL")
+    assert not missing_row.remaining_present
+    assert missing_row.remaining_raw == ""
+    assert select_quantity_snapshot(
+        missing_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    ) is not None
+
+    duplicate_remaining_tab = await _open_fixture(
+        browser, "UTK0203_quantity.html", query
+    )
+    await duplicate_remaining_tab.evaluate('''(() => {
+        const row = document.querySelector('input.numbox[key="FULL"]').closest('tr');
+        const remaining = row.querySelector('input[key="LAST_AMOUNT"]');
+        row.appendChild(remaining.cloneNode(true));
+    })()''')
+    duplicate_remaining_snapshot = await read_quantity_snapshot(
+        duplicate_remaining_tab
+    )
+    duplicate_remaining_row = next(
+        row for row in duplicate_remaining_snapshot.rows if row.key == "FULL"
+    )
+    assert duplicate_remaining_row.remaining_present
+    assert duplicate_remaining_row.remaining_raw == "__invalid__"
+    assert select_quantity_snapshot(
+        duplicate_remaining_snapshot, cfg["utiki"]["ticket_type_keyword"],
+        cfg["ticket_number"],
+    ) is None
+
     limit_tab = await _open_fixture(
         browser, "UTK0203_quantity.html", query
     )

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the reviewed uTiki execution manifest from its fixed catalog.
+"""Generate a phase-specific uTiki execution manifest from its fixed catalog.
 
 The required set comes only from the approved catalog.  The binding registry
-may attach real pytest nodes and evidence producers to P1-due execution keys,
+may attach real pytest nodes and evidence producers to phase-due execution keys,
 but it cannot add, remove, postpone, or waive a catalog obligation.
 """
 
@@ -23,6 +23,7 @@ SCHEMA_VERSION = 1
 CATALOG_ID = "utiki-required-cases"
 CATALOG_REVISION = "1.5.0"
 PHASE = "P1"
+SUPPORTED_PHASES = {"P1": 63, "P2": 105}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}")
 PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9.-]")
@@ -105,10 +106,12 @@ def _string_list(value: Any, label: str) -> list[str]:
     return result
 
 
-def _catalog_profiles(catalog: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+def _catalog_profiles(
+    catalog: dict[str, Any], phase: str = PHASE
+) -> dict[str, dict[str, dict[str, Any]]]:
     raw_profiles = catalog.get("gate_profiles")
-    if not isinstance(raw_profiles, dict) or PHASE not in raw_profiles:
-        raise ManifestError("INVALID_CATALOG", "gate_profiles.P1 is absent")
+    if not isinstance(raw_profiles, dict) or phase not in raw_profiles:
+        raise ManifestError("INVALID_CATALOG", f"gate_profiles.{phase} is absent")
     profiles: dict[str, dict[str, dict[str, Any]]] = {}
     for phase, raw_profile in raw_profiles.items():
         if not isinstance(raw_profile, dict) or not isinstance(raw_profile.get("required_jobs"), list):
@@ -147,7 +150,8 @@ def _condition_applies(obligation: dict[str, Any], target: str) -> bool:
 
 
 def _catalog_keys(
-    catalog: dict[str, Any], profiles: dict[str, dict[str, dict[str, Any]]]
+    catalog: dict[str, Any], profiles: dict[str, dict[str, dict[str, Any]]],
+    phase: str = PHASE,
 ) -> tuple[list[dict[str, Any]], set[tuple[str, str, str, str, str]]]:
     cases = catalog.get("cases")
     if not isinstance(cases, list) or len(cases) != 153:
@@ -200,8 +204,8 @@ def _catalog_keys(
             for variant_id in variants:
                 for target in sorted(targets):
                     key = (case_id, obligation_id, variant_id, job_id, target)
-                    p1_job = profiles[PHASE].get(job_id)
-                    if PHASE not in gates or p1_job is None or target not in p1_job["targets"]:
+                    phase_job = profiles[phase].get(job_id)
+                    if phase not in gates or phase_job is None or target not in phase_job["targets"]:
                         status = "NOT_DUE"
                     elif _condition_applies(obligation, target):
                         status = "MAPPED"
@@ -225,8 +229,11 @@ def _catalog_keys(
         raise ManifestError("INVALID_CATALOG", "catalog must contain 341 obligations")
     if sum(len(case["executions"]) for case in expanded) != 490:
         raise ManifestError("INVALID_CATALOG", "catalog must expand to 490 execution keys")
-    if len(due_keys) != 63:
-        raise ManifestError("INVALID_CATALOG", "P1 must contain 63 due execution keys")
+    if len(due_keys) != SUPPORTED_PHASES[phase]:
+        raise ManifestError(
+            "INVALID_CATALOG",
+            f"{phase} must contain {SUPPORTED_PHASES[phase]} due execution keys",
+        )
     return expanded, due_keys
 
 
@@ -244,6 +251,7 @@ def _load_bindings(
     path: Path,
     catalog_digest: str,
     root: Path,
+    phase: str = PHASE,
 ) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
     registry, _ = _load_json(path, "binding registry")
     _exact_keys(
@@ -264,8 +272,8 @@ def _load_bindings(
     )
     expected = {
         "schema_version": SCHEMA_VERSION,
-        "registry_id": "utiki-p1-execution-bindings",
-        "phase": PHASE,
+        "registry_id": f"utiki-{phase.lower()}-execution-bindings",
+        "phase": phase,
         "catalog_id": CATALOG_ID,
         "catalog_revision": CATALOG_REVISION,
         "catalog_sha256": catalog_digest,
@@ -278,7 +286,7 @@ def _load_bindings(
     if checker_exit_template != "evidence/negative/{obligation_id}--{variant_id}.json":
         raise ManifestError(
             "BINDING_CONTEXT_MISMATCH",
-            "registry.checker_exit_path_template is not the reviewed P1 policy",
+            "registry.checker_exit_path_template is not the reviewed path policy",
         )
     readiness_notes = registry["readiness_notes"]
     if not isinstance(readiness_notes, dict) or set(readiness_notes) != {
@@ -287,7 +295,7 @@ def _load_bindings(
     }:
         raise ManifestError(
             "BINDING_CONTEXT_MISMATCH",
-            "registry.readiness_notes must explain both blocked P1 jobs",
+            "registry.readiness_notes must explain both isolated jobs",
         )
     if any(
         not isinstance(note, str) or not note.startswith("BLOCKED")
@@ -392,7 +400,10 @@ def generate(
     registry_path: Path,
     approved_catalog_sha256: str,
     root: Path,
+    phase: str = PHASE,
 ) -> dict[str, Any]:
+    if phase not in SUPPORTED_PHASES:
+        raise ManifestError("UNSUPPORTED_PHASE", f"phase {phase!r} is not supported")
     if SHA256_RE.fullmatch(approved_catalog_sha256) is None:
         raise ManifestError("INVALID_APPROVED_DIGEST", "approved catalog digest is invalid")
     catalog, catalog_raw = _load_json(catalog_path, "required catalog")
@@ -411,9 +422,9 @@ def generate(
     for field, value in expected_headers.items():
         if catalog.get(field) != value:
             raise ManifestError("INVALID_CATALOG", f"catalog.{field} is invalid")
-    profiles = _catalog_profiles(catalog)
-    expanded, due_keys = _catalog_keys(catalog, profiles)
-    bindings = _load_bindings(registry_path, catalog_digest, root)
+    profiles = _catalog_profiles(catalog, phase)
+    expanded, due_keys = _catalog_keys(catalog, profiles, phase)
+    bindings = _load_bindings(registry_path, catalog_digest, root, phase)
     missing = sorted(due_keys - set(bindings))
     extra = sorted(set(bindings) - due_keys)
     if missing or extra:
@@ -463,7 +474,7 @@ def generate(
         "catalog_id": CATALOG_ID,
         "catalog_revision": CATALOG_REVISION,
         "catalog_sha256": catalog_digest,
-        "phase": PHASE,
+        "phase": phase,
         "cases": cases,
     }
 
@@ -489,6 +500,7 @@ def _write_atomic(path: Path, payload: bytes) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--phase", choices=tuple(SUPPORTED_PHASES), default=PHASE)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--required-catalog", type=Path, required=True)
     parser.add_argument("--approved-catalog-sha256", required=True)
@@ -503,6 +515,7 @@ def main() -> int:
             arguments.binding_registry,
             arguments.approved_catalog_sha256,
             root,
+            arguments.phase,
         )
         payload = _serialized(manifest)
         if arguments.check:

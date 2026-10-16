@@ -28,7 +28,9 @@ def _write_json(path: Path, value: object) -> None:
     )
 
 
-def _command(registry: Path, output: Path, *, check: bool = False) -> list[str]:
+def _command(
+    registry: Path, output: Path, *, check: bool = False, phase: str | None = None
+) -> list[str]:
     command = [
         sys.executable,
         str(GENERATOR),
@@ -43,14 +45,18 @@ def _command(registry: Path, output: Path, *, check: bool = False) -> list[str]:
         "--output",
         str(output),
     ]
+    if phase is not None:
+        command.extend(("--phase", phase))
     if check:
         command.append("--check")
     return command
 
 
-def _run(registry: Path, output: Path, *, check: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    registry: Path, output: Path, *, check: bool = False, phase: str | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        _command(registry, output, check=check),
+        _command(registry, output, check=check, phase=phase),
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -113,6 +119,22 @@ def test_persisted_manifest_is_byte_stable_and_has_fixed_counts(tmp_path):
         "browser-contract-isolated",
         "performance-contract",
     }
+
+
+def test_p2_phase_requires_all_new_bindings_instead_of_reusing_p1_result(tmp_path):
+    registry = _registry()
+    registry["registry_id"] = "utiki-p2-execution-bindings"
+    registry["phase"] = "P2"
+    registry_path = tmp_path / "p2-incomplete.json"
+    _write_json(registry_path, registry)
+
+    result = _run(registry_path, tmp_path / "p2-manifest.json", phase="P2")
+
+    assert result.returncode != 0
+    failure = json.loads(result.stderr)
+    assert failure["reason"] == "BINDING_SET_MISMATCH"
+    assert "(42)" in failure["detail"]
+    assert not (tmp_path / "p2-manifest.json").exists()
 
 
 def test_byte_pinned_json_uses_lf_checkout() -> None:

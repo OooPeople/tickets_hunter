@@ -19,7 +19,7 @@ class Fake:
     async def observe_page(self, expected_context: OperationStamp) -> QuantitySnapshot:
         raise NotImplementedError
 
-    async def commit_quantity(self, plan: QuantityPlan, claim: RunningEffect) -> {result_type}:
+    async def commit_quantity(self, plan: QuantityPlan{claim_parameter}) -> {result_type}:
         {result_body}
 
 async def use(port: QuantityBrowserPort) -> None:
@@ -30,12 +30,18 @@ async def check() -> None:
 """
 
 
-def _typecheck(result_type: str, result_body: str) -> subprocess.CompletedProcess[str]:
+def _typecheck(
+    result_type: str, result_body: str, *, include_claim: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable, "-m", "mypy", "--strict", "--no-incremental",
             "--config-file", str(CONFIG), "-c",
-            _FAKE_SOURCE.format(result_type=result_type, result_body=result_body),
+            _FAKE_SOURCE.format(
+                claim_parameter=", claim: RunningEffect" if include_claim else "",
+                result_type=result_type,
+                result_body=result_body,
+            ),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -44,12 +50,54 @@ def _typecheck(result_type: str, result_body: str) -> subprocess.CompletedProces
     )
 
 
-def test_quantity_port_accepts_typed_receipt_and_rejects_raw_dict() -> None:
+def _assert_legal_port() -> None:
     legal = _typecheck("EffectReceipt", "raise NotImplementedError")
     assert legal.returncode == 0, legal.stdout + legal.stderr
 
+
+def _assert_port_rejection(
+    result: subprocess.CompletedProcess[str], *, got_signature: str
+) -> None:
+    assert result.returncode != 0
+    assert 'Argument 1 to "use" has incompatible type "Fake"' in result.stdout
+    assert "QuantityBrowserPort" in result.stdout
+    assert "[arg-type]" in result.stdout
+    assert (
+        "commit_quantity(self, plan: QuantityPlan, claim: RunningEffect) "
+        "-> Coroutine[Any, Any, EffectReceipt]"
+    ) in result.stdout
+    assert got_signature in result.stdout
+
+
+def test_quantity_port_accepts_typed_receipt() -> None:
+    _assert_legal_port()
+
+
+def test_quantity_port_rejects_wrong_receipt_type() -> None:
+    _assert_legal_port()
+    wrong = _typecheck("QuantityPlan", "return plan")
+    _assert_port_rejection(
+        wrong,
+        got_signature="commit_quantity(self, plan: QuantityPlan, claim: RunningEffect) "
+        "-> Coroutine[Any, Any, QuantityPlan]",
+    )
+
+
+def test_quantity_port_rejects_missing_claim() -> None:
+    _assert_legal_port()
+    wrong = _typecheck("EffectReceipt", "raise NotImplementedError", include_claim=False)
+    _assert_port_rejection(
+        wrong,
+        got_signature="commit_quantity(self, plan: QuantityPlan) "
+        "-> Coroutine[Any, Any, EffectReceipt]",
+    )
+
+
+def test_quantity_port_rejects_raw_dict_adapter() -> None:
+    _assert_legal_port()
     wrong = _typecheck("dict[str, str]", "return {}")
-    assert wrong.returncode != 0
-    assert 'Argument 1 to "use" has incompatible type "Fake"' in wrong.stdout
-    assert "commit_quantity" in wrong.stdout
-    assert "QuantityBrowserPort" in wrong.stdout
+    _assert_port_rejection(
+        wrong,
+        got_signature="commit_quantity(self, plan: QuantityPlan, claim: RunningEffect) "
+        "-> Coroutine[Any, Any, dict[str, str]]",
+    )

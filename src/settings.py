@@ -2,6 +2,7 @@
 #encoding=utf-8
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import platform
@@ -14,6 +15,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime
+from pathlib import Path
 
 import tornado
 from tornado.web import Application
@@ -1263,7 +1265,27 @@ def settgins_gui_timer():
         if GLOBAL_SERVER_SHUTDOWN:
             break
 
+def run_resource_self_test():
+    """Check only the settings entry's reachable UI resource."""
+    try:
+        bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        source = (bundled / "www" / "settings.html").read_bytes()
+        if getattr(sys, "frozen", False):
+            final = (Path(sys.executable).resolve().parent / "www" /
+                     "settings.html").read_bytes()
+            if source != final:
+                raise ValueError("settings UI bundle copies differ")
+        digest = hashlib.sha256(source).hexdigest()
+    except (OSError, ValueError) as exc:
+        print(f"Settings resource self-test FAILED: {exc}")
+        return 1
+    print(f"Settings resource self-test passed: {digest}")
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--resource-self-test"]:
+        sys.exit(run_resource_self_test())
     global GLOBAL_SERVER_SHUTDOWN
     GLOBAL_SERVER_SHUTDOWN = False
     

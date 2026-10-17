@@ -180,38 +180,22 @@ echo [PHASE 4] Create Unified Package
 echo ================================================================================
 echo.
 
-echo [4.1] Creating unified directory...
-mkdir dist\tickets_hunter
-echo [OK] Directory created
+echo [4.1] Assembling and checking the frozen bundle...
+python build_scripts\build_local.py --assemble-only --keep
+if %errorlevel% neq 0 (
+    echo [ERROR] Frozen bundle assembly or verification failed
+    goto :error_exit
+)
+echo [OK] Checked bundle ready
 echo.
 
-echo [4.2] Copying executables...
-xcopy /Y dist\nodriver_tixcraft\nodriver_tixcraft.exe dist\tickets_hunter\ >nul
-xcopy /Y dist\settings\settings.exe dist\tickets_hunter\ >nul
-echo [OK] 2 executables copied
-echo.
-
-echo [4.3] Merging _internal directories...
-xcopy /E /I /Y dist\nodriver_tixcraft\_internal dist\tickets_hunter\_internal >nul
-xcopy /E /I /Y dist\settings\_internal\* dist\tickets_hunter\_internal >nul
-echo [OK] _internal merged
-echo.
-
-echo [4.4] Copying shared resources...
-REM Copy resources directly from src/ (more reliable than PyInstaller datas)
-echo   Copying assets/ from src...
-xcopy /E /I /Y src\assets dist\tickets_hunter\assets >nul 2>&1
-echo   Copying www/ from src...
-xcopy /E /I /Y src\www dist\tickets_hunter\www >nul 2>&1
-REM settings.json excluded - program generates it automatically
-REM ddddocr data files are automatically collected by PyInstaller via collect_data_files()
-echo   Copying documentation...
+echo [4.2] Copying documentation...
 copy build_scripts\README_Release.txt dist\tickets_hunter\ >nul 2>&1
 if exist "CHANGELOG.md" copy CHANGELOG.md dist\tickets_hunter\ >nul 2>&1
-echo [OK] Resources copied
+echo [OK] Documentation copied
 echo.
 
-echo [4.5] Creating ZIP archive...
+echo [4.3] Creating ZIP archive...
 mkdir dist\release 2>nul
 set ZIP_NAME=tickets_hunter_v%VERSION%.zip
 powershell -Command "Compress-Archive -Path 'dist\tickets_hunter\*' -DestinationPath 'dist\release\%ZIP_NAME%' -Force" >nul 2>&1

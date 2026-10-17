@@ -50,38 +50,16 @@ jobs:
 
           echo "All executables built successfully!"
 
-      - name: Create unified directory structure
+      - name: Assemble and verify the frozen bundle
+        # Use the same checked _internal merge as the local build before ZIP.
+        # This also runs the frozen bot/settings and OCR/resource self-tests.
+        run: python build_scripts/build_local.py --assemble-only --keep
+
+      - name: Copy release documentation
         shell: cmd
         run: |
-          echo Creating unified directory...
-          mkdir dist\tickets_hunter
-
-          echo Copying executables...
-          xcopy /Y dist\nodriver_tixcraft\nodriver_tixcraft.exe dist\tickets_hunter\
-          xcopy /Y dist\settings\settings.exe dist\tickets_hunter\
-
-          echo Merging _internal directories...
-          xcopy /E /I /Y dist\nodriver_tixcraft\_internal dist\tickets_hunter\_internal
-          xcopy /E /I /Y dist\settings\_internal\* dist\tickets_hunter\_internal
-
-          echo Copying shared resources from src/...
-          xcopy /E /I /Y src\assets dist\tickets_hunter\assets
-          xcopy /E /I /Y src\www dist\tickets_hunter\www
-          REM settings.json excluded - program generates it automatically
-          REM ddddocr data files are automatically collected by PyInstaller via collect_data_files()
-
-          echo Copying documentation...
           copy build_scripts\README_Release.txt dist\tickets_hunter\
           if exist CHANGELOG.md copy CHANGELOG.md dist\tickets_hunter\CHANGELOG.txt
-
-          echo Unified directory created successfully!
-
-      - name: Verify the frozen bundle starts
-        # Nothing else in this job ever runs what it ships. --skip-build checks
-        # the assembled layout, runs the frozen binary's --help, which loads
-        # every platform module, and its --self-test, which fails the job when
-        # OCR cannot read a captcha; --keep leaves build/ for the failure upload.
-        run: python build_scripts/build_local.py --skip-build --keep
 
       - name: Create ZIP archive
         shell: pwsh
@@ -270,34 +248,15 @@ jobs:
 
           echo "All executables built successfully!"
 
-      - name: Create unified directory structure
+      - name: Assemble and verify the frozen bundle
+        # Reject unknown _internal collisions before creating the release ZIP.
+        run: python build_scripts/build_local.py --assemble-only --keep
+
+      - name: Copy release documentation
         run: |
           set -euo pipefail
-          mkdir -p dist/tickets_hunter
-
-          echo "Copying executables..."
-          cp dist/nodriver_tixcraft/nodriver_tixcraft dist/tickets_hunter/
-          cp dist/settings/settings dist/tickets_hunter/
-
-          echo "Merging _internal directories..."
-          cp -R dist/nodriver_tixcraft/_internal dist/tickets_hunter/_internal
-          cp -R dist/settings/_internal/. dist/tickets_hunter/_internal/
-
-          echo "Copying shared resources from src/..."
-          cp -R src/assets dist/tickets_hunter/assets
-          cp -R src/www dist/tickets_hunter/www
-
-          echo "Copying launchers and documentation..."
-          cp build_scripts/macos/start-bot.command dist/tickets_hunter/
-          cp build_scripts/macos/start-settings.command dist/tickets_hunter/
-          chmod +x dist/tickets_hunter/start-bot.command
-          chmod +x dist/tickets_hunter/start-settings.command
-          chmod +x dist/tickets_hunter/nodriver_tixcraft
-          chmod +x dist/tickets_hunter/settings
           cp build_scripts/README_Release_macOS.txt dist/tickets_hunter/README.txt
           if [ -f CHANGELOG.md ]; then cp CHANGELOG.md dist/tickets_hunter/CHANGELOG.txt; fi
-
-          echo "Unified directory created successfully!"
 
       - name: Report code signature status
         # PyInstaller ad-hoc signs macOS binaries by default. This records what
@@ -306,13 +265,6 @@ jobs:
         run: |
           codesign -dv dist/tickets_hunter/nodriver_tixcraft 2>&1 || true
           codesign -dv dist/tickets_hunter/settings 2>&1 || true
-
-      - name: Verify the frozen bundle starts
-        # This job has never run on Actions before, and the local build that
-        # was verified copies _internal with shutil.copytree while this job
-        # uses cp -R, so a local pass says little about this artifact.
-        # --keep leaves build/ for the failure upload below.
-        run: python build_scripts/build_local.py --skip-build --keep
 
       - name: Create ZIP archive
         id: package

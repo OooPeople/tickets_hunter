@@ -1,6 +1,9 @@
 name: uTiki P2 Gate
 
 on:
+  push:
+    branches:
+      - refactor/17-utiki-root-v1-5
   workflow_dispatch:
 
 permissions:

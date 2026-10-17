@@ -8,3 +8,7 @@
 ci/utiki-*.json text eol=lf
 tests/fixtures/utiki/manifest.json text eol=lf
 tests/fixtures/utiki/manifest-p2.json text eol=lf
+
+# Production JS digests must match the bytes on Windows and macOS checkouts.
+src/platforms/utiki/scripts/*.js text eol=lf
+src/platforms/utiki/scripts/manifest.json text eol=lf

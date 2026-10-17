@@ -1,5 +1,6 @@
 """The documented source command works from an arbitrary current directory."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.migrations import convert_utiki_config as converter
 from utiki_config import load_current_policy, parse_profile_json
 
 
@@ -132,3 +134,119 @@ def test_cli_refuses_existing_output_without_overwrite(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert result.stderr.strip() == "ERROR TARGET_EXISTS"
     assert output.read_text(encoding="utf-8") == "existing"
+
+
+def test_cli_batch_validates_all_sources_then_writes_separate_outputs(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    output_dir = tmp_path / "converted"
+    first.write_text(
+        json.dumps({"utiki": {"ticket_type_keyword": "", "seat_sorting": "display",
+                              "seat_selection_mode": "computer"},
+                    "ctbc": {"ticket_type_keyword": "", "seat_sorting": "display",
+                             "seat_selection_mode": "computer"},
+                    "accounts": {"password": "fixture-private-value"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    second.write_text('{"ctbc":{"ticket_type_keyword":"全票"}}', encoding="utf-8")
+    originals = (first.read_bytes(), second.read_bytes())
+
+    result = _run(
+        tmp_path, "--input", str(first), "--input", str(second),
+        "--output-dir", str(output_dir),
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout == "BATCH PASS entries=2\n"
+    assert (first.read_bytes(), second.read_bytes()) == originals
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "PASS"
+    assert [(entry["output_name"], entry["status"]) for entry in manifest["entries"]] == [
+        ("first.json", "PASS"), ("second.json", "PASS")
+    ]
+    expected = (
+        {"utiki": {"ticket_type_keyword": "", "seat_sorting": "display",
+                   "seat_selection_mode": "computer"},
+         "accounts": {"password": "fixture-private-value"}},
+        {"utiki": {"ticket_type_keyword": "全票", "seat_sorting": "row_seat",
+                   "seat_selection_mode": "manual"}},
+    )
+    for index, source in enumerate((first, second)):
+        output = output_dir / source.name
+        converted = parse_profile_json(output.read_text(encoding="utf-8"))
+        assert converted == expected[index]
+        load_current_policy(converted)
+        assert manifest["entries"][index]["source_sha256"] == hashlib.sha256(originals[index]).hexdigest()
+        assert manifest["entries"][index]["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert "fixture-private-value" not in result.stdout + result.stderr
+    assert "fixture-private-value" not in (output_dir / "manifest.json").read_text(encoding="utf-8")
+
+
+def test_cli_batch_invalid_second_source_leaves_no_output(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    output_dir = tmp_path / "converted"
+    first.write_text('{"ctbc":{}}', encoding="utf-8")
+    second.write_text('{"ctbc":{"unknown":"fixture-private-value"}}', encoding="utf-8")
+    originals = (first.read_bytes(), second.read_bytes())
+
+    result = _run(
+        tmp_path, "--input", str(first), "--input", str(second),
+        "--output-dir", str(output_dir),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == "ERROR UNKNOWN_BEHAVIOR_KEY"
+    assert result.stdout == ""
+    assert (first.read_bytes(), second.read_bytes()) == originals
+    assert not output_dir.exists()
+
+
+def test_cli_multiple_sources_require_output_directory(tmp_path: Path) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text('{"ctbc":{}}', encoding="utf-8")
+    second.write_text('{"ctbc":{}}', encoding="utf-8")
+
+    result = _run(tmp_path, "--input", str(first), "--input", str(second))
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == "ERROR BATCH_OUTPUT_DIR_REQUIRED"
+    assert result.stdout == ""
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["first.json", "second.json"]
+
+
+def test_cli_partial_write_returns_nonzero_and_preserves_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    output_dir = tmp_path / "converted"
+    first.write_text('{"ctbc":{"ticket_type_keyword":"全票"}}', encoding="utf-8")
+    second.write_text('{"ctbc":{"ticket_type_keyword":"半票"}}', encoding="utf-8")
+    originals = (first.read_bytes(), second.read_bytes())
+    original_write = converter.write_new_profile
+
+    def fail_second(prepared: converter.PreparedProfile, target: Path) -> str:
+        if target.name == "second.json":
+            raise OSError("fixture disk full")
+        return original_write(prepared, target)
+
+    monkeypatch.setattr(converter, "write_new_profile", fail_second)
+    exit_code = converter.main([
+        "--input", str(first), "--input", str(second), "--output-dir", str(output_dir),
+    ])
+
+    assert exit_code == 4
+    captured = capsys.readouterr()
+    assert captured.out == "BATCH PARTIAL_FAILURE entries=2\n"
+    assert captured.err == ""
+    assert (first.read_bytes(), second.read_bytes()) == originals
+    assert (output_dir / "first.json").exists()
+    assert not (output_dir / "second.json").exists()
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "PARTIAL_FAILURE"
+    assert [(entry["status"], entry["error_code"]) for entry in manifest["entries"]] == [
+        ("PASS", None), ("FAILED", "WRITE_FAILED")
+    ]

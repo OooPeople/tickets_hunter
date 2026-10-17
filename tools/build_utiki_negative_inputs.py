@@ -578,11 +578,11 @@ def _syntax_probe(
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "add bridge")
     elif variant == "new-or-untracked-omitted":
-        baseline.write_text("VALUE = 2\n", encoding="utf-8")
+        baseline.write_bytes(b"VALUE = 2\n")
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "change source")
         untracked = repo / "src/new_untracked.py"
-        untracked.write_text("VALUE = 1\n", encoding="utf-8")
+        untracked.write_bytes(b"VALUE = 1\n")
         include_worktree = True
     else:
         baseline.write_text("VALUE = 2\n", encoding="utf-8")

@@ -1424,10 +1424,33 @@ def cli():
     parser.add_argument("--self-test",
         action="store_true",
         help=argparse.SUPPRESS)
+    parser.add_argument("--utiki-resource-self-test",
+        action="store_true",
+        help=argparse.SUPPRESS)
 
     args = parser.parse_args()
     if args.self_test:
         sys.exit(run_ocr_self_test())
+    if args.utiki_resource_self_test:
+        from platforms.utiki.adapters import script_resources
+        from nodriver_common import CONST_NATIVE_INPUT_SETTER_JS
+        try:
+            if getattr(sys, "frozen", False):
+                bundle_root = pathlib.Path(sys._MEIPASS).resolve()
+                if not script_resources.RESOURCE_DIR.resolve().is_relative_to(
+                    bundle_root
+                ):
+                    raise script_resources.ScriptResourceError(
+                        "uTiki script resource escaped the frozen bundle"
+                    )
+            digest = script_resources.verify_script_resources(
+                CONST_NATIVE_INPUT_SETTER_JS
+            )
+        except (OSError, script_resources.ScriptResourceError) as exc:
+            print(f"uTiki resource self-test FAILED: {exc}")
+            sys.exit(1)
+        print(f"uTiki resource self-test passed: {digest}")
+        return
     asyncio.run(main(args))
 
 if __name__ == "__main__":

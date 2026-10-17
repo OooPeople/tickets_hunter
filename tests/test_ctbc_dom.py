@@ -38,6 +38,7 @@ from platforms.utiki.workflow import (
     _ctbc_fast_marker_matches_pending,
     _fill_ctbc_inline_login,
     _ctbc_pending_from_fast_marker,
+    _ctbc_prefetch_area_snapshot,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
     _reconcile_utiki_purchase,
@@ -245,6 +246,52 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         )
         self.assertFalse(await _fill_ctbc_inline_login(raced, cfg))
         self.assertFalse(raced.credentials_written)
+
+        account = 'user__UTIKI_INLINE_LOGIN_FILL_ARG_2__"\\\n@example.test'
+        password = 'p__UTIKI_INLINE_LOGIN_FILL_ARG_0__\\\n"密碼'
+        cfg["accounts"]["ctbc_account"] = account
+        cfg["accounts"]["ctbc_password"] = password
+        literal_placeholder = LoginTab(
+            "https://tix.ctbcsports.com/BROTHERS/UTK0205_?PERFORMANCE_ID=P1"
+        )
+        self.assertTrue(await _fill_ctbc_inline_login(literal_placeholder, cfg))
+        self.assertTrue(literal_placeholder.credentials_written)
+        self.assertIn(json.dumps(account), literal_placeholder.scripts[1])
+        self.assertIn(json.dumps(password), literal_placeholder.scripts[1])
+
+    async def test_fast_area_prefetch_uses_bound_production_script(self):
+        class PrefetchTab:
+            def __init__(self):
+                self.script = None
+                self.await_promise = None
+
+            async def evaluate(self, script, *, await_promise=False):
+                self.script = script
+                self.await_promise = await_promise
+                return '{"ok": false, "reason": "area-response"}'
+
+        tab = PrefetchTab()
+        target = {
+            "url": "https://tix.ctbcsports.com/BROTHERS/UTK0202_?PRODUCT_ID=P1",
+            "performance_id": "P1",
+            "product_id": "PRODUCT-1",
+            "map_namespace": "CTBC",
+        }
+        result = await _ctbc_prefetch_area_snapshot(tab, target)
+        self.assertEqual({"ok": False, "reason": "area-response"}, result)
+        self.assertTrue(tab.await_promise)
+        for variable, key in (
+            ("areaUrl", "url"),
+            ("expectedPerformance", "performance_id"),
+            ("expectedProduct", "product_id"),
+            ("mapNamespace", "map_namespace"),
+        ):
+            self.assertIn(
+                f"const {variable} = {json.dumps(target[key])};",
+                tab.script,
+            )
+        self.assertIn("credentials: 'include'", tab.script)
+        self.assertIn("credentials: 'omit'", tab.script)
 
     async def test_cookie_injection_rechecks_the_exact_tenant(self):
         get_all = AsyncMock(return_value=[])
@@ -2742,6 +2789,28 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 tab, cfg, ocr=None
             ))
         dispatch.assert_not_awaited()
+
+    async def test_credential_protocol_error_never_logs_script_params(self):
+        tab = FakeSubmitTab(dialog="")
+        cfg = config()
+        logs = []
+        synthetic_account = "synthetic-account-sentinel"
+        synthetic_password = "synthetic-password-sentinel"
+        failure = RuntimeError(
+            f"CDP Runtime.evaluate expression={synthetic_account}:{synthetic_password}"
+        )
+        logger = types.SimpleNamespace(log=logs.append)
+        with patch(
+            "platforms.utiki.workflow.util.create_debug_logger",
+            return_value=logger,
+        ), patch(
+            "platforms.utiki.workflow._fill_ctbc_inline_login",
+            AsyncMock(side_effect=failure),
+        ):
+            self.assertFalse(await _ctbc_captcha_and_submit(tab, cfg, ocr=None))
+        self.assertTrue(any("Credential observation failed" in item for item in logs))
+        self.assertNotIn(synthetic_account, "\n".join(logs))
+        self.assertNotIn(synthetic_password, "\n".join(logs))
 
     async def test_known_auth_fingerprint_requires_observable_change(self):
         tab = FakeSubmitTab(dialog="")

@@ -15,18 +15,25 @@ upgrade can silently break, and it is worth being able to re-run in under a
 minute.
 
     python build_scripts/build_local.py            build, assemble, verify
-    python build_scripts/build_local.py --skip-build   re-verify an existing dist
+    python build_scripts/build_local.py --assemble-only   assemble existing PyInstaller outputs, verify
+    python build_scripts/build_local.py --skip-build      re-verify an existing dist
     python build_scripts/build_local.py --keep         leave build/ for inspection
+    python build_scripts/build_local.py --skip-build --report result.json
 
 Exit code is 0 only when every check passes.
 """
 import argparse
+import hashlib
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPTS = ROOT / "build_scripts"
@@ -38,6 +45,24 @@ IS_MACOS = sys.platform == "darwin"
 EXE_SUFFIX = ".exe" if IS_WINDOWS else ""
 
 SPECS = ["nodriver_tixcraft", "settings"]
+
+# PyInstaller can point these macOS top-level aliases at different bundled
+# copies. The old merge always selected the settings copy; keep that explicit
+# and leave all other, including uTiki resource, collisions as hard errors.
+MACOS_ALIAS_PAIRS = {
+    "libfreetype.6.dylib": (
+        "PIL/.dylibs/libfreetype.6.dylib",
+        "cv2/.dylibs/libfreetype.6.dylib",
+    ),
+    "liblzma.5.dylib": (
+        "cv2/.dylibs/liblzma.5.dylib",
+        "PIL/.dylibs/liblzma.5.dylib",
+    ),
+    "libpng16.16.dylib": (
+        "PIL/.dylibs/libpng16.16.dylib",
+        "cv2/.dylibs/libpng16.16.dylib",
+    ),
+}
 
 # Two smoke checks run the frozen bot: --help proves the import chain loaded,
 # and --self-test proves OCR works, which --help cannot because the ddddocr
@@ -57,6 +82,35 @@ def step(name, ok, detail=""):
 def run(cmd, **kwargs):
     print(f"    $ {' '.join(str(c) for c in cmd)}")
     return subprocess.run(cmd, cwd=ROOT, **kwargs)
+
+
+def same_file_bytes(first, second):
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open("rb") as left, second.open("rb") as right:
+        return (hashlib.file_digest(left, "sha256").digest() ==
+                hashlib.file_digest(right, "sha256").digest())
+
+
+def equivalent_base_library(first, second):
+    """Ignore ZIP metadata only when every importable member is identical."""
+    try:
+        with ZipFile(first) as left, ZipFile(second) as right:
+            names = set(left.namelist())
+            return (names == set(right.namelist()) and
+                    all(left.read(name) == right.read(name) for name in names))
+    except (OSError, BadZipFile):
+        return False
+
+
+def expected_macos_alias(first, second, relative):
+    pair = MACOS_ALIAS_PAIRS.get(relative.as_posix()) if IS_MACOS else None
+    return bool(
+        pair and first.is_symlink() and second.is_symlink()
+        and os.readlink(first) == pair[0]
+        and os.readlink(second) == pair[1]
+        and first.resolve().is_file() and second.resolve().is_file()
+    )
 
 
 def preflight():
@@ -118,7 +172,38 @@ def assemble():
 
         internal = DIST / name / "_internal"
         if internal.exists():
-            shutil.copytree(internal, STAGE / "_internal", dirs_exist_ok=True)
+            target = STAGE / "_internal"
+            for item in internal.rglob("*"):
+                destination = target / item.relative_to(internal)
+                if item.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                elif item.is_file():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if destination.exists():
+                        relative = item.relative_to(internal)
+                        if not destination.is_file():
+                            return step("_internal content conflict", False,
+                                        str(relative))
+                        if same_file_bytes(item, destination):
+                            continue
+                        first = DIST / SPECS[0] / "_internal" / relative
+                        if relative.as_posix() == "base_library.zip" and \
+                                equivalent_base_library(first, item):
+                            step("equivalent base_library.zip", True,
+                                 "all members identical")
+                            continue
+                        if expected_macos_alias(first, item, relative):
+                            shutil.copy2(item, destination)
+                            step(f"canonical macOS library alias: {relative.as_posix()}", True,
+                                 str(relative))
+                            continue
+                        return step("_internal content conflict", False,
+                                    str(relative))
+                    else:
+                        shutil.copy2(item, destination)
+                else:
+                    return step("_internal unsupported entry", False,
+                                str(item.relative_to(internal)))
     step("executables and _internal merged", True)
 
     # assets/ and www/ are copied from src/ rather than bundled, matching the
@@ -151,7 +236,7 @@ def verify_layout():
     ok = True
     for name in SPECS:
         exe = STAGE / f"{name}{EXE_SUFFIX}"
-        ok &= step(f"{exe.name} exists", exe.exists())
+        ok &= step(f"{name} exists", exe.exists())
         if exe.exists() and not IS_WINDOWS:
             ok &= step(f"{exe.name} is executable",
                        os.access(exe, os.X_OK))
@@ -159,6 +244,22 @@ def verify_layout():
     ok &= step("_internal present", (STAGE / "_internal").is_dir())
     ok &= step("www/settings.html present",
                (STAGE / "www" / "settings.html").is_file())
+
+    source_scripts = ROOT / "src" / "platforms" / "utiki" / "scripts"
+    bundled_scripts = STAGE / "_internal" / "platforms" / "utiki" / "scripts"
+    source_files = {
+        item.relative_to(source_scripts): item
+        for item in source_scripts.rglob("*") if item.is_file()
+    }
+    bundled_files = {
+        item.relative_to(bundled_scripts): item
+        for item in bundled_scripts.rglob("*") if item.is_file()
+    } if bundled_scripts.is_dir() else {}
+    scripts_match = bool(source_files) and source_files.keys() == bundled_files.keys()
+    if scripts_match:
+        scripts_match = all(same_file_bytes(source, bundled_files[relative])
+                            for relative, source in source_files.items())
+    ok &= step("uTiki scripts match source in final bundle", scripts_match)
 
     # ddddocr ships its ONNX model as a data file. PyInstaller collects it via
     # collect_data_files(), and a silent miss turns into "OCR always fails" at
@@ -179,10 +280,10 @@ def verify_layout():
     return ok
 
 
-def run_bot(exe, flag):
+def run_bot(exe, flag, *, cwd=None, env=None):
     """Run the frozen bot with one flag; (returncode, output) or (None, "")."""
     try:
-        proc = subprocess.run([str(exe), flag], cwd=STAGE,
+        proc = subprocess.run([str(exe), flag], cwd=cwd or STAGE, env=env,
                               capture_output=True, text=True,
                               timeout=SMOKE_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -220,7 +321,107 @@ def smoke():
     if code != 0:
         print_tail(output)
         return step("OCR self-test", False, f"exit {code}")
-    return step("OCR self-test", True, "both models read the test image")
+    step("OCR self-test", True, "both models read the test image")
+
+    with tempfile.TemporaryDirectory(prefix="tickets-hunter-resource-smoke-") as cwd:
+        isolated_root = Path(cwd)
+        if ROOT.resolve() == isolated_root or ROOT.resolve() in isolated_root.parents:
+            return step("standalone frozen bundle outside source tree", False)
+        isolated_bundle = isolated_root / "bundle"
+        try:
+            shutil.copytree(STAGE, isolated_bundle, symlinks=True)
+        except OSError as exc:
+            return step("standalone frozen bundle outside source tree", False,
+                        type(exc).__name__)
+        step("standalone frozen bundle outside source tree", True)
+        isolated_exe = isolated_bundle / f"nodriver_tixcraft{EXE_SUFFIX}"
+        code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
+        if code != 0 or "uTiki resource self-test passed:" not in output:
+            print_tail(output)
+            return step("bot frozen uTiki resource self-test", False,
+                        f"exit {code}")
+        step("bot frozen uTiki resource self-test", True, "exit 0")
+        settings_exe = isolated_bundle / f"settings{EXE_SUFFIX}"
+        try:
+            proc = subprocess.run(
+                [str(settings_exe), "--resource-self-test"], cwd=cwd,
+                capture_output=True, text=True, timeout=SMOKE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return step("settings frozen resource self-test", False,
+                        f"no output within {SMOKE_TIMEOUT}s")
+        if proc.returncode != 0 or "Settings resource self-test passed:" not in proc.stdout:
+            print_tail((proc.stdout or "") + (proc.stderr or ""))
+            return step("settings frozen resource self-test", False,
+                        f"exit {proc.returncode}")
+        step("settings frozen resource self-test", True, "exit 0")
+
+        if IS_WINDOWS:
+            legacy_env = os.environ.copy()
+            legacy_env.update(PYTHONUTF8="0", PYTHONIOENCODING="cp950")
+            code, output = run_bot(
+                isolated_exe, "--utiki-resource-self-test", cwd=cwd, env=legacy_env
+            )
+            if code != 0 or "uTiki resource self-test passed:" not in output:
+                print_tail(output)
+                return step("Windows cp950 frozen bot resource self-test", False,
+                            f"exit {code}")
+            step("Windows cp950 frozen bot resource self-test", True, "exit 0")
+            try:
+                proc = subprocess.run(
+                    [str(settings_exe), "--resource-self-test"], cwd=cwd,
+                    env=legacy_env, capture_output=True, text=True,
+                    timeout=SMOKE_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                return step("Windows cp950 frozen settings resource self-test", False,
+                            "no output within timeout")
+            if proc.returncode != 0 or "Settings resource self-test passed:" not in proc.stdout:
+                print_tail((proc.stdout or "") + (proc.stderr or ""))
+                return step("Windows cp950 frozen settings resource self-test", False,
+                            f"exit {proc.returncode}")
+            step("Windows cp950 frozen settings resource self-test", True, "exit 0")
+
+        script_file = (isolated_bundle / "_internal" / "platforms" / "utiki" /
+                       "scripts" / "date_snapshot.js")
+        original = script_file.read_bytes()
+        backup = script_file.with_name("date_snapshot.js.resource-smoke-backup")
+        if backup.exists():
+            return step("resource smoke backup absent", False)
+        try:
+            script_file.rename(backup)
+            code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
+            if code in (None, 0) or "uTiki resource self-test FAILED:" not in output:
+                print_tail(output)
+                return step("missing frozen uTiki script rejected", False)
+        finally:
+            backup.rename(script_file)
+        step("missing frozen uTiki script rejected", True, f"exit {code}")
+
+        try:
+            script_file.write_bytes(original + b" ")
+            code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
+            if code in (None, 0) or "digest mismatch" not in output:
+                print_tail(output)
+                return step("mixed frozen uTiki script rejected", False)
+        finally:
+            script_file.write_bytes(original)
+        step("mixed frozen uTiki script rejected", True, f"exit {code}")
+
+        corrupt = original.replace(b"#PerformanceListTable", b"#DamagedTable", 1)
+        if corrupt == original:
+            return step("corrupt frozen uTiki production script rejected", False,
+                        "expected production selector is absent")
+        try:
+            script_file.write_bytes(corrupt)
+            code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
+            if code in (None, 0) or "digest mismatch" not in output:
+                print_tail(output)
+                return step("corrupt frozen uTiki production script rejected", False)
+        finally:
+            script_file.write_bytes(original)
+        return step("corrupt frozen uTiki production script rejected", True,
+                    f"exit {code}")
 
 
 def clear_quarantine():
@@ -239,23 +440,24 @@ def clear_quarantine():
         print(f"  xattr -dr com.apple.quarantine {STAGE}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skip-build", action="store_true",
-                        help="verify an existing dist/ without rebuilding")
-    parser.add_argument("--keep", action="store_true",
-                        help="keep build/ for inspecting warn-*.txt")
-    args = parser.parse_args()
-
+def _execute(args):
     print(f"Tickets Hunter local build -- {sys.platform}")
     print(f"Project root: {ROOT}")
+
+    source_manifest = ROOT / "src/platforms/utiki/scripts/manifest.json"
+    if args.source_manifest is not None:
+        if args.source_manifest.resolve() != source_manifest.resolve():
+            step("bound source manifest is current source", False)
+            return 1
+        if not step("bound source manifest is current source", source_manifest.is_file()):
+            return 1
 
     if not preflight():
         print("\nPreflight failed, nothing was built.")
         return 1
 
     if not args.skip_build:
-        if not build():
+        if not args.assemble_only and not build():
             print("\nPyInstaller failed. See build/*/warn-*.txt for the "
                   "module it could not resolve.")
             return 1
@@ -267,6 +469,15 @@ def main():
 
     layout_ok = verify_layout()
     smoke_ok = smoke()
+    bundle_bound = True
+    if args.bundle_manifest is not None:
+        final_manifest = STAGE / "_internal/platforms/utiki/scripts/manifest.json"
+        bundle_bound = (
+            args.bundle_manifest.is_file()
+            and final_manifest.is_file()
+            and same_file_bytes(args.bundle_manifest, final_manifest)
+        )
+        step("bound bundle manifest matches final bundle", bundle_bound)
 
     if not args.keep and (ROOT / "build").exists():
         shutil.rmtree(ROOT / "build")
@@ -280,7 +491,55 @@ def main():
     print(f"Bundle: {STAGE}")
     if IS_MACOS:
         clear_quarantine()
-    return 0 if layout_ok and smoke_ok else 1
+    return 0 if layout_ok and smoke_ok and bundle_bound else 1
+
+
+def _write_report(path, exit_code):
+    if path is None:
+        return
+    source = ROOT / "src" / "platforms" / "utiki" / "scripts" / "manifest.json"
+    bundle = STAGE / "_internal" / "platforms" / "utiki" / "scripts" / "manifest.json"
+
+    def digest(existing):
+        return hashlib.sha256(existing.read_bytes()).hexdigest() if existing.is_file() else None
+
+    report = {
+        "schema_version": 1,
+        "status": "PASS" if exit_code == 0 else "FAIL",
+        "exit_code": exit_code,
+        "platform": sys.platform,
+        "architecture": platform.machine(),
+        "source_manifest_sha256": digest(source),
+        "bundle_manifest_sha256": digest(bundle),
+        "checks": [
+            {"name": name, "status": "PASS" if ok else "FAIL", "detail": detail}
+            for name, ok, detail in results
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--assemble-only", action="store_true",
+                      help="assemble existing PyInstaller outputs and verify the bundle")
+    mode.add_argument("--skip-build", action="store_true",
+                      help="re-verify an already assembled dist/ without rebuilding")
+    parser.add_argument("--keep", action="store_true",
+                        help="keep build/ for inspecting warn-*.txt")
+    parser.add_argument("--report", type=Path,
+                        help="write the raw build/smoke result for a P3a package gate")
+    parser.add_argument("--source-manifest", type=Path,
+                        help="bind the current source manifest for evidence collection")
+    parser.add_argument("--bundle-manifest", type=Path,
+                        help="bind a captured copy of the final bundle manifest")
+    args = parser.parse_args()
+    results.clear()
+    exit_code = _execute(args)
+    _write_report(args.report, exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

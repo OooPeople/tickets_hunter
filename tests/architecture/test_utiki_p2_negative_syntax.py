@@ -116,6 +116,37 @@ def test_p2_h11_conditional_bridge_is_not_omitted_from_syntax_scope(tmp_path: Pa
     assert transcript["observed_exit_code"] == 1
 
 
+def test_h11_untracked_probe_keeps_canonical_bytes_with_windows_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    entry = next(
+        item for item in registry["probes"]
+        if item["obligation_id"] == "H11.syntax.new-or-untracked-omitted"
+    )
+    original_write_text = Path.write_text
+    translated: list[str] = []
+
+    def windows_write_text(path: Path, value: str, *args, **kwargs) -> int:
+        if path.name in {"settings.py", "new_untracked.py"} and value.startswith("VALUE"):
+            translated.append(path.name)
+            return path.write_bytes(value.replace("\n", "\r\n").encode("utf-8"))
+        return original_write_text(path, value, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", windows_write_text)
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    builder._syntax_probe(ROOT, probe, entry, "1" * 40, phase="P2")
+
+    assert translated, "Windows text-mode simulation did not exercise the builder"
+    assert (probe / "repo/src/settings.py").read_bytes() == b"VALUE = 2\n"
+    assert (probe / "repo/src/new_untracked.py").read_bytes() == b"VALUE = 1\n"
+    request = json.loads((probe / "probe.json").read_text(encoding="utf-8"))
+    validate_request_contract(
+        entry, request, probe_root=probe, repository_root=ROOT, phase="P2"
+    )
+
+
 @pytest.mark.parametrize("obligation_id", EXPECTED_REJECTIONS)
 def test_p2_syntax_probe_runs_declared_rejection(
     tmp_path: Path, obligation_id: str

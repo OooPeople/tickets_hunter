@@ -25,6 +25,8 @@ a = Analysis(
     datas=[
         (os.path.join(project_root, 'src', 'assets'), 'assets'),
         (os.path.join(project_root, 'src', 'www'), 'www'),
+        (os.path.join(project_root, 'src', 'platforms', 'utiki', 'scripts'),
+         'platforms/utiki/scripts'),
         # settings.json excluded - program generates it automatically
         # chrome-win64/ excluded - auto-downloaded at runtime if needed
     ] + ddddocr_datas,

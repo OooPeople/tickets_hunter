@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Literal, cast
 
-if __name__ == "__main__":
+if __name__ == "__main__" and not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from utiki_config import (

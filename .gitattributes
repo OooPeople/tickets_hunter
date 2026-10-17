@@ -7,3 +7,4 @@
 # P1 evidence identities are byte-pinned and must survive Windows checkout.
 ci/utiki-*.json text eol=lf
 tests/fixtures/utiki/manifest.json text eol=lf
+tests/fixtures/utiki/manifest-p2.json text eol=lf

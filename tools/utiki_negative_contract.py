@@ -529,14 +529,20 @@ def _validate_typecheck(
     arguments: list[str],
     inputs: dict[str, tuple[str, Path]],
     probe_root: Path,
+    phase: str,
 ) -> None:
+    if phase not in {"P1", "P2"}:
+        raise NegativeContractError("typecheck phase is untrusted")
     flags = {
         "--root",
         "--manifest",
         "--config",
-        "--mypy",
         "--report",
     }
+    if phase == "P1":
+        flags.add("--mypy")
+    else:
+        flags.add("--phase")
     if variant in TYPECHECK_PATHS:
         flags.add("--probe-subject")
     values = _require_exact_options(arguments, flags)
@@ -544,12 +550,17 @@ def _validate_typecheck(
         "--root": f"{PROBE_ROOT}/repo",
         "--manifest": f"{PROBE_ROOT}/repo/ci/utiki-typed-scope.txt",
         "--config": f"{PROBE_ROOT}/repo/ci/mypy-utiki.ini",
-        "--mypy": f"{PROBE_ROOT}/fake-mypy.py",
         "--report": f"{PROBE_ROOT}/typecheck-report.json",
     }
+    if phase == "P1":
+        expected_static["--mypy"] = f"{PROBE_ROOT}/fake-mypy.py"
+    else:
+        expected_static["--phase"] = "P2"
     if any(values.get(key) != value for key, value in expected_static.items()):
         raise NegativeContractError("typecheck arguments are not canonical")
     expected_inputs = dict(TYPECHECK_SUPPORT_PATHS)
+    if phase == "P2":
+        expected_inputs.pop("typecheck-mypy")
     expected_inputs["mutated-typecheck-input"] = (
         TYPECHECK_PATHS.get(variant, "repo/ci/mypy-utiki.ini")
     )
@@ -558,6 +569,8 @@ def _validate_typecheck(
     if {kind: relative for kind, (relative, _) in inputs.items()} != expected_inputs:
         raise NegativeContractError("typecheck input set differs from review")
     for kind, relative in TYPECHECK_SUPPORT_PATHS.items():
+        if phase == "P2" and kind == "typecheck-mypy":
+            continue
         _, path = inputs[kind]
         if kind == "typecheck-manifest":
             _canonical_text_file(path, TYPECHECK_MANIFEST_CONTENT, kind)
@@ -597,6 +610,7 @@ def _validate_syntax(
     input_path: Path,
     request: dict[str, Any],
     probe_root: Path,
+    phase: str,
 ) -> None:
     flags: set[str] = set()
     option_names = {
@@ -627,6 +641,9 @@ def _validate_syntax(
         raise NegativeContractError("syntax candidate ref is invalid")
     if values.get("--run-metadata") != f"{PROBE_ROOT}/run-context.json":
         raise NegativeContractError("syntax run metadata path is not canonical")
+    context = _json(probe_root / "run-context.json")
+    if context.get("phase") != phase:
+        raise NegativeContractError("syntax run phase differs from the reviewed registry")
     relative = request["inputs"][0]["path"]
     repo = probe_root / "repo"
     if variant in {"outside-fixed-roots", "not-imported-by-pytest"}:
@@ -727,7 +744,8 @@ def _ci_execution_keys(manifest: dict[str, Any]) -> list[tuple[str, str, str]]:
 
 
 def _validate_ci(
-    entry: dict[str, Any], arguments: list[str], input_path: Path, request: dict[str, Any]
+    entry: dict[str, Any], arguments: list[str], input_path: Path,
+    request: dict[str, Any], phase: str,
 ) -> None:
     variant = entry["variant_id"]
     aggregate = variant == "missing-job-or-target"
@@ -745,7 +763,7 @@ def _validate_ci(
         options.update({"--junit", "--run-metadata", "--job-id", "--target"})
     values = _require_exact_options(arguments, options)
     if (
-        values.get("--phase") != "P1"
+        values.get("--phase") != phase
         or values.get("--candidate-sha") != request.get("candidate_sha")
         or (not aggregate and values.get("--job-id") != "architecture-types")
         or (not aggregate and values.get("--target") != "source-linux-x64")
@@ -866,6 +884,7 @@ def validate_request_contract(
     *,
     probe_root: Path,
     repository_root: Path,
+    phase: str = "P1",
 ) -> None:
     """Validate one concrete request against its exact reviewed mutation."""
 
@@ -894,14 +913,14 @@ def validate_request_contract(
             raise NegativeContractError("negative input set differs from review")
         _validate_egress(variant, arguments, input_path)
     elif producer == "tools/run_utiki_typecheck.py":
-        _validate_typecheck(variant, arguments, inputs, probe_root)
+        _validate_typecheck(variant, arguments, inputs, probe_root, phase)
     elif producer == "tools/verify_modified_python.py":
         if set(inputs) != set(mutation_kinds):
             raise NegativeContractError("negative input set differs from review")
-        _validate_syntax(variant, arguments, input_path, request, probe_root)
+        _validate_syntax(variant, arguments, input_path, request, probe_root, phase)
     elif producer == "tools/verify_utiki_ci_results.py":
         if set(inputs) != set(mutation_kinds):
             raise NegativeContractError("negative input set differs from review")
-        _validate_ci(entry, arguments, input_path, request)
+        _validate_ci(entry, arguments, input_path, request, phase)
     else:
         raise NegativeContractError("negative producer has no canonical contract")

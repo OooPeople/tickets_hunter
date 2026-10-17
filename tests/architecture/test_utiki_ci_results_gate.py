@@ -144,10 +144,10 @@ def _internal_negative_request(
         builder._pytest_probe(root, entry, CANDIDATE_SHA)
         return
     if entry["child_producer"] == "tools/run_utiki_typecheck.py":
-        builder._typecheck_probe(root, entry, CANDIDATE_SHA)
+        builder._typecheck_probe(root, entry, CANDIDATE_SHA, phase=PHASE)
         return
     if entry["child_producer"] == "tools/verify_modified_python.py":
-        builder._syntax_probe(PROJECT_ROOT, root, entry, CANDIDATE_SHA)
+        builder._syntax_probe(PROJECT_ROOT, root, entry, CANDIDATE_SHA, phase=PHASE)
         return
     if entry["environment"] == "isolated":
         builder._isolated_probe(PROJECT_ROOT, root, entry, CANDIDATE_SHA)
@@ -171,7 +171,7 @@ def _internal_negative_request(
             "--run-index",
             primary,
             "--phase",
-            "P1",
+            PHASE,
             "--run-id",
             RUN_ID,
             "--candidate-sha",
@@ -185,7 +185,7 @@ def _internal_negative_request(
             "--run-metadata",
             root / "run-metadata.json",
             "--phase",
-            "P1",
+            PHASE,
             "--run-id",
             RUN_ID,
             "--job-id",
@@ -836,17 +836,24 @@ def _make_run(
                 },
             }
             if kind == "typecheck-report":
-                fixture_root = (
-                    PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "typecheck-p1"
-                )
-                typed_manifest = fixture_root / "manifest.txt"
-                mypy_config = fixture_root / "mypy.ini"
-                coverage_context = fixture_root / "context.json"
-                for input_kind, input_file in (
-                    ("typed-manifest", typed_manifest),
-                    ("mypy-config", mypy_config),
-                    ("coverage-context", coverage_context),
-                ):
+                if PHASE == "P2":
+                    typed_manifest = PROJECT_ROOT / "ci/utiki-typed-scope.txt"
+                    mypy_config = PROJECT_ROOT / "ci/mypy-utiki.ini"
+                    input_files = (
+                        ("typed-manifest", typed_manifest),
+                        ("mypy-config", mypy_config),
+                    )
+                else:
+                    fixture_root = PROJECT_ROOT / "tests/fixtures/utiki/typecheck-p1"
+                    typed_manifest = fixture_root / "manifest.txt"
+                    mypy_config = fixture_root / "mypy.ini"
+                    coverage_context = fixture_root / "context.json"
+                    input_files = (
+                        ("typed-manifest", typed_manifest),
+                        ("mypy-config", mypy_config),
+                        ("coverage-context", coverage_context),
+                    )
+                for input_kind, input_file in input_files:
                     extra_inputs.append(
                         {
                             "kind": input_kind,
@@ -857,17 +864,34 @@ def _make_run(
                     )
                 typecheck_stdout = path.parent / "typecheck-mypy.stdout"
                 typecheck_stderr = path.parent / "typecheck-mypy.stderr"
-                typecheck_stdout.write_text("Success: no issues found\n", encoding="utf-8")
-                typecheck_stderr.write_text("", encoding="utf-8")
-                producer_payloads[kind].update(
-                    {
-                        "manifest_sha256": _sha256(typed_manifest),
-                        "config_sha256": _sha256(mypy_config),
-                        "coverage_context_sha256": _sha256(coverage_context),
-                        "stdout_sha256": _sha256(typecheck_stdout),
-                        "stderr_sha256": _sha256(typecheck_stderr),
-                    }
-                )
+                if PHASE == "P2":
+                    typecheck_raw = path.parent / "typecheck-raw.json"
+                    completed = subprocess.run(
+                        [
+                            sys.executable, str(PROJECT_ROOT / "tools/run_utiki_typecheck.py"),
+                            "--phase", "P2", "--root", str(PROJECT_ROOT),
+                            "--manifest", str(typed_manifest), "--config", str(mypy_config),
+                            "--report", str(typecheck_raw),
+                            "--stdout-report", str(typecheck_stdout),
+                            "--stderr-report", str(typecheck_stderr),
+                        ],
+                        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
+                    )
+                    if completed.returncode != 0:
+                        raise AssertionError(f"P2 production typecheck control failed: {completed.stderr}")
+                    producer_payloads[kind] = json.loads(typecheck_raw.read_text(encoding="utf-8"))
+                else:
+                    typecheck_stdout.write_text("Success: no issues found\n", encoding="utf-8")
+                    typecheck_stderr.write_text("", encoding="utf-8")
+                    producer_payloads[kind].update(
+                        {
+                            "manifest_sha256": _sha256(typed_manifest),
+                            "config_sha256": _sha256(mypy_config),
+                            "coverage_context_sha256": _sha256(coverage_context),
+                            "stdout_sha256": _sha256(typecheck_stdout),
+                            "stderr_sha256": _sha256(typecheck_stderr),
+                        }
+                    )
                 extra_outputs.extend(
                     [
                         {

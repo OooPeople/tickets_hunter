@@ -197,7 +197,11 @@ def _pytest_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> None
     )
 
 
-def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> None:
+def _typecheck_probe(
+    root: Path, entry: dict[str, Any], candidate_sha: str, *, phase: str = "P1"
+) -> None:
+    if phase not in {"P1", "P2"}:
+        raise BuildError("unsupported typecheck probe phase")
     fixture = root / "repo"
     seed_files = (
         "src/platforms/utiki/auth.py",
@@ -217,7 +221,8 @@ def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> N
         encoding="utf-8",
     )
     fake_mypy = root / "fake-mypy.py"
-    fake_mypy.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+    if phase == "P1":
+        fake_mypy.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
     new_paths = {
         "new-domain-file": "src/platforms/utiki/domain/state.py",
         "new-application-file": "src/platforms/utiki/application/engine.py",
@@ -249,14 +254,14 @@ def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> N
         entry,
         candidate_sha,
         arguments=[
+            *(["--phase", "P2"] if phase == "P2" else []),
             "--root",
             fixture,
             "--manifest",
             manifest,
             "--config",
             config,
-            "--mypy",
-            fake_mypy,
+            *(["--mypy", fake_mypy] if phase == "P1" else []),
             "--report",
             report,
             *(["--probe-subject", input_path] if variant in new_paths else []),
@@ -265,7 +270,7 @@ def _typecheck_probe(root: Path, entry: dict[str, Any], candidate_sha: str) -> N
         support_inputs=[
             ("typecheck-manifest", manifest),
             *([("typecheck-config", config)] if input_path != config else []),
-            ("typecheck-mypy", fake_mypy),
+            *([("typecheck-mypy", fake_mypy)] if phase == "P1" else []),
             ("typecheck-seed-auth", fixture / seed_files[0]),
             ("typecheck-seed-profiles", fixture / seed_files[1]),
             ("typecheck-seed-selection", fixture / seed_files[2]),
@@ -311,14 +316,21 @@ def _set_testcase_property(testcase: ElementTree.Element, name: str, value: str)
 
 
 def _ci_probe(
-    repository: Path, root: Path, entry: dict[str, Any], candidate_sha: str
+    repository: Path, root: Path, entry: dict[str, Any], candidate_sha: str,
+    *, phase: str = "P1",
 ) -> None:
+    if phase not in {"P1", "P2"}:
+        raise BuildError("unsupported CI probe phase")
     from tests.architecture import test_utiki_ci_results_gate as gate
 
     previous_candidate = gate.CANDIDATE_SHA
     previous_run = gate.RUN_ID
+    previous_phase = gate.PHASE
+    previous_registry = gate.NEGATIVE_REGISTRY
     gate.CANDIDATE_SHA = candidate_sha
     gate.RUN_ID = "utiki-negative-builder-attempt-1"
+    gate.PHASE = phase
+    gate.NEGATIVE_REGISTRY = repository / f"ci/utiki-{phase.lower()}-negative-probes.json"
     previous_internal = os.environ.get("UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL")
     os.environ["UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL"] = "1"
     try:
@@ -469,6 +481,8 @@ def _ci_probe(
             os.environ["UTIKI_TEST_NEGATIVE_BUILDER_INTERNAL"] = previous_internal
         gate.CANDIDATE_SHA = previous_candidate
         gate.RUN_ID = previous_run
+        gate.PHASE = previous_phase
+        gate.NEGATIVE_REGISTRY = previous_registry
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -493,14 +507,14 @@ def _git(repo: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def _syntax_context(path: Path, base: str, candidate: str) -> None:
+def _syntax_context(path: Path, base: str, candidate: str, phase: str = "P1") -> None:
     _write_json(
         path,
         {
             "schema_version": 1,
             "run_id": "utiki-negative-syntax",
             "job_id": "modified-python-syntax",
-            "phase": "P1",
+            "phase": phase,
             "base_sha": base,
             "candidate_sha": candidate,
         },
@@ -508,8 +522,11 @@ def _syntax_context(path: Path, base: str, candidate: str) -> None:
 
 
 def _syntax_probe(
-    repository: Path, root: Path, entry: dict[str, Any], candidate_sha: str
+    repository: Path, root: Path, entry: dict[str, Any], candidate_sha: str,
+    *, phase: str = "P1",
 ) -> None:
+    if phase not in {"P1", "P2"}:
+        raise BuildError("unsupported syntax probe phase")
     repo = root / "repo"
     repo.mkdir(parents=True)
     _git(repo, "init", "-b", "main")
@@ -573,7 +590,7 @@ def _syntax_probe(
         _git(repo, "commit", "-m", "change source")
     candidate = _git(repo, "rev-parse", "HEAD")
     context = root / "run-context.json"
-    _syntax_context(context, base, candidate)
+    _syntax_context(context, base, candidate, phase)
     manifest = root / "modified-python.json"
     report = root / "syntax-report.json"
     producer = repository / "tools/verify_modified_python.py"
@@ -727,7 +744,10 @@ def main(argv: list[str] | None = None) -> int:
             "catalog_revision",
             "catalog_sha256",
             "probes",
-        } or registry.get("schema_version") != 1 or registry.get("phase") != "P1":
+        } or registry.get("schema_version") != 1 or registry.get("phase") not in {"P1", "P2"}:
+            raise BuildError("negative registry identity/schema is invalid")
+        phase = registry["phase"]
+        if registry.get("registry_id") != f"utiki-{phase.lower()}-negative-probes":
             raise BuildError("negative registry identity/schema is invalid")
         probes = registry.get("probes")
         if not isinstance(probes, list) or len(probes) != 57:
@@ -791,11 +811,11 @@ def main(argv: list[str] | None = None) -> int:
             elif job_id == "architecture-types" and entry["child_producer"].endswith(
                 "verify_utiki_ci_results.py"
             ):
-                _ci_probe(repository, root, entry, arguments.candidate_sha)
+                _ci_probe(repository, root, entry, arguments.candidate_sha, phase=phase)
             elif job_id == "architecture-types":
-                _typecheck_probe(root, entry, arguments.candidate_sha)
+                _typecheck_probe(root, entry, arguments.candidate_sha, phase=phase)
             elif job_id == "modified-python-syntax":
-                _syntax_probe(repository, root, entry, arguments.candidate_sha)
+                _syntax_probe(repository, root, entry, arguments.candidate_sha, phase=phase)
             else:
                 raise BuildError(f"unsupported negative probe family: {_name(entry)}")
             request = _load(root / "probe.json")
@@ -804,6 +824,7 @@ def main(argv: list[str] | None = None) -> int:
                 request,
                 probe_root=root.resolve(),
                 repository_root=repository,
+                phase=phase,
             )
             validate_probe_output_contract(
                 entry,

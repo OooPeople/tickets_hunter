@@ -861,7 +861,7 @@ def _expected_input_contract(
             "injected-probe": ("artifact", None),
             "probe-registry": (
                 "repository",
-                "ci/utiki-p1-negative-probes.json",
+                f"ci/utiki-{phase.lower()}-negative-probes.json",
             ),
         }
     contract = EVIDENCE_INPUT_CONTRACTS.get((job_id, kind))
@@ -2009,6 +2009,7 @@ def _validate_negative_payload(
             probe_request,
             probe_root=probe_input_path.parent.resolve(),
             repository_root=repository_root,
+            phase=metadata["phase"],
         )
     except NegativeContractError as error:
         fail("INVALID_NEGATIVE_PROBE", str(error))
@@ -2316,7 +2317,7 @@ def _validate_evidence_report(
         )
         if (
             registry_payload["schema_version"] != 1
-            or registry_payload["registry_id"] != "utiki-p1-negative-probes"
+            or registry_payload["registry_id"] != f"utiki-{metadata['phase'].lower()}-negative-probes"
             or registry_payload["phase"] != metadata["phase"]
             or registry_payload["catalog_sha256"] != metadata["catalog_sha256"]
         ):

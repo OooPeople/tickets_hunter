@@ -1336,20 +1336,7 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
 async def _fill_ctbc_inline_login(tab, config_dict):
     """在支援的租戶頁面填入並送出登入資料。"""
 
-    state_raw = await tab.evaluate('''
-        (() => {
-            const input = document.querySelector('#LOGIN_ID');
-            const password = document.querySelector('#LOGIN_PWD');
-            if (!input) return {required: false};
-            const style = getComputedStyle(input);
-            const required = style.display !== 'none' && style.visibility !== 'hidden' && input.offsetParent !== null;
-            return {
-                required: required,
-                account: input.value || '',
-                password: password ? password.value : ''
-            };
-        })()
-    ''')
+    state_raw = await tab.evaluate(assemble_script("inline_login_state"))
     state = util.parse_nodriver_result(state_raw)
     if not isinstance(state, dict) or not state.get("required", False):
         return True
@@ -1369,25 +1356,11 @@ async def _fill_ctbc_inline_login(tab, config_dict):
     if not account or not password:
         return False
 
-    result = await tab.evaluate(f'''
-        (() => {{
-            const expectedOrigin = {json.dumps(auth_profile.inline_login_origin)};
-            const currentUrl = new URL(location.href);
-            if (
-                currentUrl.origin !== expectedOrigin ||
-                currentUrl.username ||
-                currentUrl.password
-            ) return false;
-            const account = document.querySelector('#LOGIN_ID');
-            const password = document.querySelector('#LOGIN_PWD');
-            if (!account || !password) return false;
-            account.value = {json.dumps(account)};
-            password.value = {json.dumps(password)};
-            account.dispatchEvent(new Event('input', {{bubbles: true}}));
-            password.dispatchEvent(new Event('input', {{bubbles: true}}));
-            return true;
-        }})()
-    ''')
+    result = await tab.evaluate(assemble_script("inline_login_fill", {
+        "__UTIKI_INLINE_LOGIN_FILL_ARG_0__": json.dumps(auth_profile.inline_login_origin),
+        "__UTIKI_INLINE_LOGIN_FILL_ARG_1__": json.dumps(account),
+        "__UTIKI_INLINE_LOGIN_FILL_ARG_2__": json.dumps(password),
+    }))
     return bool(result)
 
 
@@ -1405,48 +1378,9 @@ async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
             "documentId": expected_dialog.document_id,
             "text": expected_dialog.text,
         }, ensure_ascii=False)
-    raw = await tab.evaluate(f'''
-        (() => {{
-            const expectedDialog = {expected_json};
-            if (expectedDialog) {{
-                if (location.href !== expectedDialog.pageUrl ||
-                    String(performance.timeOrigin) !==
-                        expectedDialog.documentId) {{
-                    return JSON.stringify({{ok: false}});
-                }}
-                const visible = element => {{
-                    if (!element || !element.isConnected || element.hidden ||
-                        element.getAttribute('aria-hidden') === 'true') {{
-                        return false;
-                    }}
-                    const style = getComputedStyle(element);
-                    return style.display !== 'none' &&
-                        style.visibility !== 'hidden' &&
-                        element.getClientRects().length > 0;
-                }};
-                const dialogs = Array.from(
-                    document.querySelectorAll('#dialog-message'))
-                    .map(message => ({{
-                        message,
-                        wrapper: message.closest('.ui-dialog')
-                    }}))
-                    .filter(item =>
-                        visible(item.wrapper) && visible(item.message));
-                if (dialogs.length !== 1 ||
-                    (dialogs[0].message.textContent || '').trim() !==
-                        expectedDialog.text) {{
-                    return JSON.stringify({{ok: false}});
-                }}
-            }}
-            const account = document.querySelector('#LOGIN_ID');
-            const password = document.querySelector('#LOGIN_PWD');
-            return JSON.stringify({{
-                ok: true,
-                account: account ? account.value : '',
-                password: password ? password.value : ''
-            }});
-        }})()
-    ''')
+    raw = await tab.evaluate(assemble_script("login_fingerprint", {
+        "__UTIKI_LOGIN_FINGERPRINT_ARG_0__": expected_json,
+    }))
     try:
         credentials = json.loads(raw) if isinstance(raw, str) else {}
     except (TypeError, ValueError):
@@ -2282,21 +2216,7 @@ async def _get_ctbc_captcha_image_bytes(tab, config_dict):
     """以原始 90×25 解析度擷取同源驗證碼圖片。"""
     debug = util.create_debug_logger(config_dict)
     try:
-        data_url = await tab.evaluate('''
-            (() => {
-                const image = document.querySelector('img#chk_pic');
-                if (!image || !image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
-                    return '';
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = image.naturalWidth;
-                canvas.height = image.naturalHeight;
-                const context = canvas.getContext('2d');
-                if (!context) return '';
-                context.drawImage(image, 0, 0, canvas.width, canvas.height);
-                return canvas.toDataURL('image/png');
-            })()
-        ''')
+        data_url = await tab.evaluate(assemble_script("captcha_image"))
         if isinstance(data_url, str) and data_url.startswith("data:image/"):
             _header, separator, encoded = data_url.partition(",")
             if separator and encoded:
@@ -2323,12 +2243,7 @@ async def _ctbc_captcha(tab, config_dict, ocr):
         return False
 
     for _ in range(10):
-        image_ready = await tab.evaluate('''
-            (() => {
-                const image = document.querySelector('img#chk_pic');
-                return !!(image && image.src && image.complete && image.naturalWidth > 0);
-            })()
-        ''')
+        image_ready = await tab.evaluate(assemble_script("captcha_image_ready"))
         if image_ready:
             break
         await tab.sleep(0.1)
@@ -2475,22 +2390,17 @@ async def _ctbc_captcha_and_submit(
             debug.log("[CTBC LOGIN] Waiting for login or CTBC account settings")
             return False
         login_fingerprint = await _ctbc_login_fingerprint(tab)
-    except Exception as exc:
+    except Exception:
         debug.log(
             "[CTBC LOGIN] Credential observation failed; "
-            f"previous authentication blocker retained: {exc}"
+            "previous authentication blocker retained"
         )
         return False
     if _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
         debug.log("[CTBC LOGIN] Previous authentication failure; waiting for credentials to change")
         return False
 
-    captcha_value = await tab.evaluate('''
-        (() => {
-            const input = document.querySelector('#CHK');
-            return input ? input.value.trim() : '';
-        })()
-    ''')
+    captcha_value = await tab.evaluate(assemble_script("captcha_value"))
     captcha_ready = isinstance(captcha_value, str) and len(captcha_value) == 4
     if not captcha_ready and config_dict.get("ocr_captcha", {}).get("enable", False):
         captcha_ready = await _ctbc_captcha(tab, config_dict, ocr)

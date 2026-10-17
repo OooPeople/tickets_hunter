@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,12 @@ WORKFLOW_TEMPLATE_P2_SHA256 = {
     "fast_marker_delete": ("3f04463b9ca17d94b0f466f4938c81bb096848f2d46562985735cdfbcf3b8524", 3, ""),
     "fast_marker_malformed_delete": ("78eedd34ada53940d663f92cb062e7742713bc6b7c26b6d0c88dd8daabb936f7", 4, ""),
     "document_health": ("9505d92f0879c7e52165f4c7f238334aa9c1dc6093bfe4344fdd7f64a7870283", 2, "\n        "),
+    "inline_login_state": ("cdf5658b8cc9d86bc4f04f8e261e5db4457c8c7785f0dc1739e31e21bbf99898", 0, "\n    "),
+    "inline_login_fill": ("8222969a2afa0754a30c0ea581a7eab3255cc33ab98659ba096f740a864dad66", 3, "\n    "),
+    "login_fingerprint": ("2776648119c34a9002ebddb5a62fc5b8e8b941c65c08153122fff951d6343544", 1, "\n    "),
+    "captcha_image": ("daae7b08058bd63bbf0bd5b12c9e40de5cb0c5dea1b251239a713dd2682d283d", 0, "\n        "),
+    "captcha_image_ready": ("3c595980e71871a49613acc119cf2d34b79971511ab3c84d3679c250c3fddaf3", 0, "\n        "),
+    "captcha_value": ("914168ff6964ec5088e49b0c2a4cd7b17398b567bd62874c468487ca43621640", 0, "\n    "),
 }
 
 
@@ -90,6 +97,22 @@ def test_workflow_template_preserves_original_script_chunks(name, expected):
     for key, value in replacements.items():
         assert key not in assembled
         assert assembled.count(value) >= 1
+
+
+def test_inline_login_payload_does_not_reparse_placeholder_literals():
+    account = 'user__UTIKI_INLINE_LOGIN_FILL_ARG_2__"\\\n\u2028@example.test'
+    password = 'p__UTIKI_INLINE_LOGIN_FILL_ARG_0__\\\n"密碼'
+    assembled = script_resources.assemble_script("inline_login_fill", {
+        "__UTIKI_INLINE_LOGIN_FILL_ARG_0__": json.dumps("https://tickets.example.test"),
+        "__UTIKI_INLINE_LOGIN_FILL_ARG_1__": json.dumps(account),
+        "__UTIKI_INLINE_LOGIN_FILL_ARG_2__": json.dumps(password),
+    })
+    assert json.dumps(account) in assembled
+    assert json.dumps(password) in assembled
+    # SHA of the original P2 f-string output for these synthetic values.
+    assert hashlib.sha256((assembled + "\n    ").encode()).hexdigest() == (
+        "a918400fea0e80b148d732c163ead2f637f38dcbe29b64ea3986b028c2a9f510"
+    )
 
 
 @pytest.mark.parametrize("change", ["missing", "tampered", "manifest-tampered"])

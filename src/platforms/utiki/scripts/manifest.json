@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
   "scripts": {
+    "captcha_image": "2746a5f4bc45dfc714b68eeccd79c34e23df72bb3ee84c8bddc9f3cb74232121",
+    "captcha_image_ready": "1f5af48faf3b050089a00c91502eede5d58f61c822a9b23585c9f5b516305c0d",
+    "captcha_value": "a4b7f82199b04b22710ed64349fd0999d8aac9dd0e0d413d2176828a4b96c3a6",
     "conflict_clear": "072355064204a064ae73dd13690665893700e8d505e7aed87ddc5f9128452faf",
     "date_commit": "f3e4b2373e91afd7efd57a7852faf7716530163adbc4a64c5a401fa33a30ef95",
     "date_snapshot": "a621145628245afba2dde4100ee0dffd1affc0f9e8ce4a546feca6a184b90ad3",
@@ -8,6 +11,9 @@
     "fast_marker_delete": "183a7130bbd5f36e020cb68ae73b056c24adaae3dde7c97878246a59b8ca3dc6",
     "fast_marker_malformed_delete": "a0181fc93acdb9a8e2f45d249d7156976ddc5d5d35ef2cc181f2af9cf439483f",
     "fast_marker_read": "e2e0bad69c3e5e480ec5d8c6b886bc92497595717cad660d3979286d8f8f2bbc",
+    "inline_login_fill": "a6ac7e72b82e7059f74fa379dbb7ed9cacdc4455e1e495bed341e0a3494cf0cc",
+    "inline_login_state": "e7fcbb25394112b1595780c3c7a8f1ab35bafda28a3f4340815f364a8691d941",
+    "login_fingerprint": "705d1802114581ef23615b012478844b4a689f8eaa0a8379239e68ef46d4f300",
     "quantity_commit": "f8077337cc445f56d02ed9d709bfe645d4a8d7c4d93ef0577c591507827e01a6",
     "quantity_snapshot": "7105475064672699d25acf9d69fe2e7047b25c94663e825108eb6d32a4759f0a",
     "seat_commit": "88f47636acb7761498b48c5e8f4b4095d1de02f01fedfdffcbccf3eda5419fb5",

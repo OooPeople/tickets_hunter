@@ -70,11 +70,14 @@ def load_script(name: str) -> str:
 def assemble_script(name: str, replacements: Mapping[str, str] | None = None) -> str:
     """Bind explicitly supplied placeholders without changing script ordering."""
     script = load_script(name)
-    for placeholder, value in (replacements or {}).items():
-        if script.count(placeholder) != 1:
+    values = replacements or {}
+    if not values:
+        return script
+    for placeholder, value in values.items():
+        if script.count(placeholder) != 1 or not isinstance(value, str):
             raise ScriptResourceError(f"uTiki script placeholder mismatch: {name}")
-        script = script.replace(placeholder, value, 1)
-    return script
+    pattern = re.compile("|".join(re.escape(key) for key in values))
+    return pattern.sub(lambda match: values[match.group(0)], script)
 
 
 def verify_script_resources() -> str:

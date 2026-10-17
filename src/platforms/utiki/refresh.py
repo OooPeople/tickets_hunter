@@ -20,6 +20,7 @@ from global_settings import get_global_settings_path, load_global_settings
 from nodriver_common import check_and_handle_pause, check_and_handle_quit
 from refresh_coordinator import UTK_SPORTS_SCOPE, get_shared_refresh_coordinator
 
+from .adapters.script_resources import assemble_script
 from .profiles import PageKind, classify_utiki_page
 
 
@@ -161,31 +162,10 @@ async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
         if normal_selector else "false"
     )
     try:
-        raw_value = await tab.evaluate(f'''
-            (() => {{
-                const ready = document.readyState === 'interactive' ||
-                    document.readyState === 'complete';
-                const bodyText = document.body
-                    ? (document.body.innerText || document.body.textContent || '')
-                        .replace(/\\s+/g, ' ').trim().slice(0, 12000)
-                    : '';
-                const normalRoot = {selector_expression};
-                const timeOrigin = Number(performance.timeOrigin ||
-                    (performance.timing && performance.timing.navigationStart) || 0);
-                const documentToken = Number.isFinite(timeOrigin) && timeOrigin > 0
-                    ? String(timeOrigin) : '';
-                return JSON.stringify({{
-                    ready,
-                    body_text: bodyText,
-                    document_id: documentToken,
-                    document_started_at: timeOrigin > 0 ? timeOrigin / 1000 : 0,
-                    url: location.href,
-                    ready_state: document.readyState,
-                    has_normal_root: normalRoot,
-                    requires_normal_root: {str(bool(normal_selector)).lower()}
-                }});
-            }})()
-        ''')
+        raw_value = await tab.evaluate(assemble_script("document_health", {
+            "__UTIKI_DOCUMENT_HEALTH_ARG_0__": selector_expression,
+            "__UTIKI_DOCUMENT_HEALTH_ARG_1__": str(bool(normal_selector)).lower(),
+        }))
         snapshot = _decode_json_result(raw_value)
     except Exception:
         snapshot = None

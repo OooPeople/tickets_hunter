@@ -25,6 +25,7 @@ from nodriver_common import (
     send_telegram_notification,
 )
 from . import refresh as refresh_engine
+from .adapters.script_resources import assemble_script
 from .auth import (
     cookie_domain_is_in_scope,
     get_tenant_auth_profile,
@@ -1015,32 +1016,9 @@ async def _ctbc_read_fast_navigation_marker(tab):
 
     marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     try:
-        raw_value = await tab.evaluate(f'''(() => {{
-            // __ticketsHunterCtbcFastMarkerRead
-            try {{
-                const raw = sessionStorage.getItem({marker_key_json});
-                if (raw === null) return JSON.stringify({{
-                    available: true, present: false, marker: null,
-                    raw: null, page_url: location.href
-                }});
-                try {{
-                    return JSON.stringify({{
-                        available: true, present: true, marker: JSON.parse(raw),
-                        raw, page_url: location.href
-                    }});
-                }} catch (_error) {{
-                    return JSON.stringify({{
-                        available: true, present: true, marker: null,
-                        raw, page_url: location.href
-                    }});
-                }}
-            }} catch (_error) {{
-                return JSON.stringify({{
-                    available: false, present: false, marker: null,
-                    page_url: location.href
-                }});
-            }}
-        }})()''')
+        raw_value = await tab.evaluate(assemble_script("fast_marker_read", {
+            "__UTIKI_FAST_MARKER_READ_ARG_0__": marker_key_json,
+        }))
     except Exception:
         return {"available": False, "present": False, "marker": None}
     result = _decode_ctbc_json_result(raw_value)
@@ -1055,20 +1033,11 @@ async def _ctbc_delete_fast_navigation_marker(tab, nonce):
     marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     nonce_json = json.dumps(nonce)
     try:
-        return await tab.evaluate(f'''(() => {{
-            // __ticketsHunterCtbcFastMarkerDelete
-            const expectedNonce = {nonce_json};
-            try {{
-                const raw = sessionStorage.getItem({marker_key_json});
-                if (raw === null) return true;
-                const marker = JSON.parse(raw);
-                if (!marker || marker.nonce !== expectedNonce) return false;
-                sessionStorage.removeItem({marker_key_json});
-                return true;
-            }} catch (_error) {{
-                return false;
-            }}
-        }})()''')
+        return await tab.evaluate(assemble_script("fast_marker_delete", {
+            "__UTIKI_FAST_MARKER_DELETE_ARG_0__": nonce_json,
+            "__UTIKI_FAST_MARKER_DELETE_ARG_1__": marker_key_json,
+            "__UTIKI_FAST_MARKER_DELETE_ARG_2__": marker_key_json,
+        }))
     except Exception:
         return False
 
@@ -1079,20 +1048,12 @@ async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
     marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
     expected_raw_json = json.dumps(expected_raw)
     try:
-        return await tab.evaluate(f'''(() => {{
-            // __ticketsHunterCtbcMalformedMarkerDelete
-            const expectedRaw = {expected_raw_json};
-            try {{
-                const current = sessionStorage.getItem({marker_key_json});
-                if (current !== expectedRaw) return false;
-                const confirmed = sessionStorage.getItem({marker_key_json});
-                if (confirmed !== expectedRaw) return false;
-                sessionStorage.removeItem({marker_key_json});
-                return true;
-            }} catch (_error) {{
-                return false;
-            }}
-        }})()''')
+        return await tab.evaluate(assemble_script("fast_marker_malformed_delete", {
+            "__UTIKI_FAST_MARKER_MALFORMED_DELETE_ARG_0__": expected_raw_json,
+            "__UTIKI_FAST_MARKER_MALFORMED_DELETE_ARG_1__": marker_key_json,
+            "__UTIKI_FAST_MARKER_MALFORMED_DELETE_ARG_2__": marker_key_json,
+            "__UTIKI_FAST_MARKER_MALFORMED_DELETE_ARG_3__": marker_key_json,
+        }))
     except Exception:
         return False
 

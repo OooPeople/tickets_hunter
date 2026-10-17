@@ -33,6 +33,12 @@ P2_TRAILING_WHITESPACE = {
     "seat_snapshot": "\n    ",
     "quantity_snapshot": "\n    ",
 }
+WORKFLOW_TEMPLATE_P2_SHA256 = {
+    "fast_marker_read": ("11a02527d896d85dbee62fb6a2f6749f7f0662d9a9ef788dd52c8ec3d752f650", 1, ""),
+    "fast_marker_delete": ("3f04463b9ca17d94b0f466f4938c81bb096848f2d46562985735cdfbcf3b8524", 3, ""),
+    "fast_marker_malformed_delete": ("78eedd34ada53940d663f92cb062e7742713bc6b7c26b6d0c88dd8daabb936f7", 4, ""),
+    "document_health": ("9505d92f0879c7e52165f4c7f238334aa9c1dc6093bfe4344fdd7f64a7870283", 2, "\n        "),
+}
 
 
 def test_date_snapshot_script_matches_p2_browser_bytes():
@@ -68,6 +74,22 @@ def test_script_template_binds_one_json_payload_without_reordering(name, placeho
     assert script_resources.assemble_script(name, {placeholder: encoded}) == (
         original.replace(placeholder, encoded, 1)
     )
+
+
+@pytest.mark.parametrize("name, expected", WORKFLOW_TEMPLATE_P2_SHA256.items())
+def test_workflow_template_preserves_original_script_chunks(name, expected):
+    original_sha256, binding_count, trailing = expected
+    script = script_resources.load_script(name)
+    assert hashlib.sha256((script + trailing).encode()).hexdigest() == original_sha256
+    replacements = {
+        f"__UTIKI_{name.upper()}_ARG_{index}__": f'"value-{index}"'
+        for index in range(binding_count)
+    }
+    assert all(script.count(key) == 1 for key in replacements)
+    assembled = script_resources.assemble_script(name, replacements)
+    for key, value in replacements.items():
+        assert key not in assembled
+        assert assembled.count(value) >= 1
 
 
 @pytest.mark.parametrize("change", ["missing", "tampered", "manifest-tampered"])

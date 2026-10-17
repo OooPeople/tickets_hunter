@@ -126,6 +126,68 @@ def smoke(executable: Path) -> None:
         _require(conflict.read_bytes() == conflict_before,
                  "frozen conflict rejection changed the source")
 
+        profile_cases = (
+            (
+                "legacy-only",
+                {"ctbc": {"ticket_type_keyword": "全票"}},
+                {"ticket_type_keyword": "全票", "seat_sorting": "row_seat",
+                 "seat_selection_mode": "manual"},
+            ),
+            (
+                "complementary-explicit-empty",
+                {"utiki": {"ticket_type_keyword": ""},
+                 "ctbc": {"seat_sorting": "display", "seat_selection_mode": "computer"}},
+                behavior,
+            ),
+            (
+                "canonical-only",
+                {"utiki": behavior},
+                behavior,
+            ),
+        )
+        for name, sections, expected_behavior in profile_cases:
+            case_source = work / f"{name}.json"
+            case_output = work / f"{name}-converted.json"
+            case_profile = {**sections, "accounts": profile["accounts"]}
+            case_source.write_text(
+                json.dumps(case_profile, ensure_ascii=False), encoding="utf-8"
+            )
+            case_before = case_source.read_bytes()
+            case_result = _run(
+                frozen, work, "--input", str(case_source), "--output", str(case_output)
+            )
+            _require(case_result.returncode == 0, f"frozen {name} conversion failed")
+            _require(case_source.read_bytes() == case_before,
+                     f"frozen {name} conversion changed the source")
+            case_converted = json.loads(case_output.read_text(encoding="utf-8"))
+            _require(case_converted == {
+                "utiki": expected_behavior,
+                "accounts": profile["accounts"],
+            },
+                     f"frozen {name} conversion changed the expected values")
+            _require("fixture-only-sentinel" not in case_result.stdout + case_result.stderr,
+                     f"frozen {name} conversion exposed a fixture value")
+
+        invalid_profiles = (
+            ("corrupt-json", '{"accounts":{"password":"fixture-only-sentinel"},"utiki":'),
+            ("duplicate-key", '{"accounts":{"password":"fixture-only-sentinel"},'
+                              '"utiki":{},"utiki":{}}'),
+        )
+        for name, raw_profile in invalid_profiles:
+            case_source = work / f"{name}.json"
+            case_source.write_text(raw_profile, encoding="utf-8")
+            case_before = case_source.read_bytes()
+            case_result = _run(frozen, work, "--input", str(case_source), "--dry-run")
+            error_code = "INVALID_JSON" if name == "corrupt-json" else "DUPLICATE_JSON_KEY"
+            _require(case_result.returncode == 2 and
+                     case_result.stderr.strip() == f"ERROR {error_code}",
+                     f"frozen {name} was not rejected for the expected reason")
+            _require(case_result.stdout == "" and
+                     "fixture-only-sentinel" not in case_result.stderr,
+                     f"frozen {name} rejection exposed a fixture value")
+            _require(case_source.read_bytes() == case_before,
+                     f"frozen {name} rejection changed the source")
+
         for result in (preview, written, repeat, rejected):
             _require("fixture-only-sentinel" not in result.stdout + result.stderr,
                      "frozen upgrader exposed a fixture value")

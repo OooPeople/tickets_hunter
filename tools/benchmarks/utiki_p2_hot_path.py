@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import copy
 import dataclasses
 import hashlib
@@ -45,7 +46,8 @@ class _Browser:
 
 
 def _trace_calls(
-    functions: dict[str, Callable[..., object]], calls: dict[str, int]
+    functions: dict[str, Callable[..., object]], calls: dict[str, int],
+    *, allowed_callers: dict[str, CodeType] | None = None,
 ) -> Callable[[FrameType, str, object], None]:
     """Count original call targets even when a consumer saved an import alias."""
     by_code: dict[CodeType, str] = {}
@@ -64,6 +66,10 @@ def _trace_calls(
             label = by_builtin.get(id(argument))
         else:
             return
+        if label is not None and label in (allowed_callers or {}):
+            caller = frame.f_back if event == "call" else frame
+            if caller is not None and caller.f_code is allowed_callers[label]:
+                return
         if label is not None:
             calls[label] += 1
 
@@ -105,6 +111,8 @@ def _selection_and_config() -> tuple[object, object]:
 
 def _measure_v07(samples: int, warmup: int) -> dict[str, object]:
     selection, config = _selection_and_config()
+    from keyword_rules import parse_keyword_string_to_array
+    from tools.migrations import convert_utiki_config
     from platforms.utiki.application.ports import CoreControl, CoreGate
     from platforms.utiki.bootstrap import create_engine
     from platforms.utiki.domain.identity import DocumentKey, OperationId, OperationStamp, TabKey
@@ -135,15 +143,26 @@ def _measure_v07(samples: int, warmup: int) -> dict[str, object]:
     browser.source = stamp
     calls = {name: 0 for name in (
         "parse_profile_json", "load_current_policy", "inspect_upgrade_input",
-        "apply_current_policy_reload", "sha256",
+        "apply_current_policy_reload", "convert_profile_mapping", "json.loads",
+        "hash", "hashlib.new", "sha256", "sha1", "md5", "blake2b",
     )}
     trace = _trace_calls({
         "parse_profile_json": config.parse_profile_json,
         "load_current_policy": config.load_current_policy,
         "inspect_upgrade_input": config.inspect_upgrade_input,
         "apply_current_policy_reload": config.apply_current_policy_reload,
+        "convert_profile_mapping": convert_utiki_config.convert_profile_mapping,
+        "json.loads": json.loads,
+        "hash": builtins.hash,
+        "hashlib.new": hashlib.new,
         "sha256": hashlib.sha256,
-    }, calls)
+        "sha1": hashlib.sha1,
+        "md5": hashlib.md5,
+        "blake2b": hashlib.blake2b,
+    }, calls, allowed_callers={
+        "json.loads": parse_keyword_string_to_array.__code__,
+        "hash": TabKey.__hash__.__code__,
+    })
 
     async def run() -> list[int]:
         values: list[int] = []
@@ -176,6 +195,7 @@ def _measure_v07(samples: int, warmup: int) -> dict[str, object]:
 
 def _measure_v08(samples: int, warmup: int, seat_count: int) -> dict[str, object]:
     selection, _ = _selection_and_config()
+    from platforms.utiki.domain.snapshots import SeatRow, SeatSnapshot, TicketTypeRow
     sizes = {**bench_utiki.DEFAULT_SIZES, "seat_count": seat_count}
     raw = bench_utiki.build_synthetic_fixtures(sizes)["seat"]
     snapshot = selection.parse_seat_snapshot(raw)
@@ -183,10 +203,18 @@ def _measure_v08(samples: int, warmup: int, seat_count: int) -> dict[str, object
         raise HotPathError("large seat fixture did not parse")
     graph = _tracked_graph(snapshot)
     before_refs = _reference_counts(graph)
-    calls = {"deepcopy": 0, "asdict": 0}
+    calls = {
+        "deepcopy": 0, "copy": 0, "asdict": 0,
+        "SeatRow.__init__": 0, "SeatSnapshot.__init__": 0,
+        "TicketTypeRow.__init__": 0,
+    }
     trace = _trace_calls({
         "deepcopy": copy.deepcopy,
+        "copy": copy.copy,
         "asdict": dataclasses.asdict,
+        "SeatRow.__init__": SeatRow.__init__,
+        "SeatSnapshot.__init__": SeatSnapshot.__init__,
+        "TicketTypeRow.__init__": TicketTypeRow.__init__,
     }, calls)
     valid_values: list[int] = []
     invalid_values: list[int] = []
@@ -219,7 +247,7 @@ def _measure_v08(samples: int, warmup: int, seat_count: int) -> dict[str, object
             sys.setprofile(previous)
         if any(calls.values()):
             violated = ", ".join(name for name, count in calls.items() if count)
-            raise HotPathError(f"large seat tick copied a typed snapshot: {violated}")
+            raise HotPathError(f"large seat tick reconstructed a typed snapshot: {violated}")
         after_tasks = asyncio.all_tasks()
         extra_tasks = after_tasks - before_tasks
         if extra_tasks:

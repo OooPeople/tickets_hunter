@@ -34,6 +34,8 @@ from tools.benchmarks.utiki_p1_performance import (
     execution_results,
     load_contract,
     load_json,
+    node_ids,
+    performance_phase,
     sha256_file,
     validate_raw_report,
     write_json,
@@ -227,6 +229,8 @@ def _validate_inner_outputs(
     validate_raw_report(
         benchmark, contract=contract, expected_candidate_sha=candidate_sha
     )
+    phase = expected_context["phase"]
+    required_nodes = node_ids(phase)
     if set(inner) != {
         "schema_version",
         "report_kind",
@@ -243,7 +247,7 @@ def _validate_inner_outputs(
     pytest_result = inner.get("pytest")
     if (
         inner.get("schema_version") != 1
-        or inner.get("report_kind") != "utiki-p1-performance-inner"
+        or inner.get("report_kind") != f"utiki-{phase.lower()}-performance-inner"
         or inner.get("status") != "PENDING_OUTER_AUDIT"
         or inner.get("context") != {
             name: expected_context[name]
@@ -267,7 +271,7 @@ def _validate_inner_outputs(
         or not isinstance(pytest_result.get("command"), list)
         or "--strict-config" not in pytest_result["command"]
         or "--strict-markers" not in pytest_result["command"]
-        or any(node_id not in pytest_result["command"] for node_id in NODE_IDS)
+        or any(node_id not in pytest_result["command"] for node_id in required_nodes)
     ):
         raise PerformanceIsolationFailed("inner performance evidence is invalid")
     if set(reporter) != {
@@ -285,8 +289,8 @@ def _validate_inner_outputs(
         or reporter.get("status") != "PASS"
         or reporter.get("initial_exit_code") != 0
         or reporter.get("final_exit_code") != 0
-        or reporter.get("required_count") != len(NODE_IDS)
-        or reporter.get("selected_count") != len(NODE_IDS)
+        or reporter.get("required_count") != len(required_nodes)
+        or reporter.get("selected_count") != len(required_nodes)
         or reporter.get("missing_node_ids") != []
         or reporter.get("invalid_node_ids") != []
     ):
@@ -373,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not NAME_PATTERN.fullmatch(arguments.run_id):
             raise PerformanceIsolationBlocked("run-id has invalid characters")
-        if arguments.attempt < 1 or arguments.phase != PHASE:
+        if arguments.attempt < 1 or arguments.phase not in {"P1", "P2"}:
             raise PerformanceIsolationBlocked("performance run context is invalid")
         if SHA_PATTERN.fullmatch(arguments.candidate_sha) is None:
             raise PerformanceIsolationBlocked("candidate SHA is invalid")
@@ -406,9 +410,11 @@ def main(argv: list[str] | None = None) -> int:
         if repository not in contract_path.parents or repository not in manifest_path.parents:
             raise PerformanceIsolationBlocked("contract and manifest must be repository files")
         contract = load_contract(contract_path)
+        if performance_phase(contract) != arguments.phase:
+            raise PerformanceIsolationBlocked("performance contract phase is invalid")
         manifest = load_json(manifest_path)
         if (
-            manifest.get("phase") != PHASE
+            manifest.get("phase") != arguments.phase
             or manifest.get("catalog_sha256") != arguments.catalog_sha256
         ):
             raise PerformanceIsolationBlocked("execution manifest context is invalid")
@@ -545,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         report["benchmark_report_sha256"] = output_digests["benchmark"]
         report["junit_sha256"] = output_digests["junit"]
         report["reporter_result_sha256"] = output_digests["reporter"]
-        report["execution_results"] = execution_results()
+        report["execution_results"] = execution_results(arguments.phase)
         report["status"] = "PASS"
         exit_code = 0
     except (

@@ -688,10 +688,21 @@ def _validate_syntax(
             if len(paths) < 2 or len(paths) == len(set(paths)):
                 raise NegativeContractError("duplicate syntax manifest payload is absent")
         elif variant == "new-or-untracked-omitted":
+            settings = repo / "src/settings.py"
+            untracked = repo / "src/new_untracked.py"
             if (
-                files
+                len(files) != 1
+                or not isinstance(files[0], dict)
+                or files[0].get("path") != "src/settings.py"
+                or files[0].get("required_action") != "compile"
                 or values.get("--include-worktree") is not True
-                or not (repo / "src/new_untracked.py").is_file()
+                or settings.is_symlink()
+                or not settings.is_file()
+                or settings.read_bytes() != b"VALUE = 2\n"
+                or files[0].get("sha256") != hashlib.sha256(settings.read_bytes()).hexdigest()
+                or untracked.is_symlink()
+                or not untracked.is_file()
+                or untracked.read_bytes() != b"VALUE = 1\n"
             ):
                 raise NegativeContractError("untracked omitted payload is not canonical")
         elif variant == "missing-file":

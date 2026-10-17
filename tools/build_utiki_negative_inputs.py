@@ -653,6 +653,11 @@ def _syntax_probe(
             value = _load(manifest)
             if variant == "duplicate-or-digest-race" and value["files"]:
                 value["files"].append(copy.deepcopy(value["files"][0]))
+            elif variant == "new-or-untracked-omitted":
+                paths = [item.get("path") for item in value["files"]]
+                if paths != ["src/new_untracked.py", "src/settings.py"]:
+                    raise BuildError("syntax control does not contain both changed files")
+                value["files"] = [value["files"][1]]
             elif variant != "missing-file":
                 value["files"] = []
             _write_json(manifest, value)

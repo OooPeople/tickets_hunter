@@ -17,6 +17,9 @@ GENERATOR = PROJECT_ROOT / "tools" / "generate_utiki_execution_manifest.py"
 CATALOG = PROJECT_ROOT / "ci" / "utiki-required-cases.json"
 REGISTRY = PROJECT_ROOT / "ci" / "utiki-p1-execution-bindings.json"
 PERSISTED = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "manifest.json"
+P2_REGISTRY = PROJECT_ROOT / "ci" / "utiki-p2-execution-bindings.json"
+P2_PERSISTED = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "manifest-p2.json"
+P2_NEGATIVE = PROJECT_ROOT / "ci" / "utiki-p2-negative-probes.json"
 APPROVED_CATALOG_SHA256 = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
 
 
@@ -137,11 +140,52 @@ def test_p2_phase_requires_all_new_bindings_instead_of_reusing_p1_result(tmp_pat
     assert not (tmp_path / "p2-manifest.json").exists()
 
 
+def test_p2_persisted_manifest_and_negative_registry_bind_exact_due_keys(tmp_path):
+    generated = tmp_path / "manifest-p2.json"
+    first = _run(P2_REGISTRY, generated, phase="P2")
+    second = _run(P2_REGISTRY, generated, check=True, phase="P2")
+
+    assert first.returncode == second.returncode == 0, first.stderr or second.stderr
+    assert generated.read_bytes() == P2_PERSISTED.read_bytes()
+    manifest = json.loads(P2_PERSISTED.read_text(encoding="utf-8"))
+    assert manifest["phase"] == "P2"
+    assert json.loads(first.stdout)["mapped_count"] == 105
+    mapped = {
+        (case["id"], execution["obligation_id"], execution["variant_id"],
+         execution["job_id"], execution["target"])
+        for case in manifest["cases"]
+        for execution in case["executions"]
+        if execution["status"] == "MAPPED"
+    }
+    assert len(mapped) == 105
+    negative = {
+        (case["id"], execution["obligation_id"], execution["variant_id"],
+         execution["job_id"], execution["target"])
+        for case in manifest["cases"]
+        for execution in case["executions"]
+        if execution["status"] == "MAPPED"
+        and any(item["kind"] == "checker-exit-nonzero" for item in execution["evidence"])
+    }
+    registry = json.loads(P2_NEGATIVE.read_text(encoding="utf-8"))
+    assert registry["registry_id"] == "utiki-p2-negative-probes"
+    assert registry["phase"] == "P2"
+    assert registry["catalog_sha256"] == APPROVED_CATALOG_SHA256
+    registry_keys = {
+        (entry["case_id"], entry["obligation_id"], entry["variant_id"],
+         entry["job_id"], entry["target"])
+        for entry in registry["probes"]
+    }
+    assert len(negative) == len(registry_keys) == len(registry["probes"]) == 57
+    assert negative == registry_keys
+
+
 def test_byte_pinned_json_uses_lf_checkout() -> None:
     paths = (
         "ci/utiki-required-cases.json",
         "ci/utiki-p1-negative-probes.json",
+        "ci/utiki-p2-negative-probes.json",
         "tests/fixtures/utiki/manifest.json",
+        "tests/fixtures/utiki/manifest-p2.json",
     )
     result = subprocess.run(
         ["git", "check-attr", "eol", "--", *paths],

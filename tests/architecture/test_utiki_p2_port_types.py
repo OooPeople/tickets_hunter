@@ -9,14 +9,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "ci" / "mypy-utiki.ini"
 
 _FAKE_SOURCE = """
-from platforms.utiki.application.ports import QuantityBrowserPort
+from platforms.utiki.application.ports import QuantityBrowserPort, QuantityObservation
 from platforms.utiki.domain.effects import EffectReceipt, RunningEffect
 from platforms.utiki.domain.identity import OperationStamp
 from platforms.utiki.domain.plans import QuantityPlan
-from platforms.utiki.domain.snapshots import QuantitySnapshot
 
 class Fake:
-    async def observe_page(self, expected_context: OperationStamp) -> QuantitySnapshot:
+    async def observe_page(self, expected_context: OperationStamp) -> QuantityObservation:
         raise NotImplementedError
 
     async def commit_quantity(self, plan: QuantityPlan{claim_parameter}) -> {result_type}:
@@ -35,7 +34,7 @@ def _typecheck(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            sys.executable, "-m", "mypy", "--strict", "--no-incremental",
+            sys.executable, "-I", "-m", "mypy", "--strict", "--no-incremental",
             "--config-file", str(CONFIG), "-c",
             _FAKE_SOURCE.format(
                 claim_parameter=", claim: RunningEffect" if include_claim else "",
@@ -121,7 +120,7 @@ async def wrong(port: QuantityBrowserPort, claim: RunningEffect) -> None:
         "    raise NotImplementedError\n",
     )
     command = [
-        sys.executable, "-m", "mypy", "--strict", "--no-incremental",
+        sys.executable, "-I", "-m", "mypy", "--strict", "--no-incremental",
         "--config-file", str(CONFIG), "-c",
     ]
     legal = subprocess.run(
@@ -135,4 +134,49 @@ async def wrong(port: QuantityBrowserPort, claim: RunningEffect) -> None:
     assert 'Argument 2 to "commit_granted_quantity" has incompatible type' in wrong.stdout
     assert "dict[str, str]" in wrong.stdout
     assert "QuantityPlan" in wrong.stdout
+    assert "[arg-type]" in wrong.stdout
+
+
+def test_core_control_port_rejects_raw_bridge_gate() -> None:
+    source = """
+from platforms.utiki.application.ports import CoreControl, QuantityObservation
+from platforms.utiki.bootstrap import create_engine
+from platforms.utiki.domain.effects import EffectReceipt, RunningEffect
+from platforms.utiki.domain.identity import OperationStamp, TabKey
+from platforms.utiki.domain.plans import QuantityPlan
+from utiki_config import CurrentPolicyState
+
+class Browser:
+    async def observe_page(self, expected: OperationStamp) -> QuantityObservation:
+        raise NotImplementedError
+
+    async def commit_quantity(self, plan: QuantityPlan, claim: RunningEffect) -> EffectReceipt:
+        raise NotImplementedError
+
+class Core:
+    def current_control(self, tab: TabKey) -> {result_type}:
+        {result_body}
+
+def check(policy: CurrentPolicyState) -> None:
+    create_engine(policy, Browser(), Core())
+"""
+    command = [
+        sys.executable, "-I", "-m", "mypy", "--strict", "--no-incremental",
+        "--config-file", str(CONFIG), "-c",
+    ]
+    legal = subprocess.run(
+        [*command, source.format(result_type="CoreControl", result_body="raise NotImplementedError")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert legal.returncode == 0, legal.stdout + legal.stderr
+
+    wrong = subprocess.run(
+        [*command, source.format(result_type="dict[str, str]", result_body="return {}")],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert wrong.returncode != 0
+    assert 'Argument 3 to "create_engine" has incompatible type "Core"' in wrong.stdout
+    assert "CoreControlPort" in wrong.stdout
+    assert "current_control(self, tab: TabKey) -> dict[str, str]" in wrong.stdout
+    assert "current_control(self, tab: TabKey) -> CoreControl" in wrong.stdout
     assert "[arg-type]" in wrong.stdout

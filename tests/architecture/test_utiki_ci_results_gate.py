@@ -144,10 +144,10 @@ def _internal_negative_request(
         builder._pytest_probe(root, entry, CANDIDATE_SHA)
         return
     if entry["child_producer"] == "tools/run_utiki_typecheck.py":
-        builder._typecheck_probe(root, entry, CANDIDATE_SHA)
+        builder._typecheck_probe(root, entry, CANDIDATE_SHA, phase=PHASE)
         return
     if entry["child_producer"] == "tools/verify_modified_python.py":
-        builder._syntax_probe(PROJECT_ROOT, root, entry, CANDIDATE_SHA)
+        builder._syntax_probe(PROJECT_ROOT, root, entry, CANDIDATE_SHA, phase=PHASE)
         return
     if entry["environment"] == "isolated":
         builder._isolated_probe(PROJECT_ROOT, root, entry, CANDIDATE_SHA)
@@ -171,7 +171,7 @@ def _internal_negative_request(
             "--run-index",
             primary,
             "--phase",
-            "P1",
+            PHASE,
             "--run-id",
             RUN_ID,
             "--candidate-sha",
@@ -185,7 +185,7 @@ def _internal_negative_request(
             "--run-metadata",
             root / "run-metadata.json",
             "--phase",
-            "P1",
+            PHASE,
             "--run-id",
             RUN_ID,
             "--job-id",
@@ -803,9 +803,13 @@ def _make_run(
                     "report_kind": "utiki-browser-isolation-launcher",
                     "status": "PASS",
                     "run_id": RUN_ID,
+                    "attempt": 1,
+                    "phase": PHASE,
                     "candidate_sha": CANDIDATE_SHA,
                     "job_id": job_id,
                     "target": target,
+                    "catalog_sha256": APPROVED_CATALOG_SHA256,
+                    "execution_manifest_sha256": _sha256(manifest_path),
                     "runtime_evidence": {"network_mode": "none", "process_tree": True},
                     "peer_audit": {"outbound_count": 0},
                     "inner_report_sha256": "a" * 64,
@@ -836,17 +840,24 @@ def _make_run(
                 },
             }
             if kind == "typecheck-report":
-                fixture_root = (
-                    PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "typecheck-p1"
-                )
-                typed_manifest = fixture_root / "manifest.txt"
-                mypy_config = fixture_root / "mypy.ini"
-                coverage_context = fixture_root / "context.json"
-                for input_kind, input_file in (
-                    ("typed-manifest", typed_manifest),
-                    ("mypy-config", mypy_config),
-                    ("coverage-context", coverage_context),
-                ):
+                if PHASE == "P2":
+                    typed_manifest = PROJECT_ROOT / "ci/utiki-typed-scope.txt"
+                    mypy_config = PROJECT_ROOT / "ci/mypy-utiki.ini"
+                    input_files = (
+                        ("typed-manifest", typed_manifest),
+                        ("mypy-config", mypy_config),
+                    )
+                else:
+                    fixture_root = PROJECT_ROOT / "tests/fixtures/utiki/typecheck-p1"
+                    typed_manifest = fixture_root / "manifest.txt"
+                    mypy_config = fixture_root / "mypy.ini"
+                    coverage_context = fixture_root / "context.json"
+                    input_files = (
+                        ("typed-manifest", typed_manifest),
+                        ("mypy-config", mypy_config),
+                        ("coverage-context", coverage_context),
+                    )
+                for input_kind, input_file in input_files:
                     extra_inputs.append(
                         {
                             "kind": input_kind,
@@ -857,17 +868,34 @@ def _make_run(
                     )
                 typecheck_stdout = path.parent / "typecheck-mypy.stdout"
                 typecheck_stderr = path.parent / "typecheck-mypy.stderr"
-                typecheck_stdout.write_text("Success: no issues found\n", encoding="utf-8")
-                typecheck_stderr.write_text("", encoding="utf-8")
-                producer_payloads[kind].update(
-                    {
-                        "manifest_sha256": _sha256(typed_manifest),
-                        "config_sha256": _sha256(mypy_config),
-                        "coverage_context_sha256": _sha256(coverage_context),
-                        "stdout_sha256": _sha256(typecheck_stdout),
-                        "stderr_sha256": _sha256(typecheck_stderr),
-                    }
-                )
+                if PHASE == "P2":
+                    typecheck_raw = path.parent / "typecheck-raw.json"
+                    completed = subprocess.run(
+                        [
+                            sys.executable, str(PROJECT_ROOT / "tools/run_utiki_typecheck.py"),
+                            "--phase", "P2", "--root", str(PROJECT_ROOT),
+                            "--manifest", str(typed_manifest), "--config", str(mypy_config),
+                            "--report", str(typecheck_raw),
+                            "--stdout-report", str(typecheck_stdout),
+                            "--stderr-report", str(typecheck_stderr),
+                        ],
+                        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
+                    )
+                    if completed.returncode != 0:
+                        raise AssertionError(f"P2 production typecheck control failed: {completed.stderr}")
+                    producer_payloads[kind] = json.loads(typecheck_raw.read_text(encoding="utf-8"))
+                else:
+                    typecheck_stdout.write_text("Success: no issues found\n", encoding="utf-8")
+                    typecheck_stderr.write_text("", encoding="utf-8")
+                    producer_payloads[kind].update(
+                        {
+                            "manifest_sha256": _sha256(typed_manifest),
+                            "config_sha256": _sha256(mypy_config),
+                            "coverage_context_sha256": _sha256(coverage_context),
+                            "stdout_sha256": _sha256(typecheck_stdout),
+                            "stderr_sha256": _sha256(typecheck_stderr),
+                        }
+                    )
                 extra_outputs.extend(
                     [
                         {
@@ -885,6 +913,10 @@ def _make_run(
                     ]
                 )
             if job_id == "performance-contract" and kind == "browser-isolation-report":
+                performance_contract = PROJECT_ROOT / "ci" / (
+                    "utiki-p2-performance-isolation.json"
+                    if PHASE == "P2" else "utiki-performance-isolation.json"
+                )
                 sibling_files = {
                     "inner_report_sha256": path.parent / "inner-performance-report.json",
                     "benchmark_report_sha256": path.parent / "raw-benchmark-report.json",
@@ -950,9 +982,9 @@ def _make_run(
                     },
                     "execution_results": owned_results,
                     "contract": {
-                        "contract_id": "utiki-p1-performance-hard-egress-v1",
-                        "path": "ci/utiki-performance-isolation.json",
-                        "sha256": _sha256(PROJECT_ROOT / "ci/utiki-performance-isolation.json"),
+                        "contract_id": json.loads(performance_contract.read_text(encoding="utf-8"))["contract_id"],
+                        "path": performance_contract.relative_to(PROJECT_ROOT).as_posix(),
+                        "sha256": _sha256(performance_contract),
                     },
                     "execution_manifest": {
                         "path": str(manifest_path.resolve()),
@@ -1230,8 +1262,8 @@ def _make_run(
                 {
                     "kind": "execution-manifest",
                     "scope": "repository",
-                    "path": "tests/fixtures/utiki/manifest.json",
-                    "sha256": _sha256(PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"),
+                    "path": f"tests/fixtures/utiki/manifest{'-p2' if PHASE == 'P2' else ''}.json",
+                    "sha256": _sha256(PROJECT_ROOT / f"tests/fixtures/utiki/manifest{'-p2' if PHASE == 'P2' else ''}.json"),
                 },
                 {
                     "kind": "image-build",
@@ -1261,18 +1293,25 @@ def _make_run(
                 },
             ]
         elif job_id == "performance-contract" and kind == "browser-isolation-report":
+            performance_contract = PROJECT_ROOT / "ci" / (
+                "utiki-p2-performance-isolation.json"
+                if PHASE == "P2" else "utiki-performance-isolation.json"
+            )
+            performance_manifest = PROJECT_ROOT / "tests/fixtures/utiki" / (
+                "manifest-p2.json" if PHASE == "P2" else "manifest.json"
+            )
             evidence_inputs = [
                 {
                     "kind": "performance-contract",
                     "scope": "repository",
-                    "path": "ci/utiki-performance-isolation.json",
-                    "sha256": _sha256(PROJECT_ROOT / "ci/utiki-performance-isolation.json"),
+                    "path": performance_contract.relative_to(PROJECT_ROOT).as_posix(),
+                    "sha256": _sha256(performance_contract),
                 },
                 {
                     "kind": "execution-manifest",
                     "scope": "repository",
-                    "path": "tests/fixtures/utiki/manifest.json",
-                    "sha256": _sha256(PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"),
+                    "path": performance_manifest.relative_to(PROJECT_ROOT).as_posix(),
+                    "sha256": _sha256(performance_manifest),
                 },
                 *[item for item in extra_inputs if item["kind"] == "image-build"],
             ]
@@ -2446,6 +2485,141 @@ def test_resource_and_report_digest_mismatch_is_rejected(gate_inputs, tampered):
 
     assert result.returncode != 0
     assert "DIGEST_MISMATCH" in result.stdout
+
+
+def test_p2_browser_report_binds_raw_context_to_current_run(tmp_path, monkeypatch):
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PHASE", "P2")
+    monkeypatch.setattr(module, "RUN_ID", "utiki-p2-attempt-1")
+    monkeypatch.setattr(
+        module, "NEGATIVE_REGISTRY", PROJECT_ROOT / "ci/utiki-p2-negative-probes.json"
+    )
+    manifest_path, manifest, _, profiles = _make_manifest(tmp_path)
+    run = _make_run(
+        tmp_path, manifest_path, manifest, profiles,
+        "browser-contract-isolated", "isolated-linux-x64",
+    )
+    arguments = _single_arguments(
+        manifest_path, run, "browser-contract-isolated", "isolated-linux-x64"
+    )
+    legal = _run_checker(*arguments)
+    assert legal.returncode == 0, legal.stdout + legal.stderr
+
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = run["dir"] / producer_output["path"]
+    original = json.loads(producer_report.read_text(encoding="utf-8"))
+    for field, wrong in (
+        ("phase", "P1"),
+        ("attempt", 2),
+        ("catalog_sha256", "f" * 64),
+        ("execution_manifest_sha256", "f" * 64),
+    ):
+        changed = dict(original)
+        changed[field] = wrong
+        _write_json(producer_report, changed)
+        producer_output["sha256"] = _sha256(producer_report)
+        _write_json(artifact, envelope)
+        _refresh_artifact_digest(run, "browser-isolation-report")
+        metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+        metadata["isolation"]["report_sha256"] = _sha256(artifact)
+        _write_json(run["metadata"], metadata)
+
+        result = _run_checker(*arguments)
+
+        assert result.returncode != 0, (field, result.stdout + result.stderr)
+        assert "INVALID_EVIDENCE_CONTENT" in result.stdout, (field, result.stdout)
+        assert "browser isolation report" in result.stdout
+
+    _write_json(producer_report, original)
+    producer_output["sha256"] = _sha256(producer_report)
+    manifest_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "execution-manifest"
+    )
+    p1_manifest = PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"
+    manifest_input["path"] = "tests/fixtures/utiki/manifest.json"
+    manifest_input["sha256"] = _sha256(p1_manifest)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "browser-isolation-report")
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    metadata["isolation"]["report_sha256"] = _sha256(artifact)
+    _write_json(run["metadata"], metadata)
+
+    wrong_manifest = _run_checker(*arguments)
+
+    assert wrong_manifest.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in wrong_manifest.stdout
+    assert "execution-manifest" in wrong_manifest.stdout
+
+
+def test_p2_performance_input_contract_requires_its_own_manifest():
+    from tools import verify_utiki_ci_results as checker
+
+    for kind in ("browser-isolation-report", "benchmark-report"):
+        p1 = checker._expected_input_contract(kind, "performance-contract", "P1")
+        p2 = checker._expected_input_contract(kind, "performance-contract", "P2")
+        assert p1["performance-contract"] == (
+            "repository", "ci/utiki-performance-isolation.json"
+        )
+        assert p2["performance-contract"] == (
+            "repository", "ci/utiki-p2-performance-isolation.json"
+        )
+        if kind == "browser-isolation-report":
+            assert p1["execution-manifest"] == (
+                "repository", "tests/fixtures/utiki/manifest.json"
+            )
+            assert p2["execution-manifest"] == (
+                "repository", "tests/fixtures/utiki/manifest-p2.json"
+            )
+            assert p2["execution-manifest"] != p1["execution-manifest"]
+
+
+def test_p2_performance_isolation_envelope_rejects_p1_manifest(tmp_path, monkeypatch):
+    from tools import verify_utiki_ci_results as checker
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PHASE", "P2")
+    monkeypatch.setattr(module, "RUN_ID", "utiki-p2-attempt-1")
+    monkeypatch.setattr(
+        module, "NEGATIVE_REGISTRY", PROJECT_ROOT / "ci/utiki-p2-negative-probes.json"
+    )
+    manifest_path, manifest, _, profiles = _make_manifest(tmp_path)
+    run = _make_run(
+        tmp_path, manifest_path, manifest, profiles,
+        "performance-contract", "isolated-linux-x64",
+    )
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    catalog = checker.validate_catalog(CATALOG, APPROVED_CATALOG_SHA256)
+    expected = {
+        checker.ExecutionKey(
+            result["case_id"], result["obligation_id"], result["variant_id"],
+            result["job_id"], result["target"],
+        )
+        for result in envelope["results"]
+    }
+    checker._validate_evidence_report(
+        artifact, "browser-isolation-report", metadata, expected, catalog, run["dir"]
+    )
+
+    manifest_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "execution-manifest"
+    )
+    p1_manifest = PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"
+    manifest_input["path"] = "tests/fixtures/utiki/manifest.json"
+    manifest_input["sha256"] = _sha256(p1_manifest)
+    _write_json(artifact, envelope)
+
+    with pytest.raises(checker.GateError) as captured:
+        checker._validate_evidence_report(
+            artifact, "browser-isolation-report", metadata, expected, catalog, run["dir"]
+        )
+    assert captured.value.code == "INVALID_EVIDENCE_REPORT"
+    assert "execution-manifest" in captured.value.message
 
 
 def test_duplicate_junit_result_is_rejected(gate_inputs):

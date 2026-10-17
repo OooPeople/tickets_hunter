@@ -165,7 +165,7 @@ def _manifest_negative(
 
 
 def _registry(
-    payload: dict[str, Any], catalog_digest: str
+    payload: dict[str, Any], catalog_digest: str, phase: str
 ) -> dict[tuple[str, str, str, str, str], dict[str, Any]]:
     expected_top = {
         "schema_version",
@@ -180,8 +180,9 @@ def _registry(
         raise JobError("negative registry fields mismatch")
     if (
         payload["schema_version"] != SCHEMA_VERSION
-        or payload["registry_id"] != "utiki-p1-negative-probes"
-        or payload["phase"] != "P1"
+        or phase not in {"P1", "P2"}
+        or payload["registry_id"] != f"utiki-{phase.lower()}-negative-probes"
+        or payload["phase"] != phase
         or payload["catalog_sha256"] != catalog_digest
     ):
         raise JobError("negative registry identity/catalog digest mismatch")
@@ -282,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         catalog_keys = _catalog_negative_keys(catalog, arguments.phase)
         manifest_keys, evidence_paths = _manifest_negative(manifest)
         registry_path = arguments.probe_registry.resolve(strict=True)
-        registry = _registry(_load(registry_path), catalog_digest)
+        registry = _registry(_load(registry_path), catalog_digest, arguments.phase)
         if manifest_keys != catalog_keys or set(registry) != catalog_keys:
             raise JobError("catalog/manifest/negative registry key sets differ")
         isolated = {key for key, value in registry.items() if value["environment"] == "isolated"}
@@ -331,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
                 request,
                 probe_root=copied_dir.resolve(),
                 repository_root=repository,
+                phase=arguments.phase,
             )
             validate_probe_output_contract(
                 entry,

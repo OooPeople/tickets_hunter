@@ -27,7 +27,9 @@ def _temporary_files(tmp_path: Path, target: Path) -> list[Path]:
     return list(tmp_path.glob(f".{target.name}.*"))
 
 
-def test_new_file_round_trip_preserves_other_values_and_source(tmp_path: Path) -> None:
+def test_new_file_round_trip_preserves_other_values_and_source(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     source, profile, original = _source(tmp_path)
     target = tmp_path / "converted.json"
 
@@ -46,6 +48,9 @@ def test_new_file_round_trip_preserves_other_values_and_source(tmp_path: Path) -
     assert result["accounts"] == profile["accounts"]
     assert result["other_platform"] == profile["other_platform"]
     assert output_digest == hashlib.sha256(target.read_bytes()).hexdigest()
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert "fixture-private-value" not in repr(prepared)
     assert _temporary_files(tmp_path, target) == []
     if os.name == "posix":
         assert target.stat().st_mode & 0o777 == 0o600

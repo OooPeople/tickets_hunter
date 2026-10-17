@@ -152,7 +152,9 @@ def _require_isolation(
     }
 
 
-def _registry_entry(registry_path: Path, request: dict[str, Any]) -> dict[str, Any]:
+def _registry_entry(
+    registry_path: Path, request: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
     registry = _load(registry_path)
     _exact(
         registry,
@@ -167,10 +169,11 @@ def _registry_entry(registry_path: Path, request: dict[str, Any]) -> dict[str, A
         },
         "negative probe registry",
     )
+    phase = registry["phase"]
     if (
         registry["schema_version"] != 1
-        or registry["registry_id"] != "utiki-p1-negative-probes"
-        or registry["phase"] != "P1"
+        or phase not in {"P1", "P2"}
+        or registry["registry_id"] != f"utiki-{phase.lower()}-negative-probes"
     ):
         raise ProbeError("negative probe registry identity is invalid")
     raw_probes = registry["probes"]
@@ -236,7 +239,7 @@ def _registry_entry(registry_path: Path, request: dict[str, Any]) -> dict[str, A
         or any(kind not in actual_input_kinds for kind in mutation_input_kinds)
     ):
         raise ProbeError("probe request differs from its reviewed registry entry")
-    return entry
+    return entry, phase
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -276,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if request["schema_version"] != REQUEST_SCHEMA_VERSION:
             raise ProbeError("unknown probe input schema")
-        registry_entry = _registry_entry(
+        registry_entry, phase = _registry_entry(
             arguments.probe_registry.resolve(strict=True), request
         )
         validate_request_contract(
@@ -284,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
             request,
             probe_root=probe_root,
             repository_root=repository,
+            phase=phase,
         )
         validate_probe_output_contract(
             registry_entry,

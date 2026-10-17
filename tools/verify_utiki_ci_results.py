@@ -854,14 +854,14 @@ def _expected_evidence_producer(kind: str, job_id: str) -> str | None:
 
 
 def _expected_input_contract(
-    kind: str, job_id: str
+    kind: str, job_id: str, phase: str = "P1"
 ) -> dict[str, tuple[str, str | None]]:
     if kind == "checker-exit-nonzero":
         return {
             "injected-probe": ("artifact", None),
             "probe-registry": (
                 "repository",
-                "ci/utiki-p1-negative-probes.json",
+                f"ci/utiki-{phase.lower()}-negative-probes.json",
             ),
         }
     contract = EVIDENCE_INPUT_CONTRACTS.get((job_id, kind))
@@ -870,6 +870,29 @@ def _expected_input_contract(
             "INVALID_EVIDENCE_REPORT",
             f"no reviewed input contract for {job_id}/{kind}",
         )
+    if job_id == "architecture-types" and kind == "typecheck-report" and phase == "P2":
+        return {
+            "typed-manifest": ("repository", "ci/utiki-typed-scope.txt"),
+            "mypy-config": ("repository", "ci/mypy-utiki.ini"),
+        }
+    if job_id == "browser-contract-isolated" and kind == "browser-isolation-report" and phase == "P2":
+        return {
+            name: (
+                scope,
+                "tests/fixtures/utiki/manifest-p2.json"
+                if name == "execution-manifest" else path,
+            )
+            for name, (scope, path) in contract.items()
+        }
+    if job_id == "performance-contract" and phase == "P2":
+        phase_inputs = {
+            "performance-contract": "ci/utiki-p2-performance-isolation.json",
+            "execution-manifest": "tests/fixtures/utiki/manifest-p2.json",
+        }
+        return {
+            name: (scope, phase_inputs.get(name, path))
+            for name, (scope, path) in contract.items()
+        }
     return contract
 
 
@@ -1095,52 +1118,107 @@ def _validate_typecheck_payload(
     payload: dict[str, Any],
     inputs: dict[str, Path],
     outputs: dict[str, Path],
+    metadata: dict[str, Any],
+    repository_root: Path,
 ) -> None:
+    phase = metadata["phase"]
+    if phase not in {"P1", "P2"}:
+        fail("INVALID_EVIDENCE_CONTENT", "typecheck phase is not supported")
+    base_keys = {
+        "schema_version", "status", "files", "required_files",
+        "effective_flags", "mypy_exit_code", "failure_reasons",
+        "config_sha256", "manifest_sha256", "stdout_sha256", "stderr_sha256",
+    }
     require_exact_keys(
         payload,
-        {
-            "schema_version",
-            "status",
-            "files",
-            "required_files",
-            "effective_flags",
-            "mypy_exit_code",
-            "failure_reasons",
-            "config_sha256",
-            "manifest_sha256",
-            "stdout_sha256",
-            "stderr_sha256",
+        base_keys | ({
             "coverage_kind",
             "production_scope_status",
             "legacy_seed_scope_status",
             "coverage_context_path",
             "coverage_context_sha256",
-        },
+        } if phase == "P1" else {"phase"}),
         label="typecheck report",
     )
     if payload.get("schema_version") != 1 or payload.get("status") != "PASS":
         fail("INVALID_EVIDENCE_CONTENT", "typecheck producer did not report PASS")
     if payload.get("mypy_exit_code") != 0:
         fail("INVALID_EVIDENCE_CONTENT", "typecheck report did not observe mypy exit 0")
+    if phase == "P2" and payload.get("phase") != "P2":
+        fail("INVALID_EVIDENCE_CONTENT", "production typecheck phase is invalid")
     files = require_list(payload.get("files"), label="typecheck.files")
     required = require_list(payload.get("required_files"), label="typecheck.required_files")
+    if any(type(item) is not str for item in files + required):
+        fail("INVALID_EVIDENCE_CONTENT", "typecheck report has invalid source paths")
     if not files or not set(required).issubset(files):
         fail("INVALID_EVIDENCE_CONTENT", "typecheck scope is empty or incomplete")
     flags = require_list(payload.get("effective_flags"), label="typecheck.effective_flags")
     if "--strict" not in flags or "--no-incremental" not in flags:
         fail("INVALID_EVIDENCE_CONTENT", "typecheck strict flags are absent")
-    if (
-        payload.get("coverage_kind") != "controlled-runner-contract"
-        or payload.get("production_scope_status") != "NOT_CLAIMED"
-        or payload.get("legacy_seed_scope_status") != "KNOWN_FAILING_DEBT"
-    ):
-        fail(
-            "INVALID_EVIDENCE_CONTENT",
-            "typecheck report misrepresents the controlled fixture as production coverage",
-        )
     manifest_path = inputs["typed-manifest"]
     config_path = inputs["mypy-config"]
-    context_path = inputs["coverage-context"]
+    if phase == "P1":
+        if (
+            payload.get("coverage_kind") != "controlled-runner-contract"
+            or payload.get("production_scope_status") != "NOT_CLAIMED"
+            or payload.get("legacy_seed_scope_status") != "KNOWN_FAILING_DEBT"
+        ):
+            fail(
+                "INVALID_EVIDENCE_CONTENT",
+                "typecheck report misrepresents the controlled fixture as production coverage",
+            )
+        context_path = inputs["coverage-context"]
+        if digest_file(context_path, label="typecheck coverage context") != require_sha256(
+            payload.get("coverage_context_sha256"), label="typecheck.coverage_context_sha256"
+        ):
+            fail("EVIDENCE_DIGEST_MISMATCH", "typecheck coverage context digest mismatch")
+        require_str(payload.get("coverage_context_path"), label="typecheck.coverage_context_path")
+    else:
+        if len(files) != len(set(files)) or len(required) != len(set(required)):
+            fail("INVALID_EVIDENCE_CONTENT", "production typed report has invalid paths")
+        try:
+            manifest_files = [
+                line.strip() for line in manifest_path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        except (OSError, UnicodeError):
+            fail("INVALID_EVIDENCE_CONTENT", "production typed manifest is unreadable")
+        if not manifest_files or len(manifest_files) != len(set(manifest_files)):
+            fail("INVALID_EVIDENCE_CONTENT", "production typed manifest is empty or duplicated")
+        required_paths: set[str] = set()
+        for relative_root in (
+            "src/platforms/utiki/domain",
+            "src/platforms/utiki/application",
+            "src/platforms/utiki/adapters",
+        ):
+            directory = repository_root / relative_root
+            if directory.is_symlink():
+                fail("INVALID_EVIDENCE_CONTENT", "production typed root is a symlink")
+            if directory.is_dir():
+                required_paths.update(
+                    path.relative_to(repository_root).as_posix()
+                    for path in directory.rglob("*.py")
+                )
+        for relative in (
+            "src/platforms/utiki/auth.py",
+            "src/platforms/utiki/profiles.py",
+            "src/platforms/utiki/selection.py",
+            "src/platforms/utiki/bootstrap.py",
+            "src/utiki_config.py",
+            "src/keyword_rules.py",
+            "src/utiki_core_services.py",
+            "tools/migrations/convert_utiki_config.py",
+        ):
+            if (repository_root / relative).exists() or (repository_root / relative).is_symlink():
+                required_paths.add(relative)
+        for relative in set(manifest_files) | required_paths:
+            path = safe_relative_path(
+                repository_root, relative, label="production typed source"
+            )
+            if path.suffix != ".py" or not path.is_file():
+                fail("INVALID_EVIDENCE_CONTENT", f"production typed source is missing: {relative}")
+        if files != manifest_files or set(required) != required_paths:
+            fail("INVALID_EVIDENCE_CONTENT", "production typed scope differs from repository sources")
     if digest_file(manifest_path, label="typecheck typed manifest") != require_sha256(
         payload.get("manifest_sha256"), label="typecheck.manifest_sha256"
     ):
@@ -1149,11 +1227,6 @@ def _validate_typecheck_payload(
         payload.get("config_sha256"), label="typecheck.config_sha256"
     ):
         fail("EVIDENCE_DIGEST_MISMATCH", "typecheck config digest mismatch")
-    if digest_file(context_path, label="typecheck coverage context") != require_sha256(
-        payload.get("coverage_context_sha256"), label="typecheck.coverage_context_sha256"
-    ):
-        fail("EVIDENCE_DIGEST_MISMATCH", "typecheck coverage context digest mismatch")
-    require_str(payload.get("coverage_context_path"), label="typecheck.coverage_context_path")
     for kind, field in (
         ("typecheck-stdout", "stdout_sha256"),
         ("typecheck-stderr", "stderr_sha256"),
@@ -1452,6 +1525,10 @@ def _validate_browser_payload(
         or payload.get("candidate_sha") != metadata["candidate_sha"]
         or payload.get("job_id") != metadata["job_id"]
         or payload.get("target") != metadata["target"]
+        or payload.get("phase") != metadata["phase"]
+        or payload.get("attempt") != metadata["attempt"]
+        or payload.get("catalog_sha256") != metadata["catalog_sha256"]
+        or payload.get("execution_manifest_sha256") != metadata["execution_manifest_sha256"]
     ):
         fail("INVALID_EVIDENCE_CONTENT", "browser isolation report context/status is invalid")
     runtime = require_dict(payload.get("runtime_evidence"), label="browser.runtime_evidence")
@@ -1486,6 +1563,7 @@ def _validate_benchmark_payload(
     inputs: dict[str, Path],
 ) -> None:
     if metadata["job_id"] == "performance-contract":
+        phase = metadata["phase"]
         require_exact_keys(
             payload,
             {
@@ -1500,12 +1578,12 @@ def _validate_benchmark_payload(
                 "source",
                 "browser",
                 "threshold_policy",
-            },
+            } | ({"hot_path"} if phase == "P2" else set()),
             label="verified performance report",
         )
         if (
             payload["schema_version"] != 1
-            or payload["report_kind"] != "utiki-p1-performance-verification"
+            or payload["report_kind"] != f"utiki-{phase.lower()}-performance-verification"
             or payload["status"] != "PASS"
         ):
             fail("INVALID_EVIDENCE_CONTENT", "verified performance report did not pass")
@@ -1710,6 +1788,70 @@ def _validate_benchmark_payload(
             for sample in browser_metrics["ticketing_requests_per_observation"]["samples"]
         ):
             fail("INVALID_EVIDENCE_CONTENT", "performance browser observations are invalid")
+        if phase == "P2":
+            hot_path = require_dict(payload["hot_path"], label="P2 hot-path")
+            require_exact_keys(
+                hot_path,
+                {"schema_version", "phase", "method", "v07", "v08"},
+                label="P2 hot-path",
+            )
+            if (
+                hot_path["schema_version"] != 1
+                or hot_path["phase"] != "P2"
+                or hot_path["method"] != {"samples": 30, "warmup": 5, "seat_count": 2000}
+            ):
+                fail("INVALID_EVIDENCE_CONTENT", "P2 hot-path method is invalid")
+            v07 = require_dict(hot_path["v07"], label="V07")
+            v08 = require_dict(hot_path["v08"], label="V08")
+            if (
+                v07.get("latency_includes_call_tracing") is not True
+                or v07.get("forbidden_calls") != {
+                    "parse_profile_json": 0,
+                    "load_current_policy": 0,
+                    "inspect_upgrade_input": 0,
+                    "apply_current_policy_reload": 0,
+                    "convert_profile_mapping": 0,
+                    "json.loads": 0,
+                    "hash": 0,
+                    "hashlib.new": 0,
+                    "sha256": 0,
+                    "sha1": 0,
+                    "md5": 0,
+                    "blake2b": 0,
+                }
+                or v08.get("seat_count") != 2000
+                or v08.get("latency_includes_call_tracing") is not True
+                or v08.get("forbidden_calls") != {
+                    "deepcopy": 0, "copy": 0, "asdict": 0,
+                    "SeatRow.__init__": 0,
+                    "SeatSnapshot.__init__": 0,
+                    "TicketTypeRow.__init__": 0,
+                }
+                or type(v08.get("tracked_objects")) is not int
+                or v08["tracked_objects"] < 2000
+                or type(v08.get("max_reference_delta")) is not int
+                or v08["max_reference_delta"] != 0
+                or type(v08.get("pending_tasks_before")) is not int
+                or v08["pending_tasks_before"] < 1
+                or v08.get("pending_tasks_after") != v08["pending_tasks_before"]
+            ):
+                fail("INVALID_EVIDENCE_CONTENT", "P2 hot-path invariants failed")
+            for metric_name, metric in (
+                ("V07 latency", v07.get("latency")),
+                ("V08 valid latency", v08.get("valid_latency")),
+                ("V08 invalid latency", v08.get("invalid_latency")),
+            ):
+                item = require_dict(metric, label=metric_name)
+                samples = require_list(item.get("samples"), label=f"{metric_name} samples")
+                if (
+                    item.get("unit") != "ns"
+                    or item.get("sample_count") != 30
+                    or len(samples) != 30
+                    or item.get("failure_count") != 0
+                    or item.get("failures") != []
+                    or any(type(sample) is not int or sample < 0 for sample in samples)
+                ):
+                    fail("INVALID_EVIDENCE_CONTENT", f"{metric_name} samples are invalid")
         return
     if (
         payload.get("schema_version") != 1
@@ -1748,7 +1890,7 @@ def _validate_positive_payload(
             payload, metadata, repository_root
         ),
         "typecheck-report": lambda: _validate_typecheck_payload(
-            payload, inputs, outputs
+            payload, inputs, outputs, metadata, repository_root
         ),
         "python-syntax-report": lambda: _validate_syntax_payload(payload, metadata),
         "browser-isolation-report": lambda: _validate_browser_payload(
@@ -1880,6 +2022,7 @@ def _validate_negative_payload(
             probe_request,
             probe_root=probe_input_path.parent.resolve(),
             repository_root=repository_root,
+            phase=metadata["phase"],
         )
     except NegativeContractError as error:
         fail("INVALID_NEGATIVE_PROBE", str(error))
@@ -2079,7 +2222,9 @@ def _validate_evidence_report(
         )
         for item in require_list(report["inputs"], label=f"{kind}.inputs")
     }
-    expected_inputs = _expected_input_contract(kind, metadata["job_id"])
+    expected_inputs = _expected_input_contract(
+        kind, metadata["job_id"], metadata["phase"]
+    )
     if set(raw_inputs) != set(expected_inputs):
         fail(
             "EVIDENCE_SET_MISMATCH",
@@ -2185,7 +2330,7 @@ def _validate_evidence_report(
         )
         if (
             registry_payload["schema_version"] != 1
-            or registry_payload["registry_id"] != "utiki-p1-negative-probes"
+            or registry_payload["registry_id"] != f"utiki-{metadata['phase'].lower()}-negative-probes"
             or registry_payload["phase"] != metadata["phase"]
             or registry_payload["catalog_sha256"] != metadata["catalog_sha256"]
         ):

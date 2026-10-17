@@ -9,7 +9,7 @@ from platforms.utiki.application.quantity import (
     QuantityDispatchUncertain,
     commit_granted_quantity,
 )
-from platforms.utiki.application.ports import QuantityBrowserPort
+from platforms.utiki.application.ports import QuantityBrowserPort, QuantityObservation
 from platforms.utiki.domain.effects import (
     ClaimId,
     DispatchStage,
@@ -34,9 +34,9 @@ class FakeQuantityBrowser:
         self.observed: list[OperationStamp] = []
         self.committed: list[tuple[QuantityPlan, RunningEffect]] = []
 
-    async def observe_page(self, expected_context: OperationStamp) -> QuantitySnapshot:
+    async def observe_page(self, expected_context: OperationStamp) -> QuantityObservation:
         self.observed.append(expected_context)
-        return self.snapshot
+        return QuantityObservation(expected_context, self.snapshot)
 
     async def commit_quantity(
         self, plan: QuantityPlan, claim: RunningEffect
@@ -54,7 +54,8 @@ class FakeQuantityBrowser:
 
 async def _exercise(port: QuantityBrowserPort, stamp: OperationStamp) -> None:
     observed = await port.observe_page(stamp)
-    plan = select_quantity_snapshot(observed, "全票", 2)
+    assert observed.source == stamp
+    plan = select_quantity_snapshot(observed.snapshot, "全票", 2)
     assert isinstance(plan, QuantityPlan)
     assert plan.document_id == stamp.document.token
     claim = RunningEffect(ClaimId("quantity-claim"), EffectProposal(stamp, EffectKind.SELECT))
@@ -67,7 +68,8 @@ async def _exercise(port: QuantityBrowserPort, stamp: OperationStamp) -> None:
 
 async def _exercise_application(port: QuantityBrowserPort, stamp: OperationStamp) -> None:
     observed = await port.observe_page(stamp)
-    plan = select_quantity_snapshot(observed, "全票", 2)
+    assert observed.source == stamp
+    plan = select_quantity_snapshot(observed.snapshot, "全票", 2)
     assert isinstance(plan, QuantityPlan)
     claim = RunningEffect(ClaimId("application-claim"), EffectProposal(stamp, EffectKind.SELECT))
     receipt = await commit_granted_quantity(port, plan, claim)

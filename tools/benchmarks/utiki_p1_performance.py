@@ -47,6 +47,41 @@ NODE_IDS = (
     "tests/performance/utiki/test_p1_performance_contract.py::"
     "test_v13_source_cold_start",
 )
+P2_RESULT_KEYS = (
+    ("V07", "V07.perf.primary", "primary"),
+    ("V08", "V08.perf.primary", "primary"),
+    *RESULT_KEYS,
+)
+P2_NODE_IDS = (
+    "tests/performance/utiki/test_p2_performance_contract.py::test_v07_unchanged_policy_hot_path",
+    "tests/performance/utiki/test_p2_performance_contract.py::test_v08_large_seat_hot_path",
+    *NODE_IDS,
+)
+
+
+def performance_phase(contract: Mapping[str, Any]) -> str:
+    contract_id = contract.get("contract_id")
+    if contract_id == "utiki-p1-performance-hard-egress-v1":
+        return "P1"
+    if contract_id == "utiki-p2-performance-hard-egress-v1":
+        return "P2"
+    raise PerformanceReportError("unknown performance contract identity")
+
+
+def result_keys(phase: str) -> tuple[tuple[str, str, str], ...]:
+    if phase == "P1":
+        return RESULT_KEYS
+    if phase == "P2":
+        return P2_RESULT_KEYS
+    raise PerformanceReportError("unsupported performance phase")
+
+
+def node_ids(phase: str) -> tuple[str, ...]:
+    if phase == "P1":
+        return NODE_IDS
+    if phase == "P2":
+        return P2_NODE_IDS
+    raise PerformanceReportError("unsupported performance phase")
 
 
 class PerformanceReportError(ValueError):
@@ -115,6 +150,7 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], label: str) -> Non
 
 def load_contract(path: Path) -> dict[str, Any]:
     value = load_json(path)
+    phase = performance_phase(value)
     _exact_keys(
         value,
         {
@@ -127,7 +163,7 @@ def load_contract(path: Path) -> dict[str, Any]:
             "measurement",
             "semantic_baseline",
             "required_execution_results",
-        },
+        } | ({"hot_path"} if phase == "P2" else set()),
         "performance contract",
     )
     if value["schema_version"] != SCHEMA_VERSION:
@@ -217,8 +253,14 @@ def load_contract(path: Path) -> dict[str, Any]:
         actual_results.append(
             (item["case_id"], item["obligation_id"], item["variant_id"])
         )
-    if tuple(actual_results) != RESULT_KEYS:
-        raise PerformanceReportError("performance result contract does not match P1")
+    if tuple(actual_results) != result_keys(phase):
+        raise PerformanceReportError("performance result contract does not match phase")
+    if phase == "P2" and value["hot_path"] != {
+        "samples": 30,
+        "warmup": 5,
+        "seat_count": 2000,
+    }:
+        raise PerformanceReportError("P2 hot-path measurement contract changed")
     return value
 
 
@@ -284,6 +326,71 @@ def _validate_summary(
         raise PerformanceReportError(f"{label} samples or failures are invalid")
     if summarize_samples(samples, unit) != summary:
         raise PerformanceReportError(f"{label} aggregate does not match raw samples")
+
+
+def validate_hot_path_report(report: Any, *, contract: Mapping[str, Any]) -> None:
+    if not isinstance(report, dict):
+        raise PerformanceReportError("P2 hot-path report is absent")
+    _exact_keys(report, {"schema_version", "phase", "method", "v07", "v08"}, "hot-path report")
+    if (
+        report["schema_version"] != 1
+        or report["phase"] != "P2"
+        or report["method"] != contract["hot_path"]
+    ):
+        raise PerformanceReportError("P2 hot-path report context is invalid")
+    samples = contract["hot_path"]["samples"]
+    seat_count = contract["hot_path"]["seat_count"]
+    v07 = report["v07"]
+    v08 = report["v08"]
+    if not isinstance(v07, dict) or not isinstance(v08, dict):
+        raise PerformanceReportError("P2 hot-path result is absent")
+    _exact_keys(v07, {"policy_revision", "latency_includes_call_tracing", "forbidden_calls", "latency"}, "V07")
+    _exact_keys(v08, {
+        "seat_count", "latency_includes_call_tracing", "tracked_objects",
+        "max_reference_delta", "pending_tasks_before", "pending_tasks_after",
+        "forbidden_calls", "valid_latency", "invalid_latency",
+    }, "V08")
+    if (
+        type(v07["policy_revision"]) is not int
+        or v07["policy_revision"] < 1
+        or v07["latency_includes_call_tracing"] is not True
+        or v07["forbidden_calls"] != {
+            "parse_profile_json": 0,
+            "load_current_policy": 0,
+            "inspect_upgrade_input": 0,
+            "apply_current_policy_reload": 0,
+            "convert_profile_mapping": 0,
+            "json.loads": 0,
+            "hash": 0,
+            "hashlib.new": 0,
+            "sha256": 0,
+            "sha1": 0,
+            "md5": 0,
+            "blake2b": 0,
+        }
+    ):
+        raise PerformanceReportError("V07 high-frequency policy invariant failed")
+    if (
+        v08["seat_count"] != seat_count
+        or v08["latency_includes_call_tracing"] is not True
+        or type(v08["tracked_objects"]) is not int
+        or v08["tracked_objects"] < seat_count
+        or type(v08["max_reference_delta"]) is not int
+        or v08["max_reference_delta"] != 0
+        or type(v08["pending_tasks_before"]) is not int
+        or v08["pending_tasks_before"] < 1
+        or v08["pending_tasks_after"] != v08["pending_tasks_before"]
+        or v08["forbidden_calls"] != {
+            "deepcopy": 0, "copy": 0, "asdict": 0,
+            "SeatRow.__init__": 0,
+            "SeatSnapshot.__init__": 0,
+            "TicketTypeRow.__init__": 0,
+        }
+    ):
+        raise PerformanceReportError("V08 large-seat retention invariant failed")
+    _validate_summary(v07["latency"], label="V07 latency", unit="ns", sample_count=samples)
+    _validate_summary(v08["valid_latency"], label="V08 valid latency", unit="ns", sample_count=samples)
+    _validate_summary(v08["invalid_latency"], label="V08 invalid latency", unit="ns", sample_count=samples)
 
 
 def _validate_source_metric(metric: Any, label: str, samples: int) -> None:
@@ -423,6 +530,7 @@ def validate_raw_report(
     contract: Mapping[str, Any],
     expected_candidate_sha: str | None = None,
 ) -> None:
+    phase = performance_phase(contract)
     _exact_keys(
         report,
         {
@@ -438,10 +546,13 @@ def validate_raw_report(
             "source",
             "browser",
             "execution_results",
-        },
+        } | ({"hot_path"} if phase == "P2" else set()),
         "performance report",
     )
-    if report["schema_version"] != SCHEMA_VERSION or report["report_kind"] != REPORT_KIND:
+    if (
+        report["schema_version"] != SCHEMA_VERSION
+        or report["report_kind"] != f"utiki-{phase.lower()}-performance"
+    ):
         raise PerformanceReportError("performance report schema is invalid")
     if report["status"] != "PENDING_OUTER_AUDIT":
         raise PerformanceReportError("performance report bypassed outer isolation audit")
@@ -455,7 +566,7 @@ def validate_raw_report(
     )
     candidate_sha = context["candidate_sha"]
     if (
-        context["phase"] != PHASE
+        context["phase"] != phase
         or context["job_id"] != JOB_ID
         or context["target"] != TARGET
         or not isinstance(context["run_id"], str)
@@ -466,7 +577,7 @@ def validate_raw_report(
         or GIT_SHA_PATTERN.fullmatch(candidate_sha) is None
         or (expected_candidate_sha is not None and candidate_sha != expected_candidate_sha)
     ):
-        raise PerformanceReportError("performance context does not match P1")
+        raise PerformanceReportError("performance context does not match contract phase")
     method = report["method"]
     if not isinstance(method, dict) or method != contract["measurement"]:
         raise PerformanceReportError("performance method does not match the contract")
@@ -481,6 +592,8 @@ def validate_raw_report(
         "semantic_output_sha256",
             "production_subject_manifest_sha256",
     }
+    if phase == "P2":
+        required_digests.add("hot_path_script_sha256")
     if not isinstance(digests, dict) or set(digests) != required_digests:
         raise PerformanceReportError("performance digest set is incomplete")
     if any(
@@ -506,12 +619,22 @@ def validate_raw_report(
     if normalized_subjects != sorted(normalized_subjects, key=lambda item: item["path"]):
         raise PerformanceReportError("production subject manifest is not sorted")
     paths = [item["path"] for item in normalized_subjects]
-    if len(paths) != len(set(paths)) or not {
+    required_subjects = {
         "src/platforms/utiki/dom.py",
         "src/platforms/utiki/profiles.py",
         "src/platforms/utiki/selection.py",
         "src/util.py",
-    }.issubset(paths):
+    }
+    if phase == "P2":
+        required_subjects.update({
+            "src/platforms/utiki/application/engine.py",
+            "src/platforms/utiki/application/ports.py",
+            "src/platforms/utiki/bootstrap.py",
+            "src/platforms/utiki/domain/identity.py",
+            "src/platforms/utiki/domain/plans.py",
+            "src/platforms/utiki/domain/snapshots.py",
+        })
+    if len(paths) != len(set(paths)) or not required_subjects.issubset(paths):
         raise PerformanceReportError("production subject graph is incomplete")
     if sha256_json(normalized_subjects) != digests[
         "production_subject_manifest_sha256"
@@ -614,8 +737,11 @@ def validate_raw_report(
         for value in browser_metrics["ticketing_requests_per_observation"]["samples"]
     ):
         raise PerformanceReportError("browser observation emitted a ticketing request")
+    if phase == "P2":
+        validate_hot_path_report(report["hot_path"], contract=contract)
+    expected_results = result_keys(phase)
     results = report["execution_results"]
-    if not isinstance(results, list) or len(results) != len(RESULT_KEYS):
+    if not isinstance(results, list) or len(results) != len(expected_results):
         raise PerformanceReportError("performance execution results are incomplete")
     actual_results: list[tuple[str, str, str]] = []
     for item in results:
@@ -631,11 +757,11 @@ def validate_raw_report(
         actual_results.append(
             (item["case_id"], item["obligation_id"], item["variant_id"])
         )
-    if tuple(actual_results) != RESULT_KEYS:
+    if tuple(actual_results) != expected_results:
         raise PerformanceReportError("performance execution result set is wrong")
 
 
-def execution_results() -> list[dict[str, str]]:
+def execution_results(phase: str = "P1") -> list[dict[str, str]]:
     return [
         {
             "case_id": case_id,
@@ -645,5 +771,5 @@ def execution_results() -> list[dict[str, str]]:
             "target": TARGET,
             "status": "PASS",
         }
-        for case_id, obligation_id, variant_id in RESULT_KEYS
+        for case_id, obligation_id, variant_id in result_keys(phase)
     ]

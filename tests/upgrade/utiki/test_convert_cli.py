@@ -68,6 +68,38 @@ def test_cli_output_is_loadable_and_preserves_unrelated_values(tmp_path: Path) -
     assert "fixture-private-value" not in result.stdout + result.stderr
 
 
+def test_cli_mixed_equal_writes_current_profile_without_changing_source(tmp_path: Path) -> None:
+    source = tmp_path / "mixed-equal.json"
+    output = tmp_path / "converted.json"
+    current = {
+        "ticket_type_keyword": "",
+        "seat_sorting": "display",
+        "seat_selection_mode": "computer",
+    }
+    original_profile = {
+        "utiki": current,
+        "ctbc": current.copy(),
+        "accounts": {"password": "fixture-private-value"},
+        "other_platform": {"enabled": False},
+    }
+    source.write_text(json.dumps(original_profile, ensure_ascii=False), encoding="utf-8")
+    original_bytes = source.read_bytes()
+
+    result = _run(tmp_path, "--input", str(source), "--output", str(output))
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    assert result.stdout.startswith("WRITTEN source_sha256=")
+    assert "fixture-private-value" not in result.stdout
+    assert source.read_bytes() == original_bytes
+    converted = parse_profile_json(output.read_text(encoding="utf-8"))
+    assert "ctbc" not in converted
+    assert converted["utiki"] == current
+    assert converted["accounts"] == original_profile["accounts"]
+    assert converted["other_platform"] == original_profile["other_platform"]
+    assert load_current_policy(converted).ticket_type_keyword == ""
+
+
 def test_cli_mixed_conflict_requires_explicit_choice(tmp_path: Path) -> None:
     source = tmp_path / "conflict.json"
     output = tmp_path / "new.json"

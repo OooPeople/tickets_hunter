@@ -1,11 +1,10 @@
-# uTiki typed scope — P0 seed manifest
+# uTiki typed scope — active P2 development manifest
 # Issue: OooPeople/tickets_hunter#17
 # Branch: refactor/17-utiki-root-v1-5
 # Baseline: f307f7caba054fb40aab807a4629c891e69fb200
 #
-# Active entries below are existing pure/domain-ish uTiki modules only. Their
-# presence in this manifest defines the P0 typecheck scope; it does not claim
-# that a strict typecheck has already been executed or passed.
+# Active entries define the current typed scope, including the new P2 planning
+# bootstrap. A local PASS does not establish later adapters or production wiring.
 src/platforms/utiki/auth.py
 src/platforms/utiki/profiles.py
 src/platforms/utiki/selection.py
@@ -20,6 +19,8 @@ src/platforms/utiki/domain/inputs.py
 src/platforms/utiki/application/__init__.py
 src/platforms/utiki/application/ports.py
 src/platforms/utiki/application/quantity.py
+src/platforms/utiki/application/engine.py
+src/platforms/utiki/bootstrap.py
 src/utiki_config.py
 src/keyword_rules.py
 tools/migrations/convert_utiki_config.py

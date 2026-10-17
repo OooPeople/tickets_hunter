@@ -47,6 +47,8 @@ from tools.benchmarks.utiki_p1_performance import (  # noqa: E402
     execution_results,
     load_contract,
     load_json,
+    node_ids,
+    performance_phase,
     sha256_file,
     sha256_json,
     summarize_samples,
@@ -61,6 +63,7 @@ PRODUCTION_FIXTURE_URL = (
 FIXTURE_PATH = REPOSITORY / "tests" / "fixtures" / "ctbc" / "UTK0201_date.html"
 PRODUCTION_SCRIPT_PATH = REPOSITORY / "src" / "platforms" / "utiki" / "dom.py"
 SOURCE_BENCHMARK_PATH = REPOSITORY / "tools" / "benchmarks" / "bench_utiki.py"
+HOT_PATH_SCRIPT_PATH = REPOSITORY / "tools" / "benchmarks" / "utiki_p2_hot_path.py"
 
 
 class PerformanceRunError(RuntimeError):
@@ -445,7 +448,7 @@ def _run_browser_measurement(measurement: Mapping[str, Any]) -> dict[str, Any]:
         ) from exc
 
 
-def _manifest_mappings(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
+def _manifest_mappings(manifest: Mapping[str, Any], phase: str = "P1") -> list[dict[str, str]]:
     mappings: list[dict[str, str]] = []
     for case in manifest.get("cases", []):
         if not isinstance(case, dict):
@@ -467,9 +470,10 @@ def _manifest_mappings(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
                     }
                 )
     by_node = {item["node_id"]: item for item in mappings}
-    if set(by_node) != set(NODE_IDS) or len(mappings) != len(NODE_IDS):
+    required_nodes = node_ids(phase)
+    if set(by_node) != set(required_nodes) or len(mappings) != len(required_nodes):
         raise PerformanceRunError("execution manifest performance nodes are not exact")
-    return [by_node[node_id] for node_id in NODE_IDS]
+    return [by_node[node_id] for node_id in required_nodes]
 
 
 def _run_assertion_nodes(
@@ -482,15 +486,16 @@ def _run_assertion_nodes(
     context: Mapping[str, Any],
     fixture_digest: str,
     script_digest: str,
+    phase: str = "P1",
 ) -> tuple[int, list[str]]:
     manifest = load_json(manifest_path)
-    mappings = _manifest_mappings(manifest)
+    mappings = _manifest_mappings(manifest, phase)
     reporter_context = {
         "schema_version": 1,
         "run_id": context["run_id"],
         "attempt": context["attempt"],
         "job_id": JOB_ID,
-        "phase": PHASE,
+        "phase": phase,
         "target": TARGET,
         "candidate_sha": context["candidate_sha"],
         "catalog_sha256": manifest["catalog_sha256"],
@@ -526,7 +531,7 @@ def _run_assertion_nodes(
         str(junit),
         "--utiki-reporter-result",
         str(reporter_result),
-        *NODE_IDS,
+        *node_ids(phase),
     ]
     completed = subprocess.run(
         command,
@@ -566,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     inner: dict[str, Any] = {
         "schema_version": 1,
-        "report_kind": "utiki-p1-performance-inner",
+        "report_kind": f"utiki-{arguments.phase.lower()}-performance-inner",
         "status": "BLOCKED",
         "context": {
             "run_id": arguments.run_id,
@@ -585,18 +590,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if any(path.exists() for path in outputs):
             raise PerformanceRunError("performance output already exists")
-        if arguments.phase != PHASE or arguments.attempt < 1:
+        if arguments.phase not in {"P1", "P2"} or arguments.attempt < 1:
             raise PerformanceRunError("performance run context is invalid")
         contract_path = arguments.contract.resolve(strict=True)
         manifest_path = arguments.execution_manifest.resolve(strict=True)
         contract = load_contract(contract_path)
+        if performance_phase(contract) != arguments.phase:
+            raise PerformanceRunError("performance contract phase is invalid")
         manifest = load_json(manifest_path)
         if (
-            manifest.get("phase") != PHASE
+            manifest.get("phase") != arguments.phase
             or manifest.get("catalog_sha256") != arguments.catalog_sha256
         ):
             raise PerformanceRunError("execution manifest context is invalid")
-        _manifest_mappings(manifest)
+        _manifest_mappings(manifest, arguments.phase)
         attestation, attested_files = _verify_candidate_attestation(
             arguments.candidate_attestation.resolve(strict=True),
             arguments.candidate_sha,
@@ -621,6 +628,14 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         browser_result = _run_browser_measurement(contract["measurement"])
+        hot_path = None
+        if arguments.phase == "P2":
+            from tools.benchmarks.utiki_p2_hot_path import measure_hot_path
+
+            relative_hot_path = HOT_PATH_SCRIPT_PATH.relative_to(REPOSITORY).as_posix()
+            if attested_files.get(relative_hot_path) != sha256_file(HOT_PATH_SCRIPT_PATH):
+                raise PerformanceRunError("P2 hot-path script differs from candidate")
+            hot_path = measure_hot_path(**contract["hot_path"])
         production_subjects = _loaded_production_subjects()
         if any(
             attested_files.get(item["path"]) != item["sha256"]
@@ -632,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
         context = inner["context"]
         raw_report = {
             "schema_version": SCHEMA_VERSION,
-            "report_kind": REPORT_KIND,
+            "report_kind": f"utiki-{arguments.phase.lower()}-performance",
             "status": "PENDING_OUTER_AUDIT",
             "context": context,
             "environment": {
@@ -657,6 +672,8 @@ def main(argv: list[str] | None = None) -> int:
                 "production_subject_manifest_sha256": sha256_json(
                     production_subjects
                 ),
+                **({"hot_path_script_sha256": sha256_file(HOT_PATH_SCRIPT_PATH)}
+                   if arguments.phase == "P2" else {}),
             },
             "production_subjects": production_subjects,
             "isolation": {
@@ -678,7 +695,8 @@ def main(argv: list[str] | None = None) -> int:
             },
             "source": source,
             "browser": browser_result,
-            "execution_results": execution_results(),
+            "execution_results": execution_results(arguments.phase),
+            **({"hot_path": hot_path} if arguments.phase == "P2" else {}),
         }
         validate_raw_report(
             raw_report,
@@ -695,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
             context=context,
             fixture_digest=raw_report["digests"]["fixture_sha256"],
             script_digest=raw_report["digests"]["production_script_sha256"],
+            phase=arguments.phase,
         )
         inner["pytest"] = {"exit_code": pytest_exit, "command": pytest_command}
         if pytest_exit != 0:

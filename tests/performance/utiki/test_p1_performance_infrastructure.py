@@ -19,6 +19,8 @@ from tools.benchmarks.utiki_p1_performance import (
     PerformanceReportError,
     execution_results,
     load_contract,
+    node_ids,
+    result_keys,
     sha256_file,
     sha256_json,
     summarize_samples,
@@ -182,7 +184,8 @@ def _write(path, value):
 
 
 def _junit(path, raw, manifest_sha):
-    suite = ElementTree.Element("testsuite", tests="5")
+    phase = raw["context"]["phase"]
+    suite = ElementTree.Element("testsuite", tests=str(len(result_keys(phase))))
     suite_properties = ElementTree.SubElement(suite, "properties")
     suite_values = {
         **raw["context"],
@@ -195,7 +198,7 @@ def _junit(path, raw, manifest_sha):
         ElementTree.SubElement(
             suite_properties, "property", name=name, value=str(value)
         )
-    for key, node_id in zip(RESULT_KEYS, NODE_IDS):
+    for key, node_id in zip(result_keys(phase), node_ids(phase)):
         testcase = ElementTree.SubElement(
             suite,
             "testcase",
@@ -523,7 +526,7 @@ def test_untrusted_candidate_is_blocked_before_container_runtime(tmp_path):
 
 def test_verifier_binds_outer_raw_junit_and_reporter(tmp_path):
     raw = _raw_report()
-    raw_path = tmp_path / "raw.json"
+    raw_path = tmp_path / "raw-benchmark-report.json"
     junit_path = tmp_path / "performance.xml"
     reporter_path = tmp_path / "reporter.json"
     isolation_path = tmp_path / "isolation.json"
@@ -664,3 +667,190 @@ def test_managed_performance_nodes_collect_exactly_five():
     assert completed.returncode == 0, completed.stderr
     collected = [line for line in completed.stdout.splitlines() if "::test_v" in line]
     assert collected == list(NODE_IDS)
+
+
+def _p2_raw_report() -> tuple[dict, Path]:
+    from tools.benchmarks.utiki_p2_hot_path import measure_hot_path
+
+    contract_path = ROOT / "ci" / "utiki-p2-performance-isolation.json"
+    contract = load_contract(contract_path)
+    raw = _raw_report()
+    raw["report_kind"] = "utiki-p2-performance"
+    raw["context"]["phase"] = "P2"
+    raw["method"] = contract["measurement"]
+    raw["digests"]["contract_sha256"] = sha256_file(contract_path)
+    raw["digests"]["hot_path_script_sha256"] = sha256_file(
+        ROOT / "tools" / "benchmarks" / "utiki_p2_hot_path.py"
+    )
+    raw["production_subjects"].extend(
+        {"path": path, "sha256": sha256_file(ROOT / path)}
+        for path in (
+            "src/platforms/utiki/application/engine.py",
+            "src/platforms/utiki/application/ports.py",
+            "src/platforms/utiki/bootstrap.py",
+            "src/platforms/utiki/domain/identity.py",
+            "src/platforms/utiki/domain/plans.py",
+            "src/platforms/utiki/domain/snapshots.py",
+        )
+    )
+    raw["production_subjects"].sort(key=lambda item: item["path"])
+    raw["digests"]["production_subject_manifest_sha256"] = sha256_json(
+        raw["production_subjects"]
+    )
+    raw["hot_path"] = measure_hot_path(**contract["hot_path"])
+    raw["execution_results"] = execution_results("P2")
+    return raw, contract_path
+
+
+def test_p2_raw_report_accepts_real_hot_path_and_rejects_wrong_result() -> None:
+    raw, contract_path = _p2_raw_report()
+    contract = load_contract(contract_path)
+    validate_raw_report(raw, contract=contract, expected_candidate_sha=CANDIDATE)
+
+    wrong = copy.deepcopy(raw)
+    wrong["execution_results"][0]["status"] = "NOT_RUN"
+    with pytest.raises(PerformanceReportError, match="did not pass"):
+        validate_raw_report(wrong, contract=contract, expected_candidate_sha=CANDIDATE)
+
+    missing_engine = copy.deepcopy(raw)
+    missing_engine["production_subjects"] = [
+        item for item in missing_engine["production_subjects"]
+        if item["path"] != "src/platforms/utiki/application/engine.py"
+    ]
+    missing_engine["digests"]["production_subject_manifest_sha256"] = sha256_json(
+        missing_engine["production_subjects"]
+    )
+    with pytest.raises(PerformanceReportError, match="subject graph is incomplete"):
+        validate_raw_report(
+            missing_engine, contract=contract, expected_candidate_sha=CANDIDATE
+        )
+
+
+def test_p2_synthetic_outer_verification_requires_seven_managed_results(tmp_path) -> None:
+    from tools import verify_utiki_ci_results as gate_checker
+
+    raw, contract_path = _p2_raw_report()
+    raw_path = tmp_path / "raw.json"
+    junit_path = tmp_path / "performance.xml"
+    reporter_path = tmp_path / "reporter.json"
+    isolation_path = tmp_path / "isolation.json"
+    _write(raw_path, raw)
+    _junit(junit_path, raw, raw["digests"]["execution_manifest_sha256"])
+    _write(reporter_path, {"status": "PASS", "required_count": 7, "selected_count": 7})
+    outer = _outer(raw_path, junit_path, reporter_path)
+    outer.update(phase="P2", context={**raw["context"], "catalog_sha256": CATALOG})
+    outer["execution_results"] = execution_results("P2")
+    outer["contract"] = {
+        "path": "ci/utiki-p2-performance-isolation.json",
+        "sha256": sha256_file(contract_path),
+        "contract_id": "utiki-p2-performance-hard-egress-v1",
+    }
+    _write(isolation_path, outer)
+
+    verified = verifier.verify(
+        contract_path=contract_path,
+        isolation_path=isolation_path,
+        raw_report_path=raw_path,
+        junit_path=junit_path,
+        reporter_result_path=reporter_path,
+    )
+    assert verified["report_kind"] == "utiki-p2-performance-verification"
+    assert len(verified["execution_results"]) == 7
+    expected_keys = {
+        gate_checker.ExecutionKey(
+            item["case_id"], item["obligation_id"], item["variant_id"],
+            item["job_id"], item["target"],
+        )
+        for item in verified["execution_results"]
+    }
+    evidence_inputs = {
+        "performance-contract": contract_path,
+        "performance-isolation-report": isolation_path,
+        "raw-benchmark-report": raw_path,
+        "managed-junit": junit_path,
+        "reporter-result": reporter_path,
+    }
+    metadata = {
+        **outer["context"],
+        "execution_manifest_sha256": raw["digests"]["execution_manifest_sha256"],
+    }
+    gate_checker._validate_benchmark_payload(
+        verified, metadata, expected_keys, evidence_inputs
+    )
+    wrong_v08 = copy.deepcopy(verified)
+    wrong_v08["hot_path"]["v08"]["max_reference_delta"] = 1
+    with pytest.raises(gate_checker.GateError, match="P2 hot-path invariants"):
+        gate_checker._validate_benchmark_payload(
+            wrong_v08, metadata, expected_keys, evidence_inputs
+        )
+
+    outer["execution_results"] = outer["execution_results"][:-1]
+    _write(isolation_path, outer)
+    with pytest.raises(PerformanceReportError, match="execution results"):
+        verifier.verify(
+            contract_path=contract_path,
+            isolation_path=isolation_path,
+            raw_report_path=raw_path,
+            junit_path=junit_path,
+            reporter_result_path=reporter_path,
+        )
+
+
+def test_p2_synthetic_managed_nodes_follow_exact_manifest(tmp_path, monkeypatch) -> None:
+    approved = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+    manifest_path = tmp_path / "p2-manifest.json"
+    generated = subprocess.run([
+        sys.executable, "tools/generate_utiki_execution_manifest.py",
+        "--phase", "P2", "--root", str(ROOT),
+        "--required-catalog", str(ROOT / "ci" / "utiki-required-cases.json"),
+        "--approved-catalog-sha256", approved,
+        "--binding-registry", str(ROOT / "ci" / "utiki-p2-execution-bindings.json"),
+        "--output", str(manifest_path),
+    ], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert generated.returncode == 0, generated.stderr
+    raw, contract_path = _p2_raw_report()
+    raw["context"]["run_id"] = "p2-synthetic-attempt-1"
+    raw["digests"]["execution_manifest_sha256"] = sha256_file(manifest_path)
+    raw_path = tmp_path / "raw-benchmark-report.json"
+    _write(raw_path, raw)
+    monkeypatch.setenv("TICKETS_HUNTER_HARD_EGRESS_ACTIVE", "1")
+    monkeypatch.setenv("TICKETS_HUNTER_CANDIDATE_SHA", CANDIDATE)
+
+    exit_code, command = inner_runner._run_assertion_nodes(
+        raw_report=raw_path,
+        contract_path=contract_path,
+        manifest_path=manifest_path,
+        junit=tmp_path / "performance.xml",
+        reporter_result=tmp_path / "performance-reporter-result.json",
+        context=raw["context"],
+        fixture_digest=raw["digests"]["fixture_sha256"],
+        script_digest=raw["digests"]["production_script_sha256"],
+        phase="P2",
+    )
+    assert exit_code == 0, (tmp_path / "performance-pytest.stderr").read_text()
+    assert all(node_id in command for node_id in node_ids("P2"))
+    assert json.loads((tmp_path / "performance-reporter-result.json").read_text())["required_count"] == 7
+    contract = load_contract(contract_path)
+    inner_path = tmp_path / "inner-performance-report.json"
+    _write(inner_path, {
+        "schema_version": 1,
+        "report_kind": "utiki-p2-performance-inner",
+        "status": "PENDING_OUTER_AUDIT",
+        "context": raw["context"],
+        "probes": {
+            name: {"status": "PASS"}
+            for name in contract["canary"]["required_inner_probes"]
+        },
+        "benchmark_report_sha256": sha256_file(raw_path),
+        "junit_sha256": sha256_file(tmp_path / "performance.xml"),
+        "pytest": {"exit_code": 0, "command": command},
+        "reasons": [],
+        "netns": "net:[synthetic]",
+    })
+    digests = isolation._validate_inner_outputs(
+        run_dir=tmp_path,
+        contract=contract,
+        candidate_sha=CANDIDATE,
+        expected_context={**raw["context"], "catalog_sha256": approved},
+    )
+    assert digests["inner"] == sha256_file(inner_path)

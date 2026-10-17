@@ -22,6 +22,8 @@ from tools.benchmarks.utiki_p1_performance import (
     execution_results,
     load_contract,
     load_json,
+    performance_phase,
+    result_keys,
     sha256_file,
     validate_raw_report,
     write_json,
@@ -47,19 +49,21 @@ def _validate_junit(
     *,
     context: Mapping[str, Any],
     execution_manifest_sha256: str,
+    phase: str = "P1",
 ) -> None:
     try:
         root = ElementTree.parse(path).getroot()
     except (OSError, ElementTree.ParseError) as exc:
         raise PerformanceReportError("managed performance JUnit is invalid") from exc
-    if root.tag != "testsuite" or root.get("tests") != "5":
+    required_results = result_keys(phase)
+    if root.tag != "testsuite" or root.get("tests") != str(len(required_results)):
         raise PerformanceReportError("managed performance JUnit count is invalid")
     suite = _property_map(root)
     expected_suite = {
         "run_id": str(context["run_id"]),
         "attempt": str(context["attempt"]),
         "job_id": JOB_ID,
-        "phase": PHASE,
+        "phase": phase,
         "target": TARGET,
         "candidate_sha": str(context["candidate_sha"]),
         "catalog_sha256": str(context["catalog_sha256"]),
@@ -68,7 +72,7 @@ def _validate_junit(
     if any(suite.get(name) != value for name, value in expected_suite.items()):
         raise PerformanceReportError("managed performance JUnit context mismatch")
     testcases = root.findall("testcase")
-    if len(testcases) != 5:
+    if len(testcases) != len(required_results):
         raise PerformanceReportError("managed performance JUnit testcase count is wrong")
     actual: list[tuple[str, str, str]] = []
     for testcase in testcases:
@@ -92,12 +96,12 @@ def _validate_junit(
                 properties.get("variant_id", ""),
             )
         )
-    if set(actual) != set(RESULT_KEYS) or len(actual) != len(set(actual)):
+    if set(actual) != set(required_results) or len(actual) != len(set(actual)):
         raise PerformanceReportError("managed performance execution keys are wrong")
 
 
-def _validate_execution_results(value: Any) -> None:
-    if value != execution_results():
+def _validate_execution_results(value: Any, phase: str = "P1") -> None:
+    if value != execution_results(phase):
         raise PerformanceReportError("outer performance execution results are wrong")
 
 
@@ -107,6 +111,7 @@ def _validate_outer(
     raw_report: Path,
     junit: Path,
     reporter_result: Path,
+    phase: str = "P1",
 ) -> dict[str, Any]:
     expected_fields = {
         "schema_version",
@@ -158,7 +163,7 @@ def _validate_outer(
             "candidate_sha",
             "catalog_sha256",
         }
-        or context.get("phase") != PHASE
+        or context.get("phase") != phase
         or context.get("job_id") != JOB_ID
         or context.get("target") != TARGET
     ):
@@ -182,7 +187,7 @@ def _validate_outer(
         raise PerformanceReportError(
             "outer performance execution manifest context mismatch"
         )
-    _validate_execution_results(report.get("execution_results"))
+    _validate_execution_results(report.get("execution_results"), phase)
     peer = report.get("peer_audit")
     if (
         not isinstance(peer, dict)
@@ -212,8 +217,8 @@ def _validate_outer(
     reporter = load_json(reporter_result)
     if (
         reporter.get("status") != "PASS"
-        or reporter.get("required_count") != 5
-        or reporter.get("selected_count") != 5
+        or reporter.get("required_count") != len(result_keys(phase))
+        or reporter.get("selected_count") != len(result_keys(phase))
     ):
         raise PerformanceReportError("managed performance reporter result is invalid")
     return context
@@ -228,6 +233,7 @@ def verify(
     reporter_result_path: Path,
 ) -> dict[str, Any]:
     contract = load_contract(contract_path)
+    phase = performance_phase(contract)
     isolation = load_json(isolation_path)
     raw = load_json(raw_report_path)
     context = _validate_outer(
@@ -235,6 +241,7 @@ def verify(
         raw_report=raw_report_path,
         junit=junit_path,
         reporter_result=reporter_result_path,
+        phase=phase,
     )
     validate_raw_report(
         raw,
@@ -262,13 +269,18 @@ def verify(
         junit_path,
         context=context,
         execution_manifest_sha256=manifest_sha,
+        phase=phase,
     )
+    if phase == "P2" and raw["digests"]["hot_path_script_sha256"] != sha256_file(
+        REPOSITORY_ROOT / "tools" / "benchmarks" / "utiki_p2_hot_path.py"
+    ):
+        raise PerformanceReportError("P2 hot-path producer digest mismatch")
     return {
         "schema_version": 1,
-        "report_kind": "utiki-p1-performance-verification",
+        "report_kind": f"utiki-{phase.lower()}-performance-verification",
         "status": "PASS",
         "context": context,
-        "execution_results": execution_results(),
+        "execution_results": execution_results(phase),
         "method": raw["method"],
         "hard_egress_isolation": {
             "verified": True,
@@ -293,8 +305,10 @@ def verify(
             "metrics": raw["source"]["metrics"],
         },
         "browser": raw["browser"],
+        **({"hot_path": raw["hot_path"]} if phase == "P2" else {}),
         "threshold_policy": (
-            "P1 baseline establishment: fixed sample counts and zero failures; "
+            ("P1 baseline establishment: " if phase == "P1" else "P2: ")
+            + "fixed sample counts and zero failures; "
             "no arbitrary percentage threshold"
         ),
     }

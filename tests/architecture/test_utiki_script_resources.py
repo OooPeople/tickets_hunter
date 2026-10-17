@@ -11,6 +11,10 @@ from zipfile import ZipFile, ZipInfo
 
 import pytest
 
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
 from nodriver_common import CONST_NATIVE_INPUT_SETTER_JS
 from build_scripts import build_local
 from platforms.utiki.adapters import script_resources

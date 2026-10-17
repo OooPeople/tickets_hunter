@@ -875,6 +875,15 @@ def _expected_input_contract(
             "typed-manifest": ("repository", "ci/utiki-typed-scope.txt"),
             "mypy-config": ("repository", "ci/mypy-utiki.ini"),
         }
+    if job_id == "browser-contract-isolated" and kind == "browser-isolation-report" and phase == "P2":
+        return {
+            name: (
+                scope,
+                "tests/fixtures/utiki/manifest-p2.json"
+                if name == "execution-manifest" else path,
+            )
+            for name, (scope, path) in contract.items()
+        }
     if job_id == "performance-contract" and phase == "P2":
         return {
             name: (
@@ -1516,6 +1525,10 @@ def _validate_browser_payload(
         or payload.get("candidate_sha") != metadata["candidate_sha"]
         or payload.get("job_id") != metadata["job_id"]
         or payload.get("target") != metadata["target"]
+        or payload.get("phase") != metadata["phase"]
+        or payload.get("attempt") != metadata["attempt"]
+        or payload.get("catalog_sha256") != metadata["catalog_sha256"]
+        or payload.get("execution_manifest_sha256") != metadata["execution_manifest_sha256"]
     ):
         fail("INVALID_EVIDENCE_CONTENT", "browser isolation report context/status is invalid")
     runtime = require_dict(payload.get("runtime_evidence"), label="browser.runtime_evidence")

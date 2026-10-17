@@ -42,6 +42,16 @@ NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 DEFAULT_CONTRACT = Path(__file__).resolve().parent.parent / "ci" / "utiki-browser-isolation.json"
 PEER_PORT = 8765
 OWNER_LABEL = "org.tickets-hunter.utiki-cleanup-owner"
+PHASE_INPUTS = {
+    "P1": (
+        "tests/fixtures/utiki/manifest.json",
+        "ci/utiki-p1-negative-probes.json",
+    ),
+    "P2": (
+        "tests/fixtures/utiki/manifest-p2.json",
+        "ci/utiki-p2-negative-probes.json",
+    ),
+}
 
 
 class IsolationBlocked(RuntimeError):
@@ -444,6 +454,10 @@ def _isolated_command(
     candidate_sha: str,
     owner: str,
 ) -> list[str]:
+    paths = PHASE_INPUTS.get(phase)
+    if paths is None:
+        raise IsolationBlocked("browser execution manifest phase mismatch")
+    manifest_relative, registry_relative = paths
     job_run_dir = run_dir.parent
     return [
         runtime,
@@ -505,9 +519,9 @@ def _isolated_command(
         "--required-catalog",
         str(container_repository / "ci/utiki-required-cases.json"),
         "--execution-manifest",
-        str(container_repository / "tests/fixtures/utiki/manifest.json"),
+        str(container_repository / manifest_relative),
         "--probe-registry",
-        str(container_repository / "ci/utiki-p1-negative-probes.json"),
+        str(container_repository / registry_relative),
         "--negative-output-root",
         str(job_run_dir / "isolated-negative-inputs"),
         "--job-run-dir",
@@ -712,8 +726,13 @@ def _prepare_reporter_context(
     candidate_sha: str,
     catalog_sha256: str,
 ) -> tuple[str, str, str]:
+    paths = PHASE_INPUTS.get(phase)
     manifest = _load_json(manifest_path)
-    if phase != "P1" or manifest.get("phase") != phase:
+    if (
+        paths is None
+        or manifest.get("phase") != phase
+        or manifest_path.resolve() != (repository / paths[0]).resolve()
+    ):
         raise IsolationBlocked("browser execution manifest phase mismatch")
     if manifest.get("catalog_sha256") != catalog_sha256:
         raise IsolationBlocked("browser execution manifest catalog mismatch")

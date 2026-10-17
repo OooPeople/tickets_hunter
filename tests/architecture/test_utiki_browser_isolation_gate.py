@@ -444,6 +444,74 @@ def test_isolated_command_cannot_restore_network_or_privilege(
     assert "tools/build_utiki_negative_inputs.py" not in command
     assert "--negative-output-root" in command
     assert command[command.index("--entrypoint") + 1] == "python"
+    assert command[command.index("--execution-manifest") + 1] == str(
+        PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"
+    )
+    assert command[command.index("--probe-registry") + 1] == str(
+        PROJECT_ROOT / "ci/utiki-p1-negative-probes.json"
+    )
+
+
+def test_p2_browser_context_and_container_use_p2_manifest_and_probes(
+    tmp_path, monkeypatch
+):
+    launcher = _load_launcher()
+    manifest = PROJECT_ROOT / "tests/fixtures/utiki/manifest-p2.json"
+    run_dir = tmp_path / "evidence"
+    run_dir.mkdir()
+    catalog_sha256 = (
+        "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+    )
+    manifest_sha256, _, _ = launcher._prepare_reporter_context(
+        repository=PROJECT_ROOT,
+        manifest_path=manifest,
+        run_dir=run_dir,
+        run_id="p2-browser-test-attempt-1",
+        attempt=1,
+        phase="P2",
+        candidate_sha="b" * 40,
+        catalog_sha256=catalog_sha256,
+    )
+    context = json.loads((run_dir / "browser-pytest-context.json").read_text(encoding="utf-8"))
+    assert context["phase"] == "P2"
+    assert context["execution_manifest_sha256"] == manifest_sha256
+    assert len(context["mappings"]) == 13
+    with pytest.raises(launcher.IsolationBlocked, match="manifest phase mismatch"):
+        launcher._prepare_reporter_context(
+            repository=PROJECT_ROOT,
+            manifest_path=manifest,
+            run_dir=run_dir,
+            run_id="p1-browser-test-attempt-1",
+            attempt=1,
+            phase="P1",
+            candidate_sha="b" * 40,
+            catalog_sha256=catalog_sha256,
+        )
+    with pytest.raises(launcher.IsolationBlocked, match="manifest phase mismatch"):
+        launcher._prepare_reporter_context(
+            repository=PROJECT_ROOT,
+            manifest_path=PROJECT_ROOT / "tests/fixtures/utiki/manifest.json",
+            run_dir=run_dir,
+            run_id="p2-browser-test-attempt-1",
+            attempt=1,
+            phase="P2",
+            candidate_sha="b" * 40,
+            catalog_sha256=catalog_sha256,
+        )
+
+    monkeypatch.setattr(launcher, "_user_options", lambda: ["--user", "65532:65532"])
+    command = launcher._isolated_command(
+        "docker", "example/isolation@sha256:" + "a" * 64,
+        "utiki-test-isolated", PROJECT_ROOT, PROJECT_ROOT, run_dir,
+        "172.31.0.2", "fd42:1:2::2", "p2-browser-test-attempt-1", 1,
+        "P2", catalog_sha256, "b" * 40, "ours",
+    )
+    assert command[command.index("--phase") + 1] == "P2"
+    assert command[command.index("--execution-manifest") + 1] == str(manifest)
+    assert command[command.index("--probe-registry") + 1] == str(
+        PROJECT_ROOT / "ci/utiki-p2-negative-probes.json"
+    )
+    assert command[command.index("--network") + 1] == "none"
 
 
 def test_controlled_peer_audit_fails_when_isolated_path_arrives():

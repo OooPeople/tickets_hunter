@@ -803,9 +803,13 @@ def _make_run(
                     "report_kind": "utiki-browser-isolation-launcher",
                     "status": "PASS",
                     "run_id": RUN_ID,
+                    "attempt": 1,
+                    "phase": PHASE,
                     "candidate_sha": CANDIDATE_SHA,
                     "job_id": job_id,
                     "target": target,
+                    "catalog_sha256": APPROVED_CATALOG_SHA256,
+                    "execution_manifest_sha256": _sha256(manifest_path),
                     "runtime_evidence": {"network_mode": "none", "process_tree": True},
                     "peer_audit": {"outbound_count": 0},
                     "inner_report_sha256": "a" * 64,
@@ -1254,8 +1258,8 @@ def _make_run(
                 {
                     "kind": "execution-manifest",
                     "scope": "repository",
-                    "path": "tests/fixtures/utiki/manifest.json",
-                    "sha256": _sha256(PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"),
+                    "path": f"tests/fixtures/utiki/manifest{'-p2' if PHASE == 'P2' else ''}.json",
+                    "sha256": _sha256(PROJECT_ROOT / f"tests/fixtures/utiki/manifest{'-p2' if PHASE == 'P2' else ''}.json"),
                 },
                 {
                     "kind": "image-build",
@@ -2470,6 +2474,74 @@ def test_resource_and_report_digest_mismatch_is_rejected(gate_inputs, tampered):
 
     assert result.returncode != 0
     assert "DIGEST_MISMATCH" in result.stdout
+
+
+def test_p2_browser_report_binds_raw_context_to_current_run(tmp_path, monkeypatch):
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PHASE", "P2")
+    monkeypatch.setattr(module, "RUN_ID", "utiki-p2-attempt-1")
+    monkeypatch.setattr(
+        module, "NEGATIVE_REGISTRY", PROJECT_ROOT / "ci/utiki-p2-negative-probes.json"
+    )
+    manifest_path, manifest, _, profiles = _make_manifest(tmp_path)
+    run = _make_run(
+        tmp_path, manifest_path, manifest, profiles,
+        "browser-contract-isolated", "isolated-linux-x64",
+    )
+    arguments = _single_arguments(
+        manifest_path, run, "browser-contract-isolated", "isolated-linux-x64"
+    )
+    legal = _run_checker(*arguments)
+    assert legal.returncode == 0, legal.stdout + legal.stderr
+
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    producer_output = next(
+        item for item in envelope["outputs"] if item["kind"] == "producer-report"
+    )
+    producer_report = run["dir"] / producer_output["path"]
+    original = json.loads(producer_report.read_text(encoding="utf-8"))
+    for field, wrong in (
+        ("phase", "P1"),
+        ("attempt", 2),
+        ("catalog_sha256", "f" * 64),
+        ("execution_manifest_sha256", "f" * 64),
+    ):
+        changed = dict(original)
+        changed[field] = wrong
+        _write_json(producer_report, changed)
+        producer_output["sha256"] = _sha256(producer_report)
+        _write_json(artifact, envelope)
+        _refresh_artifact_digest(run, "browser-isolation-report")
+        metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+        metadata["isolation"]["report_sha256"] = _sha256(artifact)
+        _write_json(run["metadata"], metadata)
+
+        result = _run_checker(*arguments)
+
+        assert result.returncode != 0, (field, result.stdout + result.stderr)
+        assert "INVALID_EVIDENCE_CONTENT" in result.stdout, (field, result.stdout)
+        assert "browser isolation report" in result.stdout
+
+    _write_json(producer_report, original)
+    producer_output["sha256"] = _sha256(producer_report)
+    manifest_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "execution-manifest"
+    )
+    p1_manifest = PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"
+    manifest_input["path"] = "tests/fixtures/utiki/manifest.json"
+    manifest_input["sha256"] = _sha256(p1_manifest)
+    _write_json(artifact, envelope)
+    _refresh_artifact_digest(run, "browser-isolation-report")
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    metadata["isolation"]["report_sha256"] = _sha256(artifact)
+    _write_json(run["metadata"], metadata)
+
+    wrong_manifest = _run_checker(*arguments)
+
+    assert wrong_manifest.returncode != 0
+    assert "INVALID_EVIDENCE_REPORT" in wrong_manifest.stdout
+    assert "execution-manifest" in wrong_manifest.stdout
 
 
 def test_duplicate_junit_result_is_rejected(gate_inputs):

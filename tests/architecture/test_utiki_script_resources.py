@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from zipfile import ZipFile, ZipInfo
@@ -17,6 +18,21 @@ from platforms.utiki.dom import read_date_snapshot
 DATE_SNAPSHOT_P2_SHA256 = (
     "a77821050976e0030b2fb0151063ad6c081c17acf2d6451762685dae331989df"
 )
+DOM_SCRIPT_P2_SHA256 = {
+    "conflict_clear": "86125ff4636f7672ec587f9a497dfdabc348625df339af191abb732208a4b312",
+    "date_commit": "49912506cb2cc20ec1a3f2f8d117259f174d4e3486827394ebf682b9cfd39eec",
+    "server_assigned_area_commit": "04f9d8359e68ae7270c8391da44ae593f4c41e0f9b6328996c3d895802fcafe9",
+    "seat_snapshot": "f20d31f23697d434e15a812da3dc09f9a96e3919bf388448c71837320c4f17b1",
+    "seat_commit": "b7df9252e0ca5f3091523429d5e9f4537ed1a44ff065137263ed3a5c2085193e",
+    "quantity_snapshot": "6d301545cdad5a2185381eb16791d7d8159ea7a13cc5d922116a89183864dfda",
+    "quantity_commit": "6e2945a4a530109895279441d89f2da7331ce35046f289fcc03ee9e73f075dfc",
+    "submit": "20dd01f24d91a77f7df6f8a151a1ee220324d699aff4145c984ba2776344386d",
+}
+P2_TRAILING_WHITESPACE = {
+    "server_assigned_area_commit": "\n\n    ",
+    "seat_snapshot": "\n    ",
+    "quantity_snapshot": "\n    ",
+}
 
 
 def test_date_snapshot_script_matches_p2_browser_bytes():
@@ -26,6 +42,32 @@ def test_date_snapshot_script_matches_p2_browser_bytes():
     assert script_resources.verify_script_resources() == hashlib.sha256(
         (script_resources.RESOURCE_DIR / "manifest.json").read_bytes()
     ).hexdigest()
+
+
+@pytest.mark.parametrize("name, original_sha256", DOM_SCRIPT_P2_SHA256.items())
+def test_remaining_dom_script_matches_p2_browser_bytes(name, original_sha256):
+    script = script_resources.assemble_script(name)
+    # Three original literals ended with indentation after their closing IIFE.
+    # That non-executable trailing whitespace is omitted from the LF resource.
+    original = script + P2_TRAILING_WHITESPACE.get(name, "")
+    assert hashlib.sha256(original.encode("utf-8")).hexdigest() == original_sha256
+
+
+@pytest.mark.parametrize("name, placeholder", [
+    ("conflict_clear", "__TICKETS_HUNTER_CONFLICT_CLEAR_JSON__"),
+    ("date_commit", "__TICKETS_HUNTER_DATE_INTENT_JSON__"),
+    ("server_assigned_area_commit", "__TICKETS_HUNTER_INTENT_JSON__"),
+    ("seat_commit", "__TICKETS_HUNTER_PLAN_JSON__"),
+    ("quantity_commit", "__TICKETS_HUNTER_PLAN_JSON__"),
+    ("submit", "__TICKETS_HUNTER_PLAN_JSON__"),
+])
+def test_script_template_binds_one_json_payload_without_reordering(name, placeholder):
+    original = script_resources.load_script(name)
+    assert original.count(placeholder) == 1
+    encoded = '{"safe":true}'
+    assert script_resources.assemble_script(name, {placeholder: encoded}) == (
+        original.replace(placeholder, encoded, 1)
+    )
 
 
 @pytest.mark.parametrize("change", ["missing", "tampered", "manifest-tampered"])
@@ -155,3 +197,26 @@ def test_release_entries_use_checked_assembly():
     assert "cp -R dist/settings/_internal" not in workflow
     assert "python build_scripts\\build_local.py --assemble-only --keep" in batch
     assert "xcopy /E /I /Y dist\\settings\\_internal" not in batch
+
+
+def test_byte_pinned_scripts_have_checkout_independent_line_endings():
+    root = Path(__file__).resolve().parents[2]
+    relative_paths = [
+        path.relative_to(root).as_posix()
+        for path in sorted(script_resources.RESOURCE_DIR.glob("*.js"))
+    ]
+    relative_paths.append("src/platforms/utiki/scripts/manifest.json")
+    completed = subprocess.run(
+        ["git", "check-attr", "text", "eol", "--", *relative_paths],
+        cwd=root, capture_output=True, text=True, check=True,
+    )
+    actual = {
+        (path, attribute, value)
+        for line in completed.stdout.splitlines()
+        for path, attribute, value in [line.split(": ", 2)]
+    }
+    assert actual == {
+        (path, attribute, value)
+        for path in relative_paths
+        for attribute, value in (("text", "set"), ("eol", "lf"))
+    }

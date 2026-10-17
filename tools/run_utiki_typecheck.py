@@ -278,6 +278,8 @@ def _validate_config(path: Path) -> str:
     if parser.get("mypy", "python_version", fallback="") != TARGET_PYTHON:
         raise GateError("MYPY_PYTHON_VERSION_MISMATCH")
     for section in parser.sections():
+        if parser.get(section, "plugins", fallback="").strip():
+            raise GateError("UNSAFE_MYPY_CONFIG")
         for option in UNSAFE_TRUE_OPTIONS:
             if parser.has_option(section, option) and _boolean(parser, section, option):
                 raise GateError("UNSAFE_MYPY_CONFIG")
@@ -371,6 +373,7 @@ def _emit(report: dict[str, Any], report_path: Path | None) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run strict mypy over approved uTiki scope.")
+    parser.add_argument("--phase", choices=("P1", "P2"), default="P1")
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
@@ -392,6 +395,12 @@ def main(argv: list[str] | None = None) -> int:
     coverage: dict[str, Any] = {}
     try:
         root = arguments.root.resolve(strict=True)
+        if arguments.phase == "P2":
+            coverage = {"phase": "P2"}
+            if arguments.coverage_context is not None:
+                raise GateError("COVERAGE_CONTEXT_FORBIDDEN")
+            if arguments.mypy is not None:
+                raise GateError("MYPY_OVERRIDE_FORBIDDEN")
         if (arguments.stdout_report is None) != (arguments.stderr_report is None):
             raise GateError("CAPTURE_OUTPUT_INVALID")
         if arguments.probe_subject is not None:
@@ -409,7 +418,11 @@ def main(argv: list[str] | None = None) -> int:
             arguments.manifest, "TYPED_MANIFEST_UNREADABLE"
         )
         config_sha256 = _validate_config(arguments.config)
-        command = _mypy_command(arguments.mypy)
+        command = (
+            [sys.executable, "-I", "-m", "mypy"]
+            if arguments.phase == "P2"
+            else _mypy_command(arguments.mypy)
+        )
         effective = [
             *command,
             "--strict",

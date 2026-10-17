@@ -1,0 +1,90 @@
+name: uTiki P3a macOS Bundle Diagnostic
+
+on:
+  push:
+    branches:
+      - refactor/17-utiki-root-v1-5
+    paths:
+      - .github/workflows/utiki-p3a-macos-bundle.yml
+      - src/platforms/utiki/scripts/**
+      - src/platforms/utiki/adapters/script_resources.py
+      - src/nodriver_tixcraft.py
+      - src/nodriver_common.py
+      - requirement.txt
+      - build_scripts/build_local.py
+      - build_scripts/nodriver_tixcraft.spec
+      - build_scripts/settings.spec
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-bundle:
+    if: >-
+      github.repository == 'OooPeople/tickets_hunter' &&
+      github.ref == 'refs/heads/refactor/17-utiki-root-v1-5'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11.9'
+          architecture: arm64
+          cache: pip
+          cache-dependency-path: requirement.txt
+      - name: Assert native macOS arm64 and fixed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          python -c 'import platform; assert platform.machine() == "arm64"'
+          echo "candidate_sha=$GITHUB_SHA"
+          sw_vers
+          echo "architecture=$(uname -m)"
+      - name: Install offline-build dependencies
+        shell: bash
+        run: python -m pip install -r requirement.txt pyinstaller==6.22.3
+      - name: Build and verify bot/settings final bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python build_scripts/build_local.py --keep --report p3a-build-raw.json > p3a-build.stdout.log 2> p3a-build.stderr.log; then
+            :
+          else
+            exit_code=$?
+            cat p3a-build.stdout.log p3a-build.stderr.log
+            exit "$exit_code"
+          fi
+          cat p3a-build.stdout.log p3a-build.stderr.log
+          source_manifest=src/platforms/utiki/scripts/manifest.json
+          bundle_manifest=dist/tickets_hunter/_internal/platforms/utiki/scripts/manifest.json
+          cmp "$source_manifest" "$bundle_manifest"
+          shasum -a 256 "$source_manifest" "$bundle_manifest"
+          cp "$bundle_manifest" p3a-bundle-manifest.json
+          if python build_scripts/build_local.py --skip-build --keep --report p3a-bundle-raw.json --source-manifest "$source_manifest" --bundle-manifest p3a-bundle-manifest.json > p3a-verify.stdout.log 2> p3a-verify.stderr.log; then
+            :
+          else
+            exit_code=$?
+            cat p3a-verify.stdout.log p3a-verify.stderr.log
+            exit "$exit_code"
+          fi
+          cat p3a-verify.stdout.log p3a-verify.stderr.log
+      - name: Preserve native diagnostic output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: utiki-p3a-macos-bundle-diagnostic
+          path: |
+            p3a-build.stdout.log
+            p3a-build.stderr.log
+            p3a-build-raw.json
+            p3a-verify.stdout.log
+            p3a-verify.stderr.log
+            p3a-bundle-raw.json
+            p3a-bundle-manifest.json
+            build/*/warn-*.txt
+            dist/tickets_hunter/_internal/platforms/utiki/scripts/manifest.json
+          if-no-files-found: warn

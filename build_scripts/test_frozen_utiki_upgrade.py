@@ -20,6 +20,9 @@ from pathlib import Path
 def _run(executable: Path, directory: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    environment.pop("VIRTUAL_ENV", None)
+    environment["PATH"] = str(directory.parent / "empty executable path")
     return subprocess.run(
         [str(executable), *arguments],
         cwd=directory,
@@ -53,6 +56,9 @@ def smoke(executable: Path) -> None:
         )
         work = root / "outside source 樣本"
         work.mkdir()
+        empty_path = root / "empty executable path"
+        empty_path.mkdir()
+        _require(not any(empty_path.iterdir()), "restricted executable path is not empty")
 
         help_result = _run(frozen, work, "--help")
         _require("EXTERNAL_MODULE_SHADOWED" not in help_result.stderr,
@@ -168,6 +174,54 @@ def smoke(executable: Path) -> None:
             _require("fixture-only-sentinel" not in case_result.stdout + case_result.stderr,
                      f"frozen {name} conversion exposed a fixture value")
 
+        batch_output = work / "batch converted"
+        batch_sources = (work / "legacy-only.json", work / "canonical-only.json")
+        batch_before = tuple(path.read_bytes() for path in batch_sources)
+        batch_result = _run(
+            frozen, work, "--input", str(batch_sources[0]),
+            "--input", str(batch_sources[1]), "--output-dir", str(batch_output),
+        )
+        _require(batch_result.returncode == 0 and
+                 batch_result.stdout == "BATCH PASS entries=2\n" and
+                 batch_result.stderr == "", "frozen batch conversion failed")
+        batch_manifest = json.loads((batch_output / "manifest.json").read_text(encoding="utf-8"))
+        _require(batch_manifest["status"] == "PASS" and
+                 [(entry["output_name"], entry["status"]) for entry in batch_manifest["entries"]] == [
+                     ("legacy-only.json", "PASS"), ("canonical-only.json", "PASS")
+                 ], "frozen batch manifest is incomplete")
+        expected_batch = (
+            {"utiki": {"ticket_type_keyword": "全票", "seat_sorting": "row_seat",
+                       "seat_selection_mode": "manual"}, "accounts": profile["accounts"]},
+            {"utiki": behavior, "accounts": profile["accounts"]},
+        )
+        for index, source in enumerate(batch_sources):
+            output_bytes = (batch_output / source.name).read_bytes()
+            _require(json.loads(output_bytes.decode("utf-8")) == expected_batch[index],
+                     "frozen batch output changed the expected profile")
+            _require(batch_manifest["entries"][index]["source_sha256"] ==
+                     hashlib.sha256(batch_before[index]).hexdigest() and
+                     batch_manifest["entries"][index]["output_sha256"] ==
+                     hashlib.sha256(output_bytes).hexdigest(),
+                     "frozen batch manifest digest does not match actual bytes")
+        _require(tuple(path.read_bytes() for path in batch_sources) == batch_before,
+                 "frozen batch conversion changed a source")
+        _require("fixture-only-sentinel" not in batch_result.stdout + batch_result.stderr and
+                 "fixture-only-sentinel" not in (batch_output / "manifest.json").read_text(encoding="utf-8"),
+                 "frozen batch exposed a fixture value")
+
+        bad_batch_output = work / "invalid batch"
+        bad_batch = _run(
+            frozen, work, "--input", str(batch_sources[0]),
+            "--input", str(conflict), "--output-dir", str(bad_batch_output),
+        )
+        _require(bad_batch.returncode == 2 and
+                 bad_batch.stderr.strip() == "ERROR CONFLICT_POLICY_REQUIRED" and
+                 bad_batch.stdout == "" and not bad_batch_output.exists(),
+                 "frozen batch wrote output before all inputs were valid")
+        _require(tuple(path.read_bytes() for path in batch_sources) == batch_before and
+                 conflict.read_bytes() == conflict_before,
+                 "frozen invalid batch changed a source")
+
         invalid_profiles = (
             ("corrupt-json", '{"accounts":{"password":"fixture-only-sentinel"},"utiki":'),
             ("duplicate-key", '{"accounts":{"password":"fixture-only-sentinel"},'
@@ -191,6 +245,8 @@ def smoke(executable: Path) -> None:
         for result in (preview, written, repeat, rejected):
             _require("fixture-only-sentinel" not in result.stdout + result.stderr,
                      "frozen upgrader exposed a fixture value")
+        _require(not any(empty_path.iterdir()),
+                 "frozen upgrader wrote into the restricted executable path")
 
 
 def main() -> int:

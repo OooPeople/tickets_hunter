@@ -246,22 +246,34 @@ def write_profile_batch(requests: tuple[ProfileRequest, ...], output_dir: Path) 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Offline uTiki profile conversion")
-    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--input", required=True, type=Path, action="append")
     output_group = parser.add_mutually_exclusive_group()
     output_group.add_argument("--dry-run", action="store_true")
     output_group.add_argument("--output", type=Path)
+    output_group.add_argument("--output-dir", type=Path)
     parser.add_argument("--conflict-policy", choices=("canonical", "legacy"))
     arguments = parser.parse_args(argv)
     try:
-        prepared = prepare_profile(
-            arguments.input, conflict_policy=arguments.conflict_policy
-        )
-        if arguments.output is None:
-            digest = hashlib.sha256(prepared.output_bytes).hexdigest()
-            print(f"READY source_sha256={prepared.source_digest} output_sha256={digest}")
+        if arguments.output_dir is not None:
+            requests = tuple(
+                ProfileRequest(source, source.name, arguments.conflict_policy)
+                for source in arguments.input
+            )
+            result = write_profile_batch(requests, arguments.output_dir)
+            print(f"BATCH {result.status} entries={len(result.entries)}")
+            return 0 if result.status == "PASS" else 4
         else:
-            digest = write_new_profile(prepared, arguments.output)
-            print(f"WRITTEN source_sha256={prepared.source_digest} output_sha256={digest}")
+            if len(arguments.input) != 1:
+                raise ConfigError("BATCH_OUTPUT_DIR_REQUIRED")
+            prepared = prepare_profile(
+                arguments.input[0], conflict_policy=arguments.conflict_policy
+            )
+            if arguments.output is None:
+                digest = hashlib.sha256(prepared.output_bytes).hexdigest()
+                print(f"READY source_sha256={prepared.source_digest} output_sha256={digest}")
+            else:
+                digest = write_new_profile(prepared, arguments.output)
+                print(f"WRITTEN source_sha256={prepared.source_digest} output_sha256={digest}")
     except ConfigError as exc:
         print(f"ERROR {exc.code}", file=sys.stderr)
         return 2

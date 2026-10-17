@@ -11,6 +11,7 @@ from zipfile import ZipFile, ZipInfo
 
 import pytest
 
+from nodriver_common import CONST_NATIVE_INPUT_SETTER_JS
 from build_scripts import build_local
 from platforms.utiki.adapters import script_resources
 from platforms.utiki.dom import read_date_snapshot
@@ -59,7 +60,9 @@ def test_date_snapshot_script_matches_p2_browser_bytes():
     script = script_resources.load_script("date_snapshot")
     assert hashlib.sha256(script.encode("utf-8")).hexdigest() == DATE_SNAPSHOT_P2_SHA256
     assert "__ticketsHunterUtikiDateSnapshot" in script
-    assert script_resources.verify_script_resources() == hashlib.sha256(
+    assert script_resources.verify_script_resources(
+        CONST_NATIVE_INPUT_SETTER_JS
+    ) == hashlib.sha256(
         (script_resources.RESOURCE_DIR / "manifest.json").read_bytes()
     ).hexdigest()
 
@@ -120,6 +123,50 @@ def test_inline_login_payload_does_not_reparse_placeholder_literals():
     assert hashlib.sha256((assembled + "\n    ").encode()).hexdigest() == (
         "a918400fea0e80b148d732c163ead2f637f38dcbe29b64ea3986b028c2a9f510"
     )
+
+
+def test_native_input_setter_fragment_is_one_verified_shared_source(tmp_path, monkeypatch):
+    expected_digest = "89fd95bde60ac93802c32e061e7239b6e973344beef12626b253070ef335723e"
+    assert hashlib.sha256(CONST_NATIVE_INPUT_SETTER_JS.encode()).hexdigest() == expected_digest
+    resource_dir = tmp_path / "scripts"
+    shutil.copytree(script_resources.RESOURCE_DIR, resource_dir)
+    probe = resource_dir / "setter_probe.js"
+    placeholder = script_resources.NATIVE_SETTER_PLACEHOLDER
+    probe.write_text(
+        "(() => { " + placeholder + " return typeof setNativeInputValue === 'function'; })()\n",
+        encoding="utf-8",
+    )
+    manifest_path = resource_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["native_setter_sha256"] == expected_digest
+    manifest["scripts"]["setter_probe"] = hashlib.sha256(probe.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    monkeypatch.setattr(script_resources, "RESOURCE_DIR", resource_dir)
+    script_resources._manifest.cache_clear()
+    script_resources.load_script.cache_clear()
+    script_resources.verified_native_setter_fragment.cache_clear()
+    try:
+        with pytest.raises(script_resources.ScriptResourceError, match="not supplied"):
+            script_resources.assemble_script("setter_probe")
+        assembled = script_resources.assemble_script(
+            "setter_probe", native_setter_fragment=CONST_NATIVE_INPUT_SETTER_JS
+        )
+        assert placeholder not in assembled
+        assert assembled.count(CONST_NATIVE_INPUT_SETTER_JS) == 1
+        assert script_resources.verify_script_resources(CONST_NATIVE_INPUT_SETTER_JS)
+        manifest["native_setter_sha256"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        script_resources._manifest.cache_clear()
+        script_resources.load_script.cache_clear()
+        script_resources.verified_native_setter_fragment.cache_clear()
+        with pytest.raises(script_resources.ScriptResourceError, match="setter digest"):
+            script_resources.assemble_script(
+                "setter_probe", native_setter_fragment=CONST_NATIVE_INPUT_SETTER_JS
+            )
+    finally:
+        script_resources._manifest.cache_clear()
+        script_resources.load_script.cache_clear()
+        script_resources.verified_native_setter_fragment.cache_clear()
 
 
 @pytest.mark.parametrize("change", ["missing", "tampered", "manifest-tampered"])

@@ -1433,6 +1433,7 @@ def cli():
         sys.exit(run_ocr_self_test())
     if args.utiki_resource_self_test:
         from platforms.utiki.adapters import script_resources
+        from nodriver_common import CONST_NATIVE_INPUT_SETTER_JS
         try:
             if getattr(sys, "frozen", False):
                 bundle_root = pathlib.Path(sys._MEIPASS).resolve()
@@ -1442,7 +1443,9 @@ def cli():
                     raise script_resources.ScriptResourceError(
                         "uTiki script resource escaped the frozen bundle"
                     )
-            digest = script_resources.verify_script_resources()
+            digest = script_resources.verify_script_resources(
+                CONST_NATIVE_INPUT_SETTER_JS
+            )
         except (OSError, script_resources.ScriptResourceError) as exc:
             print(f"uTiki resource self-test FAILED: {exc}")
             sys.exit(1)

@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "native_setter_sha256": "89fd95bde60ac93802c32e061e7239b6e973344beef12626b253070ef335723e",
   "scripts": {
     "area_commit": "fe7b6a24ff13fb53bc923cab35004c879e4d8d8dcfd802227ab74b87ba75f57f",
     "area_snapshot": "2d7a6a23b64c6ae8ce70b66ea713dedcf881bf953b8e89800fefb9397532ce92",

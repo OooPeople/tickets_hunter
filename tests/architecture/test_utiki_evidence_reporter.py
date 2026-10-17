@@ -241,6 +241,88 @@ def test_pytest_launcher_derives_nodes_and_marks_resources_not_applicable(tmp_pa
     assert metadata["exit_codes"] == {"collector": 0, "reporter": 0, "test": 0}
 
 
+def test_p2_pytest_launcher_loads_repository_config_for_source_imports(
+    tmp_path, monkeypatch
+):
+    repository, _ = _make_git_pytest_repository(tmp_path)
+    (repository / "src").mkdir()
+    (repository / "src" / "sample_source.py").write_text(
+        "VALUE = 7\n", encoding="utf-8"
+    )
+    (repository / "test_sample.py").write_text(
+        "from sample_source import VALUE\n\ndef test_ok():\n    assert VALUE == 7\n",
+        encoding="utf-8",
+    )
+    (repository / "pytest.ini").write_text(
+        "[pytest]\npythonpath = src\n", encoding="utf-8"
+    )
+    (repository / "empty.ini").write_text("[pytest]\n", encoding="utf-8")
+    _git(repository, "add", "src/sample_source.py", "test_sample.py", "pytest.ini", "empty.ini")
+    _git(
+        repository,
+        "-c",
+        "user.name=Codex Test",
+        "-c",
+        "user.email=codex@example.invalid",
+        "commit",
+        "-qm",
+        "add source import fixture",
+    )
+    candidate = _git(repository, "rev-parse", "HEAD")
+    catalog_digest = "a" * 64
+    manifest = tmp_path / "manifest.json"
+    run_dir = tmp_path / "run"
+    _minimal_manifest(manifest, catalog_digest)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["phase"] = "P2"
+    _write_json(manifest, manifest_value)
+
+    # Simulate the Linux run's missing config discovery. The launcher must
+    # select the repository config explicitly, even with an ambient override.
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-c empty.ini")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(PYTEST_LAUNCHER),
+            "--repository-root",
+            str(repository),
+            "--execution-manifest",
+            str(manifest),
+            "--run-dir",
+            str(run_dir),
+            "--run-id",
+            "formal-test-attempt-1",
+            "--attempt",
+            "1",
+            "--job-id",
+            "unit-contract",
+            "--phase",
+            "P2",
+            "--target",
+            "source-linux-x64",
+            "--candidate-sha",
+            candidate,
+            "--catalog-sha256",
+            catalog_digest,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        completed.stderr,
+        (run_dir / "pytest.stdout").read_text(encoding="utf-8")
+        if (run_dir / "pytest.stdout").exists()
+        else "",
+    )
+    assert "configfile: pytest.ini" in (run_dir / "pytest.stdout").read_text(
+        encoding="utf-8"
+    )
+    metadata = json.loads((run_dir / "run-metadata.json").read_text(encoding="utf-8"))
+    assert metadata["exit_codes"] == {"collector": 0, "reporter": 0, "test": 0}
+
+
 def test_pytest_launcher_refuses_dirty_candidate(tmp_path):
     repository, candidate = _make_git_pytest_repository(tmp_path)
     catalog_digest = "a" * 64

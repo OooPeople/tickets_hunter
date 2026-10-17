@@ -213,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             "pytest",
             "--rootdir",
             str(repository),
+            *(["-c", str(repository / "pytest.ini")] if arguments.phase == "P2" else []),
             "-o",
             "addopts=",
             "--strict-config",

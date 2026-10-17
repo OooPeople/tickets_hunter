@@ -764,6 +764,7 @@ EVIDENCE_PRODUCERS = {
     "browser-isolation-report": "tools/run_utiki_browser_isolation.py",
     "production-origin-report": "tools/run_utiki_browser_isolation.py",
     "benchmark-report": "tools/benchmarks/compare_utiki.py",
+    "bundle-report": "build_scripts/build_local.py",
     "checker-exit-nonzero": "tools/run_utiki_negative_probe.py",
 }
 PERFORMANCE_EVIDENCE_PRODUCERS = {
@@ -844,6 +845,16 @@ EVIDENCE_INPUT_CONTRACTS: dict[
             "evidence/performance-reporter-result.json",
         ),
     },
+    ("package-smoke", "bundle-report"): {
+        "source-manifest": (
+            "repository",
+            "src/platforms/utiki/scripts/manifest.json",
+        ),
+        "bundle-manifest": (
+            "artifact",
+            "evidence/bundle-manifest.json",
+        ),
+    },
 }
 
 
@@ -875,11 +886,15 @@ def _expected_input_contract(
             "typed-manifest": ("repository", "ci/utiki-typed-scope.txt"),
             "mypy-config": ("repository", "ci/mypy-utiki.ini"),
         }
-    if job_id == "browser-contract-isolated" and kind == "browser-isolation-report" and phase == "P2":
+    if (
+        job_id == "browser-contract-isolated"
+        and kind == "browser-isolation-report"
+        and phase in {"P2", "P3a"}
+    ):
         return {
             name: (
                 scope,
-                "tests/fixtures/utiki/manifest-p2.json"
+                f"tests/fixtures/utiki/manifest-{phase.lower()}.json"
                 if name == "execution-manifest" else path,
             )
             for name, (scope, path) in contract.items()
@@ -934,6 +949,7 @@ def _expected_output_contract(
         ("performance-contract", "benchmark-report"): sibling(
             "performance-verification-raw.json"
         ),
+        ("package-smoke", "bundle-report"): sibling("bundle-report-raw.json"),
     }
     if kind == "checker-exit-nonzero":
         producer_report = sibling(f"{pure.stem}.producer.json")
@@ -1874,6 +1890,83 @@ def _validate_benchmark_payload(
             fail("INVALID_EVIDENCE_CONTENT", "benchmark contains failed samples")
 
 
+def _validate_bundle_payload(
+    payload: dict[str, Any], metadata: dict[str, Any], inputs: dict[str, Path]
+) -> None:
+    require_exact_keys(
+        payload,
+        {
+            "schema_version", "status", "exit_code", "platform", "architecture",
+            "source_manifest_sha256", "bundle_manifest_sha256", "checks",
+        },
+        label="bundle report",
+    )
+    if payload["schema_version"] != 1 or payload["status"] != "PASS" or payload["exit_code"] != 0:
+        fail("INVALID_EVIDENCE_CONTENT", "bundle producer did not complete successfully")
+    expected_system = {
+        "windows-x64": ("win32", {"AMD64", "x86_64"}),
+        "macos-arm64": ("darwin", {"arm64"}),
+    }.get(metadata["target"])
+    if expected_system is None or (
+        payload["platform"] != expected_system[0]
+        or payload["architecture"] not in expected_system[1]
+    ):
+        fail("INVALID_EVIDENCE_CONTENT", "bundle report used the wrong native target")
+    for label, field in (
+        ("source-manifest", "source_manifest_sha256"),
+        ("bundle-manifest", "bundle_manifest_sha256"),
+    ):
+        expected = digest_file(inputs[label], label=f"bundle {label}")
+        if payload[field] != expected:
+            fail("EVIDENCE_DIGEST_MISMATCH", f"bundle {label} differs from bound input")
+    if payload["source_manifest_sha256"] != payload["bundle_manifest_sha256"]:
+        fail("INVALID_EVIDENCE_CONTENT", "final bundle manifest differs from source")
+    checks: dict[str, dict[str, Any]] = {}
+    for index, value in enumerate(require_list(payload["checks"], label="bundle.checks")):
+        item = require_dict(value, label=f"bundle.checks[{index}]")
+        require_exact_keys(item, {"name", "status", "detail"}, label=f"bundle.checks[{index}]")
+        name = require_str(item["name"], label="bundle.check.name")
+        if name in checks or item["status"] != "PASS" or not isinstance(item["detail"], str):
+            fail("INVALID_EVIDENCE_CONTENT", "bundle check is duplicate, invalid, or failed")
+        checks[name] = item
+    required = {
+        "bound source manifest is current source",
+        "bound bundle manifest matches final bundle",
+        "nodriver_tixcraft exists", "settings exists", "_internal present",
+        "uTiki scripts match source in final bundle", "bot binary starts",
+        "standalone frozen bundle outside source tree",
+        "bot frozen uTiki resource self-test", "settings frozen resource self-test",
+        "missing frozen uTiki script rejected", "mixed frozen uTiki script rejected",
+        "corrupt frozen uTiki production script rejected",
+    }
+    if metadata["target"] == "windows-x64":
+        required.update({
+            "Windows cp950 frozen bot resource self-test",
+            "Windows cp950 frozen settings resource self-test",
+        })
+    if not required.issubset(checks):
+        fail("INVALID_EVIDENCE_CONTENT", "bundle report is missing required frozen checks")
+    successful_self_tests = [
+        "bot frozen uTiki resource self-test", "settings frozen resource self-test",
+    ]
+    if metadata["target"] == "windows-x64":
+        successful_self_tests.extend([
+            "Windows cp950 frozen bot resource self-test",
+            "Windows cp950 frozen settings resource self-test",
+        ])
+    for name in successful_self_tests:
+        if checks[name]["detail"] != "exit 0":
+            fail("INVALID_EVIDENCE_CONTENT", f"{name} did not report exit 0")
+    for name in (
+        "missing frozen uTiki script rejected",
+        "mixed frozen uTiki script rejected",
+        "corrupt frozen uTiki production script rejected",
+    ):
+        detail = checks[name]["detail"]
+        if re.fullmatch(r"exit [1-9][0-9]*", detail) is None:
+            fail("INVALID_EVIDENCE_CONTENT", f"{name} did not report nonzero rejection")
+
+
 def _validate_positive_payload(
     kind: str,
     payload: dict[str, Any],
@@ -1906,6 +1999,7 @@ def _validate_positive_payload(
         "benchmark-report": lambda: _validate_benchmark_payload(
             payload, metadata, expected_keys, inputs
         ),
+        "bundle-report": lambda: _validate_bundle_payload(payload, metadata, inputs),
     }
     validator = validators.get(kind)
     if validator is None:

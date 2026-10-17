@@ -27,6 +27,7 @@ KINDS = {
     "browser-isolation-report",
     "production-origin-report",
     "benchmark-report",
+    "bundle-report",
     "checker-exit-nonzero",
 }
 

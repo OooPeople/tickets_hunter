@@ -18,12 +18,15 @@ minute.
     python build_scripts/build_local.py --assemble-only   assemble existing PyInstaller outputs, verify
     python build_scripts/build_local.py --skip-build      re-verify an existing dist
     python build_scripts/build_local.py --keep         leave build/ for inspection
+    python build_scripts/build_local.py --skip-build --report result.json
 
 Exit code is 0 only when every check passes.
 """
 import argparse
 import hashlib
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -191,7 +194,7 @@ def assemble():
                             continue
                         if expected_macos_alias(first, item, relative):
                             shutil.copy2(item, destination)
-                            step("canonical macOS library alias", True,
+                            step(f"canonical macOS library alias: {relative.as_posix()}", True,
                                  str(relative))
                             continue
                         return step("_internal content conflict", False,
@@ -233,7 +236,7 @@ def verify_layout():
     ok = True
     for name in SPECS:
         exe = STAGE / f"{name}{EXE_SUFFIX}"
-        ok &= step(f"{exe.name} exists", exe.exists())
+        ok &= step(f"{name} exists", exe.exists())
         if exe.exists() and not IS_WINDOWS:
             ok &= step(f"{exe.name} is executable",
                        os.access(exe, os.X_OK))
@@ -277,10 +280,10 @@ def verify_layout():
     return ok
 
 
-def run_bot(exe, flag, *, cwd=None):
+def run_bot(exe, flag, *, cwd=None, env=None):
     """Run the frozen bot with one flag; (returncode, output) or (None, "")."""
     try:
-        proc = subprocess.run([str(exe), flag], cwd=cwd or STAGE,
+        proc = subprocess.run([str(exe), flag], cwd=cwd or STAGE, env=env,
                               capture_output=True, text=True,
                               timeout=SMOKE_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -321,13 +324,24 @@ def smoke():
     step("OCR self-test", True, "both models read the test image")
 
     with tempfile.TemporaryDirectory(prefix="tickets-hunter-resource-smoke-") as cwd:
-        code, output = run_bot(exe, "--utiki-resource-self-test", cwd=cwd)
+        isolated_root = Path(cwd)
+        if ROOT.resolve() == isolated_root or ROOT.resolve() in isolated_root.parents:
+            return step("standalone frozen bundle outside source tree", False)
+        isolated_bundle = isolated_root / "bundle"
+        try:
+            shutil.copytree(STAGE, isolated_bundle, symlinks=True)
+        except OSError as exc:
+            return step("standalone frozen bundle outside source tree", False,
+                        type(exc).__name__)
+        step("standalone frozen bundle outside source tree", True)
+        isolated_exe = isolated_bundle / f"nodriver_tixcraft{EXE_SUFFIX}"
+        code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
         if code != 0 or "uTiki resource self-test passed:" not in output:
             print_tail(output)
             return step("bot frozen uTiki resource self-test", False,
                         f"exit {code}")
-        step("bot frozen uTiki resource self-test", True)
-        settings_exe = STAGE / f"settings{EXE_SUFFIX}"
+        step("bot frozen uTiki resource self-test", True, "exit 0")
+        settings_exe = isolated_bundle / f"settings{EXE_SUFFIX}"
         try:
             proc = subprocess.run(
                 [str(settings_exe), "--resource-self-test"], cwd=cwd,
@@ -340,9 +354,35 @@ def smoke():
             print_tail((proc.stdout or "") + (proc.stderr or ""))
             return step("settings frozen resource self-test", False,
                         f"exit {proc.returncode}")
-        step("settings frozen resource self-test", True)
+        step("settings frozen resource self-test", True, "exit 0")
 
-        script_file = (STAGE / "_internal" / "platforms" / "utiki" /
+        if IS_WINDOWS:
+            legacy_env = os.environ.copy()
+            legacy_env.update(PYTHONUTF8="0", PYTHONIOENCODING="cp950")
+            code, output = run_bot(
+                isolated_exe, "--utiki-resource-self-test", cwd=cwd, env=legacy_env
+            )
+            if code != 0 or "uTiki resource self-test passed:" not in output:
+                print_tail(output)
+                return step("Windows cp950 frozen bot resource self-test", False,
+                            f"exit {code}")
+            step("Windows cp950 frozen bot resource self-test", True, "exit 0")
+            try:
+                proc = subprocess.run(
+                    [str(settings_exe), "--resource-self-test"], cwd=cwd,
+                    env=legacy_env, capture_output=True, text=True,
+                    timeout=SMOKE_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                return step("Windows cp950 frozen settings resource self-test", False,
+                            "no output within timeout")
+            if proc.returncode != 0 or "Settings resource self-test passed:" not in proc.stdout:
+                print_tail((proc.stdout or "") + (proc.stderr or ""))
+                return step("Windows cp950 frozen settings resource self-test", False,
+                            f"exit {proc.returncode}")
+            step("Windows cp950 frozen settings resource self-test", True, "exit 0")
+
+        script_file = (isolated_bundle / "_internal" / "platforms" / "utiki" /
                        "scripts" / "date_snapshot.js")
         original = script_file.read_bytes()
         backup = script_file.with_name("date_snapshot.js.resource-smoke-backup")
@@ -350,23 +390,38 @@ def smoke():
             return step("resource smoke backup absent", False)
         try:
             script_file.rename(backup)
-            code, output = run_bot(exe, "--utiki-resource-self-test", cwd=cwd)
+            code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
             if code in (None, 0) or "uTiki resource self-test FAILED:" not in output:
                 print_tail(output)
                 return step("missing frozen uTiki script rejected", False)
         finally:
             backup.rename(script_file)
-        step("missing frozen uTiki script rejected", True)
+        step("missing frozen uTiki script rejected", True, f"exit {code}")
 
         try:
             script_file.write_bytes(original + b" ")
-            code, output = run_bot(exe, "--utiki-resource-self-test", cwd=cwd)
+            code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
             if code in (None, 0) or "digest mismatch" not in output:
                 print_tail(output)
                 return step("mixed frozen uTiki script rejected", False)
         finally:
             script_file.write_bytes(original)
-        return step("mixed frozen uTiki script rejected", True)
+        step("mixed frozen uTiki script rejected", True, f"exit {code}")
+
+        corrupt = original.replace(b"#PerformanceListTable", b"#DamagedTable", 1)
+        if corrupt == original:
+            return step("corrupt frozen uTiki production script rejected", False,
+                        "expected production selector is absent")
+        try:
+            script_file.write_bytes(corrupt)
+            code, output = run_bot(isolated_exe, "--utiki-resource-self-test", cwd=cwd)
+            if code in (None, 0) or "digest mismatch" not in output:
+                print_tail(output)
+                return step("corrupt frozen uTiki production script rejected", False)
+        finally:
+            script_file.write_bytes(original)
+        return step("corrupt frozen uTiki production script rejected", True,
+                    f"exit {code}")
 
 
 def clear_quarantine():
@@ -385,19 +440,17 @@ def clear_quarantine():
         print(f"  xattr -dr com.apple.quarantine {STAGE}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--assemble-only", action="store_true",
-                      help="assemble existing PyInstaller outputs and verify the bundle")
-    mode.add_argument("--skip-build", action="store_true",
-                      help="re-verify an already assembled dist/ without rebuilding")
-    parser.add_argument("--keep", action="store_true",
-                        help="keep build/ for inspecting warn-*.txt")
-    args = parser.parse_args()
-
+def _execute(args):
     print(f"Tickets Hunter local build -- {sys.platform}")
     print(f"Project root: {ROOT}")
+
+    source_manifest = ROOT / "src/platforms/utiki/scripts/manifest.json"
+    if args.source_manifest is not None:
+        if args.source_manifest.resolve() != source_manifest.resolve():
+            step("bound source manifest is current source", False)
+            return 1
+        if not step("bound source manifest is current source", source_manifest.is_file()):
+            return 1
 
     if not preflight():
         print("\nPreflight failed, nothing was built.")
@@ -416,6 +469,15 @@ def main():
 
     layout_ok = verify_layout()
     smoke_ok = smoke()
+    bundle_bound = True
+    if args.bundle_manifest is not None:
+        final_manifest = STAGE / "_internal/platforms/utiki/scripts/manifest.json"
+        bundle_bound = (
+            args.bundle_manifest.is_file()
+            and final_manifest.is_file()
+            and same_file_bytes(args.bundle_manifest, final_manifest)
+        )
+        step("bound bundle manifest matches final bundle", bundle_bound)
 
     if not args.keep and (ROOT / "build").exists():
         shutil.rmtree(ROOT / "build")
@@ -429,7 +491,55 @@ def main():
     print(f"Bundle: {STAGE}")
     if IS_MACOS:
         clear_quarantine()
-    return 0 if layout_ok and smoke_ok else 1
+    return 0 if layout_ok and smoke_ok and bundle_bound else 1
+
+
+def _write_report(path, exit_code):
+    if path is None:
+        return
+    source = ROOT / "src" / "platforms" / "utiki" / "scripts" / "manifest.json"
+    bundle = STAGE / "_internal" / "platforms" / "utiki" / "scripts" / "manifest.json"
+
+    def digest(existing):
+        return hashlib.sha256(existing.read_bytes()).hexdigest() if existing.is_file() else None
+
+    report = {
+        "schema_version": 1,
+        "status": "PASS" if exit_code == 0 else "FAIL",
+        "exit_code": exit_code,
+        "platform": sys.platform,
+        "architecture": platform.machine(),
+        "source_manifest_sha256": digest(source),
+        "bundle_manifest_sha256": digest(bundle),
+        "checks": [
+            {"name": name, "status": "PASS" if ok else "FAIL", "detail": detail}
+            for name, ok, detail in results
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--assemble-only", action="store_true",
+                      help="assemble existing PyInstaller outputs and verify the bundle")
+    mode.add_argument("--skip-build", action="store_true",
+                      help="re-verify an already assembled dist/ without rebuilding")
+    parser.add_argument("--keep", action="store_true",
+                        help="keep build/ for inspecting warn-*.txt")
+    parser.add_argument("--report", type=Path,
+                        help="write the raw build/smoke result for a P3a package gate")
+    parser.add_argument("--source-manifest", type=Path,
+                        help="bind the current source manifest for evidence collection")
+    parser.add_argument("--bundle-manifest", type=Path,
+                        help="bind a captured copy of the final bundle manifest")
+    args = parser.parse_args()
+    results.clear()
+    exit_code = _execute(args)
+    _write_report(args.report, exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -282,12 +282,144 @@ def test_assemble_only_rejects_unknown_collision_before_release(tmp_path, monkey
     monkeypatch.setattr(build_local, "STAGE", dist / "tickets_hunter")
     monkeypatch.setattr(build_local, "preflight", lambda: True)
     monkeypatch.setattr(build_local, "smoke", lambda: pytest.fail("smoke must not run"))
-    monkeypatch.setattr(sys, "argv", ["build_local.py", "--assemble-only", "--keep"])
+    report_path = tmp_path / "bundle-report.json"
+    monkeypatch.setattr(sys, "argv", [
+        "build_local.py", "--assemble-only", "--keep", "--report", str(report_path)
+    ])
     build_local.results.clear()
 
     assert build_local.main() == 1
     assert any(name == "_internal content conflict" and not ok
                for name, ok, _ in build_local.results)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "FAIL"
+    assert report["exit_code"] == 1
+    assert any(item["name"] == "_internal content conflict" and item["status"] == "FAIL"
+               for item in report["checks"])
+
+
+def test_package_report_binds_actual_source_and_final_manifest_bytes(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    source = root / "src/platforms/utiki/scripts/manifest.json"
+    bundle = root / "dist/tickets_hunter/_internal/platforms/utiki/scripts/manifest.json"
+    source.parent.mkdir(parents=True)
+    bundle.parent.mkdir(parents=True)
+    source.write_bytes(b'{"source":true}\n')
+    bundle.write_bytes(source.read_bytes())
+    monkeypatch.setattr(build_local, "ROOT", root)
+    monkeypatch.setattr(build_local, "STAGE", root / "dist/tickets_hunter")
+    build_local.results.clear()
+    build_local.step("bot frozen uTiki resource self-test", True)
+    build_local.step("missing frozen uTiki script rejected", True, "exit 2")
+    report_path = tmp_path / "raw-bundle-report.json"
+    build_local._write_report(report_path, 0)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    expected_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert report["status"] == "PASS"
+    assert report["exit_code"] == 0
+    assert report["source_manifest_sha256"] == expected_digest
+    assert report["bundle_manifest_sha256"] == expected_digest
+    assert [item["name"] for item in report["checks"]] == [
+        "bot frozen uTiki resource self-test",
+        "missing frozen uTiki script rejected",
+    ]
+    bundle.write_bytes(b'{"mixed":true}\n')
+    build_local._write_report(report_path, 1)
+    mismatched = json.loads(report_path.read_text(encoding="utf-8"))
+    assert mismatched["status"] == "FAIL"
+    assert mismatched["bundle_manifest_sha256"] != expected_digest
+
+
+def test_package_report_rejects_stale_captured_bundle_manifest(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    source = root / "src/platforms/utiki/scripts/manifest.json"
+    final = root / "dist/tickets_hunter/_internal/platforms/utiki/scripts/manifest.json"
+    source.parent.mkdir(parents=True)
+    final.parent.mkdir(parents=True)
+    source.write_bytes(b"current manifest\n")
+    final.write_bytes(source.read_bytes())
+    captured = tmp_path / "captured-manifest.json"
+    captured.write_bytes(final.read_bytes())
+    report_path = tmp_path / "bundle-report.json"
+    monkeypatch.setattr(build_local, "ROOT", root)
+    monkeypatch.setattr(build_local, "DIST", root / "dist")
+    monkeypatch.setattr(build_local, "STAGE", root / "dist/tickets_hunter")
+    monkeypatch.setattr(build_local, "IS_MACOS", False)
+    monkeypatch.setattr(build_local, "preflight", lambda: True)
+    monkeypatch.setattr(build_local, "verify_layout", lambda: build_local.step("layout", True))
+    monkeypatch.setattr(build_local, "smoke", lambda: build_local.step("frozen smoke", True))
+    monkeypatch.setattr(sys, "argv", [
+        "build_local.py", "--skip-build", "--keep", "--report", str(report_path),
+        "--source-manifest", str(source), "--bundle-manifest", str(captured),
+    ])
+    assert build_local.main() == 0
+    legal = json.loads(report_path.read_text(encoding="utf-8"))
+    assert legal["status"] == "PASS"
+    assert any(item["name"] == "bound bundle manifest matches final bundle"
+               and item["status"] == "PASS" for item in legal["checks"])
+
+    captured.write_bytes(b"stale manifest\n")
+    assert build_local.main() == 1
+    stale = json.loads(report_path.read_text(encoding="utf-8"))
+    assert stale["status"] == "FAIL"
+    assert any(item["name"] == "bound bundle manifest matches final bundle"
+               and item["status"] == "FAIL" for item in stale["checks"])
+
+
+def test_windows_layout_produces_platform_stable_bundle_check_names(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    source = root / "src/platforms/utiki/scripts"
+    final = root / "dist/tickets_hunter"
+    bundled_scripts = final / "_internal/platforms/utiki/scripts"
+    source.mkdir(parents=True)
+    bundled_scripts.mkdir(parents=True)
+    for name, content in (("manifest.json", b"{}\n"), ("date_snapshot.js", b"(() => 1)()\n")):
+        (source / name).write_bytes(content)
+        (bundled_scripts / name).write_bytes(content)
+    for name in ("nodriver_tixcraft.exe", "settings.exe"):
+        (final / name).write_bytes(b"frozen executable")
+    (final / "www").mkdir()
+    (final / "www/settings.html").write_bytes(b"settings")
+    (final / "_internal/model.onnx").write_bytes(b"model")
+    monkeypatch.setattr(build_local, "ROOT", root)
+    monkeypatch.setattr(build_local, "STAGE", final)
+    monkeypatch.setattr(build_local, "IS_WINDOWS", True)
+    monkeypatch.setattr(build_local, "EXE_SUFFIX", ".exe")
+    build_local.results.clear()
+    assert build_local.verify_layout()
+    names = [name for name, _, _ in build_local.results]
+    assert "nodriver_tixcraft exists" in names
+    assert "settings exists" in names
+    assert "nodriver_tixcraft.exe exists" not in names
+    assert "settings.exe exists" not in names
+
+
+def test_macos_alias_checks_keep_distinct_resource_names(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    dist = root / "dist"
+    aliases = tuple(build_local.MACOS_ALIAS_PAIRS)[:2]
+    for package, content in (("nodriver_tixcraft", b"first"), ("settings", b"second")):
+        bundle = dist / package
+        bundle.mkdir(parents=True)
+        (bundle / package).write_bytes(b"frozen executable")
+        for relative in aliases:
+            resource = bundle / "_internal" / relative
+            resource.parent.mkdir(parents=True, exist_ok=True)
+            resource.write_bytes(content)
+    (root / "src/assets").mkdir(parents=True)
+    (root / "src/www").mkdir(parents=True)
+    monkeypatch.setattr(build_local, "ROOT", root)
+    monkeypatch.setattr(build_local, "BUILD_SCRIPTS", root / "build_scripts")
+    monkeypatch.setattr(build_local, "DIST", dist)
+    monkeypatch.setattr(build_local, "STAGE", dist / "tickets_hunter")
+    monkeypatch.setattr(build_local, "IS_MACOS", True)
+    monkeypatch.setattr(build_local, "EXE_SUFFIX", "")
+    monkeypatch.setattr(build_local, "expected_macos_alias", lambda *_args: True)
+    build_local.results.clear()
+    assert build_local.assemble()
+    names = [name for name, _, _ in build_local.results]
+    assert {f"canonical macOS library alias: {relative}" for relative in aliases} <= set(names)
+    assert len(names) == len(set(names))
 
 
 def test_release_entries_use_checked_assembly():

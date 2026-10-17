@@ -2577,6 +2577,22 @@ def test_p2_performance_input_contract_requires_its_own_manifest():
             assert p2["execution-manifest"] != p1["execution-manifest"]
 
 
+def test_p3a_browser_input_contract_requires_its_own_manifest():
+    from tools import verify_utiki_ci_results as checker
+
+    manifests = {
+        phase: checker._expected_input_contract(
+            "browser-isolation-report", "browser-contract-isolated", phase
+        )["execution-manifest"]
+        for phase in ("P1", "P2", "P3a")
+    }
+    assert manifests == {
+        "P1": ("repository", "tests/fixtures/utiki/manifest.json"),
+        "P2": ("repository", "tests/fixtures/utiki/manifest-p2.json"),
+        "P3a": ("repository", "tests/fixtures/utiki/manifest-p3a.json"),
+    }
+
+
 def test_p2_performance_isolation_envelope_rejects_p1_manifest(tmp_path, monkeypatch):
     from tools import verify_utiki_ci_results as checker
 

@@ -246,34 +246,7 @@ async def commit_date_action(
 
 async def read_dialog_snapshot(tab):
     """在不改變頁面狀態下讀取所有可見的 uTiki 對話框。"""
-    raw_value = await tab.evaluate('''
-        (() => {
-            // __ticketsHunterUtikiDialogSnapshot
-            const visible = element => {
-                if (!element || !element.isConnected || element.hidden ||
-                    element.getAttribute('aria-hidden') === 'true') return false;
-                const style = getComputedStyle(element);
-                return style.display !== 'none' &&
-                    style.visibility !== 'hidden' &&
-                    element.getClientRects().length > 0;
-            };
-            const dialogs = Array.from(
-                document.querySelectorAll('#dialog-message'))
-                .map(message => ({
-                    message,
-                    wrapper: message.closest('.ui-dialog')
-                }))
-                .filter(item =>
-                    visible(item.wrapper) && visible(item.message));
-            return JSON.stringify({
-                page_url: location.href,
-                document_id: String(performance.timeOrigin),
-                visible_count: dialogs.length,
-                text: dialogs.length === 1 ?
-                    (dialogs[0].message.textContent || '').trim() : ''
-            });
-        })()
-    ''')
+    raw_value = await tab.evaluate(assemble_script("dialog_snapshot"))
     return parse_dialog_snapshot(_decode_json_result(raw_value))
 
 
@@ -292,43 +265,9 @@ async def dismiss_dialog(tab, snapshot):
         "documentId": snapshot.document_id,
         "text": snapshot.text,
     }, ensure_ascii=False)
-    raw_result = await tab.evaluate(fr'''
-        (() => {{
-            // __ticketsHunterUtikiDialogDismiss
-            const snapshot = {snapshot_json};
-            if (location.href !== snapshot.pageUrl ||
-                String(performance.timeOrigin) !== snapshot.documentId) {{
-                return 'stale';
-            }}
-            const visible = element => {{
-                if (!element || !element.isConnected || element.hidden ||
-                    element.getAttribute('aria-hidden') === 'true') return false;
-                const style = getComputedStyle(element);
-                return style.display !== 'none' &&
-                    style.visibility !== 'hidden' &&
-                    element.getClientRects().length > 0;
-            }};
-            const dialogs = Array.from(
-                document.querySelectorAll('#dialog-message'))
-                .map(message => ({{
-                    message,
-                    wrapper: message.closest('.ui-dialog')
-                }}))
-                .filter(item =>
-                    visible(item.wrapper) && visible(item.message));
-            if (dialogs.length !== 1 ||
-                (dialogs[0].message.textContent || '').trim() !==
-                    snapshot.text) return 'stale';
-            const buttons = Array.from(dialogs[0].wrapper.querySelectorAll(
-                '.ui-dialog-buttonset button')).filter(visible);
-            if (buttons.length !== 1 || buttons[0].disabled ||
-                buttons[0].getAttribute('aria-disabled') === 'true') {{
-                return 'rejected';
-            }}
-            buttons[0].click();
-            return 'committed';
-        }})()
-    ''')
+    raw_result = await tab.evaluate(assemble_script("dialog_dismiss", {
+        "__UTIKI_DIALOG_DISMISS_ARG_0__": snapshot_json,
+    }))
     try:
         return CommitResult(raw_result)
     except (TypeError, ValueError):
@@ -337,60 +276,9 @@ async def dismiss_dialog(tab, snapshot):
 
 async def read_area_snapshot(tab):
     """等待可操作的區域圖後，以單次瀏覽器呼叫讀取快照。"""
-    raw_value = await tab.evaluate('''
-        (() => new Promise(resolve => {
-            let observer = null;
-            let timer = null;
-            let poller = null;
-            const finish = value => {
-                if (observer) observer.disconnect();
-                if (timer) clearTimeout(timer);
-                if (poller) clearInterval(poller);
-                resolve(JSON.stringify(value));
-                return true;
-            };
-            const collect = () => {
-                if (!location.pathname.includes('/UTK0204_')) {
-                    return finish({ok: false, reason: 'navigation'});
-                }
-                const rows = Array.from(document.querySelectorAll(
-                    '.seats table.f1 > tbody > tr.saleTr'));
-                const areas = Array.from(document.querySelectorAll(
-                    '#mapdata area[id][href]'));
-                const mapReady = typeof mainMap === 'object' && mainMap &&
-                    Object.keys(mainMap).length > 0;
-                if (!rows.length || !areas.length || !mapReady) return false;
-                finish({
-                    ok: true,
-                    page_url: location.href,
-                    document_id: String(performance.timeOrigin),
-                    rows: rows.map(row => ({
-                        area: (row.querySelector(
-                            'td[data-title^="票區"]')?.textContent || '').trim(),
-                        price: (row.querySelector(
-                            'td[data-title^="票價"]')?.textContent || '').trim(),
-                        status: (row.querySelector(
-                            'td[data-title^="空位"]')?.textContent || '').trim(),
-                        rel: row.getAttribute('rel') || ''
-                    })),
-                    areas: areas.map(area => ({
-                        id: area.getAttribute('id') || '',
-                        href: area.getAttribute('href') || '',
-                        title: area.getAttribute('title') || ''
-                    }))
-                });
-                return true;
-            };
-            if (collect()) return;
-            observer = new MutationObserver(collect);
-            observer.observe(document.documentElement, {
-                childList: true, subtree: true
-            });
-            poller = setInterval(collect, 20);
-            timer = setTimeout(
-                () => finish({ok: false, reason: 'timeout'}), 2500);
-        }))()
-    ''', await_promise=True)
+    raw_value = await tab.evaluate(
+        assemble_script("area_snapshot"), await_promise=True
+    )
     return parse_area_snapshot(_decode_json_result(raw_value))
 
 
@@ -432,111 +320,18 @@ async def commit_area(
     ticket_number_json = json.dumps(parse_nonnegative_count(ticket_number).value)
     nonce_json = json.dumps(navigation_nonce)
     marker_key_json = json.dumps(fast_marker_key)
-    raw_result = await tab.evaluate(fr'''
-        (() => {{
-            // __ticketsHunterCtbcNativeAreaCommit
-            const pageUrl = {page_url_json};
-            const documentId = {document_id_json};
-            const areaId = {rel_json};
-            const expectedArea = {area_json};
-            const expectedPrice = {price_json};
-            const expectedActionName = {action_name_json};
-            const expectedActionArgs = {action_args_json};
-            const ticketNumber = {ticket_number_json};
-            const navigationNonce = {nonce_json};
-            const normalizeArea = value => (value || '').replace(/\s+/g, '');
-            const normalizePrice = value => (value || '').replace(/[\s,$]/g, '');
-            const hasTickets = value => {{
-                const text = (value || '').replace(/\s+/g, '');
-                if (!text || text.includes('售完') ||
-                    /^(0|0張|無)$/.test(text)) return false;
-                if (text === '熱賣中') return true;
-                const count = text.match(
-                    /^(?:剩餘|尚餘|剩|餘)[:：]?([0-9]+)(?:張)?$/) ||
-                    text.match(/^([0-9]+)(?:張)?$/);
-                if (!count || count[1].length > 16) return false;
-                const available = Number(count[1]);
-                return Number.isSafeInteger(available) &&
-                    available >= ticketNumber;
-            }};
-            const parseAction = value => {{
-                const match = (value || '').match(
-                    /^\s*javascript:\s*(Send|SendA)\(\s*(.*?)\s*\)\s*;?\s*$/);
-                if (!match) return null;
-                const args = [];
-                let remaining = match[2];
-                while (remaining) {{
-                    const argument = remaining.match(
-                        /^\s*(?:'([^'\"]*)'|"([^'\"]*)")\s*(?:,\s*|$)/);
-                    if (!argument) return null;
-                    args.push(argument[1] !== undefined ?
-                        argument[1] : argument[2]);
-                    remaining = remaining.slice(argument[0].length);
-                }}
-                const expectedLength = match[1] === 'Send' ? 5 : 7;
-                if (args.length !== expectedLength) return null;
-                return {{
-                    name: match[1], stableArgs: args.slice(0, -1),
-                    status: args.at(-1)
-                }};
-            }};
-            const parseTitle = value => {{
-                const match = (value || '').match(
-                    /^\s*票區\s*[:：]\s*(.*?)\s+票價\s*[:：]\s*(.*?)\s+尚餘\s*[:：]\s*(.*?)\s*$/);
-                if (!match) return null;
-                return {{
-                    area: normalizeArea(match[1]),
-                    price: normalizePrice(match[2]), status: match[3]
-                }};
-            }};
-            const root = document.documentElement;
-            const commitMarker = 'data-tickets-hunter-ctbc-area-commit';
-            if (location.href !== pageUrl ||
-                String(performance.timeOrigin) !== documentId) return 'stale';
-            if (root.hasAttribute(commitMarker)) {{
-                return root.getAttribute(commitMarker) === navigationNonce ?
-                    'committed' : 'stale';
-            }}
-            try {{
-                if (sessionStorage.getItem({marker_key_json}) !== null) {{
-                    return 'stale';
-                }}
-            }} catch (_error) {{}}
-            const area = document.querySelector(
-                `#mapdata area#${{CSS.escape(areaId)}}`);
-            if (!area) return 'rejected';
-            const action = parseAction(area.getAttribute('href'));
-            const mapTitle = parseTitle(area.getAttribute('title'));
-            if (!action || !mapTitle || action.name !== expectedActionName ||
-                action.stableArgs.length !== expectedActionArgs.length ||
-                action.stableArgs.some((value, index) =>
-                    value !== expectedActionArgs[index]) ||
-                mapTitle.area !== normalizeArea(expectedArea) ||
-                mapTitle.price !== normalizePrice(expectedPrice) ||
-                !hasTickets(action.status) ||
-                !hasTickets(mapTitle.status)) return 'rejected';
-            const rows = Array.from(document.querySelectorAll(
-                '.seats table.f1 > tbody > tr.saleTr'));
-            const matchingRows = rows.filter(row => {{
-                if (!(row.getAttribute('rel') || '').split(/\s+/)
-                    .includes(areaId)) return false;
-                const currentArea = row.querySelector(
-                    'td[data-title^="票區"]')?.textContent;
-                const currentPrice = row.querySelector(
-                    'td[data-title^="票價"]')?.textContent;
-                const status = row.querySelector(
-                    'td[data-title^="空位"]')?.textContent;
-                return normalizeArea(currentArea) ===
-                    normalizeArea(expectedArea) &&
-                    normalizePrice(currentPrice) ===
-                    normalizePrice(expectedPrice) && hasTickets(status);
-            }});
-            if (!matchingRows.length) return 'rejected';
-            root.setAttribute(commitMarker, navigationNonce);
-            area.click();
-            return 'committed';
-        }})()
-    ''')
+    raw_result = await tab.evaluate(assemble_script("area_commit", {
+        "__UTIKI_AREA_COMMIT_ARG_0__": page_url_json,
+        "__UTIKI_AREA_COMMIT_ARG_1__": document_id_json,
+        "__UTIKI_AREA_COMMIT_ARG_2__": rel_json,
+        "__UTIKI_AREA_COMMIT_ARG_3__": area_json,
+        "__UTIKI_AREA_COMMIT_ARG_4__": price_json,
+        "__UTIKI_AREA_COMMIT_ARG_5__": action_name_json,
+        "__UTIKI_AREA_COMMIT_ARG_6__": action_args_json,
+        "__UTIKI_AREA_COMMIT_ARG_7__": ticket_number_json,
+        "__UTIKI_AREA_COMMIT_ARG_8__": nonce_json,
+        "__UTIKI_AREA_COMMIT_ARG_9__": marker_key_json,
+    }))
     if raw_result is True:
         return CommitResult.COMMITTED
     if raw_result is False:

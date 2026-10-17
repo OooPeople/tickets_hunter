@@ -38,6 +38,7 @@ from platforms.utiki.workflow import (
     _ctbc_fast_marker_matches_pending,
     _fill_ctbc_inline_login,
     _ctbc_pending_from_fast_marker,
+    _ctbc_prefetch_area_snapshot,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
     _reconcile_utiki_purchase,
@@ -257,6 +258,40 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertTrue(literal_placeholder.credentials_written)
         self.assertIn(json.dumps(account), literal_placeholder.scripts[1])
         self.assertIn(json.dumps(password), literal_placeholder.scripts[1])
+
+    async def test_fast_area_prefetch_uses_bound_production_script(self):
+        class PrefetchTab:
+            def __init__(self):
+                self.script = None
+                self.await_promise = None
+
+            async def evaluate(self, script, *, await_promise=False):
+                self.script = script
+                self.await_promise = await_promise
+                return '{"ok": false, "reason": "area-response"}'
+
+        tab = PrefetchTab()
+        target = {
+            "url": "https://tix.ctbcsports.com/BROTHERS/UTK0202_?PRODUCT_ID=P1",
+            "performance_id": "P1",
+            "product_id": "PRODUCT-1",
+            "map_namespace": "CTBC",
+        }
+        result = await _ctbc_prefetch_area_snapshot(tab, target)
+        self.assertEqual({"ok": False, "reason": "area-response"}, result)
+        self.assertTrue(tab.await_promise)
+        for variable, key in (
+            ("areaUrl", "url"),
+            ("expectedPerformance", "performance_id"),
+            ("expectedProduct", "product_id"),
+            ("mapNamespace", "map_namespace"),
+        ):
+            self.assertIn(
+                f"const {variable} = {json.dumps(target[key])};",
+                tab.script,
+            )
+        self.assertIn("credentials: 'include'", tab.script)
+        self.assertIn("credentials: 'omit'", tab.script)
 
     async def test_cookie_injection_rechecks_the_exact_tenant(self):
         get_all = AsyncMock(return_value=[])

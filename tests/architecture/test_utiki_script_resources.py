@@ -45,6 +45,13 @@ WORKFLOW_TEMPLATE_P2_SHA256 = {
     "captcha_image": ("daae7b08058bd63bbf0bd5b12c9e40de5cb0c5dea1b251239a713dd2682d283d", 0, "\n        "),
     "captcha_image_ready": ("3c595980e71871a49613acc119cf2d34b79971511ab3c84d3679c250c3fddaf3", 0, "\n        "),
     "captcha_value": ("914168ff6964ec5088e49b0c2a4cd7b17398b567bd62874c468487ca43621640", 0, "\n    "),
+    "prefetch_area_snapshot": ("05541d1736d8f6b642edc906d0749c267e93d4b817f2f93294e2c12d6c1d0ec4", 4, "\n    "),
+    "return_to_native_area": ("c77a4313d8b1a7d98da0aa15fac66c516e0ef756dae40ab89405b5456037fad9", 2, ""),
+    "destination_state": ("ecea249c3c3cc702f9a1ea3a9beab7a254cf83a70e243e99492495e0ce2cf245", 3, "\n    "),
+    "dialog_snapshot": ("08e9a4e65c91c281cb846d2a2b269ec5384b90c3ab7aa96e429b3a35f406a5dd", 0, "\n    "),
+    "dialog_dismiss": ("b866b60d91d6c672203cb757927ee6e5edd28b28bc26339c96298e2a24355b53", 1, "\n    "),
+    "area_snapshot": ("aad63e04213637d732d8a932d3a35c7df91b6169b4b82b3f54a372e8167d2c9f", 0, "\n    "),
+    "area_commit": ("6d68e16b114ee149f6cc5d65c7b697f44b548f80b2b3a58f9cb54d6209f73ce3", 10, "\n    "),
 }
 
 

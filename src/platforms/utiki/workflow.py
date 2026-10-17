@@ -923,91 +923,15 @@ async def _ctbc_prefetch_area_snapshot(tab, date_target):
     performance_json = json.dumps(date_target["performance_id"])
     product_json = json.dumps(date_target["product_id"])
     map_namespace_json = json.dumps(date_target["map_namespace"])
-    raw_value = await tab.evaluate(f'''
-        (async () => {{
-            const started = performance.now();
-            const areaUrl = {area_url_json};
-            const expectedPerformance = {performance_json};
-            const expectedProduct = {product_json};
-            const mapNamespace = {map_namespace_json};
-            const fail = reason => JSON.stringify({{ok: false, reason}});
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 1200);
-            try {{
-                const response = await fetch(areaUrl, {{
-                    credentials: 'include', cache: 'no-store', redirect: 'manual',
-                    signal: controller.signal
-                }});
-                if (!response.ok || response.type === 'opaqueredirect' || response.url !== areaUrl) {{
-                    return fail('area-response');
-                }}
-                const contentType = (response.headers.get('content-type') || '').toLowerCase();
-                if (!contentType.startsWith('text/html')) return fail('area-content-type');
-                const html = await response.text();
-                if (!html || html.length > 250000) return fail('area-size');
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const rows = Array.from(doc.querySelectorAll('.seats table.f1 > tbody > tr.saleTr'));
-                if (!rows.length || rows.length > 200 || !doc.querySelector('#mapdata')) return fail('area-markers');
-                if (doc.querySelector('#byServer, #ATYPE_CB') || /\\bSendA\\s*\\(/.test(html)) return fail('special-mode');
-
-                const uniqueMatch = regex => {{
-                    const values = Array.from(html.matchAll(regex), match => match[1]);
-                    return values.length === 1 ? values[0] : null;
-                }};
-                const lp = uniqueMatch(/\\bvar\\s+_lp\\s*=\\s*['\"]([^'\"]+)['\"]\\s*;/g);
-                const wt = uniqueMatch(/\\bvar\\s+_wt\\s*=\\s*([0-9]+)\\s*;/g);
-                const season = uniqueMatch(/\\bvar\\s+seasonTicketId\\s*=\\s*['\"]([^'\"]*)['\"]\\s*;/g);
-                const product = uniqueMatch(/\\bvar\\s+productId\\s*=\\s*['\"]([^'\"]+)['\"]\\s*;/g);
-                if (lp !== '0' || wt === null || season !== '' || product !== expectedProduct) return fail('special-flags');
-
-                const mapPattern = /https:\\/\\/imgs2\\.utiki\\.com\\.tw\\/Data\\/[A-Za-z0-9_]+\\/Images\\/Temp\\/[A-Za-z0-9_-]+\\/1_[A-Za-z0-9_-]+_live\\.map\\?v=[A-Za-z0-9_-]+/g;
-                const mapUrls = Array.from(new Set(html.match(mapPattern) || []));
-                if (mapUrls.length !== 1) return fail('map-url-count');
-                const mapUrl = new URL(mapUrls[0]);
-                const expectedMapPath = `/Data/${{mapNamespace}}/Images/Temp/${{expectedPerformance}}/1_${{expectedPerformance}}_live.map`;
-                const mapKeys = Array.from(mapUrl.searchParams.keys());
-                const version = mapUrl.searchParams.get('v') || '';
-                if (mapUrl.protocol !== 'https:' || mapUrl.hostname !== 'imgs2.utiki.com.tw' ||
-                    mapUrl.pathname !== expectedMapPath || mapKeys.length !== 1 || mapKeys[0] !== 'v' ||
-                    !/^[A-Za-z0-9_-]{{8,128}}$/.test(version) || mapUrl.hash) {{
-                    return fail('map-url');
-                }}
-
-                const mapResponse = await fetch(mapUrl.href, {{
-                    credentials: 'omit', cache: 'no-store', redirect: 'error',
-                    signal: controller.signal
-                }});
-                if (!mapResponse.ok) return fail('map-response');
-                const mapType = (mapResponse.headers.get('content-type') || '').toLowerCase();
-                if (!mapType.startsWith('text/plain') && !mapType.startsWith('text/html')) return fail('map-content-type');
-                const mapText = await mapResponse.text();
-                if (!mapText || mapText.length > 100000) return fail('map-size');
-                const mapDoc = new DOMParser().parseFromString(mapText, 'text/html');
-                const areas = Array.from(mapDoc.querySelectorAll('area[id][href]')).map(area => ({{
-                    id: area.getAttribute('id') || '',
-                    href: area.getAttribute('href') || '',
-                    title: area.getAttribute('title') || ''
-                }}));
-                if (!areas.length || areas.length > 500) return fail('map-markers');
-                return JSON.stringify({{
-                    ok: true,
-                    rows: rows.map(row => ({{
-                        area: (row.querySelector('td[data-title^="票區"]')?.textContent || '').trim(),
-                        price: (row.querySelector('td[data-title^="票價"]')?.textContent || '').trim(),
-                        status: (row.querySelector('td[data-title^="空位"]')?.textContent || '').trim(),
-                        rel: row.getAttribute('rel') || ''
-                    }})),
-                    areas,
-                    map_url: mapUrl.href,
-                    elapsed_ms: performance.now() - started
-                }});
-            }} catch (error) {{
-                return fail(error?.name === 'AbortError' ? 'timeout' : 'fetch-error');
-            }} finally {{
-                clearTimeout(timeout);
-            }}
-        }})()
-    ''', await_promise=True)
+    raw_value = await tab.evaluate(
+        assemble_script("prefetch_area_snapshot", {
+            "__UTIKI_PREFETCH_AREA_SNAPSHOT_ARG_0__": area_url_json,
+            "__UTIKI_PREFETCH_AREA_SNAPSHOT_ARG_1__": performance_json,
+            "__UTIKI_PREFETCH_AREA_SNAPSHOT_ARG_2__": product_json,
+            "__UTIKI_PREFETCH_AREA_SNAPSHOT_ARG_3__": map_namespace_json,
+        }),
+        await_promise=True,
+    )
     return _decode_ctbc_json_result(raw_value)
 
 
@@ -2904,14 +2828,10 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
     area_url_json = json.dumps(area_url)
     source_url_json = json.dumps(source_url)
     try:
-        return await tab.evaluate(f'''(() => {{
-            // __ticketsHunterCtbcReturn
-            const areaUrl = {area_url_json};
-            const sourceUrl = {source_url_json};
-            if (location.href !== sourceUrl) return false;
-            location.assign(areaUrl);
-            return true;
-        }})()''')
+        return await tab.evaluate(assemble_script("return_to_native_area", {
+            "__UTIKI_RETURN_TO_NATIVE_AREA_ARG_0__": area_url_json,
+            "__UTIKI_RETURN_TO_NATIVE_AREA_ARG_1__": source_url_json,
+        }))
     except Exception:
         return False
 
@@ -2941,59 +2861,14 @@ async def _ctbc_read_destination_state(tab, page_type):
         if page_type in {"seat", "server_assigned_quantity"}
         else "false"
     )
-    raw_value = await tab.evaluate(f'''
-        (() => new Promise(resolve => {{
-            // __ticketsHunterCtbcDestinationState
-            let observer = null;
-            let timer = null;
-            let poller = null;
-            const finish = value => {{
-                if (observer) observer.disconnect();
-                if (timer) clearTimeout(timer);
-                if (poller) clearInterval(poller);
-                resolve(JSON.stringify(value));
-            }};
-            const documentToken = () => {{
-                const value = Number(performance.timeOrigin ||
-                    (performance.timing && performance.timing.navigationStart) || 0);
-                return Number.isFinite(value) && value > 0 ? String(value) : '';
-            }};
-            const read = () => {{
-                const markers = {marker_json};
-                const markerReady = markers.every(selector => document.querySelector(selector));
-                const exactInput = selector => {{
-                    const inputs = Array.from(document.querySelectorAll(selector));
-                    return inputs.length === 1 ? inputs[0] : null;
-                }};
-                const performanceInput = exactInput('#PERFORMANCE_ID');
-                const productInput = exactInput('#PRODUCT_ID');
-                const groupInputs = Array.from(
-                    document.querySelectorAll('#GROUP_ID'));
-                const groupInput = groupInputs[0] || null;
-                const priceAreaInput = exactInput({price_area_selector_json});
-                const groupReady = {group_required_json} ?
-                    groupInputs.length === 1 : groupInputs.length <= 1;
-                const documentId = documentToken();
-                if (!documentId || !markerReady || !performanceInput ||
-                    !productInput || !groupReady || !priceAreaInput) return false;
-                finish({{ready: true, page_url: location.href,
-                    document_id: documentId,
-                    performance_id: performanceInput.value || '',
-                    product_id: productInput.value || '',
-                    group_id: groupInput ? (groupInput.value || '') : '',
-                    price_area_id: priceAreaInput.value || ''}});
-                return true;
-            }};
-            if (read()) return;
-            observer = new MutationObserver(read);
-            observer.observe(document.documentElement, {{childList: true, subtree: true}});
-            poller = setInterval(read, 25);
-            timer = setTimeout(() => finish({{
-                ready: false, page_url: location.href,
-                document_id: documentToken(), document_ready: document.readyState
-            }}), 2500);
-        }}))()
-    ''', await_promise=True)
+    raw_value = await tab.evaluate(
+        assemble_script("destination_state", {
+            "__UTIKI_DESTINATION_STATE_ARG_0__": marker_json,
+            "__UTIKI_DESTINATION_STATE_ARG_1__": price_area_selector_json,
+            "__UTIKI_DESTINATION_STATE_ARG_2__": group_required_json,
+        }),
+        await_promise=True,
+    )
     return _decode_ctbc_json_result(raw_value)
 
 

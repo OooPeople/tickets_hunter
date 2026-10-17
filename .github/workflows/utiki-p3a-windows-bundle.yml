@@ -11,9 +11,11 @@ on:
       - src/nodriver_tixcraft.py
       - src/nodriver_common.py
       - requirement.txt
+      - requirements-dev.txt
       - build_scripts/build_local.py
       - build_scripts/nodriver_tixcraft.spec
       - build_scripts/settings.spec
+      - tests/native/utiki/p3a_bundle_case_nodes.py
   workflow_dispatch:
 
 permissions:
@@ -43,9 +45,9 @@ jobs:
           Write-Host "candidate_sha=$env:GITHUB_SHA"
           Write-Host "os=$([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
           Write-Host "architecture=$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
-      - name: Install offline-build dependencies
+      - name: Install build and native-test dependencies
         shell: pwsh
-        run: python -m pip install -r requirement.txt pyinstaller==6.22.3
+        run: python -m pip install -r requirements-dev.txt pyinstaller==6.22.3
       - name: Build and verify bot/settings final bundle
         shell: pwsh
         run: |
@@ -67,6 +69,15 @@ jobs:
           Get-Content p3a-verify.stdout.log
           Get-Content p3a-verify.stderr.log
           if ($verifyExit -ne 0) { exit $verifyExit }
+      - name: Run P3a native bundle diagnostic nodes
+        shell: pwsh
+        run: |
+          $env:UTIKI_P3A_TARGET = 'windows-x64'
+          $env:UTIKI_P3A_BUNDLE_REPORT = 'p3a-bundle-raw.json'
+          $env:UTIKI_P3A_SOURCE_MANIFEST = 'src/platforms/utiki/scripts/manifest.json'
+          $env:UTIKI_P3A_BUNDLE_ROOT = 'dist/tickets_hunter'
+          python -m pytest -q -o 'addopts=--strict-config --strict-markers' tests/native/utiki/p3a_bundle_case_nodes.py --junitxml=p3a-package-diagnostic.xml
+          exit $LASTEXITCODE
       - name: Preserve native diagnostic output
         if: always()
         uses: actions/upload-artifact@v7
@@ -80,6 +91,7 @@ jobs:
             p3a-verify.stderr.log
             p3a-bundle-raw.json
             p3a-bundle-manifest.json
+            p3a-package-diagnostic.xml
             build/*/warn-*.txt
             dist/tickets_hunter/_internal/platforms/utiki/scripts/manifest.json
           if-no-files-found: warn

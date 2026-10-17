@@ -11,9 +11,11 @@ on:
       - src/nodriver_tixcraft.py
       - src/nodriver_common.py
       - requirement.txt
+      - requirements-dev.txt
       - build_scripts/build_local.py
       - build_scripts/nodriver_tixcraft.spec
       - build_scripts/settings.spec
+      - tests/native/utiki/p3a_bundle_case_nodes.py
   workflow_dispatch:
 
 permissions:
@@ -44,9 +46,9 @@ jobs:
           echo "candidate_sha=$GITHUB_SHA"
           sw_vers
           echo "architecture=$(uname -m)"
-      - name: Install offline-build dependencies
+      - name: Install build and native-test dependencies
         shell: bash
-        run: python -m pip install -r requirement.txt pyinstaller==6.22.3
+        run: python -m pip install -r requirements-dev.txt pyinstaller==6.22.3
       - name: Build and verify bot/settings final bundle
         shell: bash
         run: |
@@ -72,6 +74,15 @@ jobs:
             exit "$exit_code"
           fi
           cat p3a-verify.stdout.log p3a-verify.stderr.log
+      - name: Run P3a native bundle diagnostic nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          export UTIKI_P3A_TARGET=macos-arm64
+          export UTIKI_P3A_BUNDLE_REPORT=p3a-bundle-raw.json
+          export UTIKI_P3A_SOURCE_MANIFEST=src/platforms/utiki/scripts/manifest.json
+          export UTIKI_P3A_BUNDLE_ROOT=dist/tickets_hunter
+          python -m pytest -q -o 'addopts=--strict-config --strict-markers' tests/native/utiki/p3a_bundle_case_nodes.py --junitxml=p3a-package-diagnostic.xml
       - name: Preserve native diagnostic output
         if: always()
         uses: actions/upload-artifact@v7
@@ -85,6 +96,7 @@ jobs:
             p3a-verify.stderr.log
             p3a-bundle-raw.json
             p3a-bundle-manifest.json
+            p3a-package-diagnostic.xml
             build/*/warn-*.txt
             dist/tickets_hunter/_internal/platforms/utiki/scripts/manifest.json
           if-no-files-found: warn

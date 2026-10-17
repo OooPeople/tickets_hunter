@@ -913,6 +913,10 @@ def _make_run(
                     ]
                 )
             if job_id == "performance-contract" and kind == "browser-isolation-report":
+                performance_contract = PROJECT_ROOT / "ci" / (
+                    "utiki-p2-performance-isolation.json"
+                    if PHASE == "P2" else "utiki-performance-isolation.json"
+                )
                 sibling_files = {
                     "inner_report_sha256": path.parent / "inner-performance-report.json",
                     "benchmark_report_sha256": path.parent / "raw-benchmark-report.json",
@@ -978,9 +982,9 @@ def _make_run(
                     },
                     "execution_results": owned_results,
                     "contract": {
-                        "contract_id": "utiki-p1-performance-hard-egress-v1",
-                        "path": "ci/utiki-performance-isolation.json",
-                        "sha256": _sha256(PROJECT_ROOT / "ci/utiki-performance-isolation.json"),
+                        "contract_id": json.loads(performance_contract.read_text(encoding="utf-8"))["contract_id"],
+                        "path": performance_contract.relative_to(PROJECT_ROOT).as_posix(),
+                        "sha256": _sha256(performance_contract),
                     },
                     "execution_manifest": {
                         "path": str(manifest_path.resolve()),
@@ -1289,18 +1293,25 @@ def _make_run(
                 },
             ]
         elif job_id == "performance-contract" and kind == "browser-isolation-report":
+            performance_contract = PROJECT_ROOT / "ci" / (
+                "utiki-p2-performance-isolation.json"
+                if PHASE == "P2" else "utiki-performance-isolation.json"
+            )
+            performance_manifest = PROJECT_ROOT / "tests/fixtures/utiki" / (
+                "manifest-p2.json" if PHASE == "P2" else "manifest.json"
+            )
             evidence_inputs = [
                 {
                     "kind": "performance-contract",
                     "scope": "repository",
-                    "path": "ci/utiki-performance-isolation.json",
-                    "sha256": _sha256(PROJECT_ROOT / "ci/utiki-performance-isolation.json"),
+                    "path": performance_contract.relative_to(PROJECT_ROOT).as_posix(),
+                    "sha256": _sha256(performance_contract),
                 },
                 {
                     "kind": "execution-manifest",
                     "scope": "repository",
-                    "path": "tests/fixtures/utiki/manifest.json",
-                    "sha256": _sha256(PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"),
+                    "path": performance_manifest.relative_to(PROJECT_ROOT).as_posix(),
+                    "sha256": _sha256(performance_manifest),
                 },
                 *[item for item in extra_inputs if item["kind"] == "image-build"],
             ]
@@ -2542,6 +2553,73 @@ def test_p2_browser_report_binds_raw_context_to_current_run(tmp_path, monkeypatc
     assert wrong_manifest.returncode != 0
     assert "INVALID_EVIDENCE_REPORT" in wrong_manifest.stdout
     assert "execution-manifest" in wrong_manifest.stdout
+
+
+def test_p2_performance_input_contract_requires_its_own_manifest():
+    from tools import verify_utiki_ci_results as checker
+
+    for kind in ("browser-isolation-report", "benchmark-report"):
+        p1 = checker._expected_input_contract(kind, "performance-contract", "P1")
+        p2 = checker._expected_input_contract(kind, "performance-contract", "P2")
+        assert p1["performance-contract"] == (
+            "repository", "ci/utiki-performance-isolation.json"
+        )
+        assert p2["performance-contract"] == (
+            "repository", "ci/utiki-p2-performance-isolation.json"
+        )
+        if kind == "browser-isolation-report":
+            assert p1["execution-manifest"] == (
+                "repository", "tests/fixtures/utiki/manifest.json"
+            )
+            assert p2["execution-manifest"] == (
+                "repository", "tests/fixtures/utiki/manifest-p2.json"
+            )
+            assert p2["execution-manifest"] != p1["execution-manifest"]
+
+
+def test_p2_performance_isolation_envelope_rejects_p1_manifest(tmp_path, monkeypatch):
+    from tools import verify_utiki_ci_results as checker
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "PHASE", "P2")
+    monkeypatch.setattr(module, "RUN_ID", "utiki-p2-attempt-1")
+    monkeypatch.setattr(
+        module, "NEGATIVE_REGISTRY", PROJECT_ROOT / "ci/utiki-p2-negative-probes.json"
+    )
+    manifest_path, manifest, _, profiles = _make_manifest(tmp_path)
+    run = _make_run(
+        tmp_path, manifest_path, manifest, profiles,
+        "performance-contract", "isolated-linux-x64",
+    )
+    artifact = _artifact_path(run, "browser-isolation-report")
+    envelope = json.loads(artifact.read_text(encoding="utf-8"))
+    metadata = json.loads(run["metadata"].read_text(encoding="utf-8"))
+    catalog = checker.validate_catalog(CATALOG, APPROVED_CATALOG_SHA256)
+    expected = {
+        checker.ExecutionKey(
+            result["case_id"], result["obligation_id"], result["variant_id"],
+            result["job_id"], result["target"],
+        )
+        for result in envelope["results"]
+    }
+    checker._validate_evidence_report(
+        artifact, "browser-isolation-report", metadata, expected, catalog, run["dir"]
+    )
+
+    manifest_input = next(
+        item for item in envelope["inputs"] if item["kind"] == "execution-manifest"
+    )
+    p1_manifest = PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"
+    manifest_input["path"] = "tests/fixtures/utiki/manifest.json"
+    manifest_input["sha256"] = _sha256(p1_manifest)
+    _write_json(artifact, envelope)
+
+    with pytest.raises(checker.GateError) as captured:
+        checker._validate_evidence_report(
+            artifact, "browser-isolation-report", metadata, expected, catalog, run["dir"]
+        )
+    assert captured.value.code == "INVALID_EVIDENCE_REPORT"
+    assert "execution-manifest" in captured.value.message
 
 
 def test_duplicate_junit_result_is_rejected(gate_inputs):

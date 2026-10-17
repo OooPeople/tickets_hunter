@@ -885,12 +885,12 @@ def _expected_input_contract(
             for name, (scope, path) in contract.items()
         }
     if job_id == "performance-contract" and phase == "P2":
+        phase_inputs = {
+            "performance-contract": "ci/utiki-p2-performance-isolation.json",
+            "execution-manifest": "tests/fixtures/utiki/manifest-p2.json",
+        }
         return {
-            name: (
-                scope,
-                "ci/utiki-p2-performance-isolation.json"
-                if name == "performance-contract" else path,
-            )
+            name: (scope, phase_inputs.get(name, path))
             for name, (scope, path) in contract.items()
         }
     return contract

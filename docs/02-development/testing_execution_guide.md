@@ -2,8 +2,6 @@
 
 **文件說明**：定義目前 repository 可執行的驗證層級、命令與結果陳述方式。
 
-**最後更新**：2026-10-17
-
 ## 1. 原則
 
 - 日常驗證節奏、CI 重跑、checkpoint、覆核與停止判斷以根目錄
@@ -15,39 +13,17 @@
 - 不得用廣泛的程序終止指令關閉所有 Python 或 Chrome；只停止本次測試啟動的程序。
 - 實機測試的刷新頻率必須使用使用者設定，不得為加速測試而私自縮短。沒有明確設定時，人工調查預設至少間隔 5 秒。
 
-### 1.1 正式義務與本指南的關係
+### 1.1 uTiki 重構的驗證來源
 
-大型重構的 phase、required cases、target、收集範圍與 evidence 綁定以已採用計劃、
-required catalog 及現行 workflow 為準。本指南的命令範例不能新增、刪除、延後或取代正式義務，
-也不設定固定的 CI 次數或 commit 數。
+uTiki 的目標與完成條件由 [重構計畫](utiki-refactor/PLAN.md) 維護，實際接線狀態由
+[進度摘要](utiki-refactor/STATUS.md) 維護。本指南只保存驗證命令與分級；舊 gate
+的退役條件由計畫維護。
 
-目前 uTiki 個人原始碼需求不包含產品 PyInstaller／frozen 成品、安裝包、舊設定升級器或正式發布；
-這不取消 pytest、mypy、逐檔語法、CI、測試 image、hard isolation 或 source resource 驗證。
-[v1.6 計劃](UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) 已由
-[採用紀錄](utiki-refactor/adoption-v1.6.md) 固定，v1.6 required catalog 由
-[核准紀錄](utiki-refactor/catalog-approval-v1.6.md) 固定。這只代表規格與 repository 內直接
-輸入已接入；尚未執行的 gate 不能宣稱通過。其他平台或另有授權的產品打包工作仍可使用
-本文件的建置章節。
+## 2. 測試入口與環境
 
-## 2. 目前測試基線
-
-本專案以 pytest 作為主要測試入口，並保留既有 `unittest.TestCase` 測試的相容性。測試目前位於：
-
-```text
-tests/
-  test_cloudflare_handling.py
-  ctbc_support.py
-  test_ctbc_pure.py
-  test_ctbc_dom.py
-  test_ctbc_dom_fixtures.py
-  test_ctbc_refresh.py
-  test_global_settings.py
-  test_ibon_date_selection.py
-  test_refresh_coordinator.py
-  test_runtime_output.py
-```
-
-Phase 1 導入時的基線是 pytest 收集並通過 155 個測試（其中 CTBC 94 個）；這是用來偵測遷移差異的起始快照，不是永久數量門檻。`pytest.ini` 定義預設收集與 marker，`requirements-dev.txt` 固定直接使用的測試工具版本。
+本專案以 pytest 作為主要測試入口，也可收集既有 `unittest.TestCase`。
+實際測試檔以 `tests/` 為準；`pytest.ini` 定義預設收集與 marker，
+`requirements-dev.txt` 固定開發工具版本。舊快照的測試數不作為完成門檻。
 
 安裝開發相依套件：
 
@@ -72,13 +48,14 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 先啟用已安裝 `requirement.txt` 的專案虛擬環境，並確認 active interpreter 符合專案 Python 版本。
 下列命令的 `python` 一律指該 interpreter，不是未安裝相依套件的系統 Python。
 
-| 層級 | 目的 | 典型命令／方式 |
-|------|------|----------------|
-| A. 靜態檢查 | 發現語法、空白與文件問題 | `py_compile`、`git diff --check`、連結檢查 |
-| B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m pytest tests/test_<module>.py` |
-| C. Phase 出站完整套件 | 固定候選發現跨模組回歸；失敗修正後必要重驗 | `python -m pytest` |
-| D. 適用的產品建置 | 只有當已採用計劃與當次授權包含產品打包時，才於指定 target 驗證 | `python build_scripts/build_local.py` |
-| E. 實機煙霧測試 | 有另行真站授權時驗證真實網站 DOM、導頁與瀏覽器行為 | 使用專用測試設定啟動，人工觀察並記錄範圍 |
+| 層級 | 何時使用 | 要做的事 |
+|------|----------|----------|
+| 聚焦檢查 | 文件、一般修正及開發中的流程切片 | `git diff --check`、修改過的 Python 語法、受影響 pytest；適用時加 mypy／JS syntax |
+| 本機完整檢查 | 跨模組接線、切換正式路徑、準備上傳完整候選 | 完整 pytest、型別與語法範圍、設定／資源測試，以及環境允許的隔離瀏覽器 fixture |
+| GitHub CI | 分支推送後的實際候選 | 以 `.github/workflows/tests.yml` 和過渡中的 uTiki 隔離 job 結果為準；紅燈列原因，不把本機結果寫成 CI 通過 |
+| 真站手動驗收 | 使用者之後有可用活動時 | 由使用者以專用設定核對網站 DOM、導頁、提交邊界；單獨記錄，不由離線測試代替 |
+
+產品打包另依本文件 4.5 節與當次交付範圍驗證。
 
 ## 4. 常用命令
 
@@ -125,7 +102,7 @@ python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 本節只列完整套件命令；何時到期由 `AGENTS.md`、已採用計劃及本次變更影響決定。
 
 ```bash
-python -m pytest
+python -m pytest --strict-config --strict-markers
 ```
 
 需要核對收集範圍或遷移相容性時：
@@ -161,140 +138,23 @@ Remove-Item Env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
 runner 每次建立暫存 browser profile，並只在 `finally` 停止該次測試自行啟動的
 browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程序。
 
-#### uTiki production-origin fixture 與 hard-egress
+#### uTiki 離線瀏覽器與效能驗證
 
-`file://` fixture 只驗 DOM/browser contract，不是 production-origin 或網路硬隔離證據。
-uTiki 的 production-origin fixture 必須由
-`tools/run_utiki_browser_isolation.py` 啟動；launcher 只接受已存在本機、以
-repository `@sha256:` 或 exact content-addressed `sha256:` image ID 固定的 Linux
-image，且不會在測試期間 pull、build 或安裝依賴。browser、driver
-與其子程序都在 `--network none`、read-only root、drop-all-capabilities 的同一個
-container 中。另一個 internal-only network 的受控 peer 只用於正向控制；隔離
-container 不加入該 network。
+- `tests/test_ctbc_dom_fixtures.py` 使用本機 HTML，適合檢查 selector、原生事件與 production script 的瀏覽器行為；它不證明真站相容，也不證明網路硬隔離。
+- 需要 production-origin 或外部網路不可達證據時，使用隔離容器中的合成頁面與專用 browser profile。現有 `.github/workflows/utiki-p1-gate.yml`、`utiki-p2-gate.yml` 仍提供這類檢查；替代流程可執行之前不關閉隔離。後續驗收只需回報測試、隔離結果與失敗原因，不再建立每案例文件核准紀錄。
+- Windows 與 macOS 原始碼啟動、腳本資源路徑與設定 UI 在正式入口切換時分別驗證；Linux 容器結果不能代替兩個使用平台。
+- 效能基線和修改後數值在相同頁面、設定與執行環境比較，分開記本機決策、CDP 往返與站點等待。保留必要的即時核對與 429 節流，沒有量測收益的優化可撤回。
+- 目前舊 v1.6 gate 的失敗要明列；它們既不能冒充功能失敗，也不能在新流程完成前被靜默略過。
 
-```bash
-python tools/run_utiki_browser_isolation.py \
-  --image 'sha256:64_HEX_IMAGE_ID' \
-  --image-build-evidence artifacts/utiki-isolation/IMAGE_BUILD.json \
-  --execution-manifest tests/fixtures/utiki/manifest.json \
-  --run-dir artifacts/utiki-isolation/RUN_ID/evidence \
-  --report artifacts/utiki-isolation/RUN_ID/evidence/browser-isolation-raw.json \
-  --run-id RUN_ID \
-  --attempt 1 \
-  --phase P1 \
-  --catalog-sha256 APPROVED_64_HEX_CATALOG_DIGEST \
-  --candidate-sha EXACT_40_HEX_GIT_SHA
-```
+#### uTiki 目標 CI（待實作）
 
-上述 image、build evidence 與 SHA 必須由當次受審查的 CI context 代入，範例字串
-本身不能執行。GitHub Actions 的正式 P1 workflow 另要求 repository variable
-`UTIKI_P1_BASE_IMAGE`；其值只能是維護者已審查的 `repository@sha256:<64-hex>`。
-repository 的正式 P1 gate 已配置此變數；workflow 仍須逐次驗證它是 digest-pinned
-reference。若變數缺失或格式不符，browser／performance required job 必須在 build 前
-明確以 `BLOCKED` prerequisite 失敗；不得改用 mutable tag、臨時解析 tag，或把空值視為
-skip／PASS。build evidence 要綁定 digest-pinned base image、實際 image ID，以及
-`ci/utiki-isolation/Dockerfile`、`requirement.txt`、`requirements-dev.txt` 的當次
-SHA-256；builder 只會把這三個檔案複製到暫存的最小 Docker build context，不會把
-checkout 或私人設定送入 Docker daemon。image 必須先在隔離測試開始前完成 build/load。
-正式執行前，launcher 另會要求 `HEAD` 等於 candidate SHA 且 working tree 乾淨，並以
-該 SHA 的 `git archive` 建立暫存 workspace。Container 只會唯讀掛載這份 tracked-file
-snapshot，不會掛載原 checkout，因此 ignored／untracked 的 `src/settings.json`、browser
-profile 或 artifacts 不會進入隔離測試域；archive digest 會寫入 outer evidence。
-launcher exit code `0` 才是當次 PASS，`1` 是已建立隔離後發現違規，`2` 是
-`BLOCKED`（例如 runtime／image／權限／證據不足）。`BLOCKED` 不得轉成 skip 或
-等效 PASS。raw report 只寫到明示的 `--report`；正式 job 另須由
-`tools/run_utiki_evidence.py` 封裝成 execution manifest 所列的
-`evidence/browser-isolation-report.json`。raw report 綁定 managed JUnit、reporter result、
-inner canary、production-origin report，以及 container 內實際執行的 12 份 negative
-probe envelope digest；缺任一項都不能封裝為 PASS。
+後續將以清楚的測試結果取代 catalog／manifest／逐義務 evidence 框架：
 
-正式 evidence envelope 使用 schema v2。可供 aggregate 定位檔案的欄位只接受兩種 scope：
-`repository` 以 candidate checkout 為根，`artifact` 以該 job 的 artifact root 為根；兩者都必須
-是無反斜線、磁碟代號、`.`、`..` 或 symlink traversal 的 POSIX 相對路徑，並以 SHA-256 綁定
-內容。producer raw report 內的 absolute path、command 或 working directory 僅能是診斷資料，
-不得作為搬移後 artifact 的定位依據。launcher 會在執行前完成 scope、路徑、producer、input、
-output 與 execution-key preflight，並在執行後確認 producer、manifest 與所有 input 未於收集期間
-改變，避免把執行後狀態冒充實際輸入。
+1. **原始碼 job**：Windows 與 Linux 跑 strict pytest、修改過的 Python 語法、適用的 mypy 與 JavaScript syntax。完整流程切換時加入 macOS source 啟動與資源檢查。
+2. **隔離瀏覽器 job**：Linux 容器禁止外部網路，使用合成頁面、production scripts 與專用 profile，驗證選擇、填值、未知提交及刷新競態。失敗顯示具體測試與原因。
+3. **效能檢查**：在固定 fixture 中比較同一流程的等待與瀏覽器往返；先記錄基線，再設定可合理重現的回歸界線。coverage 作為缺口提示，不直接移植其他專案的百分比。
 
-每種 evidence 的 input/output 種類、scope 與相對路徑都是 reviewed contract，不接受只因 digest
-正確就改指其他檔案。除 architecture report 明確以 captured stdout 作 producer report 外，stdout、
-stderr、producer report 與額外 capture 必須各自使用契約指定且不重疊的路徑；因此不能用同一個
-空檔同時冒充 stdout/stderr，也不能用 repository 內含 rejection token 的檔案冒充執行輸出。
-
-negative transcript 使用 schema v2，只記錄 reviewed request／registry digest、child producer 身分、
-stdout／stderr digest、真實 nonzero exit 與必要的 isolation proof。最終 checker 從 envelope 的
-artifact-relative references 重新取得檔案、重跑 request contract，並比對同一份 captured output；
-不再記錄或猜測 CI runner 的 absolute command、cwd 與暫存目錄，也沒有舊 schema fallback。
-
-production-origin 測試保留真實 origin/path，於 CDP request stage 僅允許已核准的
-脫敏 fixture 並拒絕未知 request；故意未安裝 interception 的 browser/driver canary
-則驗證 OS 邊界仍會攔截。兩者都禁止以連線真售票站作 canary。proxy、hosts、
-host-resolver、socket monkeypatch 或 browser flag 都不能單獨充當 hard-egress 證據。
-
-目前 launcher 的可執行參考環境是 Linux container。Windows/macOS native job 必須
-另有涵蓋整個 process tree 的 VM／防火牆證據；沒有證據時維持 `BLOCKED`，不能借用
-Linux 結果宣稱 native browser 已通過。
-
-#### uTiki P1 performance-contract
-
-P1 的五個 V12／V13 效能義務不是 benchmark 工具的單元測試。正式節點位於
-`tests/performance/utiki/test_p1_performance_contract.py`，只能由
-`tools/run_utiki_performance_isolation.py` 在 `isolated-linux-x64`、digest-pinned image、
-核對過的 image build evidence 與 `--network none` 中執行：
-
-```bash
-python tools/run_utiki_performance_isolation.py \
-  --image 'sha256:64_HEX_IMAGE_ID' \
-  --image-build-evidence artifacts/utiki-isolation/IMAGE_BUILD.json \
-  --execution-manifest tests/fixtures/utiki/manifest.json \
-  --run-dir artifacts/utiki-ci/RUN_ID/performance-contract/isolated-linux-x64/evidence \
-  --report artifacts/utiki-ci/RUN_ID/performance-contract/isolated-linux-x64/evidence/performance-isolation-raw.json \
-  --run-id RUN_ID \
-  --attempt 1 \
-  --phase P1 \
-  --catalog-sha256 APPROVED_64_HEX_CATALOG_DIGEST \
-  --candidate-sha EXACT_40_HEX_GIT_SHA
-```
-
-這個命令和 browser isolation 共用預先建好的 image 與 build evidence，但以獨立 container
-執行效能量測，避免只證明另一個 browser process 被隔離。固定方法由
-`ci/utiki-performance-isolation.json` 定義：source cold 3 samples／case、warm 300、
-event-loop 300，以及 production-origin date fixture 的 5 次 warm-up 與 30 次 reader
-量測。每次 reader 直接計數實際 `tab.send` protocol command、ticketing request 與 latency；
-fixture 只透過 CDP Request-stage interception fulfillment，不連真站。source 的四個
-`case_results` 也必須逐一等於 P0 基線的 semantic digest，不能只以樣本數與零失敗冒充
-行為一致。效能 container 同樣只讀 sanitized `git archive`；outer launcher 另產生並綁定
-candidate workspace attestation，inner harness 逐檔核對 tree／subject digests，source
-benchmark 由該 attestation 取得 candidate SHA 與 clean-tree metadata，不需要把 `.git`
-或原 checkout 掛入 container。
-
-inner report 在 controlled-peer 尚未由外層核對前只能是 `PENDING_OUTER_AUDIT`。outer report
-確認 image/build、container security、peer positive controls、outbound count 0，且綁定 raw
-samples、五個 managed JUnit nodes及 reporter digest 後，才可成為
-`browser-isolation-report` 的 raw producer。接著
-`tools/benchmarks/verify_utiki_p1_performance.py` 同時核對 outer PASS、raw benchmark、JUnit、
-source/fixture/production subject manifest digests，產生 `benchmark-report` 的 raw producer。
-兩者仍須分別由正式 evidence launcher封裝；缺 Docker、image、build evidence、Linux x64、
-Chrome、完整樣本或任一 digest 時為 `BLOCKED`／nonzero，不能降級成 source-only PASS。
-
-需要觀察覆蓋範圍時：
-
-```bash
-python -m pytest --cov=src --cov-report=term-missing
-```
-
-導入時在 macOS／Python 3.11 的當次整體 coverage 是 15%，僅作為技術債與後續補測的觀察值，目前不設失敗門檻。
-
-依本專案測試約定，所有會啟動瀏覽器或連線真實售票網站的測試都必須分別標記 `browser` 或 `live`；預設 pytest 命令排除這兩個 marker。本機、非真站的瀏覽器測試使用 `python -m pytest -m "browser and not live"`，避免同時選中雙重標記的 live 案例。`live` 測試必須另有明確授權與就緒環境才能執行。Marker 在 collection 後才篩選，因此測試模組匯入本身不得產生瀏覽器、網路或其他外部副作用。
-
-若完整套件因環境相依而失敗，要保存第一個可處理的失敗訊息，區分：
-
-- 本次修改造成的回歸。
-- 本機缺少相依套件或瀏覽器。
-- 測試本身依賴未提供的私人設定。
-- 與本次修改無關、原本已存在的失敗。
-
-不得只寫「環境問題」而省略證據。
+這是目標流程，現有 workflow 尚未改造。替代檢查實際可執行且涵蓋安全情境後，再移除舊 gate 及其兩份機器依賴文件；不把刪除檢查當成修復 CI。
 
 ### 4.5 建置驗證
 
@@ -426,8 +286,7 @@ fixture 必須：
 ## 9. 失敗處理
 
 測試失敗時保留第一個完整 traceback、原命令與必要輸出，區分 production regression、
-測試耦合、fixture 過期、結果收集錯誤及環境／權限不足。重跑與停止節奏依 `AGENTS.md`；
-需要最小重現、首因分群或有限診斷重置的例子時，再查
-[有限診斷與恢復案例](autonomous-execution.md)。
+測試耦合、fixture 過期、結果收集錯誤及環境／權限不足。先用最小重現定位根因，再修正
+受影響路徑；重跑範圍依改動影響決定，並把仍未解決的問題記在 uTiki [STATUS.md](utiki-refactor/STATUS.md)。
 
 工程審查的嚴重度與輸出格式見 [engineering-review.md](engineering-review.md)。

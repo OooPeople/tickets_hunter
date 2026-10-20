@@ -1,7 +1,5 @@
 **文件說明**：Tickets Hunter 公開技術文件導覽與索引
 
-**最後更新**：2026-10-17
-
 ---
 
 # Tickets Hunter 文件導覽
@@ -32,11 +30,8 @@ docs/
 │   ├── code-boundaries.md                             <- 程式碼邊界（模組職責、依賴 DAG、命名）
 │   ├── engineering-review.md                          <- 工程審查嚴重度、範圍與輸出格式
 │   ├── ticket_automation_standard.md                  <- 標準功能定義 (12 階段)
-│   ├── UTIKI_ROOT_REFACTOR_PLAN_v1.6.md               <- 已由外部採用紀錄固定的 uTiki v1.6 計劃
-│   ├── V1.6_CHANGE_SUMMARY.md                         <- v1.6 需求差異摘要
-│   ├── utiki-refactor/                                <- v1.6／v1.5 採用紀錄與歷史證據
-│   ├── autonomous-execution.md                        <- 有限診斷與恢復案例（按需）
-│   ├── utiki-refactor-plan.md                         <- 先前 uTiki2 重構計劃（歷史）
+│   ├── utiki-refactor/PLAN.md                         <- uTiki 重構計畫
+│   ├── utiki-refactor/STATUS.md                       <- uTiki 目前進度
 │   ├── structure.md                                   <- 程式架構與函數索引
 │   ├── development_guide.md                           <- 開發規範與檢查清單
 │   ├── coding_templates.md                            <- 程式寫法範本
@@ -112,7 +107,7 @@ docs/
 
 ### 情境 3：我要打包部署
 
-以下是其他平台或另有授權之產品交付的既有指南；目前 uTiki v1.6 個人原始碼需求不包含產品打包、frozen 成品或安裝包。
+以下是其他平台或另有授權之產品交付的既有指南；目前 uTiki 個人原始碼需求不包含產品打包、frozen 成品或安裝包。
 
 - [PyInstaller 打包指南](07-deployment/pyinstaller_packaging_guide.md) - 完整打包流程
 - [本地測試打包](../build_scripts/QUICK_START.md) - 5 分鐘快速開始
@@ -127,13 +122,8 @@ docs/
 | [code-boundaries.md](02-development/code-boundaries.md) | 模組責任與依賴邊界 | 開發者／審查者 |
 | [testing_execution_guide.md](02-development/testing_execution_guide.md) | 實際驗證命令與結果陳述 | 開發者／審查者 |
 | [engineering-review.md](02-development/engineering-review.md) | findings-first 工程審查 | 審查者 |
-| [UTIKI_ROOT_REFACTOR_PLAN_v1.6.md](02-development/UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) | 已採用的 uTiki v1.6 完整計劃；原始位元組保留交付狀態 | Issue #17 維護者／審查者 |
-| [V1.6_CHANGE_SUMMARY.md](02-development/V1.6_CHANGE_SUMMARY.md) | v1.6 已確認需求與 v1.5 差異摘要 | Issue #17 實作者／審查者 |
-| [SCOPE_CHANGE_MATRIX_v1.6.json](02-development/SCOPE_CHANGE_MATRIX_v1.6.json) | v1.6 scope 處置索引；不是 executable catalog | 規格投影／審查者 |
-| [utiki-refactor/adoption-v1.6.md](02-development/utiki-refactor/adoption-v1.6.md) | v1.6 計劃採用與版本固定紀錄 | 維護者／審查者 |
-| [utiki-refactor/adoption.md](02-development/utiki-refactor/adoption.md) | v1.5 採用與既有 catalog 核准脈絡（歷史固定紀錄） | 維護者／審查者 |
-| [autonomous-execution.md](02-development/autonomous-execution.md) | 首因不明或恢復工作時的有限診斷案例 | 按需查閱 |
-| [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | 先前 uTiki2 家族重構計劃（歷史） | 歷史查閱 |
+| [utiki-refactor/PLAN.md](02-development/utiki-refactor/PLAN.md) | uTiki 目標與重構計畫 | uTiki 實作者 |
+| [utiki-refactor/STATUS.md](02-development/utiki-refactor/STATUS.md) | uTiki 目前進度與下一步 | 跨電腦接續工作 |
 | [structure.md](02-development/structure.md) | 程式架構索引與完成度評分 | 所有人 |
 | [zendriver_api_guide.md](06-api-reference/zendriver_api_guide.md) | Zendriver API 指南（主要參考） | 開發者 |
 | [cdp_protocol_reference.md](06-api-reference/cdp_protocol_reference.md) | CDP 協定完整參考 | Zendriver 開發者 |
@@ -159,16 +149,11 @@ docs/
 各 WebDriver 引擎的 API 使用指南。
 
 ### 07-deployment/ - 部署打包
-其他平台或另有授權之產品交付的部署與打包指南。包含 PyInstaller 流程與依賴管理；不代表目前 uTiki v1.6 要求產品打包。
+其他平台或另有授權之產品交付的部署與打包指南。包含 PyInstaller 流程與依賴管理；不代表目前 uTiki 要求產品打包。
 
 ---
 
 ## 文件維護
 
-根目錄的 `AGENTS.md` 集中代理日常工作規則；已採用計劃與 required catalog 定義產品契約與
-階段門檻；本目錄保存按需查閱的架構、命令、狀態表、API 與案例。索引只描述用途與狀態，
-不複製另一套停止、CI、checkpoint 或打包政策。修改程式碼行為時，再更新對應的技術文件。
-
----
-
-**最後更新：** 2026-10-15
+根目錄的 [AGENTS.md](../AGENTS.md) 保存日常工作規則；[開發文件導航](02-development/README.md)
+說明各主文件的職責。修改行為或驗證命令時，只更新負責該資訊的文件。

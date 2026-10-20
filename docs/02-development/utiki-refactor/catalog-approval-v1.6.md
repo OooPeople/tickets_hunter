@@ -1,5 +1,7 @@
 # uTiki v1.6 required catalog 核准紀錄
 
+> 本檔僅供尚未退役的舊 CI catalog checker 讀取，並保存歷史追溯。現行重構目標與進度分別見 [PLAN.md](PLAN.md) 和 [STATUS.md](STATUS.md)。
+
 ## 目前結果
 
 | 欄位 | 值 |
@@ -9,7 +11,7 @@
 | Catalog | [`ci/utiki-required-cases.json`](../../../ci/utiki-required-cases.json) |
 | Catalog revision | `1.6.0` |
 | Status | `APPROVED` |
-| Plan | [`UTIKI_ROOT_REFACTOR_PLAN_v1.6.md`](../UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) |
+| Plan | [Git 歷史中的 v1.6 計畫](https://github.com/OooPeople/tickets_hunter/blob/a8ff1256a55925a947ac4a19064f64d8801b8c98/docs/02-development/UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) |
 | Plan SHA-256 | `f2e7e88edfbb3f40f9d8775d77c95ac48745ad9133c08d4762334f449b302220` |
 | Reviewed candidate SHA-256 | `65e604cb3651de49952dad34e3b634244b1b60aa654c20e1982c6149c5fd5a69` |
 | APPROVED catalog SHA-256 | `73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf` |
@@ -25,7 +27,7 @@
 ## 規格對帳
 
 Reviewer 直接對照已採用的 v1.6 計劃 §16、§16.11.1、§18.15、§19 與
-[`SCOPE_CHANGE_MATRIX_v1.6.json`](../SCOPE_CHANGE_MATRIX_v1.6.json)，沒有從現有測試數或
+[Git 歷史中的範圍矩陣](https://github.com/OooPeople/tickets_hunter/blob/a8ff1256a55925a947ac4a19064f64d8801b8c98/docs/02-development/SCOPE_CHANGE_MATRIX_v1.6.json)，沒有從現有測試數或
 execution manifest 反推需求。固定候選的 143 個 case ID 與計劃及 scope matrix 精確相等，
 320 個 obligation ID 全域唯一；每一項 obligation 都有非空的 gate、variant、evidence 與
 `PASS_ONLY` policy，且其 job／layer／target 都由相應 gate profile 承載。

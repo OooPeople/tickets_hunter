@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 
 from refresh_coordinator import (  # noqa: E402
+    OpeningBurstRequest,
     SharedRefreshCoordinator,
     UTK_SPORTS_SCOPE,
 )
@@ -29,6 +30,24 @@ class FakeClock:
 
     def advance(self, seconds):
         self.value += float(seconds)
+
+
+class AdvanceClockOnBeginConnection:
+    """SQLite proxy that simulates lock waiting before BEGIN returns."""
+
+    def __init__(self, connection, clock, seconds):
+        self._connection = connection
+        self._clock = clock
+        self._seconds = float(seconds)
+
+    def execute(self, statement, *args, **kwargs):
+        result = self._connection.execute(statement, *args, **kwargs)
+        if str(statement).strip().upper() == "BEGIN IMMEDIATE":
+            self._clock.advance(self._seconds)
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
 
 
 def _multiprocess_grant_worker(database_path, instance_id, start_event, result_queue):
@@ -83,6 +102,82 @@ def _multiprocess_reserve_commit_worker(
     result_queue.put(("commit", decision.granted, decision.status))
 
 
+def _multiprocess_opening_burst_worker(
+    database_path,
+    worker_id,
+    participant_id,
+    target_at,
+    start_event,
+    result_queue,
+):
+    coordinator = SharedRefreshCoordinator(
+        database_path,
+        owner_token=f"burst-{worker_id}",
+        stale_request_seconds=2.0,
+        poll_retry_seconds=0.01,
+        database_timeout_seconds=1.0,
+        fail_closed_retry_seconds=0.02,
+        dispatch_lease_seconds=0.5,
+    )
+    start_event.wait(5.0)
+    while time.time() < target_at:
+        time.sleep(0.002)
+    burst = OpeningBurstRequest(
+        campaign_id=f"scheduled:{int(target_at)}",
+        participant_id=participant_id,
+        scheduled_at=target_at,
+        window_until=target_at + 1.0,
+        interval_seconds=0.05,
+        max_participants=4,
+    )
+    deadline = target_at + 0.8
+    while time.time() < deadline:
+        reservation = coordinator.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            f"tab-{worker_id}",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=burst,
+        )
+        decision = None
+        if reservation.reserved:
+            decision = coordinator.commit_refresh_sync(
+                UTK_SPORTS_SCOPE,
+                f"tab-{worker_id}",
+                reservation.reservation_id,
+            )
+        if decision is not None and decision.granted:
+            claimed_until = coordinator.claim_dispatch_sync(
+                UTK_SPORTS_SCOPE,
+                decision.permit_id,
+                decision.dispatch_token,
+            )
+            command_at = time.time()
+            if not claimed_until or float(claimed_until) <= command_at:
+                result_queue.put((worker_id, participant_id, False, None))
+                return
+            coordinator.complete_dispatch_sync(
+                UTK_SPORTS_SCOPE,
+                decision.permit_id,
+                decision.dispatch_token,
+                possibly_dispatched=True,
+            )
+            result_queue.put((
+                worker_id,
+                participant_id,
+                decision.is_opening_burst,
+                command_at,
+            ))
+            return
+        retry_after = (
+            reservation.retry_after_seconds
+            if not reservation.reserved
+            else getattr(decision, "retry_after_seconds", 0.01)
+        )
+        time.sleep(max(0.002, min(retry_after, 0.02)))
+    result_queue.put((worker_id, participant_id, False, None))
+
+
 class SharedRefreshCoordinatorTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -98,6 +193,623 @@ class SharedRefreshCoordinatorTest(unittest.TestCase):
             random_uniform=lambda low, high: high,
             poll_retry_seconds=0.25,
             **kwargs,
+        )
+
+    def opening_burst(
+        self, participant, *, campaign_id="scheduled:1000", target=1000.0
+    ):
+        return OpeningBurstRequest(
+            campaign_id=campaign_id,
+            participant_id=participant,
+            scheduled_at=target,
+            window_until=target + 2.0,
+            interval_seconds=0.25,
+            max_participants=4,
+        )
+
+    def test_opening_burst_serves_each_participant_once_then_returns_to_normal(self):
+        coordinators = [self.coordinator(f"owner-{index}") for index in range(5)]
+        grants = []
+        for index in range(4):
+            decision = coordinators[index].poll_refresh_sync(
+                UTK_SPORTS_SCOPE,
+                f"tab-{index}",
+                min_interval_seconds=1.0,
+                jitter_range_seconds=(0.0, 0.0),
+                opening_burst=self.opening_burst(f"profile-{index}"),
+            )
+            if index:
+                self.assertFalse(decision.granted)
+                self.assertEqual("pacing", decision.status)
+                self.clock.advance(0.25)
+                decision = coordinators[index].poll_refresh_sync(
+                    UTK_SPORTS_SCOPE,
+                    f"tab-{index}",
+                    min_interval_seconds=1.0,
+                    jitter_range_seconds=(0.0, 0.0),
+                    opening_burst=self.opening_burst(f"profile-{index}"),
+                )
+            self.assertTrue(decision.granted)
+            self.assertTrue(decision.is_opening_burst)
+            grants.append(decision)
+
+        repeated = coordinators[0].poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a-restarted",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-0"),
+        )
+        self.assertFalse(repeated.granted)
+        self.assertEqual("opening_barrier", repeated.status)
+        self.assertTrue(coordinators[0].cancel_request_sync(
+            UTK_SPORTS_SCOPE, "tab-a-restarted"
+        ))
+
+        fifth = coordinators[4].poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-4",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-4"),
+        )
+        self.assertFalse(fifth.granted)
+        self.assertEqual("opening_barrier", fifth.status)
+        snapshot = coordinators[0].snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertEqual(4, len(snapshot["grants"]))
+        self.assertEqual("exhausted", snapshot["campaigns"][0]["state"])
+
+        self.clock.advance(1.25)
+        normal = coordinators[4].poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-4",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-4"),
+        )
+        self.assertTrue(normal.granted)
+        self.assertFalse(normal.is_opening_burst)
+
+    def test_future_opening_request_waits_then_becomes_burst_at_target(self):
+        coordinator = self.coordinator("owner-a")
+        burst = self.opening_burst("profile-a")
+        self.clock.value = burst.scheduled_at - 0.001
+
+        early = coordinator.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            request_token="request-a",
+            opening_burst=burst,
+        )
+
+        self.assertFalse(early.granted)
+        self.assertEqual("opening_not_started", early.status)
+        snapshot = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertEqual([], snapshot["queue"])
+        self.assertEqual([], snapshot["campaigns"])
+        self.assertEqual([], snapshot["grants"])
+        self.assertEqual([], snapshot["receipts"])
+        self.assertEqual(0, snapshot["bucket"]["sequence"])
+
+        self.clock.value = burst.scheduled_at
+        decision = coordinator.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            request_token="request-a",
+            opening_burst=burst,
+        )
+
+        self.assertTrue(decision.granted)
+        self.assertTrue(decision.is_opening_burst)
+        self.assertEqual(burst.campaign_id, decision.campaign_id)
+        snapshot = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertEqual(1, len(snapshot["grants"]))
+        self.assertEqual(1, len(snapshot["receipts"]))
+        self.assertTrue(snapshot["receipts"][0]["is_opening_burst"])
+
+    def test_four_early_participants_receive_only_burst_grants(self):
+        coordinators = [self.coordinator(f"owner-{index}") for index in range(4)]
+        bursts = [self.opening_burst(f"profile-{index}") for index in range(4)]
+        self.clock.value = 999.999
+
+        for index, coordinator in enumerate(coordinators):
+            early = coordinator.poll_refresh_sync(
+                UTK_SPORTS_SCOPE,
+                f"tab-{index}",
+                min_interval_seconds=1.0,
+                jitter_range_seconds=(0.0, 0.0),
+                request_token=f"request-{index}",
+                opening_burst=bursts[index],
+            )
+            self.assertFalse(early.granted)
+            self.assertEqual("opening_not_started", early.status)
+
+        self.clock.value = 1000.0
+        for index, coordinator in enumerate(coordinators):
+            decision = coordinator.poll_refresh_sync(
+                UTK_SPORTS_SCOPE,
+                f"tab-{index}",
+                min_interval_seconds=1.0,
+                jitter_range_seconds=(0.0, 0.0),
+                request_token=f"request-{index}",
+                opening_burst=bursts[index],
+            )
+            if index:
+                self.assertFalse(decision.granted)
+                self.assertEqual("pacing", decision.status)
+                self.clock.advance(0.25)
+                decision = coordinator.poll_refresh_sync(
+                    UTK_SPORTS_SCOPE,
+                    f"tab-{index}",
+                    min_interval_seconds=1.0,
+                    jitter_range_seconds=(0.0, 0.0),
+                    request_token=f"request-{index}",
+                    opening_burst=bursts[index],
+                )
+            self.assertTrue(decision.granted)
+            self.assertTrue(decision.is_opening_burst)
+
+        snapshot = coordinators[0].snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertEqual(4, len(snapshot["grants"]))
+        self.assertEqual(4, len(snapshot["receipts"]))
+        self.assertTrue(all(row["is_opening_burst"] for row in snapshot["receipts"]))
+        self.assertEqual("exhausted", snapshot["campaigns"][0]["state"])
+
+    def test_opening_reservation_release_does_not_consume_grant(self):
+        coordinator = self.coordinator("owner-a")
+        burst = self.opening_burst("profile-a")
+        reservation = coordinator.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            request_token="first",
+            opening_burst=burst,
+        )
+        self.assertTrue(reservation.reserved)
+        self.assertTrue(reservation.is_opening_burst)
+        self.assertTrue(coordinator.release_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            reservation.reservation_id,
+            request_token="first",
+        ))
+        self.assertEqual([], coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["grants"])
+
+        decision = coordinator.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            request_token="second",
+            opening_burst=burst,
+        )
+        self.assertTrue(decision.granted)
+        self.assertTrue(decision.is_opening_burst)
+
+    def test_duplicate_participant_row_cannot_block_an_unserved_profile(self):
+        first = self.coordinator("owner-a1")
+        duplicate = self.coordinator("owner-a2")
+        second = self.coordinator("owner-b")
+        reservation = first.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a1",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        self.assertTrue(reservation.reserved)
+        self.assertEqual("reservation_active", duplicate.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a2",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        ).status)
+        self.assertEqual("reservation_active", second.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-b"),
+        ).status)
+
+        first_decision = first.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a1", reservation.reservation_id
+        )
+        self.assertTrue(first.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE,
+            first_decision.permit_id,
+            first_decision.dispatch_token,
+        ))
+        self.assertTrue(first.complete_dispatch_sync(
+            UTK_SPORTS_SCOPE,
+            first_decision.permit_id,
+            first_decision.dispatch_token,
+            possibly_dispatched=True,
+        ))
+        self.clock.advance(0.25)
+
+        second_decision = second.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-b"),
+        )
+        self.assertTrue(second_decision.granted)
+        self.assertTrue(second_decision.is_opening_burst)
+
+    def test_rate_limit_aborts_opening_campaign_permanently(self):
+        first = self.coordinator("owner-a")
+        second = self.coordinator("owner-b")
+        decision = first.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        self.assertTrue(decision.is_opening_burst)
+        self.clock.advance(0.25)
+        report = second.report_rate_limited_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            initial_cooldown_seconds=1.0,
+            max_cooldown_seconds=4.0,
+        )
+        self.assertTrue(report.new_incident)
+        campaign = first.snapshot_sync(UTK_SPORTS_SCOPE)["campaigns"][0]
+        self.assertEqual("aborted", campaign["state"])
+
+        self.clock.advance(1.0)
+        probe = second.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=0.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-b"),
+        )
+        self.assertTrue(probe.granted)
+        self.assertTrue(probe.is_recovery_probe)
+        self.assertFalse(probe.is_opening_burst)
+
+    def test_dispatch_lease_requires_exact_claim_and_ack(self):
+        first = self.coordinator("owner-a", dispatch_lease_seconds=1.0)
+        second = self.coordinator("owner-b", dispatch_lease_seconds=1.0)
+        reservation = first.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=0.25,
+            jitter_range_seconds=(0.0, 0.0),
+            request_token="request",
+        )
+        decision = first.commit_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            reservation.reservation_id,
+            request_token="request",
+        )
+        self.assertTrue(decision.granted)
+        self.assertFalse(first.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, "wrong-token"
+        ))
+        self.assertFalse(second.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+        claimed_until = first.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        )
+        self.assertGreaterEqual(claimed_until, self.clock.value + 2.0)
+        self.assertFalse(first.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+
+        blocked = second.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=0.25,
+            jitter_range_seconds=(0.0, 0.0),
+        )
+        self.assertEqual("dispatch_active", blocked.status)
+        self.assertTrue(first.complete_dispatch_sync(
+            UTK_SPORTS_SCOPE,
+            decision.permit_id,
+            decision.dispatch_token,
+            possibly_dispatched=True,
+        ))
+        self.assertTrue(first.complete_dispatch_sync(
+            UTK_SPORTS_SCOPE,
+            decision.permit_id,
+            decision.dispatch_token,
+            possibly_dispatched=True,
+        ))
+        self.clock.advance(0.25)
+        self.assertTrue(second.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=0.25,
+            jitter_range_seconds=(0.0, 0.0),
+        ).granted)
+
+    def test_aborting_campaign_preserves_claimed_dispatch_accounting(self):
+        owner = self.coordinator(
+            "owner-a",
+            dispatch_lease_seconds=0.5,
+            claimed_dispatch_lease_seconds=2.0,
+        )
+        controller = self.coordinator(
+            "owner-b",
+            dispatch_lease_seconds=0.5,
+            claimed_dispatch_lease_seconds=2.0,
+        )
+        reservation = owner.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        decision = owner.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+        self.assertTrue(decision.granted)
+        self.assertTrue(owner.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+
+        self.assertTrue(controller.abort_opening_campaigns_sync(
+            UTK_SPORTS_SCOPE, "disabled"
+        ))
+        snapshot = controller.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertIsNotNone(snapshot["dispatch"])
+        self.assertEqual("claimed", snapshot["receipts"][0]["dispatch_status"])
+        self.assertTrue(owner.complete_dispatch_sync(
+            UTK_SPORTS_SCOPE,
+            decision.permit_id,
+            decision.dispatch_token,
+            possibly_dispatched=True,
+        ))
+        snapshot = controller.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertIsNone(snapshot["dispatch"])
+        self.assertEqual(self.clock.value, snapshot["bucket"]["last_dispatch_at"])
+
+    def test_aborting_campaign_revokes_unclaimed_dispatch(self):
+        owner = self.coordinator("owner-a")
+        controller = self.coordinator("owner-b")
+        reservation = owner.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        decision = owner.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+        self.assertTrue(decision.granted)
+        self.assertTrue(controller.abort_opening_campaigns_sync(
+            UTK_SPORTS_SCOPE, "disabled"
+        ))
+        self.assertFalse(owner.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+        snapshot = controller.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertIsNone(snapshot["dispatch"])
+        self.assertEqual("revoked", snapshot["receipts"][0]["dispatch_status"])
+
+    def test_burst_dispatch_cannot_be_claimed_after_campaign_window(self):
+        owner = self.coordinator(
+            "owner-a",
+            dispatch_lease_seconds=5.0,
+            claimed_dispatch_lease_seconds=5.0,
+        )
+        reservation = owner.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        decision = owner.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+        self.assertTrue(decision.granted)
+        self.clock.advance(2.0)
+        self.assertFalse(owner.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+        snapshot = owner.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertIsNone(snapshot["dispatch"])
+        self.assertEqual("revoked", snapshot["receipts"][0]["dispatch_status"])
+
+    def test_commit_rechecks_time_after_waiting_for_write_lock(self):
+        owner = self.coordinator("owner-a")
+        reservation = owner.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        self.assertTrue(reservation.reserved)
+        connect = owner._connect
+        owner._connect = lambda: AdvanceClockOnBeginConnection(
+            connect(), self.clock, 2.0
+        )
+
+        decision = owner.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+
+        self.assertFalse(decision.granted)
+        self.assertEqual("reservation_expired", decision.status)
+
+    def test_claim_rechecks_time_after_waiting_for_write_lock(self):
+        owner = self.coordinator(
+            "owner-a",
+            dispatch_lease_seconds=5.0,
+            claimed_dispatch_lease_seconds=5.0,
+        )
+        reservation = owner.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        decision = owner.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+        self.assertTrue(decision.granted)
+        connect = owner._connect
+        owner._connect = lambda: AdvanceClockOnBeginConnection(
+            connect(), self.clock, 2.0
+        )
+
+        claimed = owner.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        )
+
+        self.assertFalse(claimed)
+        snapshot = owner.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertIsNone(snapshot["dispatch"])
+        self.assertEqual("revoked", snapshot["receipts"][0]["dispatch_status"])
+
+    def test_crashed_burst_reservation_does_not_block_the_whole_window(self):
+        first = self.coordinator(
+            "owner-a",
+            stale_request_seconds=5.0,
+            reservation_lease_seconds=5.0,
+            opening_reservation_lease_seconds=0.75,
+        )
+        second = self.coordinator(
+            "owner-b",
+            stale_request_seconds=5.0,
+            reservation_lease_seconds=5.0,
+            opening_reservation_lease_seconds=0.75,
+        )
+        abandoned = first.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        )
+        self.assertTrue(abandoned.reserved)
+        self.clock.advance(0.75)
+        replacement = second.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-b"),
+        )
+        self.assertTrue(replacement.reserved)
+        self.assertTrue(replacement.is_opening_burst)
+        queue = second.snapshot_sync(UTK_SPORTS_SCOPE)["queue"]
+        self.assertEqual(["tab-b"], [row["instance_id"] for row in queue])
+
+    def test_rate_limit_preserves_claimed_dispatch_until_completion(self):
+        owner = self.coordinator("owner-a")
+        reporter = self.coordinator("owner-b")
+        reservation = owner.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=0.5,
+            jitter_range_seconds=(0.0, 0.0),
+        )
+        decision = owner.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+        self.assertTrue(owner.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+        report = reporter.report_rate_limited_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            initial_cooldown_seconds=60.0,
+            max_cooldown_seconds=240.0,
+        )
+        self.assertTrue(report.new_incident)
+        self.assertIsNotNone(reporter.snapshot_sync(UTK_SPORTS_SCOPE)["dispatch"])
+        self.assertFalse(owner.claim_dispatch_sync(
+            UTK_SPORTS_SCOPE, decision.permit_id, decision.dispatch_token
+        ))
+        self.assertIsNotNone(reporter.snapshot_sync(UTK_SPORTS_SCOPE)["dispatch"])
+        self.assertTrue(owner.complete_dispatch_sync(
+            UTK_SPORTS_SCOPE,
+            decision.permit_id,
+            decision.dispatch_token,
+            possibly_dispatched=True,
+        ))
+        snapshot = reporter.snapshot_sync(UTK_SPORTS_SCOPE)
+        self.assertIsNone(snapshot["dispatch"])
+        self.assertEqual(self.clock.value, snapshot["bucket"]["last_dispatch_at"])
+
+    def test_expired_dispatch_lease_applies_conservative_gap(self):
+        first = self.coordinator("owner-a", dispatch_lease_seconds=1.0)
+        second = self.coordinator("owner-b", dispatch_lease_seconds=1.0)
+        reservation = first.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=0.5,
+            jitter_range_seconds=(0.0, 0.0),
+        )
+        decision = first.commit_refresh_sync(
+            UTK_SPORTS_SCOPE, "tab-a", reservation.reservation_id
+        )
+        self.assertTrue(decision.granted)
+        self.clock.advance(1.0)
+        waiting = second.reserve_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=0.5,
+            jitter_range_seconds=(0.0, 0.0),
+        )
+        self.assertEqual("pacing", waiting.status)
+        self.clock.advance(0.5)
+        self.assertTrue(second.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=0.5,
+            jitter_range_seconds=(0.0, 0.0),
+        ).granted)
+
+    def test_overlapping_opening_campaign_does_not_create_second_quota(self):
+        first = self.coordinator("owner-a")
+        second = self.coordinator("owner-b")
+        self.assertTrue(first.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-a",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=self.opening_burst("profile-a"),
+        ).granted)
+        overlapping = OpeningBurstRequest(
+            campaign_id="scheduled:1001",
+            participant_id="profile-b",
+            scheduled_at=1001.0,
+            window_until=1003.0,
+            interval_seconds=0.25,
+            max_participants=4,
+        )
+        self.clock.advance(1.0)
+        result = second.poll_refresh_sync(
+            UTK_SPORTS_SCOPE,
+            "tab-b",
+            min_interval_seconds=1.0,
+            jitter_range_seconds=(0.0, 0.0),
+            opening_burst=overlapping,
+        )
+        self.assertFalse(result.granted)
+        self.assertEqual("opening_barrier", result.status)
+        self.assertEqual(
+            1, len(first.snapshot_sync(UTK_SPORTS_SCOPE)["campaigns"])
         )
 
     def test_minimum_gap_and_jitter_are_shared_between_owners(self):
@@ -626,9 +1338,93 @@ class SharedRefreshCoordinatorTest(unittest.TestCase):
                 )
             }
         self.assertIn("last_recovery_at", columns)
-        self.assertEqual(3, version)
+        self.assertIn("last_dispatch_at", columns)
+        self.assertEqual(4, version)
         self.assertIn("refresh_reservation", tables)
         self.assertIn("refresh_commit_receipt", tables)
+        self.assertIn("refresh_opening_campaign", tables)
+        self.assertIn("refresh_opening_grant", tables)
+        self.assertIn("refresh_dispatch_lease", tables)
+
+    def test_version_three_tables_receive_additive_burst_columns(self):
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE refresh_bucket (
+                    scope TEXT PRIMARY KEY,
+                    next_allowed_at REAL NOT NULL DEFAULT 0,
+                    cooldown_until REAL NOT NULL DEFAULT 0,
+                    consecutive_429 INTEGER NOT NULL DEFAULT 0,
+                    last_429_at REAL NOT NULL DEFAULT 0,
+                    recovery_required INTEGER NOT NULL DEFAULT 0,
+                    probe_owner TEXT NOT NULL DEFAULT '',
+                    probe_expires_at REAL NOT NULL DEFAULT 0,
+                    last_recovery_at REAL NOT NULL DEFAULT 0,
+                    sequence INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE refresh_queue (
+                    scope TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    owner_token TEXT NOT NULL,
+                    process_id INTEGER NOT NULL,
+                    enqueued_at REAL NOT NULL,
+                    heartbeat_at REAL NOT NULL,
+                    min_interval_seconds REAL NOT NULL,
+                    jitter_min_seconds REAL NOT NULL,
+                    jitter_max_seconds REAL NOT NULL,
+                    PRIMARY KEY (scope, instance_id)
+                );
+                CREATE TABLE refresh_reservation (
+                    scope TEXT PRIMARY KEY,
+                    reservation_id TEXT NOT NULL UNIQUE,
+                    request_id TEXT NOT NULL UNIQUE,
+                    owner_token TEXT NOT NULL,
+                    reserved_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    is_recovery_probe INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE refresh_commit_receipt (
+                    reservation_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    owner_token TEXT NOT NULL,
+                    permit_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    is_recovery_probe INTEGER NOT NULL DEFAULT 0,
+                    committed_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+                PRAGMA user_version=3;
+                """
+            )
+            connection.commit()
+
+        coordinator = self.coordinator("owner-a")
+        self.assertTrue(coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["ok"])
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            queue_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(refresh_queue)"
+                )
+            }
+            reservation_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(refresh_reservation)"
+                )
+            }
+            receipt_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(refresh_commit_receipt)"
+                )
+            }
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(4, version)
+        self.assertIn("is_opening_burst", queue_columns)
+        self.assertIn("campaign_participant_id", reservation_columns)
+        self.assertIn("dispatch_token", receipt_columns)
 
     def test_cancel_removes_only_callers_pending_request(self):
         seed = self.coordinator("seed")
@@ -1000,6 +1796,45 @@ class SharedRefreshCoordinatorTest(unittest.TestCase):
         ]
         self.assertTrue(all(interval >= 0.045 for interval in intervals), intervals)
         self.assertEqual([1, 2, 3], sorted(item[2] for item in results))
+
+    def test_opening_burst_is_bounded_across_spawned_processes(self):
+        context = multiprocessing.get_context("spawn")
+        start_event = context.Event()
+        result_queue = context.Queue()
+        target_at = time.time() + 0.8
+        participants = ["profile-a", "profile-a", "profile-b", "profile-c", "profile-d"]
+        processes = [
+            context.Process(
+                target=_multiprocess_opening_burst_worker,
+                args=(
+                    str(self.database_path),
+                    index,
+                    participant,
+                    target_at,
+                    start_event,
+                    result_queue,
+                ),
+            )
+            for index, participant in enumerate(participants)
+        ]
+        for process in processes:
+            process.start()
+        start_event.set()
+        results = [result_queue.get(timeout=8.0) for _ in processes]
+        for process in processes:
+            process.join(timeout=5.0)
+            self.assertEqual(0, process.exitcode)
+
+        granted = [item for item in results if item[3] is not None]
+        self.assertEqual(4, len(granted), results)
+        self.assertTrue(all(item[2] for item in granted), granted)
+        self.assertEqual(4, len({item[1] for item in granted}))
+        ordered = sorted(granted, key=lambda item: item[3])
+        gaps = [
+            ordered[index + 1][3] - ordered[index][3]
+            for index in range(len(ordered) - 1)
+        ]
+        self.assertTrue(all(gap >= 0.035 for gap in gaps), gaps)
 
 
 if __name__ == "__main__":

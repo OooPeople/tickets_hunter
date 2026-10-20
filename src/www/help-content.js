@@ -331,19 +331,19 @@ const HELP_CONTENT = {
   },
 
   ctbc_cookie: {
-    title: '中信育樂 Cookie',
-    short: '貼上已登入 CTBC 售票網的完整 Cookie header，可取代帳號密碼登入',
+    title: '職棒售票 Cookie',
+    short: '貼上已登入中信兄弟或味全龍售票網的完整 Cookie header，可取代帳號密碼登入',
     detail: `
-      <p>CTBC 的登入工作階段由多個 <code>CTBC_...</code> Cookie 組成，因此需要貼上完整 Cookie header，不能只複製單一 Value。</p>
+      <p>中信兄弟與味全龍的登入工作階段都由多個 Cookie 組成：中信使用 <code>CTBC_...</code>，味全龍使用 <code>WDRAGONS|...</code>。因此需要貼上目標網站的完整 Cookie header，不能只複製單一 Value。</p>
       <p><strong>取得步驟（Chrome）：</strong></p>
       <ol>
-        <li>在 Chrome 登入中信育樂售票網</li>
+        <li>在 Chrome 登入準備使用的中信兄弟或味全龍售票網</li>
         <li>按 <code>F12</code>，切到「Network」後重新整理頁面</li>
         <li>點選最上方的 <code>UTK...</code> 文件請求</li>
         <li>在「Request Headers」找到 <code>Cookie</code>，複製冒號後的完整內容</li>
-        <li>貼入此欄位；程式只會取用名稱以 <code>CTBC_</code> 開頭的 Cookie</li>
+        <li>貼入此欄位；程式會依首頁只取用中信的 <code>CTBC_...</code> 或味全龍的 <code>WDRAGONS|...</code> Cookie</li>
       </ol>
-      <p class="text-warning-emphasis small mb-0">Cookie 等同登入憑證，請勿分享。Cookie 失效時程式會回退到帳號密碼；若未設定帳密，請重新登入 Chrome 並複製新的 Cookie。</p>`,
+      <p class="text-warning-emphasis small mb-0">Cookie 等同登入憑證，請勿分享。每個設定檔請貼上與首頁相同網站的 Cookie。Cookie 失效時程式會回退到帳號密碼；若未設定帳密，請重新登入 Chrome 並複製新的 Cookie。</p>`,
     link: null
   },
 
@@ -395,7 +395,7 @@ const HELP_CONTENT = {
 
   auto_reload_page_interval: {
     title: '自動刷新頁面間隔',
-    short: '活動頁面的自動重新整理間隔秒數（0 = 停用）',
+    short: '活動頁面的自動重新整理間隔秒數（0 = 停用；職棒日期頁為跨實例合計間隔）',
     detail: `
       <p>設定程式在目標頁面等待時自動刷新的間隔時間（單位：秒）。</p>
       <table class="table table-sm table-bordered">
@@ -406,6 +406,8 @@ const HELP_CONTENT = {
           <tr><td><code>5</code>（建議）</td><td>每 5 秒重新整理，平衡速度與負載</td></tr>
         </tbody>
       </table>
+      <p class="small"><strong>職棒平台：</strong>啟用「職棒共用刷新保護」時，中信兄弟與味全龍的日期頁會由所有執行中的實例共用此間隔。例如四個實例設定 1 秒，合計仍約每秒只重新載入一次，不是每個實例各一次。進入選區或座位頁後，一般點擊不受此間隔限制。</p>
+      <p class="small"><strong>開賣首輪加速：</strong>若另行啟用，到達「刷新在指定時間」時只讓不同 profile 各取得一次有上限的快速 reload 指令機會；保留時間不是持續高速刷新。系統只保證指令協調，不保證站方原始伺服器收到相同數量的請求，也不保證頁面在理論時間內載入完成。</p>
       <p class="text-warning-emphasis small mb-0"><strong>注意：</strong>TixCraft 等平台偵測到過於頻繁的刷新可能觸發限制，建議不要低於 3 秒。</p>`,
     link: null
   },
@@ -1245,19 +1247,19 @@ const HELP_CONTENT_EN_META = {
       <p class="mb-0 text-muted small">Adjacency still follows neighboring cells on the actual seat map, so consecutive numbers never bridge an aisle. Aisle-seat mode does not fall back to interior or non-adjacent seats when no row-end block is available; endpoint detection depends on the site retaining parseable row and seat numbers for sold seats.</p>`,
   },
   ctbc_cookie: {
-    title: 'CTBC Sports cookie set',
-    short: 'Paste the complete Cookie header from a logged-in CTBC Sports session.',
+    title: 'Baseball ticketing cookie set',
+    short: 'Paste the complete Cookie header from a logged-in CTBC Brothers or Wei Chuan Dragons session.',
     detailHtml: `
-      <p>CTBC login uses multiple <code>CTBC_...</code> cookies, so copy the complete Cookie request header rather than a single cookie value.</p>
+      <p>CTBC Brothers and Wei Chuan Dragons login sessions use multiple cookies: <code>CTBC_...</code> for CTBC and <code>WDRAGONS|...</code> for Wei Chuan Dragons. Copy the complete Cookie request header from the target site rather than a single cookie value.</p>
       <p><strong>How to get it in Chrome:</strong></p>
       <ol>
-        <li>Log in to the CTBC Sports ticketing site.</li>
+        <li>Log in to the CTBC Brothers or Wei Chuan Dragons ticketing site you plan to use.</li>
         <li>Press <code>F12</code>, open Network, and reload the page.</li>
         <li>Select the main <code>UTK...</code> document request.</li>
         <li>Under Request Headers, copy the complete value after <code>Cookie:</code>.</li>
-        <li>Paste it here. Only cookie names beginning with <code>CTBC_</code> are injected.</li>
+        <li>Paste it here. The homepage determines whether <code>CTBC_...</code> or <code>WDRAGONS|...</code> cookies are injected.</li>
       </ol>
-      <p class="text-warning-emphasis small mb-0">Treat this cookie set as a login credential and never share it. If it expires, account/password login is used as a fallback.</p>`,
+      <p class="text-warning-emphasis small mb-0">Treat this cookie set as a login credential and never share it. Each profile should use cookies from the same site as its homepage. If they expire, account/password login is used as a fallback.</p>`,
   },
   idle_keyword: {
     title: 'System time pause keywords',
@@ -1297,7 +1299,7 @@ const HELP_CONTENT_EN_META = {
   },
   auto_reload_page_interval: {
     title: 'Auto reload interval',
-    short: 'Automatic page reload interval in seconds. Set to 0 to disable.',
+    short: 'Automatic page reload interval in seconds. Set to 0 to disable; baseball date pages share it across instances.',
     detailHtml: `
       <p>Set how often the bot reloads the target page while waiting, in seconds.</p>
       <table class="table table-sm table-bordered">
@@ -1308,6 +1310,8 @@ const HELP_CONTENT_EN_META = {
           <tr><td><code>5</code> (recommended)</td><td>Reload every 5 seconds for a balance between speed and load</td></tr>
         </tbody>
       </table>
+      <p class="small"><strong>Baseball platforms:</strong> When shared baseball refresh protection is enabled, every running CTBC Brothers and Wei Chuan Dragons instance shares this interval on UTK0201 date pages. For example, four instances set to 1 second still perform about one aggregate reload per second, not one reload per instance. Normal clicks after entering area or seat pages are not throttled by this interval.</p>
+      <p class="small"><strong>Scheduled first-pass acceleration:</strong> When separately enabled, reaching Refresh at specified time gives each distinct profile at most one bounded, accelerated reload-command opportunity. The reservation window is not continuous high-frequency reloading. Coordination applies to browser commands and does not guarantee matching origin-server requests or page-load completion within the theoretical dispatch time.</p>
       <p class="text-warning-emphasis small mb-0"><strong>Note:</strong> Platforms such as TixCraft may throttle or restrict overly frequent reloads. Using less than 3 seconds is not recommended.</p>`,
   },
   tixcraft_soft_block_delay: {

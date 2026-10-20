@@ -31,6 +31,7 @@ from nodriver_common import (
     send_telegram_notification,
 )
 from refresh_coordinator import (
+    OpeningBurstRequest,
     UTK_SPORTS_SCOPE,
     get_shared_refresh_coordinator,
 )
@@ -40,11 +41,14 @@ __all__ = [
     "is_utk_sports_url",
     "nodriver_utk_sports_cancel_refresh",
     "nodriver_utk_sports_consume_reload_event",
+    "nodriver_utk_sports_consume_reload_ack",
+    "nodriver_utk_sports_reload_pending",
     "nodriver_utk_sports_health_check",
     "nodriver_ctbc_inject_cookies",
     "nodriver_ctbc_main",
     "nodriver_utk_sports_reload",
     "nodriver_utk_sports_reload_wait",
+    "nodriver_utk_sports_scheduled_reload",
 ]
 
 
@@ -54,11 +58,13 @@ UTK_SPORTS_PROFILES = {
     CTBC_DOMAIN: {
         "name": "CTBC Sports",
         "map_namespace": "CTBC_SPORTS",
+        "cookie_prefixes": ("CTBC_",),
         "fast_area_prefetch": True,
     },
     "tix.wdragons.com": {
         "name": "Wei Chuan Dragons",
         "map_namespace": "WDRAGONS",
+        "cookie_prefixes": ("WDRAGONS|",),
         # WDragons' native Send() first calls GET_PRICE_AREA_NOTICE and may
         # display a confirmation.  Keep the optimized native map flow instead
         # of bypassing that server-side notice check.
@@ -72,9 +78,13 @@ CTBC_DATE_PURCHASE_CONTROL_SELECTOR = (
 )
 CTBC_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
 CTBC_FAST_PATH_TTL_SECONDS = 1.5
+CTBC_DATE_ACTION_PROGRESS_TIMEOUT_SECONDS = 5.0
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
 UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
+UTK_DISPATCH_COMMAND_TIMEOUT_SECONDS = 0.75
+UTK_RELOAD_DOCUMENT_ACK_TIMEOUT_SECONDS = 10.0
+UTK_DOCUMENT_IDENTITY_CLOCK_SKEW_SECONDS = 0.1
 # This must cover the coordinator's default 5-second fail-closed retry.  Every
 # pre-report writer uses the same-or-longer duration, so a later process cannot
 # shorten a marker written after a transient SQLite failure.
@@ -91,9 +101,12 @@ _state = {
     "rate_limit_retry": {},
     "recovery_probe": {},
     "reload_event": set(),
+    "reload_inflight": {},
+    "reload_acknowledged": set(),
     "cancel_tasks": set(),
     "document_snapshot": {},
     "last_document": {},
+    "date_action_attempt": {},
     "unknown_document": {},
     "tab_tokens": [],
 }
@@ -129,8 +142,8 @@ def _pop_reload_request_if_token(identity, request_token):
     return None
 
 
-def parse_ctbc_cookie_string(raw_value):
-    """Return CTBC session cookie pairs from a Cookie header or JSON export."""
+def parse_ctbc_cookie_string(raw_value, allowed_prefixes=None):
+    """Return UTK sports session cookie pairs from a header or JSON export."""
     raw = str(raw_value or "").strip()
     if not raw:
         return []
@@ -162,10 +175,12 @@ def parse_ctbc_cookie_string(raw_value):
     # ASP.NET antiforgery and analytics cookies are intentionally excluded.
     # The page generates a fresh antiforgery token after the injected session
     # is reloaded, while stale antiforgery cookies would make POSTs fail.
+    prefixes = tuple(allowed_prefixes or ("CTBC_", "WDRAGONS|"))
     result = []
     seen = set()
     for name, value in cookie_pairs:
-        if not name.startswith("CTBC_") or "|" not in name or not value or name in seen:
+        is_login_cookie = any(name.startswith(prefix) for prefix in prefixes)
+        if not is_login_cookie or "|" not in name or not value or name in seen:
             continue
         result.append((name, value))
         seen.add(name)
@@ -173,19 +188,33 @@ def parse_ctbc_cookie_string(raw_value):
 
 
 async def nodriver_ctbc_inject_cookies(tab, config_dict):
-    """Inject a copied CTBC cookie set; account/password remains the fallback."""
+    """Inject a copied UTK sports cookie set into the current tenant only."""
     debug = util.create_debug_logger(config_dict)
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    profile = _get_utk_sports_profile(current_url)
+    if not profile:
+        profile = _get_utk_sports_profile(config_dict.get("homepage", ""))
+    if not profile:
+        debug.log("[UTK COOKIE] Unsupported ticketing domain")
+        return False
+    cookie_domain = profile["host"]
+    cookie_prefixes = tuple(profile.get("cookie_prefixes", ()))
+
     raw_value = config_dict.get("accounts", {}).get("ctbc_cookie", "")
-    cookies = parse_ctbc_cookie_string(raw_value)
+    cookies = parse_ctbc_cookie_string(raw_value, cookie_prefixes)
     if not cookies:
         if str(raw_value or "").strip():
-            debug.log("[CTBC COOKIE] No valid CTBC session cookies were found")
+            debug.log("[UTK COOKIE] No valid login session cookies were found")
         return False
 
     try:
         existing_cookies = await tab.browser.cookies.get_all()
         for cookie in existing_cookies:
-            if cookie.name.startswith("CTBC_") and cookie.domain.lstrip(".").endswith("ctbcsports.com"):
+            existing_domain = str(cookie.domain or "").lstrip(".").lower()
+            is_login_cookie = any(
+                cookie.name.startswith(prefix) for prefix in cookie_prefixes
+            )
+            if is_login_cookie and existing_domain == cookie_domain:
                 try:
                     await tab.send(cdp.network.delete_cookies(
                         name=cookie.name,
@@ -195,7 +224,7 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
                 except Exception:
                     pass
     except Exception as exc:
-        debug.log(f"[CTBC COOKIE] Could not clear the current CTBC cookie set: {exc}")
+        debug.log(f"[UTK COOKIE] Could not clear the current cookie set: {exc}")
 
     injected = 0
     for name, value in cookies:
@@ -203,7 +232,7 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
             result = await tab.send(cdp.network.set_cookie(
                 name=name,
                 value=value,
-                domain=CTBC_DOMAIN,
+                domain=cookie_domain,
                 path="/",
                 secure=True,
                 http_only=True,
@@ -211,12 +240,12 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
             if result is not False:
                 injected += 1
         except Exception as exc:
-            debug.log(f"[CTBC COOKIE] Failed to inject {name}: {exc}")
+            debug.log(f"[UTK COOKIE] Failed to inject {name}: {exc}")
 
     if injected != len(cookies):
-        debug.log(f"[CTBC COOKIE] Injected {injected}/{len(cookies)} cookies")
+        debug.log(f"[UTK COOKIE] Injected {injected}/{len(cookies)} cookies")
         return False
-    debug.log(f"[CTBC COOKIE] Injected {injected} session cookies")
+    debug.log(f"[UTK COOKIE] Injected {injected} session cookies for {profile['name']}")
     return True
 
 
@@ -484,7 +513,7 @@ def _ctbc_safe_generic_button_handler(onclick):
     """Allow one inert-looking site function call, never arbitrary JavaScript."""
     source = str(onclick or "").strip()
     if not source:
-        return True
+        return False
     match = re.fullmatch(
         r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*"
         r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\((?P<args>.*)\)\s*;?",
@@ -614,6 +643,108 @@ async def _ctbc_commit_native_date_action(
         return true;
     }}''')
     return committed is True
+
+
+def _ctbc_date_attempt_key(document_id, fingerprint):
+    payload = json.dumps(
+        {"document_id": document_id, "fingerprint": fingerprint},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ctbc_same_tenant_page(source_url, target_url):
+    source = urlsplit(str(source_url or ""))
+    target = urlsplit(str(target_url or ""))
+    if not _ctbc_same_origin(source, target):
+        return False
+    return source.path.rsplit("/", 1)[0] == target.path.rsplit("/", 1)[0]
+
+
+async def _ctbc_vip_prompt_visible(tab):
+    try:
+        visible = await tab.evaluate(r'''
+            (() => {
+                const modal = document.querySelector('#buy');
+                if (!modal || !modal.isConnected) return false;
+                const style = getComputedStyle(modal);
+                return modal.getClientRects().length > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden';
+            })()
+        ''')
+        return visible is True
+    except Exception:
+        return False
+
+
+async def _ctbc_date_attempt_progress(tab, attempt):
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    source_url = str(attempt.get("source_url") or "")
+    if current_url != source_url:
+        expected_url = str(attempt.get("expected_url") or "")
+        current_without_fragment = urlunsplit((*urlsplit(current_url)[:4], ""))
+        expected_without_fragment = urlunsplit((*urlsplit(expected_url)[:4], ""))
+        if expected_url:
+            return (
+                "success"
+                if current_without_fragment == expected_without_fragment
+                else "left_date"
+            )
+        if _ctbc_same_tenant_page(source_url, current_url) and (
+            _get_ctbc_page_type(current_url)
+            in ("area", "seat", "general_admission")
+        ):
+            return "success"
+        return "left_date"
+
+    now = time.monotonic()
+    if attempt.get("kind") in ("vip_native", "structural_native") and (
+        now >= float(attempt.get("next_modal_probe_at") or 0.0)
+    ):
+        attempt["next_modal_probe_at"] = now + 0.2
+        if await _ctbc_vip_prompt_visible(tab):
+            return "manual_prompt"
+    if now - float(attempt.get("started_at") or 0.0) >= (
+        CTBC_DATE_ACTION_PROGRESS_TIMEOUT_SECONDS
+    ):
+        return "timeout"
+    return "pending"
+
+
+async def _ctbc_resume_date_attempt(tab, config_dict, document_id):
+    identity = _ctbc_tab_identity(tab)
+    attempt = _state["date_action_attempt"].get(identity)
+    if not attempt:
+        return None
+    if attempt.get("document_id") != document_id:
+        _state["date_action_attempt"].pop(identity, None)
+        return None
+    if attempt.get("status") == "handled":
+        return True
+    if attempt.get("status") == "failed":
+        return None
+
+    progress = await _ctbc_date_attempt_progress(tab, attempt)
+    if progress in ("success", "manual_prompt"):
+        attempt["status"] = "handled"
+        return True
+    if progress == "left_date":
+        _state["date_action_attempt"].pop(identity, None)
+        return True
+    if progress == "pending":
+        return False
+
+    attempt["status"] = "failed"
+    _state["fast_target"].pop(identity, None)
+    util.create_debug_logger(config_dict).log(
+        "[CTBC DATE] Click produced no verified progress; resuming shared refresh"
+    )
+    await _reload_ctbc_date_page(
+        tab, config_dict, "date action produced no verified progress"
+    )
+    return False
 
 
 def _parse_ctbc_map_send(href, expected_performance_id):
@@ -1076,6 +1207,7 @@ async def _inspect_utk_document(tab, url=None, *, force=False):
         return {
             "classification": "unknown",
             "document_id": current_url,
+            "document_identity_verified": False,
             "document_started_at": 0.0,
             "url": current_url,
             "ready_state": "",
@@ -1090,6 +1222,10 @@ async def _inspect_utk_document(tab, url=None, *, force=False):
         )
     except (TypeError, ValueError):
         snapshot["document_started_at"] = 0.0
+    snapshot["document_identity_verified"] = bool(
+        snapshot["document_started_at"] > 0
+        and "|" in str(snapshot.get("document_id") or "")
+    )
     snapshot["url"] = str(snapshot.get("url") or current_url)
     _state["document_snapshot"][identity] = {
         "url": snapshot["url"],
@@ -1152,6 +1288,71 @@ def nodriver_utk_sports_consume_reload_event(tab):
     if identity not in _state["reload_event"]:
         return False
     _state["reload_event"].discard(identity)
+    return True
+
+
+def _update_utk_reload_inflight(
+    tab,
+    document_id,
+    *,
+    document_identity_verified=False,
+    document_started_at=0.0,
+):
+    identity = _ctbc_tab_identity(tab)
+    inflight = _state["reload_inflight"].get(identity)
+    if not inflight:
+        return False
+    try:
+        started_wall_at = float(document_started_at or 0.0)
+    except (TypeError, ValueError):
+        started_wall_at = 0.0
+    dispatched_wall_at = float(inflight.get("dispatched_wall_at") or 0.0)
+    belongs_to_current_dispatch = bool(
+        dispatched_wall_at <= 0
+        or started_wall_at + UTK_DOCUMENT_IDENTITY_CLOCK_SKEW_SECONDS
+        >= dispatched_wall_at
+    )
+    if (
+        document_identity_verified
+        and (
+            inflight.get("source_identity_verified", True)
+            or dispatched_wall_at > 0
+        )
+        and belongs_to_current_dispatch
+        and document_id
+        and document_id != inflight.get("source_document_id")
+    ):
+        _state["reload_inflight"].pop(identity, None)
+        _state["reload_acknowledged"].add(identity)
+        return False
+    if (
+        time.monotonic() - float(inflight.get("dispatched_at", 0.0))
+        >= UTK_RELOAD_DOCUMENT_ACK_TIMEOUT_SECONDS
+    ):
+        _state["reload_inflight"].pop(identity, None)
+        return False
+    return True
+
+
+def nodriver_utk_sports_reload_pending(tab):
+    identity = _ctbc_tab_identity(tab)
+    inflight = _state["reload_inflight"].get(identity)
+    if not inflight:
+        return False
+    if (
+        time.monotonic() - float(inflight.get("dispatched_at", 0.0))
+        >= UTK_RELOAD_DOCUMENT_ACK_TIMEOUT_SECONDS
+    ):
+        _state["reload_inflight"].pop(identity, None)
+        return False
+    return True
+
+
+def nodriver_utk_sports_consume_reload_ack(tab):
+    identity = _ctbc_tab_identity(tab)
+    if identity not in _state["reload_acknowledged"]:
+        return False
+    _state["reload_acknowledged"].discard(identity)
     return True
 
 
@@ -1281,11 +1482,31 @@ async def _utk_document_guard(tab, config_dict, url=None):
     """Apply the 429 circuit breaker before any UTK page-specific action."""
     settings = _utk_refresh_settings()
     if not settings.get("enabled", True):
+        identity = _ctbc_tab_identity(tab)
+        if identity in _state["reload_inflight"]:
+            snapshot = await _inspect_utk_document(tab, url)
+            _update_utk_reload_inflight(
+                tab,
+                snapshot.get("document_id"),
+                document_identity_verified=bool(
+                    snapshot.get("document_identity_verified")
+                ),
+                document_started_at=snapshot.get("document_started_at", 0.0),
+            )
+            return "disabled", snapshot
         return "disabled", None
     snapshot = await _inspect_utk_document(tab, url)
     probe_handled = await _finish_utk_recovery_probe(tab, config_dict, snapshot)
     identity = _ctbc_tab_identity(tab)
     document_id = snapshot.get("document_id")
+    _update_utk_reload_inflight(
+        tab,
+        document_id,
+        document_identity_verified=bool(
+            snapshot.get("document_identity_verified")
+        ),
+        document_started_at=snapshot.get("document_started_at", 0.0),
+    )
     previous_document_id = _state["last_document"].get(identity)
     if previous_document_id and previous_document_id != document_id:
         _state["reload_event"].add(identity)
@@ -1354,10 +1575,20 @@ async def nodriver_utk_sports_reload(
     allow_unknown_document=False,
     allow_blocked_recovery=False,
     dispatch_deadline=None,
+    shared_min_interval_seconds=None,
+    opening_burst=None,
 ):
     """Poll once and reload only after obtaining the shared one-shot permit."""
     debug = util.create_debug_logger(config_dict)
     settings = _utk_refresh_settings()
+    shared_interval = None
+    if shared_min_interval_seconds is not None:
+        try:
+            parsed_interval = float(shared_min_interval_seconds)
+            if parsed_interval > 0:
+                shared_interval = parsed_interval
+        except (TypeError, ValueError):
+            shared_interval = None
     if not settings.get("enabled", True):
         await nodriver_utk_sports_cancel_refresh(
             tab,
@@ -1382,13 +1613,24 @@ async def nodriver_utk_sports_reload(
         # instead of allowing one final uncoordinated network request.
         if _utk_refresh_settings(force_refresh=True).get("enabled", True):
             return False
+        source_snapshot = await _inspect_utk_document(tab, force=True)
+        identity = _ctbc_tab_identity(tab)
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source_snapshot.get("document_id"),
+            "source_identity_verified": bool(
+                source_snapshot.get("document_identity_verified")
+            ),
+            "permit_id": "local-disabled",
+            "dispatched_at": time.monotonic(),
+            "dispatched_wall_at": time.time(),
+        }
         try:
             await tab.reload()
-            identity = _ctbc_tab_identity(tab)
             _state["document_snapshot"].pop(identity, None)
             _state["reload_event"].add(identity)
             return True
         except Exception as exc:
+            _state["reload_inflight"].pop(identity, None)
             debug.log(f"[CTBC] Reload failed: {exc}")
             return False
 
@@ -1410,6 +1652,15 @@ async def nodriver_utk_sports_reload(
         return False
 
     identity = _ctbc_tab_identity(tab)
+    if _update_utk_reload_inflight(
+        tab,
+        snapshot.get("document_id"),
+        document_identity_verified=bool(
+            snapshot.get("document_identity_verified")
+        ),
+        document_started_at=snapshot.get("document_started_at", 0.0),
+    ):
+        return False
     request = _state["reload_request"].get(identity)
     if request is None:
         interval = config_dict.get("advanced", {}).get(
@@ -1417,8 +1668,13 @@ async def nodriver_utk_sports_reload(
         )
         local_delay = (
             (float(interval) if interval and interval > 0 else 1.0)
-            if apply_local_interval
+            if apply_local_interval and shared_interval is None
             else 0.0
+        )
+        request_interval = (
+            shared_interval
+            if shared_interval is not None
+            else settings.get("min_interval_seconds", 1.5)
         )
         request = {
             "document_id": snapshot.get("document_id"),
@@ -1428,6 +1684,8 @@ async def nodriver_utk_sports_reload(
             "reason": reason,
             "allow_blocked_recovery": bool(allow_blocked_recovery),
             "request_token": uuid.uuid4().hex,
+            "shared_min_interval_seconds": request_interval,
+            "opening_burst": opening_burst,
         }
         _state["reload_request"][identity] = request
         debug.log(f"[CTBC] {reason}; queued for shared refresh")
@@ -1449,12 +1707,34 @@ async def nodriver_utk_sports_reload(
         return False
 
     coordinator = get_shared_refresh_coordinator()
+    request_burst = request.get("opening_burst")
+    current_settings = _utk_refresh_settings(force_refresh=True)
+    if request_burst is None:
+        request["shared_min_interval_seconds"] = (
+            shared_interval
+            if shared_interval is not None
+            else current_settings.get("min_interval_seconds", 1.5)
+        )
+    current_boost = current_settings.get("opening_boost", {})
+    if request_burst is not None and (
+        not current_settings.get("enabled", True)
+        or not current_boost.get("enabled", False)
+    ):
+        await coordinator.abort_opening_campaigns(
+            UTK_SPORTS_SCOPE, "opening boost disabled"
+        )
+        request["opening_burst"] = None
+        request_burst = None
     reservation = await coordinator.reserve_refresh(
         UTK_SPORTS_SCOPE,
         _utk_refresh_identity(tab),
-        min_interval_seconds=settings.get("min_interval_seconds", 1.5),
+        min_interval_seconds=request.get(
+            "shared_min_interval_seconds",
+            settings.get("min_interval_seconds", 1.5),
+        ),
         jitter_range_seconds=(0.1, 0.3),
         request_token=request_token,
+        opening_burst=request_burst,
     )
     if not reservation.reserved:
         retry_delay = max(float(reservation.retry_after_seconds or 0.1), 0.05)
@@ -1551,6 +1831,14 @@ async def nodriver_utk_sports_reload(
         await release_reservation()
         _pop_reload_request_if_token(identity, request_token)
         return False
+    if getattr(reservation, "is_opening_burst", False) and (
+        preflight_classification != "normal"
+        or _get_ctbc_page_type(str(preflight.get("url") or "")) != "date"
+        or not preflight.get("has_normal_root")
+    ):
+        await release_reservation()
+        _pop_reload_request_if_token(identity, request_token)
+        return False
     if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
         await release_reservation()
         _pop_reload_request_if_token(identity, request_token)
@@ -1589,6 +1877,56 @@ async def nodriver_utk_sports_reload(
                 "[UTK RATE] Shared commit failed closed: "
                 f"{decision.error}"
             )
+        return False
+
+    claimed = await coordinator.claim_dispatch(
+        UTK_SPORTS_SCOPE,
+        decision.permit_id,
+        decision.dispatch_token,
+    )
+    if not claimed:
+        # A failed/uncertain claim may have crossed the SQLite commit boundary
+        # before the caller was interrupted. Do not delete a possibly claimed
+        # lease here; its short expiry will account conservatively if needed.
+        if decision.is_recovery_probe:
+            await coordinator.complete_recovery_probe(
+                UTK_SPORTS_SCOPE,
+                _utk_refresh_identity(tab),
+                decision.permit_id,
+                success=False,
+            )
+        _pop_reload_request_if_token(identity, request_token)
+        return False
+    if isinstance(claimed, bool):
+        # Test doubles and older in-process adapters only returned a boolean.
+        # Real coordinators return the extended wall-clock lease deadline.
+        claimed_expires_at = time.time() + UTK_DISPATCH_COMMAND_TIMEOUT_SECONDS
+    else:
+        try:
+            claimed_expires_at = float(claimed)
+        except (TypeError, ValueError):
+            claimed_expires_at = 0.0
+    post_claim_stopped = bool(
+        claimed_expires_at <= time.time()
+        or _utk_emergency_remaining() > 0
+        or await check_and_handle_pause(config_dict)
+        or await check_and_handle_quit(config_dict)
+    )
+    if post_claim_stopped:
+        await coordinator.complete_dispatch(
+            UTK_SPORTS_SCOPE,
+            decision.permit_id,
+            decision.dispatch_token,
+            possibly_dispatched=False,
+        )
+        if decision.is_recovery_probe:
+            await coordinator.complete_recovery_probe(
+                UTK_SPORTS_SCOPE,
+                _utk_refresh_identity(tab),
+                decision.permit_id,
+                success=False,
+            )
+        _pop_reload_request_if_token(identity, request_token)
         return False
 
     if decision.is_recovery_probe:
@@ -1639,10 +1977,35 @@ async def nodriver_utk_sports_reload(
                 )
 
         probe_state["lease_task"] = asyncio.create_task(renew_probe_lease())
+    possibly_dispatched = False
+    _state["reload_inflight"][identity] = {
+        "source_document_id": preflight.get("document_id"),
+        "source_identity_verified": bool(
+            preflight.get("document_identity_verified")
+        ),
+        "permit_id": decision.permit_id,
+        "dispatched_at": time.monotonic(),
+        "dispatched_wall_at": time.time(),
+    }
     try:
+        if (
+            time.time() >= claimed_expires_at
+            or _utk_emergency_remaining() > 0
+        ):
+            _state["reload_inflight"].pop(identity, None)
+            if decision.is_recovery_probe:
+                await coordinator.complete_recovery_probe(
+                    UTK_SPORTS_SCOPE,
+                    _utk_refresh_identity(tab),
+                    decision.permit_id,
+                    success=False,
+                )
+                _state["recovery_probe"].pop(identity, None)
+            return False
+        possibly_dispatched = True
         reload_call = tab.reload()
         await asyncio.wait_for(
-            reload_call, timeout=UTK_RECOVERY_PROBE_MAX_SECONDS
+            reload_call, timeout=UTK_DISPATCH_COMMAND_TIMEOUT_SECONDS
         )
         _state["document_snapshot"].pop(identity, None)
         _state["reload_event"].add(identity)
@@ -1650,10 +2013,16 @@ async def nodriver_utk_sports_reload(
     except Exception as exc:
         debug.log(f"[CTBC] Reload failed: {exc}")
         # A CDP exception does not prove that the browser rejected the
-        # navigation.  Keep a recovery lease until the next document guard or
-        # lease expiry instead of immediately releasing a possible in-flight
-        # probe and creating a parallel retry.
+        # navigation. Keep the local document gate and never refund a permit.
         return False
+    finally:
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(coordinator.complete_dispatch(
+                UTK_SPORTS_SCOPE,
+                decision.permit_id,
+                decision.dispatch_token,
+                possibly_dispatched=possibly_dispatched,
+            ))
 
 
 async def nodriver_utk_sports_reload_wait(
@@ -1715,13 +2084,84 @@ async def nodriver_utk_sports_reload_wait(
         await asyncio.sleep(0.1)
 
 
-async def _reload_with_interval(tab, config_dict, reason):
+def _ctbc_auto_reload_interval(config_dict):
+    try:
+        return float(
+            config_dict.get("advanced", {}).get("auto_reload_page_interval", 0.0)
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def _reload_ctbc_date_page(tab, config_dict, reason):
+    interval = _ctbc_auto_reload_interval(config_dict)
+    if interval <= 0:
+        await nodriver_utk_sports_cancel_refresh(
+            tab, "date-page auto reload disabled", wait=True
+        )
+        return False
     return await nodriver_utk_sports_reload(
         tab,
         config_dict,
         reason,
         apply_local_interval=True,
         allow_unknown_document=False,
+        shared_min_interval_seconds=interval,
+    )
+
+
+async def _reload_ctbc_purchase_page(tab, config_dict, reason):
+    return await nodriver_utk_sports_reload(
+        tab,
+        config_dict,
+        reason,
+        apply_local_interval=False,
+        allow_unknown_document=False,
+    )
+
+
+async def nodriver_utk_sports_scheduled_reload(
+    tab, config_dict, reason, *, scheduled_at=None
+):
+    """Run one scheduled reload with the policy for the current UTK page."""
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    page_type = _get_ctbc_page_type(current_url)
+    shared_interval = None
+    if page_type == "date":
+        interval = _ctbc_auto_reload_interval(config_dict)
+        if interval > 0:
+            shared_interval = interval
+    opening_burst = None
+    settings = _utk_refresh_settings()
+    boost = settings.get("opening_boost", {})
+    if (
+        page_type == "date"
+        and settings.get("enabled", True)
+        and boost.get("enabled", False)
+        and scheduled_at is not None
+    ):
+        try:
+            target = float(scheduled_at)
+            window = float(boost.get("window_seconds", 2.0))
+            opening_burst = OpeningBurstRequest(
+                campaign_id=f"scheduled:{int(target)}",
+                participant_id=util.get_instance_id(),
+                scheduled_at=target,
+                window_until=target + window,
+                interval_seconds=float(boost.get("interval_seconds", 0.25)),
+                max_participants=int(boost.get("max_participants", 4)),
+            )
+        except (TypeError, ValueError):
+            opening_burst = None
+    return await nodriver_utk_sports_reload(
+        tab,
+        config_dict,
+        reason,
+        apply_local_interval=False,
+        allow_unknown_document=False,
+        allow_blocked_recovery=False,
+        shared_min_interval_seconds=shared_interval,
+        opening_burst=opening_burst,
     )
 
 
@@ -1987,9 +2427,21 @@ async def _ctbc_wait_area_snapshot(tab):
     return _decode_ctbc_json_result(raw_value)
 
 
-async def nodriver_ctbc_date_auto_select(tab, config_dict):
-    debug = util.create_debug_logger(config_dict)
-    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+def _ctbc_date_control_fingerprint(snapshot):
+    return {
+        key: (
+            bool(snapshot.get(key))
+            if key == "has_form"
+            else str(snapshot.get(key) or "")
+        )
+        for key in (
+            "tag_name", "href", "resolved_href", "role", "type", "target",
+            "download", "ping", "formaction", "has_form", "onclick",
+        )
+    }
+
+
+async def _ctbc_collect_date_candidates(tab, config_dict, current_url, debug):
     rows = []
     for _ in range(10):
         try:
@@ -2031,22 +2483,97 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
                 "text": row_text,
                 "element": button,
                 "onclick": onclick,
-                "fingerprint": {
-                    key: (
-                        bool(button_snapshot.get(key))
-                        if key == "has_form"
-                        else str(button_snapshot.get(key) or "")
-                    )
-                    for key in (
-                        "tag_name", "href", "resolved_href", "role", "type",
-                        "target", "download", "ping", "formaction", "has_form",
-                        "onclick",
-                    )
-                },
+                "fingerprint": _ctbc_date_control_fingerprint(button_snapshot),
                 "action": action,
             })
         except Exception as exc:
             debug.log(f"[CTBC DATE] Failed to inspect row: {exc}")
+    return candidates
+
+
+def _ctbc_store_date_attempt(
+    identity, attempt_key, document_id, source_url, expected_url, kind
+):
+    started_at = time.monotonic()
+    _state["date_action_attempt"][identity] = {
+        "attempt_key": attempt_key,
+        "document_id": document_id,
+        "source_url": source_url,
+        "expected_url": str(expected_url or ""),
+        "kind": kind,
+        "started_at": started_at,
+        "next_modal_probe_at": started_at + 0.15,
+        "status": "pending",
+    }
+
+
+async def _ctbc_attempt_date_candidate(
+    tab, config_dict, current_url, document_id, target, debug
+):
+    identity = _ctbc_tab_identity(tab)
+    attempt_key = _ctbc_date_attempt_key(document_id, target["fingerprint"])
+    previous_attempt = _state["date_action_attempt"].get(identity)
+    if previous_attempt and (
+        previous_attempt.get("document_id") == document_id
+        and previous_attempt.get("attempt_key") == attempt_key
+    ):
+        await _reload_ctbc_date_page(
+            tab, config_dict, "previous date action made no progress"
+        )
+        return False
+
+    await nodriver_utk_sports_cancel_refresh(
+        tab, "purchasable date found", wait=True
+    )
+    action = target["action"]
+    date_target = action.get("date_target") if action.get("kind") == "normal" else None
+    if date_target and config_dict.get("area_auto_select", {}).get("enable", False):
+        if await _ctbc_try_fast_area_navigation(
+            tab, config_dict, date_target, target["onclick"], current_url
+        ):
+            fast_target = _state["fast_target"].get(identity, {})
+            _ctbc_store_date_attempt(
+                identity, attempt_key, document_id, current_url,
+                fast_target.get("destination_url", ""), "fast_navigation",
+            )
+            return await _ctbc_resume_date_attempt(tab, config_dict, document_id)
+
+    committed = await _ctbc_commit_native_date_action(
+        target["element"],
+        current_url,
+        target["fingerprint"],
+        direct_url=(
+            action.get("date_target", {}).get("url", "")
+            if action.get("kind") == "anchor_native"
+            else ""
+        ),
+    )
+    if not committed:
+        debug.log(
+            f"[CTBC DATE] Native commit rejected ({action.get('kind', 'unknown')})"
+        )
+        return False
+    _ctbc_store_date_attempt(
+        identity, attempt_key, document_id, current_url,
+        action.get("date_target", {}).get("url", ""),
+        action.get("kind", "unknown"),
+    )
+    debug.log(f"[CTBC DATE] Dispatched ({action.get('kind')}): {target['text']}")
+    return await _ctbc_resume_date_attempt(tab, config_dict, document_id)
+
+
+async def nodriver_ctbc_date_auto_select(tab, config_dict):
+    debug = util.create_debug_logger(config_dict)
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    identity = _ctbc_tab_identity(tab)
+    document_id = _state["last_document"].get(identity, current_url)
+    resumed = await _ctbc_resume_date_attempt(tab, config_dict, document_id)
+    if resumed is not None:
+        return resumed
+
+    candidates = await _ctbc_collect_date_candidates(
+        tab, config_dict, current_url, debug
+    )
 
     date_config = config_dict.get("date_auto_select", {})
     keyword = date_config.get("date_keyword", "").strip()
@@ -2058,34 +2585,16 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict):
     )
 
     if target_index is None:
-        await _reload_with_interval(tab, config_dict, "no purchasable date matched")
+        await _reload_ctbc_date_page(
+            tab, config_dict, "no purchasable date matched"
+        )
         return False
 
-    await nodriver_utk_sports_cancel_refresh(tab, "purchasable date found")
     target = candidates[target_index]
     try:
-        action = target["action"]
-        date_target = action.get("date_target") if action.get("kind") == "normal" else None
-        if date_target and config_dict.get("area_auto_select", {}).get("enable", False):
-            if await _ctbc_try_fast_area_navigation(
-                tab, config_dict, date_target, target["onclick"], current_url
-            ):
-                return True
-        committed = await _ctbc_commit_native_date_action(
-            target["element"],
-            current_url,
-            target["fingerprint"],
-            direct_url=(
-                action.get("date_target", {}).get("url", "")
-                if action.get("kind") == "anchor_native"
-                else ""
-            ),
+        return await _ctbc_attempt_date_candidate(
+            tab, config_dict, current_url, document_id, target, debug
         )
-        if not committed:
-            debug.log(f"[CTBC DATE] Native commit rejected ({action.get('kind', 'unknown')})")
-            return False
-        debug.log(f"[CTBC DATE] Selected ({action.get('kind')}): {target['text']}")
-        return True
     except Exception as exc:
         debug.log(f"[CTBC DATE] Click failed: {exc}")
         return False
@@ -2100,7 +2609,9 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         snapshot = None
     if not isinstance(snapshot, dict) or not snapshot.get("ok"):
         reason = snapshot.get("reason", "invalid-result") if isinstance(snapshot, dict) else "invalid-result"
-        await _reload_with_interval(tab, config_dict, f"area map was not ready ({reason})")
+        await _reload_ctbc_purchase_page(
+            tab, config_dict, f"area map was not ready ({reason})"
+        )
         return False
 
     page_url = str(snapshot.get("page_url") or "")
@@ -2112,7 +2623,9 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         snapshot, config_dict, performance_id, strict_map=False
     )
     if target is None:
-        await _reload_with_interval(tab, config_dict, "no available area matched")
+        await _reload_ctbc_purchase_page(
+            tab, config_dict, "no available area matched"
+        )
         return False
 
     await nodriver_utk_sports_cancel_refresh(tab, "available area found")
@@ -2693,7 +3206,9 @@ async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
         if selected_titles and not await _clear_ctbc_selected_seats(tab, config_dict):
             return False
         if not await nodriver_ctbc_seat_auto_select(tab, config_dict):
-            await _reload_with_interval(tab, config_dict, "requested seats are unavailable")
+            await _reload_ctbc_purchase_page(
+                tab, config_dict, "requested seats are unavailable"
+            )
             return False
 
     await nodriver_utk_sports_cancel_refresh(tab, "requested seats selected")
@@ -3007,8 +3522,12 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
         return tab
     if guard_state == "unknown":
         return tab
+    if nodriver_utk_sports_reload_pending(tab):
+        return tab
 
     page_type = _get_ctbc_page_type(url)
+    if page_type != "date":
+        _state["date_action_attempt"].pop(_ctbc_tab_identity(tab), None)
     if page_type == "date" and config_dict.get("date_auto_select", {}).get("enable", False):
         await nodriver_ctbc_date_auto_select(tab, config_dict)
     elif page_type == "area" and config_dict.get("area_auto_select", {}).get("enable", False):

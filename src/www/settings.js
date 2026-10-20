@@ -38,6 +38,10 @@ const utk_shared_reload_throttle_enabled = document.querySelector('#utk_shared_r
 const utk_shared_reload_min_interval = document.querySelector('#utk_shared_reload_min_interval');
 const utk_rate_limit_initial_cooldown = document.querySelector('#utk_rate_limit_initial_cooldown');
 const utk_rate_limit_max_cooldown = document.querySelector('#utk_rate_limit_max_cooldown');
+const utk_opening_boost_enabled = document.querySelector('#utk_opening_boost_enabled');
+const utk_opening_boost_interval = document.querySelector('#utk_opening_boost_interval');
+const utk_opening_boost_max_participants = document.querySelector('#utk_opening_boost_max_participants');
+const utk_opening_boost_window = document.querySelector('#utk_opening_boost_window');
 const tixcraft_soft_block_delay = document.querySelector('#tixcraft_soft_block_delay');
 const tixcraft_allow_less_tickets = document.querySelector('#tixcraft_allow_less_tickets');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
@@ -558,10 +562,15 @@ function renderAdvancedTabTranslations() {
     setRowLabelForField('auto_reload_page_interval', fieldLabel('Auto reload interval (sec)', 'auto_reload_page_interval'));
     applyOrRestore('#utk-shared-throttle-label', 'textContent', 'Shared baseball refresh protection');
     applyOrRestore('#utk-shared-throttle-enabled-label', 'textContent', 'Coordinate CTBC Brothers / Wei Chuan Dragons refreshes');
-    applyOrRestore('#utk-shared-min-interval-label', 'textContent', 'Minimum interval (sec)');
+    applyOrRestore('#utk-shared-min-interval-label', 'textContent', 'Other reload minimum interval (sec)');
     applyOrRestore('#utk-initial-cooldown-label', 'textContent', 'Initial 429 cooldown (sec)');
     applyOrRestore('#utk-max-cooldown-label', 'textContent', 'Maximum 429 cooldown (sec)');
-    applyOrRestore('#utk-shared-throttle-help', 'textContent', 'These global settings are shared by every profile and every running CTBC Brothers / Wei Chuan Dragons instance. Switching profiles does not change them. The per-profile interval above still applies; this protection also prevents simultaneous refreshes.');
+    applyOrRestore('#utk-opening-boost-enabled-label', 'textContent', 'Accelerate the scheduled opening first pass');
+    applyOrRestore('#utk-opening-boost-interval-label', 'textContent', 'First-pass interval (sec)');
+    applyOrRestore('#utk-opening-boost-max-label', 'textContent', 'Maximum first-pass profiles');
+    applyOrRestore('#utk-opening-boost-window-label', 'textContent', 'First-pass reservation window (sec)');
+    applyOrRestore('#utk-opening-boost-help', 'textContent', 'Only applies to a UTK0201 date page when Refresh at specified time is reached. In one campaign, the configured limit allows each distinct profile one accelerated reload-command opportunity. This does not continuously reload during the reservation window; normal shared date-page pacing resumes afterward. Multiple processes using the same profile still share one slot. The defaults are four profiles and two seconds.');
+    applyOrRestore('#utk-shared-throttle-help', 'textContent', 'These settings are shared by every CTBC Brothers / Wei Chuan Dragons profile and process. On UTK0201 date pages, the Auto reload interval above is the aggregate minimum interval across all instances. After entering area or seat pages, normal clicks are not throttled; only actual reloads use this minimum interval. Every phase still shares the same 429 cooldown.');
     applyOrRestore('#utk-shared-throttle-warning', 'textContent', 'When disabled, tabs and processes no longer share refresh pacing or 429 cooldown protection, increasing the chance of another site-side rate limit.');
     setRowLabelForField('tixcraft_soft_block_delay', fieldLabel('TixCraft soft-block delay (sec)', 'tixcraft_soft_block_delay'));
     setRowLabelForField('tixcraft_allow_less_tickets', fieldLabel('Buy fewer TixCraft tickets if needed', 'tixcraft_allow_less_tickets'));
@@ -843,6 +852,7 @@ function uiText(key, extra = '') {
         'invalid_tixcraft_soft_block_delay': { 'zh-TW': '提示: 暫時鎖定等待秒數請填 1 到 600 的整數，或留空使用預設值。', en: 'Enter an integer from 1 to 600 for the TixCraft soft-block delay, or leave it empty to use the default.' },
         'invalid_utk_min_interval': { 'zh-TW': '提示：職棒共用刷新最小間隔必須大於 0 秒。', en: 'The shared baseball refresh interval must be greater than 0 seconds.' },
         'invalid_utk_cooldown': { 'zh-TW': '提示：429 冷卻時間必須是大於 0 的整數，且最大冷卻不得小於初始冷卻。', en: '429 cooldowns must be positive integers, and the maximum cannot be lower than the initial cooldown.' },
+        'invalid_utk_opening_boost': { 'zh-TW': '提示：首輪間隔必須大於 0，保留時間必須大於 0 且不得超過 30 秒，最多 profiles 必須是 1 到 16 的整數，且保留時間需足以依間隔服務設定數量。', en: 'The first-pass interval must be positive, the window must be greater than 0 and no more than 30 seconds, the profile limit must be an integer from 1 to 16, and the window must be long enough for the configured count and interval.' },
         'global_settings_not_ready': { 'zh-TW': '全域刷新設定仍在載入，請稍候再試。', en: 'Global refresh settings are still loading. Please try again shortly.' },
         'global_settings_load_failed': { 'zh-TW': '全域刷新設定載入失敗；儲存與啟動已停用。請重新整理頁面再試。', en: 'Global refresh settings failed to load. Save and Run are disabled; reload the page to try again.' },
         'global_settings_conflict': { 'zh-TW': '另一個設定頁已更新職棒共用刷新設定；目前輸入內容尚未覆寫，請確認後再儲存一次。', en: 'Another settings tab updated the shared baseball refresh settings. Your current input was not overwritten; review it and save again.' },
@@ -1443,12 +1453,18 @@ function load_global_settings_to_form(value, revision)
 {
     const utk = value && value.utk_sports ? value.utk_sports : null;
     if (!utk || !revision) return false;
+    const boost = utk.opening_boost || {};
     globalSettings = value;
     globalSettingsRevision = revision;
     utk_shared_reload_throttle_enabled.checked = utk.enabled === true;
     utk_shared_reload_min_interval.value = utk.min_interval_seconds;
     utk_rate_limit_initial_cooldown.value = utk.initial_cooldown_seconds;
     utk_rate_limit_max_cooldown.value = utk.max_cooldown_seconds;
+    utk_opening_boost_enabled.checked = boost.enabled === true;
+    utk_opening_boost_interval.value = boost.interval_seconds ?? 0.25;
+    utk_opening_boost_max_participants.value = boost.max_participants ?? 4;
+    utk_opening_boost_window.value = boost.window_seconds ?? 2;
+    update_utk_opening_boost_state();
     check_global_unsaved_fields();
     update_settings_action_state();
     return true;
@@ -1474,15 +1490,46 @@ function collect_global_settings_from_form(showMessage = true)
     const minInterval = Number(utk_shared_reload_min_interval.value);
     const initialCooldown = Number(utk_rate_limit_initial_cooldown.value);
     const maxCooldown = Number(utk_rate_limit_max_cooldown.value);
+    let boostInterval = Number(utk_opening_boost_interval.value);
+    let boostMaximum = Number(utk_opening_boost_max_participants.value);
+    let boostWindow = Number(utk_opening_boost_window.value);
 
     const minIntervalValid = Number.isFinite(minInterval) && minInterval > 0;
     const cooldownValid = Number.isInteger(initialCooldown) && initialCooldown > 0
         && Number.isInteger(maxCooldown) && maxCooldown > 0
         && maxCooldown >= initialCooldown;
+    let boostValid = Number.isFinite(boostInterval) && boostInterval > 0
+        && Number.isInteger(boostMaximum) && boostMaximum >= 1 && boostMaximum <= 16
+        && Number.isFinite(boostWindow) && boostWindow > 0 && boostWindow <= 30
+        && boostWindow >= Math.max(boostMaximum - 1, 0) * boostInterval;
+    const boostActive = utk_shared_reload_throttle_enabled.checked
+        && utk_opening_boost_enabled.checked;
+    if (!boostActive && !boostValid) {
+        const savedBoost = globalSettings?.utk_sports?.opening_boost || {};
+        boostInterval = Number(savedBoost.interval_seconds ?? 0.25);
+        boostMaximum = Number(savedBoost.max_participants ?? 4);
+        boostWindow = Number(savedBoost.window_seconds ?? 2);
+        boostValid = Number.isFinite(boostInterval) && boostInterval > 0
+            && Number.isInteger(boostMaximum) && boostMaximum >= 1 && boostMaximum <= 16
+            && Number.isFinite(boostWindow) && boostWindow > 0 && boostWindow <= 30
+            && boostWindow >= Math.max(boostMaximum - 1, 0) * boostInterval;
+        if (!boostValid) {
+            boostInterval = 0.25;
+            boostMaximum = 4;
+            boostWindow = 2;
+            boostValid = true;
+        }
+        utk_opening_boost_interval.value = boostInterval;
+        utk_opening_boost_max_participants.value = boostMaximum;
+        utk_opening_boost_window.value = boostWindow;
+    }
 
     utk_shared_reload_min_interval.classList.toggle('is-invalid', !minIntervalValid);
     utk_rate_limit_initial_cooldown.classList.toggle('is-invalid', !cooldownValid);
     utk_rate_limit_max_cooldown.classList.toggle('is-invalid', !cooldownValid);
+    utk_opening_boost_interval.classList.toggle('is-invalid', !boostValid);
+    utk_opening_boost_max_participants.classList.toggle('is-invalid', !boostValid);
+    utk_opening_boost_window.classList.toggle('is-invalid', !boostValid);
     if (!minIntervalValid) {
         if (showMessage) message(uiText('invalid_utk_min_interval'));
         return null;
@@ -1491,12 +1538,22 @@ function collect_global_settings_from_form(showMessage = true)
         if (showMessage) message(uiText('invalid_utk_cooldown'));
         return null;
     }
+    if (!boostValid) {
+        if (showMessage) message(uiText('invalid_utk_opening_boost'));
+        return null;
+    }
     return {
         utk_sports: {
             enabled: utk_shared_reload_throttle_enabled.checked,
             min_interval_seconds: minInterval,
             initial_cooldown_seconds: initialCooldown,
             max_cooldown_seconds: maxCooldown,
+            opening_boost: {
+                enabled: utk_opening_boost_enabled.checked,
+                interval_seconds: boostInterval,
+                max_participants: boostMaximum,
+                window_seconds: boostWindow,
+            },
         }
     };
 }
@@ -1507,6 +1564,7 @@ function check_global_unsaved_fields()
     const current = collect_global_settings_from_form(false);
     if (!current) return;
     const saved = globalSettings.utk_sports;
+    const savedBoost = saved.opening_boost || {};
     utk_shared_reload_throttle_enabled.classList.toggle(
         'is-invalid', current.utk_sports.enabled !== saved.enabled
     );
@@ -1519,17 +1577,45 @@ function check_global_unsaved_fields()
     utk_rate_limit_max_cooldown.classList.toggle(
         'is-invalid', current.utk_sports.max_cooldown_seconds !== saved.max_cooldown_seconds
     );
+    utk_opening_boost_enabled.classList.toggle(
+        'is-invalid', current.utk_sports.opening_boost.enabled !== savedBoost.enabled
+    );
+    utk_opening_boost_interval.classList.toggle(
+        'is-invalid', current.utk_sports.opening_boost.interval_seconds !== savedBoost.interval_seconds
+    );
+    utk_opening_boost_max_participants.classList.toggle(
+        'is-invalid', current.utk_sports.opening_boost.max_participants !== savedBoost.max_participants
+    );
+    utk_opening_boost_window.classList.toggle(
+        'is-invalid', current.utk_sports.opening_boost.window_seconds !== savedBoost.window_seconds
+    );
 }
 
 function global_settings_are_equal(left, right)
 {
     const a = left && left.utk_sports;
     const b = right && right.utk_sports;
+    const boostA = a && a.opening_boost;
+    const boostB = b && b.opening_boost;
     return !!a && !!b
         && a.enabled === b.enabled
         && a.min_interval_seconds === b.min_interval_seconds
         && a.initial_cooldown_seconds === b.initial_cooldown_seconds
-        && a.max_cooldown_seconds === b.max_cooldown_seconds;
+        && a.max_cooldown_seconds === b.max_cooldown_seconds
+        && !!boostA && !!boostB
+        && boostA.enabled === boostB.enabled
+        && boostA.interval_seconds === boostB.interval_seconds
+        && boostA.max_participants === boostB.max_participants
+        && boostA.window_seconds === boostB.window_seconds;
+}
+
+function update_utk_opening_boost_state()
+{
+    const active = utk_shared_reload_throttle_enabled.checked
+        && utk_opening_boost_enabled.checked;
+    utk_opening_boost_interval.disabled = !active;
+    utk_opening_boost_max_participants.disabled = !active;
+    utk_opening_boost_window.disabled = !active;
 }
 
 function maxbot_reset_api()
@@ -2226,6 +2312,9 @@ onchange_tag_list.forEach((tag) => {
         userItem.addEventListener('change', check_unsaved_fields);
     });
 });
+
+utk_shared_reload_throttle_enabled?.addEventListener('change', update_utk_opening_boost_state);
+utk_opening_boost_enabled?.addEventListener('change', update_utk_opening_boost_state);
 
 homepage.addEventListener('keyup', check_unsaved_fields);
 homepage.addEventListener('input', () => updatePlatformFields(homepage.value));

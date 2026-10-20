@@ -21,6 +21,12 @@ _DEFAULT_GLOBAL_SETTINGS = {
         "min_interval_seconds": 1.5,
         "initial_cooldown_seconds": 60,
         "max_cooldown_seconds": 240,
+        "opening_boost": {
+            "enabled": False,
+            "interval_seconds": 0.25,
+            "max_participants": 4,
+            "window_seconds": 2.0,
+        },
     }
 }
 _CACHE_TTL_SECONDS = 0.5
@@ -92,12 +98,62 @@ def validate_global_settings(value):
             "utk_sports.initial_cooldown_seconds"
         )
 
+    default_boost = _DEFAULT_GLOBAL_SETTINGS["utk_sports"]["opening_boost"]
+    opening_boost = utk_sports.get("opening_boost", {})
+    if not isinstance(opening_boost, dict):
+        raise ValueError("utk_sports.opening_boost must be an object")
+    boost_enabled = opening_boost.get("enabled", default_boost["enabled"])
+    if not isinstance(boost_enabled, bool):
+        raise ValueError("utk_sports.opening_boost.enabled must be a boolean")
+    boost_interval = _number(
+        opening_boost.get(
+            "interval_seconds", default_boost["interval_seconds"]
+        ),
+        "utk_sports.opening_boost.interval_seconds",
+        minimum=0.0,
+        exclusive_minimum=True,
+    )
+    boost_max_participants = _number(
+        opening_boost.get(
+            "max_participants", default_boost["max_participants"]
+        ),
+        "utk_sports.opening_boost.max_participants",
+        minimum=1.0,
+        integer=True,
+    )
+    if boost_max_participants > 16:
+        raise ValueError(
+            "utk_sports.opening_boost.max_participants must be at most 16"
+        )
+    boost_window = _number(
+        opening_boost.get("window_seconds", default_boost["window_seconds"]),
+        "utk_sports.opening_boost.window_seconds",
+        minimum=0.0,
+        exclusive_minimum=True,
+    )
+    if boost_window > 30.0:
+        raise ValueError(
+            "utk_sports.opening_boost.window_seconds must be at most 30"
+        )
+    required_window = max(boost_max_participants - 1, 0) * boost_interval
+    if boost_window < required_window:
+        raise ValueError(
+            "utk_sports.opening_boost.window_seconds is too short for the "
+            "configured participant count and interval"
+        )
+
     return {
         "utk_sports": {
             "enabled": enabled,
             "min_interval_seconds": min_interval,
             "initial_cooldown_seconds": initial_cooldown,
             "max_cooldown_seconds": max_cooldown,
+            "opening_boost": {
+                "enabled": boost_enabled,
+                "interval_seconds": boost_interval,
+                "max_participants": boost_max_participants,
+                "window_seconds": boost_window,
+            },
         }
     }
 

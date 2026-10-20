@@ -9,6 +9,7 @@ needed by independent bot processes.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import random
 import sqlite3
@@ -23,7 +24,19 @@ import util
 
 
 UTK_SPORTS_SCOPE = "utk-sports"
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
+
+
+@dataclass(frozen=True)
+class OpeningBurstRequest:
+    """One process's request to join a scheduled first-pass campaign."""
+
+    campaign_id: str
+    participant_id: str
+    scheduled_at: float
+    window_until: float
+    interval_seconds: float
+    max_participants: int
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,10 @@ class RefreshDecision:
     permit_id: str = ""
     sequence: int = 0
     is_recovery_probe: bool = False
+    is_opening_burst: bool = False
+    campaign_id: str = ""
+    dispatch_token: str = ""
+    dispatch_expires_at: float = 0.0
     cooldown_until: float = 0.0
     error: str = ""
 
@@ -51,6 +68,8 @@ class RefreshReservation:
     request_id: str
     reservation_id: str = ""
     is_recovery_probe: bool = False
+    is_opening_burst: bool = False
+    campaign_id: str = ""
     expires_at: float = 0.0
     cooldown_until: float = 0.0
     error: str = ""
@@ -95,6 +114,7 @@ class SharedRefreshCoordinator:
         random_uniform: Callable[[float, float], float] = random.SystemRandom().uniform,
         stale_request_seconds: float = 5.0,
         reservation_lease_seconds: float = 5.0,
+        opening_reservation_lease_seconds: float = 0.75,
         commit_receipt_seconds: float = 300.0,
         recovery_probe_lease_seconds: float = 30.0,
         incident_dedupe_seconds: float = 10.0,
@@ -102,6 +122,8 @@ class SharedRefreshCoordinator:
         poll_retry_seconds: float = 0.25,
         database_timeout_seconds: float = 0.5,
         fail_closed_retry_seconds: float = 5.0,
+        dispatch_lease_seconds: float = 1.0,
+        claimed_dispatch_lease_seconds: float = 2.0,
     ):
         if database_path is None:
             database_path = (
@@ -117,6 +139,10 @@ class SharedRefreshCoordinator:
         self.reservation_lease_seconds = max(
             float(reservation_lease_seconds), 0.1
         )
+        self.opening_reservation_lease_seconds = min(
+            self.reservation_lease_seconds,
+            max(float(opening_reservation_lease_seconds), 0.1),
+        )
         self.commit_receipt_seconds = max(float(commit_receipt_seconds), 1.0)
         self.recovery_probe_lease_seconds = max(
             float(recovery_probe_lease_seconds), 0.1
@@ -128,6 +154,11 @@ class SharedRefreshCoordinator:
         self.poll_retry_seconds = max(float(poll_retry_seconds), 0.01)
         self.database_timeout_seconds = max(float(database_timeout_seconds), 0.01)
         self.fail_closed_retry_seconds = max(float(fail_closed_retry_seconds), 0.1)
+        self.dispatch_lease_seconds = max(float(dispatch_lease_seconds), 0.25)
+        self.claimed_dispatch_lease_seconds = max(
+            float(claimed_dispatch_lease_seconds),
+            self.dispatch_lease_seconds,
+        )
 
     def _request_id(
         self,
@@ -189,6 +220,8 @@ class SharedRefreshCoordinator:
                 probe_owner TEXT NOT NULL DEFAULT '',
                 probe_expires_at REAL NOT NULL DEFAULT 0,
                 last_recovery_at REAL NOT NULL DEFAULT 0,
+                last_dispatch_at REAL NOT NULL DEFAULT 0,
+                last_dispatch_gap REAL NOT NULL DEFAULT 0,
                 sequence INTEGER NOT NULL DEFAULT 0,
                 updated_at REAL NOT NULL DEFAULT 0
             )
@@ -207,6 +240,9 @@ class SharedRefreshCoordinator:
                 min_interval_seconds REAL NOT NULL,
                 jitter_min_seconds REAL NOT NULL,
                 jitter_max_seconds REAL NOT NULL,
+                campaign_id TEXT NOT NULL DEFAULT '',
+                campaign_participant_id TEXT NOT NULL DEFAULT '',
+                is_opening_burst INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (scope, instance_id)
             )
             """
@@ -224,7 +260,10 @@ class SharedRefreshCoordinator:
                 owner_token TEXT NOT NULL,
                 reserved_at REAL NOT NULL,
                 expires_at REAL NOT NULL,
-                is_recovery_probe INTEGER NOT NULL DEFAULT 0
+                is_recovery_probe INTEGER NOT NULL DEFAULT 0,
+                campaign_id TEXT NOT NULL DEFAULT '',
+                campaign_participant_id TEXT NOT NULL DEFAULT '',
+                is_opening_burst INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -238,6 +277,11 @@ class SharedRefreshCoordinator:
                 permit_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL,
                 is_recovery_probe INTEGER NOT NULL DEFAULT 0,
+                is_opening_burst INTEGER NOT NULL DEFAULT 0,
+                campaign_id TEXT NOT NULL DEFAULT '',
+                dispatch_token TEXT NOT NULL DEFAULT '',
+                dispatched_at REAL NOT NULL DEFAULT 0,
+                dispatch_status TEXT NOT NULL DEFAULT 'authorized',
                 committed_at REAL NOT NULL,
                 expires_at REAL NOT NULL
             )
@@ -246,6 +290,58 @@ class SharedRefreshCoordinator:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS refresh_commit_receipt_expiry "
             "ON refresh_commit_receipt(expires_at)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS refresh_opening_campaign (
+                scope TEXT NOT NULL,
+                campaign_id TEXT NOT NULL,
+                scheduled_at REAL NOT NULL,
+                window_until REAL NOT NULL,
+                interval_seconds REAL NOT NULL,
+                max_participants INTEGER NOT NULL,
+                grant_count INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'active',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                ended_at REAL NOT NULL DEFAULT 0,
+                end_reason TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (scope, campaign_id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS refresh_opening_campaign_state "
+            "ON refresh_opening_campaign(scope, state, window_until)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS refresh_opening_grant (
+                scope TEXT NOT NULL,
+                campaign_id TEXT NOT NULL,
+                participant_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                permit_id TEXT NOT NULL,
+                granted_at REAL NOT NULL,
+                PRIMARY KEY (scope, campaign_id, participant_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS refresh_dispatch_lease (
+                scope TEXT PRIMARY KEY,
+                permit_id TEXT NOT NULL UNIQUE,
+                dispatch_token TEXT NOT NULL UNIQUE,
+                owner_token TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                effective_interval_seconds REAL NOT NULL,
+                campaign_id TEXT NOT NULL DEFAULT '',
+                is_opening_burst INTEGER NOT NULL DEFAULT 0,
+                authorized_at REAL NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """
         )
         bucket_columns = {
             str(row[1])
@@ -256,6 +352,46 @@ class SharedRefreshCoordinator:
                 "ALTER TABLE refresh_bucket "
                 "ADD COLUMN last_recovery_at REAL NOT NULL DEFAULT 0"
             )
+        if "last_dispatch_at" not in bucket_columns:
+            connection.execute(
+                "ALTER TABLE refresh_bucket "
+                "ADD COLUMN last_dispatch_at REAL NOT NULL DEFAULT 0"
+            )
+        if "last_dispatch_gap" not in bucket_columns:
+            connection.execute(
+                "ALTER TABLE refresh_bucket "
+                "ADD COLUMN last_dispatch_gap REAL NOT NULL DEFAULT 0"
+            )
+        additive_columns = {
+            "refresh_queue": (
+                ("campaign_id", "TEXT NOT NULL DEFAULT ''"),
+                ("campaign_participant_id", "TEXT NOT NULL DEFAULT ''"),
+                ("is_opening_burst", "INTEGER NOT NULL DEFAULT 0"),
+            ),
+            "refresh_reservation": (
+                ("campaign_id", "TEXT NOT NULL DEFAULT ''"),
+                ("campaign_participant_id", "TEXT NOT NULL DEFAULT ''"),
+                ("is_opening_burst", "INTEGER NOT NULL DEFAULT 0"),
+            ),
+            "refresh_commit_receipt": (
+                ("is_opening_burst", "INTEGER NOT NULL DEFAULT 0"),
+                ("campaign_id", "TEXT NOT NULL DEFAULT ''"),
+                ("dispatch_token", "TEXT NOT NULL DEFAULT ''"),
+                ("dispatched_at", "REAL NOT NULL DEFAULT 0"),
+                ("dispatch_status", "TEXT NOT NULL DEFAULT 'authorized'"),
+            ),
+        }
+        for table_name, columns in additive_columns.items():
+            existing_columns = {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            for column_name, definition in columns:
+                if column_name not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE {table_name} ADD COLUMN "
+                        f"{column_name} {definition}"
+                    )
         if user_version < _SCHEMA_VERSION:
             connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
@@ -324,6 +460,279 @@ class SharedRefreshCoordinator:
             raise ValueError("request_token must contain 1-128 characters")
         return value
 
+    @staticmethod
+    def _validate_opening_burst(
+        opening_burst: Optional[OpeningBurstRequest],
+    ) -> Optional[OpeningBurstRequest]:
+        if opening_burst is None:
+            return None
+        if not isinstance(opening_burst, OpeningBurstRequest):
+            raise ValueError("opening_burst must be an OpeningBurstRequest")
+        campaign_id = str(opening_burst.campaign_id or "").strip()
+        participant_id = str(opening_burst.participant_id or "").strip()
+        if not campaign_id or len(campaign_id) > 128:
+            raise ValueError("opening burst campaign_id must contain 1-128 characters")
+        if not participant_id or len(participant_id) > 128:
+            raise ValueError(
+                "opening burst participant_id must contain 1-128 characters"
+            )
+        scheduled_at = float(opening_burst.scheduled_at)
+        window_until = float(opening_burst.window_until)
+        interval = float(opening_burst.interval_seconds)
+        maximum = opening_burst.max_participants
+        if (
+            not all(math.isfinite(item) for item in (
+                scheduled_at, window_until, interval
+            ))
+            or window_until <= scheduled_at
+            or interval <= 0
+        ):
+            raise ValueError("invalid opening burst timing")
+        if isinstance(maximum, bool) or int(maximum) != maximum:
+            raise ValueError("opening burst max_participants must be an integer")
+        maximum = int(maximum)
+        if maximum < 1 or maximum > 16:
+            raise ValueError("opening burst max_participants must be 1-16")
+        if window_until - scheduled_at < (maximum - 1) * interval:
+            raise ValueError("opening burst window is too short")
+        return OpeningBurstRequest(
+            campaign_id=campaign_id,
+            participant_id=participant_id,
+            scheduled_at=scheduled_at,
+            window_until=window_until,
+            interval_seconds=interval,
+            max_participants=maximum,
+        )
+
+    def _cleanup_expired_dispatches(
+        self, connection: sqlite3.Connection, scope: str, now: float
+    ) -> None:
+        leases = connection.execute(
+            "SELECT * FROM refresh_dispatch_lease "
+            "WHERE scope = ? AND expires_at <= ?",
+            (scope, now),
+        ).fetchall()
+        for lease in leases:
+            bucket = self._bucket(connection, scope, now)
+            assumed_dispatch_at = float(lease["expires_at"])
+            effective_gap = float(lease["effective_interval_seconds"])
+            previous_dispatch_at = float(bucket["last_dispatch_at"])
+            last_dispatch_at = max(previous_dispatch_at, assumed_dispatch_at)
+            last_dispatch_gap = (
+                effective_gap
+                if assumed_dispatch_at >= previous_dispatch_at
+                else float(bucket["last_dispatch_gap"])
+            )
+            next_allowed_at = max(
+                float(bucket["next_allowed_at"]),
+                assumed_dispatch_at + effective_gap,
+            )
+            connection.execute(
+                """
+                UPDATE refresh_bucket
+                SET last_dispatch_at = ?, last_dispatch_gap = ?,
+                    next_allowed_at = ?, updated_at = ?
+                WHERE scope = ?
+                """,
+                (
+                    last_dispatch_at,
+                    last_dispatch_gap,
+                    next_allowed_at,
+                    now,
+                    scope,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE refresh_commit_receipt
+                SET dispatched_at = CASE WHEN dispatched_at > 0
+                                         THEN dispatched_at ELSE ? END,
+                    dispatch_status = CASE WHEN dispatched_at > 0
+                                           THEN dispatch_status
+                                           ELSE 'expired_uncertain' END
+                WHERE permit_id = ? AND dispatch_token = ?
+                """,
+                (
+                    assumed_dispatch_at,
+                    str(lease["permit_id"]),
+                    str(lease["dispatch_token"]),
+                ),
+            )
+        if leases:
+            connection.execute(
+                "DELETE FROM refresh_dispatch_lease "
+                "WHERE scope = ? AND expires_at <= ?",
+                (scope, now),
+            )
+
+    @staticmethod
+    def _cleanup_expired_reservations(
+        connection: sqlite3.Connection, scope: str, now: float
+    ) -> None:
+        """Drop an abandoned burst head as soon as its short lease expires."""
+
+        expired_burst = connection.execute(
+            """
+            SELECT request_id FROM refresh_reservation
+            WHERE scope = ? AND expires_at <= ? AND is_opening_burst = 1
+            """,
+            (scope, now),
+        ).fetchall()
+        for row in expired_burst:
+            connection.execute(
+                "DELETE FROM refresh_queue WHERE scope = ? AND request_id = ?",
+                (scope, str(row["request_id"])),
+            )
+        connection.execute(
+            "DELETE FROM refresh_reservation WHERE scope = ? AND expires_at <= ?",
+            (scope, now),
+        )
+
+    @staticmethod
+    def _refresh_opening_campaigns(
+        connection: sqlite3.Connection, scope: str, now: float
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE refresh_opening_campaign
+            SET state = 'expired', ended_at = ?, updated_at = ?,
+                end_reason = CASE WHEN end_reason = '' THEN 'window_expired'
+                                  ELSE end_reason END
+            WHERE scope = ? AND state IN ('active', 'exhausted')
+              AND window_until <= ?
+            """,
+            (now, now, scope, now),
+        )
+        connection.execute(
+            """
+            UPDATE refresh_queue
+            SET campaign_id = '', campaign_participant_id = '',
+                is_opening_burst = 0
+            WHERE scope = ? AND campaign_id <> ''
+              AND campaign_id NOT IN (
+                  SELECT campaign_id FROM refresh_opening_campaign
+                  WHERE scope = ? AND state IN ('active', 'exhausted')
+                    AND window_until > ?
+              )
+            """,
+            (scope, scope, now),
+        )
+        retention_cutoff = now - 604800.0
+        connection.execute(
+            """
+            DELETE FROM refresh_opening_grant
+            WHERE scope = ? AND campaign_id IN (
+                SELECT campaign_id FROM refresh_opening_campaign
+                WHERE scope = ? AND window_until < ?
+            )
+            """,
+            (scope, scope, retention_cutoff),
+        )
+        connection.execute(
+            "DELETE FROM refresh_opening_campaign "
+            "WHERE scope = ? AND window_until < ?",
+            (scope, retention_cutoff),
+        )
+
+    @staticmethod
+    def _active_opening_campaign(
+        connection: sqlite3.Connection, scope: str, now: float
+    ) -> Optional[sqlite3.Row]:
+        return connection.execute(
+            """
+            SELECT * FROM refresh_opening_campaign
+            WHERE scope = ? AND state IN ('active', 'exhausted')
+              AND scheduled_at <= ? AND window_until > ?
+            ORDER BY scheduled_at ASC, campaign_id ASC
+            LIMIT 1
+            """,
+            (scope, now, now),
+        ).fetchone()
+
+    def _prepare_opening_burst(
+        self,
+        connection: sqlite3.Connection,
+        scope: str,
+        request: Optional[OpeningBurstRequest],
+        bucket: sqlite3.Row,
+        now: float,
+    ) -> tuple[Optional[sqlite3.Row], bool, str]:
+        if request is None or now < request.scheduled_at or now >= request.window_until:
+            return None, False, ""
+        campaign = connection.execute(
+            "SELECT * FROM refresh_opening_campaign "
+            "WHERE scope = ? AND campaign_id = ?",
+            (scope, request.campaign_id),
+        ).fetchone()
+        if campaign is None:
+            overlap = connection.execute(
+                """
+                SELECT campaign_id FROM refresh_opening_campaign
+                WHERE scope = ? AND state IN ('active', 'exhausted')
+                  AND scheduled_at < ? AND window_until > ?
+                LIMIT 1
+                """,
+                (scope, request.window_until, request.scheduled_at),
+            ).fetchone()
+            if overlap is not None:
+                return None, False, "campaign_overlap"
+            blocked = (
+                float(bucket["cooldown_until"]) > now
+                or bool(bucket["recovery_required"])
+            )
+            state = "aborted" if blocked else "active"
+            reason = "rate_limit_recovery" if blocked else ""
+            connection.execute(
+                """
+                INSERT INTO refresh_opening_campaign(
+                    scope, campaign_id, scheduled_at, window_until,
+                    interval_seconds, max_participants, grant_count, state,
+                    created_at, updated_at, ended_at, end_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope,
+                    request.campaign_id,
+                    request.scheduled_at,
+                    request.window_until,
+                    request.interval_seconds,
+                    request.max_participants,
+                    state,
+                    now,
+                    now,
+                    now if blocked else 0.0,
+                    reason,
+                ),
+            )
+            campaign = connection.execute(
+                "SELECT * FROM refresh_opening_campaign "
+                "WHERE scope = ? AND campaign_id = ?",
+                (scope, request.campaign_id),
+            ).fetchone()
+        same_spec = bool(
+            campaign
+            and float(campaign["scheduled_at"]) == request.scheduled_at
+            and float(campaign["window_until"]) == request.window_until
+            and float(campaign["interval_seconds"]) == request.interval_seconds
+            and int(campaign["max_participants"]) == request.max_participants
+        )
+        if not same_spec:
+            return campaign, False, "campaign_conflict"
+        if str(campaign["state"]) != "active":
+            return campaign, False, str(campaign["state"])
+        already_granted = connection.execute(
+            """
+            SELECT 1 FROM refresh_opening_grant
+            WHERE scope = ? AND campaign_id = ? AND participant_id = ?
+            """,
+            (scope, request.campaign_id, request.participant_id),
+        ).fetchone()
+        eligible = (
+            already_granted is None
+            and int(campaign["grant_count"]) < int(campaign["max_participants"])
+        )
+        return campaign, eligible, "" if eligible else "already_served"
+
     def reserve_refresh_sync(
         self,
         scope: str,
@@ -332,6 +741,7 @@ class SharedRefreshCoordinator:
         min_interval_seconds: float,
         jitter_range_seconds: Sequence[float] = (0.1, 0.3),
         request_token: Optional[str] = None,
+        opening_burst: Optional[OpeningBurstRequest] = None,
     ) -> RefreshReservation:
         """Reserve the FIFO head without yet authorizing a network request.
 
@@ -349,20 +759,23 @@ class SharedRefreshCoordinator:
             min_interval, jitter_min, jitter_max = self._validate_pacing(
                 min_interval_seconds, jitter_range_seconds
             )
+            opening_burst = self._validate_opening_burst(opening_burst)
             request_id = self._request_id(scope, instance_id, request_token)
-            now = float(self._clock())
             with closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                # The transaction lock is the linearization point.  Re-read
+                # wall time after acquiring it so a request that waited across
+                # the scheduled boundary is classified in the correct phase.
+                now = float(self._clock())
+                bucket = self._bucket(connection, scope, now)
+                self._cleanup_expired_dispatches(connection, scope, now)
+                self._refresh_opening_campaigns(connection, scope, now)
                 bucket = self._bucket(connection, scope, now)
                 connection.execute(
                     "DELETE FROM refresh_commit_receipt WHERE expires_at <= ?",
                     (now,),
                 )
-                connection.execute(
-                    "DELETE FROM refresh_reservation "
-                    "WHERE scope = ? AND expires_at <= ?",
-                    (scope, now),
-                )
+                self._cleanup_expired_reservations(connection, scope, now)
                 # A live reservation protects its queue row even when a slow
                 # browser preflight outlives the normal heartbeat interval.
                 connection.execute(
@@ -375,6 +788,38 @@ class SharedRefreshCoordinator:
                       )
                     """,
                     (scope, now - self.stale_request_seconds, scope, now),
+                )
+
+                if (
+                    opening_burst is not None
+                    and now < opening_burst.scheduled_at
+                ):
+                    connection.commit()
+                    return RefreshReservation(
+                        reserved=False,
+                        status="opening_not_started",
+                        retry_after_seconds=max(
+                            0.01,
+                            min(
+                                self.poll_retry_seconds,
+                                opening_burst.scheduled_at - now,
+                            ),
+                        ),
+                        request_id=request_id,
+                    )
+
+                campaign, burst_eligible, _ = self._prepare_opening_burst(
+                    connection, scope, opening_burst, bucket, now
+                )
+                campaign_id = (
+                    str(campaign["campaign_id"])
+                    if campaign is not None and opening_burst is not None
+                    else ""
+                )
+                participant_id = (
+                    opening_burst.participant_id
+                    if campaign_id and opening_burst is not None
+                    else ""
                 )
 
                 existing = connection.execute(
@@ -420,8 +865,9 @@ class SharedRefreshCoordinator:
                         INSERT INTO refresh_queue(
                             scope, instance_id, request_id, owner_token, process_id,
                             enqueued_at, heartbeat_at, min_interval_seconds,
-                            jitter_min_seconds, jitter_max_seconds
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            jitter_min_seconds, jitter_max_seconds, campaign_id,
+                            campaign_participant_id, is_opening_burst
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             scope,
@@ -434,6 +880,9 @@ class SharedRefreshCoordinator:
                             min_interval,
                             jitter_min,
                             jitter_max,
+                            campaign_id if burst_eligible else "",
+                            participant_id if burst_eligible else "",
+                            int(burst_eligible),
                         ),
                     )
                 else:
@@ -441,7 +890,9 @@ class SharedRefreshCoordinator:
                         """
                         UPDATE refresh_queue
                         SET heartbeat_at = ?, min_interval_seconds = ?,
-                            jitter_min_seconds = ?, jitter_max_seconds = ?
+                            jitter_min_seconds = ?, jitter_max_seconds = ?,
+                            campaign_id = ?, campaign_participant_id = ?,
+                            is_opening_burst = ?
                         WHERE scope = ? AND instance_id = ? AND owner_token = ?
                         """,
                         (
@@ -449,10 +900,32 @@ class SharedRefreshCoordinator:
                             min_interval,
                             jitter_min,
                             jitter_max,
+                            campaign_id if burst_eligible else "",
+                            participant_id if burst_eligible else "",
+                            int(burst_eligible),
                             scope,
                             instance_id,
                             self.owner_token,
                         ),
+                    )
+
+                live_dispatch = connection.execute(
+                    "SELECT expires_at FROM refresh_dispatch_lease WHERE scope = ?",
+                    (scope,),
+                ).fetchone()
+                if live_dispatch is not None:
+                    connection.commit()
+                    return RefreshReservation(
+                        reserved=False,
+                        status="dispatch_active",
+                        retry_after_seconds=max(
+                            0.01,
+                            min(
+                                self.poll_retry_seconds,
+                                float(live_dispatch["expires_at"]) - now,
+                            ),
+                        ),
+                        request_id=request_id,
                     )
 
                 cooldown_until = float(bucket["cooldown_until"])
@@ -514,6 +987,8 @@ class SharedRefreshCoordinator:
                             request_id=request_id,
                             reservation_id=str(active["reservation_id"]),
                             is_recovery_probe=bool(active["is_recovery_probe"]),
+                            is_opening_burst=bool(active["is_opening_burst"]),
+                            campaign_id=str(active["campaign_id"] or ""),
                             expires_at=float(active["expires_at"]),
                         )
                     connection.commit()
@@ -530,15 +1005,52 @@ class SharedRefreshCoordinator:
                         request_id=request_id,
                     )
 
-                head = connection.execute(
-                    """
-                    SELECT * FROM refresh_queue
-                    WHERE scope = ?
-                    ORDER BY enqueued_at ASC, request_id ASC
-                    LIMIT 1
-                    """,
-                    (scope,),
-                ).fetchone()
+                is_probe = bool(bucket["recovery_required"])
+                active_campaign = self._active_opening_campaign(
+                    connection, scope, now
+                )
+                is_opening_burst = bool(
+                    not is_probe
+                    and burst_eligible
+                    and active_campaign is not None
+                    and campaign_id == str(active_campaign["campaign_id"])
+                )
+                if active_campaign is not None and not is_probe and not is_opening_burst:
+                    connection.commit()
+                    return RefreshReservation(
+                        reserved=False,
+                        status="opening_barrier",
+                        retry_after_seconds=max(
+                            0.01,
+                            min(
+                                self.poll_retry_seconds,
+                                float(active_campaign["window_until"]) - now,
+                            ),
+                        ),
+                        request_id=request_id,
+                    )
+
+                if is_opening_burst:
+                    head = connection.execute(
+                        """
+                        SELECT * FROM refresh_queue
+                        WHERE scope = ? AND campaign_id = ?
+                          AND is_opening_burst = 1
+                        ORDER BY enqueued_at ASC, request_id ASC
+                        LIMIT 1
+                        """,
+                        (scope, campaign_id),
+                    ).fetchone()
+                else:
+                    head = connection.execute(
+                        """
+                        SELECT * FROM refresh_queue
+                        WHERE scope = ?
+                        ORDER BY enqueued_at ASC, request_id ASC
+                        LIMIT 1
+                        """,
+                        (scope,),
+                    ).fetchone()
                 if head is None or head["request_id"] != request_id:
                     connection.commit()
                     return RefreshReservation(
@@ -548,7 +1060,17 @@ class SharedRefreshCoordinator:
                         request_id=request_id,
                     )
 
-                next_allowed_at = float(bucket["next_allowed_at"])
+                incoming_gap = (
+                    float(campaign["interval_seconds"])
+                    if is_opening_burst and campaign is not None
+                    else min_interval + jitter_min
+                )
+                pairwise_allowed_at = float(bucket["last_dispatch_at"]) + max(
+                    float(bucket["last_dispatch_gap"]), incoming_gap
+                )
+                next_allowed_at = max(
+                    float(bucket["next_allowed_at"]), pairwise_allowed_at
+                )
                 if next_allowed_at > now:
                     connection.commit()
                     return RefreshReservation(
@@ -562,14 +1084,19 @@ class SharedRefreshCoordinator:
                     )
 
                 reservation_id = f"{request_id}:reservation:{uuid.uuid4().hex}"
-                expires_at = now + self.reservation_lease_seconds
-                is_probe = bool(bucket["recovery_required"])
+                lease_seconds = (
+                    self.opening_reservation_lease_seconds
+                    if is_opening_burst
+                    else self.reservation_lease_seconds
+                )
+                expires_at = now + lease_seconds
                 connection.execute(
                     """
                     INSERT INTO refresh_reservation(
                         scope, reservation_id, request_id, owner_token,
-                        reserved_at, expires_at, is_recovery_probe
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        reserved_at, expires_at, is_recovery_probe, campaign_id,
+                        campaign_participant_id, is_opening_burst
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         scope,
@@ -579,6 +1106,9 @@ class SharedRefreshCoordinator:
                         now,
                         expires_at,
                         int(is_probe),
+                        campaign_id if is_opening_burst else "",
+                        participant_id if is_opening_burst else "",
+                        int(is_opening_burst),
                     ),
                 )
                 connection.commit()
@@ -589,6 +1119,8 @@ class SharedRefreshCoordinator:
                     request_id=request_id,
                     reservation_id=reservation_id,
                     is_recovery_probe=is_probe,
+                    is_opening_burst=is_opening_burst,
+                    campaign_id=campaign_id if is_opening_burst else "",
                     expires_at=expires_at,
                 )
         except Exception as exc:
@@ -602,6 +1134,7 @@ class SharedRefreshCoordinator:
         min_interval_seconds: float,
         jitter_range_seconds: Sequence[float] = (0.1, 0.3),
         request_token: Optional[str] = None,
+        opening_burst: Optional[OpeningBurstRequest] = None,
     ) -> RefreshReservation:
         return await asyncio.to_thread(
             self.reserve_refresh_sync,
@@ -610,6 +1143,7 @@ class SharedRefreshCoordinator:
             min_interval_seconds=min_interval_seconds,
             jitter_range_seconds=jitter_range_seconds,
             request_token=request_token,
+            opening_burst=opening_burst,
         )
 
     def commit_refresh_sync(
@@ -620,7 +1154,7 @@ class SharedRefreshCoordinator:
         *,
         request_token: Optional[str] = None,
     ) -> RefreshDecision:
-        """Atomically convert a live reservation into one dispatch permit."""
+        """Authorize one short-lived dispatch and atomically consume its quota."""
 
         request_id = self._request_id(
             str(scope or ""), str(instance_id or ""), request_token
@@ -632,9 +1166,15 @@ class SharedRefreshCoordinator:
             reservation_id = str(reservation_id or "").strip()
             if not reservation_id:
                 raise ValueError("reservation_id is required")
-            now = float(self._clock())
             with closing(self._connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                # The write lock can be delayed long enough to cross a short
+                # opening window or reservation lease.  Classify the commit
+                # using the time at which this transaction actually owns the
+                # state, not the stale time from before waiting on SQLite.
+                now = float(self._clock())
+                self._cleanup_expired_dispatches(connection, scope, now)
+                self._refresh_opening_campaigns(connection, scope, now)
                 connection.execute(
                     "DELETE FROM refresh_commit_receipt WHERE expires_at <= ?",
                     (now,),
@@ -660,6 +1200,9 @@ class SharedRefreshCoordinator:
                             permit_id=str(receipt["permit_id"]),
                             sequence=int(receipt["sequence"]),
                             is_recovery_probe=bool(receipt["is_recovery_probe"]),
+                            is_opening_burst=bool(receipt["is_opening_burst"]),
+                            campaign_id=str(receipt["campaign_id"] or ""),
+                            dispatch_token=str(receipt["dispatch_token"] or ""),
                         )
                     return RefreshDecision(
                         granted=False,
@@ -685,6 +1228,12 @@ class SharedRefreshCoordinator:
                         request_id=request_id,
                     )
                 if float(reservation["expires_at"]) <= now:
+                    if bool(reservation["is_opening_burst"]):
+                        connection.execute(
+                            "DELETE FROM refresh_queue "
+                            "WHERE scope = ? AND request_id = ?",
+                            (scope, request_id),
+                        )
                     connection.execute(
                         "DELETE FROM refresh_reservation WHERE reservation_id = ?",
                         (reservation_id,),
@@ -719,6 +1268,24 @@ class SharedRefreshCoordinator:
                     )
 
                 bucket = self._bucket(connection, scope, now)
+                live_dispatch = connection.execute(
+                    "SELECT expires_at FROM refresh_dispatch_lease WHERE scope = ?",
+                    (scope,),
+                ).fetchone()
+                if live_dispatch is not None:
+                    connection.execute(
+                        "DELETE FROM refresh_reservation WHERE reservation_id = ?",
+                        (reservation_id,),
+                    )
+                    connection.commit()
+                    return RefreshDecision(
+                        granted=False,
+                        status="dispatch_active",
+                        retry_after_seconds=max(
+                            0.01, float(live_dispatch["expires_at"]) - now
+                        ),
+                        request_id=request_id,
+                    )
                 cooldown_until = float(bucket["cooldown_until"])
                 if cooldown_until > now:
                     connection.execute(
@@ -746,6 +1313,11 @@ class SharedRefreshCoordinator:
                     bucket = self._bucket(connection, scope, now)
 
                 is_probe = bool(reservation["is_recovery_probe"])
+                is_opening_burst = bool(reservation["is_opening_burst"])
+                campaign_id = str(reservation["campaign_id"] or "")
+                participant_id = str(
+                    reservation["campaign_participant_id"] or ""
+                )
                 phase_changed = is_probe != bool(bucket["recovery_required"])
                 if phase_changed or bucket["probe_owner"]:
                     connection.execute(
@@ -760,7 +1332,77 @@ class SharedRefreshCoordinator:
                         request_id=request_id,
                     )
 
-                next_allowed_at = float(bucket["next_allowed_at"])
+                active_campaign = self._active_opening_campaign(
+                    connection, scope, now
+                )
+                campaign = None
+                if is_opening_burst:
+                    campaign = connection.execute(
+                        "SELECT * FROM refresh_opening_campaign "
+                        "WHERE scope = ? AND campaign_id = ?",
+                        (scope, campaign_id),
+                    ).fetchone()
+                    prior_grant = connection.execute(
+                        """
+                        SELECT 1 FROM refresh_opening_grant
+                        WHERE scope = ? AND campaign_id = ? AND participant_id = ?
+                        """,
+                        (scope, campaign_id, participant_id),
+                    ).fetchone()
+                    valid_campaign = bool(
+                        campaign is not None
+                        and str(campaign["state"]) == "active"
+                        and float(campaign["scheduled_at"]) <= now
+                        and float(campaign["window_until"]) > now
+                        and int(campaign["grant_count"])
+                        < int(campaign["max_participants"])
+                        and prior_grant is None
+                    )
+                    if not valid_campaign:
+                        connection.execute(
+                            "DELETE FROM refresh_reservation "
+                            "WHERE reservation_id = ?",
+                            (reservation_id,),
+                        )
+                        connection.commit()
+                        return RefreshDecision(
+                            granted=False,
+                            status="opening_ineligible",
+                            retry_after_seconds=self.poll_retry_seconds,
+                            request_id=request_id,
+                        )
+                elif active_campaign is not None and not is_probe:
+                    connection.execute(
+                        "DELETE FROM refresh_reservation WHERE reservation_id = ?",
+                        (reservation_id,),
+                    )
+                    connection.commit()
+                    return RefreshDecision(
+                        granted=False,
+                        status="opening_barrier",
+                        retry_after_seconds=max(
+                            0.01,
+                            float(active_campaign["window_until"]) - now,
+                        ),
+                        request_id=request_id,
+                    )
+
+                if is_opening_burst and campaign is not None:
+                    effective_interval = float(campaign["interval_seconds"])
+                else:
+                    jitter_min = float(queue_row["jitter_min_seconds"])
+                    jitter_max = float(queue_row["jitter_max_seconds"])
+                    jitter = float(self._random_uniform(jitter_min, jitter_max))
+                    jitter = min(max(jitter, jitter_min), jitter_max)
+                    effective_interval = (
+                        float(queue_row["min_interval_seconds"]) + jitter
+                    )
+                pairwise_allowed_at = float(bucket["last_dispatch_at"]) + max(
+                    float(bucket["last_dispatch_gap"]), effective_interval
+                )
+                next_allowed_at = max(
+                    float(bucket["next_allowed_at"]), pairwise_allowed_at
+                )
                 if next_allowed_at > now:
                     connection.execute(
                         "DELETE FROM refresh_reservation WHERE reservation_id = ?",
@@ -773,16 +1415,11 @@ class SharedRefreshCoordinator:
                         retry_after_seconds=max(0.01, next_allowed_at - now),
                         request_id=request_id,
                     )
-
-                jitter_min = float(queue_row["jitter_min_seconds"])
-                jitter_max = float(queue_row["jitter_max_seconds"])
-                jitter = float(self._random_uniform(jitter_min, jitter_max))
-                jitter = min(max(jitter, jitter_min), jitter_max)
-                next_allowed_at = (
-                    now + float(queue_row["min_interval_seconds"]) + jitter
-                )
+                next_allowed_at = now + effective_interval
                 sequence = int(bucket["sequence"]) + 1
                 permit_id = f"{request_id}:{sequence}:{uuid.uuid4().hex}"
+                dispatch_token = uuid.uuid4().hex
+                dispatch_expires_at = now + self.dispatch_lease_seconds
                 probe_expires_at = (
                     now + self.recovery_probe_lease_seconds if is_probe else 0.0
                 )
@@ -802,6 +1439,47 @@ class SharedRefreshCoordinator:
                         scope,
                     ),
                 )
+                if is_opening_burst and campaign is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO refresh_opening_grant(
+                            scope, campaign_id, participant_id, request_id,
+                            permit_id, granted_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            scope,
+                            campaign_id,
+                            participant_id,
+                            request_id,
+                            permit_id,
+                            now,
+                        ),
+                    )
+                    next_count = int(campaign["grant_count"]) + 1
+                    state = (
+                        "exhausted"
+                        if next_count >= int(campaign["max_participants"])
+                        else "active"
+                    )
+                    connection.execute(
+                        """
+                        UPDATE refresh_opening_campaign
+                        SET grant_count = ?, state = ?, updated_at = ?
+                        WHERE scope = ? AND campaign_id = ?
+                        """,
+                        (next_count, state, now, scope, campaign_id),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE refresh_queue
+                        SET campaign_id = '', campaign_participant_id = '',
+                            is_opening_burst = 0
+                        WHERE scope = ? AND campaign_id = ?
+                          AND campaign_participant_id = ?
+                        """,
+                        (scope, campaign_id, participant_id),
+                    )
                 connection.execute(
                     "DELETE FROM refresh_queue WHERE request_id = ?",
                     (request_id,),
@@ -814,8 +1492,11 @@ class SharedRefreshCoordinator:
                     """
                     INSERT INTO refresh_commit_receipt(
                         reservation_id, scope, request_id, owner_token, permit_id,
-                        sequence, is_recovery_probe, committed_at, expires_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        sequence, is_recovery_probe, is_opening_burst,
+                        campaign_id, dispatch_token, dispatched_at,
+                        dispatch_status, committed_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                              'authorized', ?, ?)
                     """,
                     (
                         reservation_id,
@@ -825,8 +1506,32 @@ class SharedRefreshCoordinator:
                         permit_id,
                         sequence,
                         int(is_probe),
+                        int(is_opening_burst),
+                        campaign_id if is_opening_burst else "",
+                        dispatch_token,
                         now,
                         now + self.commit_receipt_seconds,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO refresh_dispatch_lease(
+                        scope, permit_id, dispatch_token, owner_token, request_id,
+                        effective_interval_seconds, campaign_id,
+                        is_opening_burst, authorized_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scope,
+                        permit_id,
+                        dispatch_token,
+                        self.owner_token,
+                        request_id,
+                        effective_interval,
+                        campaign_id if is_opening_burst else "",
+                        int(is_opening_burst),
+                        now,
+                        dispatch_expires_at,
                     ),
                 )
                 connection.commit()
@@ -838,6 +1543,10 @@ class SharedRefreshCoordinator:
                     permit_id=permit_id,
                     sequence=sequence,
                     is_recovery_probe=is_probe,
+                    is_opening_burst=is_opening_burst,
+                    campaign_id=campaign_id if is_opening_burst else "",
+                    dispatch_token=dispatch_token,
+                    dispatch_expires_at=dispatch_expires_at,
                 )
         except Exception as exc:
             return self._error_decision(request_id, exc)
@@ -858,6 +1567,309 @@ class SharedRefreshCoordinator:
             request_token=request_token,
         )
 
+    def claim_dispatch_sync(
+        self, scope: str, permit_id: str, dispatch_token: str
+    ) -> float | bool:
+        """Claim the exact lease once and return its extended expiry epoch."""
+
+        try:
+            scope = str(scope or "").strip()
+            permit_id = str(permit_id or "").strip()
+            dispatch_token = str(dispatch_token or "").strip()
+            if not scope or not permit_id or not dispatch_token:
+                raise ValueError("scope, permit_id and dispatch_token are required")
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                # Re-sample after acquiring the write lock so an expired
+                # dispatch/campaign cannot be claimed with a pre-lock time.
+                now = float(self._clock())
+                self._cleanup_expired_dispatches(connection, scope, now)
+                lease = connection.execute(
+                    """
+                    SELECT * FROM refresh_dispatch_lease
+                    WHERE scope = ? AND permit_id = ? AND dispatch_token = ?
+                      AND owner_token = ? AND expires_at > ?
+                    """,
+                    (
+                        scope,
+                        permit_id,
+                        dispatch_token,
+                        self.owner_token,
+                        now,
+                    ),
+                ).fetchone()
+                if lease is None:
+                    connection.commit()
+                    return False
+                bucket = self._bucket(connection, scope, now)
+                receipt = connection.execute(
+                    "SELECT is_recovery_probe, dispatch_status, campaign_id "
+                    "FROM refresh_commit_receipt "
+                    "WHERE permit_id = ? AND dispatch_token = ?",
+                    (permit_id, dispatch_token),
+                ).fetchone()
+                is_probe = bool(receipt and receipt["is_recovery_probe"])
+                campaign_aborted = False
+                campaign_id = str(receipt["campaign_id"] or "") if receipt else ""
+                if campaign_id:
+                    campaign = connection.execute(
+                        "SELECT state, window_until FROM refresh_opening_campaign "
+                        "WHERE scope = ? AND campaign_id = ?",
+                        (scope, campaign_id),
+                    ).fetchone()
+                    campaign_aborted = bool(
+                        campaign is None
+                        or str(campaign["state"]) in {"aborted", "expired"}
+                        or float(campaign["window_until"]) <= now
+                    )
+                invalid_phase = bool(
+                    float(bucket["cooldown_until"]) > now
+                    or (bool(bucket["recovery_required"]) and not is_probe)
+                    or campaign_aborted
+                )
+                if invalid_phase:
+                    if receipt and receipt["dispatch_status"] == "authorized":
+                        connection.execute(
+                            "DELETE FROM refresh_dispatch_lease "
+                            "WHERE scope = ? AND permit_id = ? "
+                            "AND dispatch_token = ?",
+                            (scope, permit_id, dispatch_token),
+                        )
+                        connection.execute(
+                            "UPDATE refresh_commit_receipt "
+                            "SET dispatch_status = 'revoked' "
+                            "WHERE permit_id = ? AND dispatch_token = ? "
+                            "AND dispatch_status = 'authorized'",
+                            (permit_id, dispatch_token),
+                        )
+                    connection.commit()
+                    return False
+                claimed = connection.execute(
+                    """
+                    UPDATE refresh_commit_receipt
+                    SET dispatch_status = 'claimed'
+                    WHERE permit_id = ? AND dispatch_token = ?
+                      AND owner_token = ? AND dispatch_status = 'authorized'
+                    """,
+                    (permit_id, dispatch_token, self.owner_token),
+                )
+                if claimed.rowcount != 1:
+                    connection.commit()
+                    return False
+                claimed_expires_at = max(
+                    float(lease["expires_at"]),
+                    now + self.claimed_dispatch_lease_seconds,
+                )
+                connection.execute(
+                    """
+                    UPDATE refresh_dispatch_lease
+                    SET expires_at = ?
+                    WHERE scope = ? AND permit_id = ? AND dispatch_token = ?
+                      AND owner_token = ?
+                    """,
+                    (
+                        claimed_expires_at,
+                        scope,
+                        permit_id,
+                        dispatch_token,
+                        self.owner_token,
+                    ),
+                )
+                connection.commit()
+                return claimed_expires_at
+        except Exception:
+            return False
+
+    async def claim_dispatch(
+        self, scope: str, permit_id: str, dispatch_token: str
+    ) -> float | bool:
+        return await asyncio.to_thread(
+            self.claim_dispatch_sync, scope, permit_id, dispatch_token
+        )
+
+    def complete_dispatch_sync(
+        self,
+        scope: str,
+        permit_id: str,
+        dispatch_token: str,
+        *,
+        possibly_dispatched: bool,
+    ) -> bool:
+        """Acknowledge the command result without refunding an authorized permit."""
+
+        try:
+            scope = str(scope or "").strip()
+            permit_id = str(permit_id or "").strip()
+            dispatch_token = str(dispatch_token or "").strip()
+            if not scope or not permit_id or not dispatch_token:
+                raise ValueError("scope, permit_id and dispatch_token are required")
+            now = float(self._clock())
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                lease = connection.execute(
+                    """
+                    SELECT * FROM refresh_dispatch_lease
+                    WHERE scope = ? AND permit_id = ? AND dispatch_token = ?
+                      AND owner_token = ?
+                    """,
+                    (scope, permit_id, dispatch_token, self.owner_token),
+                ).fetchone()
+                if lease is None:
+                    receipt = connection.execute(
+                        """
+                        SELECT dispatched_at FROM refresh_commit_receipt
+                        WHERE scope = ? AND permit_id = ? AND dispatch_token = ?
+                          AND owner_token = ?
+                        """,
+                        (scope, permit_id, dispatch_token, self.owner_token),
+                    ).fetchone()
+                    connection.commit()
+                    return bool(receipt and float(receipt["dispatched_at"]) > 0)
+                if possibly_dispatched:
+                    bucket = self._bucket(connection, scope, now)
+                    effective_gap = float(lease["effective_interval_seconds"])
+                    previous_dispatch_at = float(bucket["last_dispatch_at"])
+                    last_dispatch_at = max(previous_dispatch_at, now)
+                    last_dispatch_gap = (
+                        effective_gap
+                        if now >= previous_dispatch_at
+                        else float(bucket["last_dispatch_gap"])
+                    )
+                    connection.execute(
+                        """
+                        UPDATE refresh_bucket
+                        SET last_dispatch_at = ?, last_dispatch_gap = ?,
+                            next_allowed_at = MAX(next_allowed_at, ?),
+                            updated_at = ?
+                        WHERE scope = ?
+                        """,
+                        (
+                            last_dispatch_at,
+                            last_dispatch_gap,
+                            now + effective_gap,
+                            now,
+                            scope,
+                        ),
+                    )
+                if possibly_dispatched:
+                    connection.execute(
+                        """
+                        UPDATE refresh_commit_receipt
+                        SET dispatched_at = CASE WHEN dispatched_at > 0
+                                                 THEN dispatched_at ELSE ? END,
+                            dispatch_status = CASE WHEN dispatched_at > 0
+                                                   THEN dispatch_status
+                                                   ELSE 'uncertain' END
+                        WHERE permit_id = ? AND dispatch_token = ?
+                        """,
+                        (now, permit_id, dispatch_token),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE refresh_commit_receipt
+                        SET dispatch_status = CASE WHEN dispatched_at > 0
+                                                   THEN dispatch_status
+                                                   ELSE 'not_dispatched' END
+                        WHERE permit_id = ? AND dispatch_token = ?
+                        """,
+                        (permit_id, dispatch_token),
+                    )
+                connection.execute(
+                    "DELETE FROM refresh_dispatch_lease "
+                    "WHERE scope = ? AND permit_id = ? AND dispatch_token = ?",
+                    (scope, permit_id, dispatch_token),
+                )
+                connection.commit()
+                return True
+        except Exception:
+            return False
+
+    async def complete_dispatch(
+        self,
+        scope: str,
+        permit_id: str,
+        dispatch_token: str,
+        *,
+        possibly_dispatched: bool,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.complete_dispatch_sync,
+            scope,
+            permit_id,
+            dispatch_token,
+            possibly_dispatched=possibly_dispatched,
+        )
+
+    def abort_opening_campaigns_sync(self, scope: str, reason: str) -> bool:
+        """Permanently close active opening campaigns without touching cooldown."""
+
+        try:
+            scope = str(scope or "").strip()
+            reason = str(reason or "disabled")[:128]
+            if not scope:
+                raise ValueError("scope is required")
+            now = float(self._clock())
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE refresh_opening_campaign
+                    SET state = 'aborted', ended_at = ?, updated_at = ?,
+                        end_reason = ?
+                    WHERE scope = ? AND state IN ('active', 'exhausted')
+                      AND window_until > ?
+                    """,
+                    (now, now, reason, scope, now),
+                )
+                connection.execute(
+                    "DELETE FROM refresh_reservation "
+                    "WHERE scope = ? AND is_opening_burst = 1",
+                    (scope,),
+                )
+                # A claimed browser command may already be crossing the CDP
+                # boundary. Keep that lease so completion or expiry performs
+                # conservative dispatch accounting. Only never-claimed
+                # authorizations can be revoked without consuming a gap.
+                connection.execute(
+                    """
+                    UPDATE refresh_commit_receipt
+                    SET dispatch_status = 'revoked'
+                    WHERE scope = ? AND is_opening_burst = 1
+                      AND dispatch_status = 'authorized'
+                    """,
+                    (scope,),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM refresh_dispatch_lease
+                    WHERE scope = ? AND is_opening_burst = 1
+                      AND permit_id IN (
+                          SELECT permit_id FROM refresh_commit_receipt
+                          WHERE scope = ? AND dispatch_status = 'revoked'
+                      )
+                    """,
+                    (scope, scope),
+                )
+                connection.execute(
+                    """
+                    UPDATE refresh_queue
+                    SET campaign_id = '', campaign_participant_id = '',
+                        is_opening_burst = 0
+                    WHERE scope = ? AND is_opening_burst = 1
+                    """,
+                    (scope,),
+                )
+                connection.commit()
+                return cursor.rowcount > 0
+        except Exception:
+            return False
+
+    async def abort_opening_campaigns(self, scope: str, reason: str) -> bool:
+        return await asyncio.to_thread(
+            self.abort_opening_campaigns_sync, scope, reason
+        )
+
     def poll_refresh_sync(
         self,
         scope: str,
@@ -866,6 +1878,7 @@ class SharedRefreshCoordinator:
         min_interval_seconds: float,
         jitter_range_seconds: Sequence[float] = (0.1, 0.3),
         request_token: Optional[str] = None,
+        opening_burst: Optional[OpeningBurstRequest] = None,
     ) -> RefreshDecision:
         """Poll once for a refresh permit without sleeping.
 
@@ -879,6 +1892,7 @@ class SharedRefreshCoordinator:
             min_interval_seconds=min_interval_seconds,
             jitter_range_seconds=jitter_range_seconds,
             request_token=request_token,
+            opening_burst=opening_burst,
         )
         if not reservation.reserved:
             return RefreshDecision(
@@ -890,12 +1904,36 @@ class SharedRefreshCoordinator:
                 cooldown_until=reservation.cooldown_until,
                 error=reservation.error,
             )
-        return self.commit_refresh_sync(
+        decision = self.commit_refresh_sync(
             scope,
             instance_id,
             reservation.reservation_id,
             request_token=request_token,
         )
+        if not decision.granted:
+            return decision
+        claimed = self.claim_dispatch_sync(
+            scope, decision.permit_id, decision.dispatch_token
+        )
+        if not claimed:
+            return RefreshDecision(
+                granted=False,
+                status="dispatch_lost",
+                retry_after_seconds=self.fail_closed_retry_seconds,
+                request_id=decision.request_id,
+                permit_id=decision.permit_id,
+                sequence=decision.sequence,
+                is_recovery_probe=decision.is_recovery_probe,
+                is_opening_burst=decision.is_opening_burst,
+                campaign_id=decision.campaign_id,
+            )
+        self.complete_dispatch_sync(
+            scope,
+            decision.permit_id,
+            decision.dispatch_token,
+            possibly_dispatched=True,
+        )
+        return decision
 
     async def poll_refresh(
         self,
@@ -905,6 +1943,7 @@ class SharedRefreshCoordinator:
         min_interval_seconds: float,
         jitter_range_seconds: Sequence[float] = (0.1, 0.3),
         request_token: Optional[str] = None,
+        opening_burst: Optional[OpeningBurstRequest] = None,
     ) -> RefreshDecision:
         return await asyncio.to_thread(
             self.poll_refresh_sync,
@@ -913,6 +1952,7 @@ class SharedRefreshCoordinator:
             min_interval_seconds=min_interval_seconds,
             jitter_range_seconds=jitter_range_seconds,
             request_token=request_token,
+            opening_burst=opening_burst,
         )
 
     @staticmethod
@@ -1017,6 +2057,34 @@ class SharedRefreshCoordinator:
                     )
                     connection.execute(
                         "DELETE FROM refresh_queue WHERE scope = ?", (scope,)
+                    )
+                    connection.execute(
+                        """
+                        UPDATE refresh_commit_receipt
+                        SET dispatch_status = 'revoked'
+                        WHERE scope = ? AND dispatch_status = 'authorized'
+                        """,
+                        (scope,),
+                    )
+                    connection.execute(
+                        """
+                        DELETE FROM refresh_dispatch_lease
+                        WHERE scope = ? AND permit_id IN (
+                            SELECT permit_id FROM refresh_commit_receipt
+                            WHERE scope = ? AND dispatch_status = 'revoked'
+                        )
+                        """,
+                        (scope, scope),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE refresh_opening_campaign
+                        SET state = 'aborted', ended_at = ?, updated_at = ?,
+                            end_reason = 'rate_limited'
+                        WHERE scope = ? AND state IN ('active', 'exhausted')
+                          AND window_until > ?
+                        """,
+                        (now, now, scope, now),
                     )
                     connection.execute(
                         """
@@ -1329,7 +2397,8 @@ class SharedRefreshCoordinator:
                     """
                     SELECT scope, instance_id, request_id, owner_token, process_id,
                            enqueued_at, heartbeat_at, min_interval_seconds,
-                           jitter_min_seconds, jitter_max_seconds
+                           jitter_min_seconds, jitter_max_seconds, campaign_id,
+                           campaign_participant_id, is_opening_burst
                     FROM refresh_queue WHERE scope = ?
                     ORDER BY enqueued_at ASC, request_id ASC
                     """,
@@ -1338,6 +2407,25 @@ class SharedRefreshCoordinator:
                 reservation = connection.execute(
                     "SELECT * FROM refresh_reservation WHERE scope = ?", (scope,)
                 ).fetchone()
+                campaigns = connection.execute(
+                    "SELECT * FROM refresh_opening_campaign WHERE scope = ? "
+                    "ORDER BY scheduled_at, campaign_id",
+                    (scope,),
+                ).fetchall()
+                grants = connection.execute(
+                    "SELECT * FROM refresh_opening_grant WHERE scope = ? "
+                    "ORDER BY granted_at, participant_id",
+                    (scope,),
+                ).fetchall()
+                dispatch = connection.execute(
+                    "SELECT * FROM refresh_dispatch_lease WHERE scope = ?",
+                    (scope,),
+                ).fetchone()
+                receipts = connection.execute(
+                    "SELECT * FROM refresh_commit_receipt WHERE scope = ? "
+                    "ORDER BY committed_at, permit_id",
+                    (scope,),
+                ).fetchall()
                 return {
                     "ok": True,
                     "bucket": dict(bucket) if bucket is not None else None,
@@ -1345,6 +2433,10 @@ class SharedRefreshCoordinator:
                     "reservation": (
                         dict(reservation) if reservation is not None else None
                     ),
+                    "campaigns": [dict(row) for row in campaigns],
+                    "grants": [dict(row) for row in grants],
+                    "dispatch": dict(dispatch) if dispatch is not None else None,
+                    "receipts": [dict(row) for row in receipts],
                 }
         except Exception as exc:
             return {
@@ -1352,6 +2444,10 @@ class SharedRefreshCoordinator:
                 "bucket": None,
                 "queue": [],
                 "reservation": None,
+                "campaigns": [],
+                "grants": [],
+                "dispatch": None,
+                "receipts": [],
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
@@ -1372,6 +2468,7 @@ def get_shared_refresh_coordinator() -> SharedRefreshCoordinator:
 
 
 __all__ = [
+    "OpeningBurstRequest",
     "ProbeCompletion",
     "RateLimitReport",
     "RefreshDecision",

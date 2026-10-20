@@ -3,7 +3,7 @@
 **文件說明**：定義冷卻刷新期間的等待與輪詢標準模式
 **最後更新**：2026-06-10
 
-> ⚠️ **文件狀態**：Active Polling 為設計概念，尚未實作。目前所有平台統一使用 **Simple Wait 模式**。
+> ⚠️ **文件狀態**：Active Polling 為設計概念，尚未實作。一般平台使用 **Simple Wait 模式**；中信兄弟與味全龍的跨程序共享刷新屬下述例外。
 
 ---
 
@@ -11,7 +11,7 @@
 
 ### 概述
 
-所有平台在刷新重試時統一使用 Simple Wait 模式：等待設定的冷卻間隔後重載頁面。
+一般平台在刷新重試時使用 Simple Wait 模式：等待設定的冷卻間隔後重載頁面。中信兄弟與味全龍日期頁改由跨程序協調器統一排程，詳見本節後方的例外說明。
 
 ```
 [check] → 未找到目標 → [sleep interval] → [reload] → [check] → ...
@@ -86,6 +86,16 @@ if is_need_refresh:
 - [ ] 使用 `debug.log()` 輸出除錯訊息
 - [ ] `tab.reload()` 包在 try/except 中
 - [ ] 使用 `DebugLogger`，不使用 `if show_debug_message: print()`
+
+### 職棒平台的跨程序例外
+
+中信兄弟與味全龍的 `UTK0201_` 日期頁不在每個程序內各自執行 `Sleep → Reload`。啟用「職棒共用刷新保護」時，每個實例把重新載入需求加入同一個 SQLite FIFO，並將 `advanced.auto_reload_page_interval` 當成所有實例合計的最小間隔。這可避免四個 profiles 各自每秒重載一次，實際合計變成每秒四次。
+
+日期頁找到可操作控制後會取消該實例尚未送出的重新載入，原生點擊只送出一次，並驗證是否進入預期的 `UTK0204_`／`UTK0205_` 或站方會員驗證視窗；沒有進展才重新排入日期頁佇列。進入購票流程後，DOM 點擊不經重新載入協調器，只有確實呼叫 `tab.reload()` 時才使用全域職棒最小間隔。所有階段仍在同一個 429 冷卻範圍內。
+
+選用「開賣首輪加速」後，`refresh_datetime` 的正規化時間會建立一次性 campaign。預設兩秒窗口內，最多四個不同 profile 各取得一次首輪 reload 指令機會，指令間隔預設 `0.25` 秒；已取得額度的 profile 與一般刷新都要等窗口結束。SQLite 會持久保存 campaign、profile grant 與短期 dispatch lease，讓重啟、commit 重播或程序崩潰都不會補發額度。任何 429 都會在同一交易永久中止該 campaign，冷卻恢復後不會繼續剩餘的快速額度。
+
+協調器以 `last_dispatch_at + max(上一筆間隔, 下一筆間隔)` 檢查快慢模式交界，避免最後一筆首輪 reload 之後過早進入一般輪詢。reload 命令完成後仍須等待新的 `performance.timeOrigin`；這個分頁層級的文件確認不會占用全域 dispatch lease，因此慢速頁面不會阻塞其他 profile 的首輪命令。文件確認最長等待 10 秒，逾時後會回到受保護的一般共享重試，且不會退還首輪額度。
 
 ---
 

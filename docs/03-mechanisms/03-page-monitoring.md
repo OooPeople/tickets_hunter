@@ -134,6 +134,10 @@ while True:
 
 `check_refresh_datetime_gate()` 在 `refresh_datetime` 設定的目標時間到達前，阻擋所有平台搶票邏輯（持續倒數顯示）；時間到達後立即重新載入頁面並放行平台路由。最後 2 秒切換為 `time.perf_counter()` busy-wait，達到毫秒級精準觸發。格式：`YYYY/MM/DD HH:MM:SS`，空值表示停用。
 
+中信兄弟與味全龍使用平台專用的定時重新載入 helper。若目標仍是 `UTK0201_` 日期頁，到點的重新載入會進入跨程序佇列，並以 `advanced.auto_reload_page_interval` 作為所有實例合計的最小間隔；第一次重新載入後若仍未開賣，日期頁會繼續使用相同共享節奏監看，不假設第一輪一定出現可購按鈕。進入 `UTK0204_`／`UTK0205_` 後，區域、票種與座位的 DOM 操作立即執行，只有實際頁面重新載入才套用全域職棒間隔。
+
+選用「開賣首輪加速」時，正規化後的目標時間會成為跨程序 campaign。有效窗口內，每個穩定 profile 最多取得一次加速額度，且所有中信兄弟／味全龍 profile 共用總額；一般刷新會等待首輪窗口結束。額度於 dispatch 授權交易中扣除，不因瀏覽器命令結果不明而退還。短期 dispatch lease 只涵蓋 reload 命令，新的頁面文件則由各分頁以 `performance.timeOrigin` 另行確認，且文件起始時間不得早於本次 dispatch，以免舊導覽延遲抵達後誤認為新一輪結果。一般情況下，在看到新文件前該分頁不會再次刷新或執行日期頁動作；若 10 秒仍無法確認，會放棄這次文件確認並回到受保護的一般共享重試，額度不會退還。
+
 ---
 
 ## 購票完成處理
@@ -154,6 +158,7 @@ while True:
 |------|------|
 | `src/nodriver_tixcraft.py` | 主迴圈與 URL 路由分派 |
 | `src/nodriver_common.py` | `nodriver_current_url()`、暫停與 Cloudflare 共用函式 |
+| `src/platforms/ctbc.py` | 職棒日期監看、購票按鈕 readiness 與共享重新載入 policy |
 | `src/util.py` | `create_debug_logger()`、`is_text_match_keyword()` 等共用函式 |
 
 **各平台 `_main` 函式位置**：

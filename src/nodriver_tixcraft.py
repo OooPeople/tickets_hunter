@@ -338,29 +338,29 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
-    if is_utk_sports_url(homepage) and 'tix.ctbcsports.com' in homepage.lower():
+    if is_utk_sports_url(homepage):
         if await nodriver_ctbc_inject_cookies(tab, config_dict):
             try:
                 reloaded = await nodriver_utk_sports_reload_wait(
                     tab,
                     config_dict,
-                    "apply CTBC cookie session",
+                    "apply UTK sports cookie session",
                     apply_local_interval=False,
                     allow_unknown_document=True,
                 )
                 if not reloaded:
-                    debug.log("[CTBC COOKIE] Shared reload was cancelled")
+                    debug.log("[UTK COOKIE] Shared reload was cancelled")
                     return tab
                 await asyncio.sleep(random.uniform(1.0, 1.5))
                 login_state = await tab.evaluate(
-                    'typeof _ul !== "undefined" ? String(_ul) : ""'
+                    '(() => typeof _ul !== "undefined" ? String(_ul) : "")()'
                 )
                 if login_state == "1":
-                    debug.log("[CTBC COOKIE] Logged in successfully")
+                    debug.log("[UTK COOKIE] Logged in successfully")
                 else:
-                    debug.log("[CTBC COOKIE] Cookie set applied; session may be expired")
+                    debug.log("[UTK COOKIE] Cookie set applied; session may be expired")
             except Exception as exc:
-                debug.log(f"[CTBC COOKIE] Reload or verification failed: {exc}")
+                debug.log(f"[UTK COOKIE] Reload or verification failed: {exc}")
 
     return tab
 
@@ -601,10 +601,15 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     # Detect config change: reset state if user changed the value
     if current_str != state["target_str"]:
         current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+        previous_reload_pending = False
         if is_utk_sports_url(current_url):
             await nodriver_utk_sports_cancel_refresh(tab, "refresh time changed")
+            nodriver_utk_sports_consume_reload_ack(tab)
+            previous_reload_pending = nodriver_utk_sports_reload_pending(tab)
         state["target_str"] = current_str
         state["reached"] = False
+        state["reload_dispatched"] = False
+        state["waiting_for_previous_reload"] = previous_reload_pending
         state["last_countdown_print"] = 0
 
     # If already reached, no gating
@@ -617,19 +622,42 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         state["reached"] = True
         return False
 
+    if state.get("reload_dispatched"):
+        if nodriver_utk_sports_consume_reload_ack(tab):
+            state["reached"] = True
+            state["reload_dispatched"] = False
+            print(
+                "[REFRESH] Target reload document confirmed, starting:",
+                target_dt.strftime('%Y/%m/%d %H:%M:%S'),
+            )
+            return False
+        if nodriver_utk_sports_reload_pending(tab):
+            return True
+        if nodriver_utk_sports_consume_reload_ack(tab):
+            state["reached"] = True
+            state["reload_dispatched"] = False
+            print(
+                "[REFRESH] Target reload document confirmed, starting:",
+                target_dt.strftime('%Y/%m/%d %H:%M:%S'),
+            )
+            return False
+        state["reload_dispatched"] = False
+
     now = datetime.now()
 
     async def reload_at_target():
         current_url = str(getattr(getattr(tab, "target", None), "url", ""))
         if is_utk_sports_url(current_url):
-            return await nodriver_utk_sports_reload(
+            nodriver_utk_sports_consume_reload_ack(tab)
+            reloaded = await nodriver_utk_sports_scheduled_reload(
                 tab,
                 config_dict,
                 "scheduled refresh time reached",
-                apply_local_interval=False,
-                allow_unknown_document=True,
-                allow_blocked_recovery=True,
+                scheduled_at=target_dt.timestamp(),
             )
+            if reloaded or nodriver_utk_sports_reload_pending(tab):
+                state["reload_dispatched"] = True
+            return reloaded
         try:
             await tab.reload()
             return True
@@ -638,7 +666,19 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
 
     # Already past target time (covers "bot starts after target" case)
     if now >= target_dt:
+        if nodriver_utk_sports_reload_pending(tab):
+            # A reload left by an older target must finish before this target
+            # dispatches, but its document acknowledgment cannot satisfy the
+            # new target.
+            state["waiting_for_previous_reload"] = True
+            return True
+        if state.pop("waiting_for_previous_reload", False):
+            nodriver_utk_sports_consume_reload_ack(tab)
         if await reload_at_target():
+            current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+            if is_utk_sports_url(current_url):
+                state["reload_dispatched"] = True
+                return True
             state["reached"] = True
             print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
             return False
@@ -674,9 +714,21 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     # asyncio.sleep precision (~1ms on Windows) is sufficient; help text already
     # instructs users to set refresh_datetime 1-2 seconds before the target.
     if remaining <= 2.0:
-        if remaining > 0:
-            await asyncio.sleep(remaining)
+        # Windows timers can wake a fraction early.  Re-check wall time after
+        # every wake-up so a scheduled opening request is never dispatched as
+        # an ordinary refresh just before the target boundary.
+        while remaining > 0:
+            await asyncio.sleep(min(remaining, 0.25))
+            remaining = (target_dt - datetime.now()).total_seconds()
+            if remaining > 2.0:
+                # The wall clock moved backwards materially.  Return to the
+                # main loop so pause/quit/config updates remain responsive.
+                return True
         if await reload_at_target():
+            current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+            if is_utk_sports_url(current_url):
+                state["reload_dispatched"] = True
+                return True
             state["reached"] = True
             print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
             return False
@@ -989,6 +1041,8 @@ async def main(args):
     refresh_datetime_state = {
         "target_str": "",
         "reached": False,
+        "reload_dispatched": False,
+        "waiting_for_previous_reload": False,
         "last_countdown_print": 0,
     }
     ticketplus_purchase_done = False  # Guard: stop polling after purchase completed

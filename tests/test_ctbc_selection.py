@@ -5,6 +5,7 @@ import unittest
 import base64
 import json
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -48,6 +49,9 @@ from platforms.ctbc import (  # noqa: E402
     _get_ctbc_captcha_image_bytes,
     _build_ctbc_destination_url,
     _ctbc_fast_destination_is_valid,
+    _ctbc_date_attempt_progress,
+    _reload_ctbc_date_page,
+    _reload_ctbc_purchase_page,
     _ctbc_native_map_href_is_allowed,
     _ctbc_seat_audit_is_valid,
     _ctbc_tab_identity,
@@ -67,21 +71,27 @@ from platforms.ctbc import (  # noqa: E402
     _inspect_utk_document,
     _finish_utk_recovery_probe,
     _utk_document_guard,
+    _update_utk_reload_inflight,
     _select_ctbc_area_snapshot,
     _select_ctbc_seat_indexes,
     _state,
     nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
+    nodriver_ctbc_inject_cookies,
     nodriver_ctbc_main,
     nodriver_ctbc_ticket_type_auto_select,
     nodriver_utk_sports_cancel_refresh,
     nodriver_utk_sports_consume_reload_event,
+    nodriver_utk_sports_consume_reload_ack,
     nodriver_utk_sports_reload,
+    nodriver_utk_sports_reload_pending,
     nodriver_utk_sports_reload_wait,
+    nodriver_utk_sports_scheduled_reload,
     is_utk_sports_url,
     parse_ctbc_cookie_string,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform  # noqa: E402
+from nodriver_tixcraft import check_refresh_datetime_gate, nodriver_goto_homepage  # noqa: E402
 from settings import get_default_config, migrate_config  # noqa: E402
 
 
@@ -249,6 +259,7 @@ class FakeTab:
         self.evaluate_count = 0
         self.last_selector = None
         self.reloaded = False
+        self.reload_count = 0
 
     async def query_selector_all(self, selector):
         self.last_selector = selector
@@ -269,6 +280,7 @@ class FakeTab:
 
     async def reload(self):
         self.reloaded = True
+        self.reload_count += 1
 
 
 class FakeSubmitTab:
@@ -294,6 +306,40 @@ class FakeSubmitTab:
 
     async def sleep(self, _seconds):
         return None
+
+
+class FakeCookieJar:
+    def __init__(self, cookies=None):
+        self.cookies = list(cookies or [])
+
+    async def get_all(self):
+        return self.cookies
+
+
+class FakeCookieTab:
+    def __init__(self, url, cookies=None):
+        self.target = types.SimpleNamespace(url=url)
+        self.browser = types.SimpleNamespace(cookies=FakeCookieJar(cookies))
+        self.commands = []
+        self.evaluate_scripts = []
+
+    async def send(self, command):
+        self.commands.append(command)
+        return True
+
+    async def evaluate(self, script):
+        self.evaluate_scripts.append(script)
+        return "1"
+
+
+class FakeHomepageDriver:
+    def __init__(self, tab):
+        self.tab = tab
+        self.urls = []
+
+    async def get(self, url):
+        self.urls.append(url)
+        return self.tab
 
 
 class CtbcPureSelectionTest(unittest.TestCase):
@@ -358,6 +404,20 @@ class CtbcPureSelectionTest(unittest.TestCase):
         self.assertEqual(
             [("CTBC_BROTHERS|BROTHERS|_1", "abc")],
             parse_ctbc_cookie_string(raw),
+        )
+
+    def test_cookie_parser_accepts_wdragons_tenant(self):
+        raw = "WDRAGONS|_1=session; WDRAGONS|_4_01=member; _ga=tracking"
+        self.assertEqual(
+            [("WDRAGONS|_1", "session"), ("WDRAGONS|_4_01", "member")],
+            parse_ctbc_cookie_string(raw),
+        )
+
+    def test_cookie_parser_filters_by_current_tenant(self):
+        raw = "CTBC_BROTHERS|BROTHERS|_1=ctbc; WDRAGONS|_1=dragons"
+        self.assertEqual(
+            [("WDRAGONS|_1", "dragons")],
+            parse_ctbc_cookie_string(raw, ("WDRAGONS|",)),
         )
 
     def test_page_routing(self):
@@ -445,10 +505,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
             "structural_native",
             _classify_ctbc_date_action("DragonMemberCheck('P1DRAGON')", source)["kind"],
         )
-        self.assertEqual(
-            "structural_native",
-            _classify_ctbc_date_action("", source)["kind"],
-        )
+        self.assertIsNone(_classify_ctbc_date_action("", source))
         self.assertIsNone(_classify_ctbc_date_action(
             "location.href='https://evil.example/'", source
         ))
@@ -859,7 +916,84 @@ class CtbcPureSelectionTest(unittest.TestCase):
         ))
 
 
+class CtbcCookieLoginTest(unittest.IsolatedAsyncioTestCase):
+    async def test_wdragons_cookie_injection_uses_current_host_only(self):
+        tab = FakeCookieTab(
+            "https://tix.wdragons.com/UTK0101_",
+            cookies=[
+                types.SimpleNamespace(
+                    name="CTBC_BROTHERS|BROTHERS|_1",
+                    domain=".tix.ctbcsports.com",
+                    path="/",
+                ),
+                types.SimpleNamespace(
+                    name="WDRAGONS|_1",
+                    domain=".tix.wdragons.com",
+                    path="/",
+                ),
+            ],
+        )
+        cfg = {
+            "homepage": "https://tix.wdragons.com/UTK0101_",
+            "accounts": {
+                "ctbc_cookie": "WDRAGONS|_1=session"
+            },
+            "advanced": {"verbose": False},
+        }
+        network = types.SimpleNamespace(
+            delete_cookies=lambda **kwargs: ("delete", kwargs),
+            set_cookie=lambda **kwargs: ("set", kwargs),
+        )
+
+        with patch("platforms.ctbc.cdp", types.SimpleNamespace(network=network)):
+            self.assertTrue(await nodriver_ctbc_inject_cookies(tab, cfg))
+
+        self.assertEqual(2, len(tab.commands))
+        delete_command, set_command = tab.commands
+        self.assertEqual("delete", delete_command[0])
+        self.assertEqual(".tix.wdragons.com", delete_command[1]["domain"])
+        self.assertEqual("set", set_command[0])
+        self.assertEqual("tix.wdragons.com", set_command[1]["domain"])
+        self.assertEqual(
+            "WDRAGONS|_1", set_command[1]["name"]
+        )
+
+    async def test_wdragons_homepage_runs_cookie_login_flow(self):
+        tab = FakeCookieTab("https://tix.wdragons.com/UTK0101_")
+        driver = FakeHomepageDriver(tab)
+        cfg = {
+            "homepage": "https://tix.wdragons.com/UTK0101_",
+            "accounts": {"ctbc_cookie": "cookie-placeholder"},
+            "advanced": {"verbose": False},
+        }
+        inject = AsyncMock(return_value=True)
+        reload_wait = AsyncMock(return_value=True)
+
+        with patch("nodriver_tixcraft.asyncio.sleep", AsyncMock()), \
+                patch("nodriver_tixcraft.nodriver_ctbc_inject_cookies", inject), \
+                patch(
+                    "nodriver_tixcraft.nodriver_utk_sports_reload_wait",
+                    reload_wait,
+                ):
+            result = await nodriver_goto_homepage(driver, cfg)
+
+        self.assertIs(tab, result)
+        inject.assert_awaited_once_with(tab, cfg)
+        reload_wait.assert_awaited_once_with(
+            tab,
+            cfg,
+            "apply UTK sports cookie session",
+            apply_local_interval=False,
+            allow_unknown_document=True,
+        )
+        self.assertTrue(any("_ul" in script for script in tab.evaluate_scripts))
+
+
 class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self):
+        _state["date_action_attempt"].clear()
+        _state["last_document"].clear()
+
     async def test_explicit_ticket_type_keyword_overrides_global_exclusions(self):
         full_counter = FakeElement(attrs={"id": "FULL", "val": "內野全票-NT$800"})
         disability_counter = FakeElement(
@@ -936,7 +1070,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [available_row, sold_row], url=source)
 
-        self.assertTrue(await nodriver_ctbc_date_auto_select(tab, config()))
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, config()))
         self.assertEqual(CTBC_DATE_ROW_SELECTOR, tab.last_selector)
         self.assertTrue(available_button.clicked)
         self.assertFalse(sold_button.clicked)
@@ -958,7 +1092,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         })
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source, evaluate_results=[snapshot, True])
         try:
-            self.assertTrue(await nodriver_ctbc_date_auto_select(tab, config()))
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, config()))
             self.assertFalse(button.clicked)
             self.assertEqual(2, tab.evaluate_count)
             self.assertNotIn("includes('購買')", tab.evaluate_scripts[-1])
@@ -979,7 +1113,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
             CTBC_DATE_ROW_SELECTOR, [row], url=source,
             evaluate_results=[json.dumps({"ok": False, "reason": "special-mode"})],
         )
-        self.assertTrue(await nodriver_ctbc_date_auto_select(tab, config()))
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, config()))
         self.assertTrue(button.clicked)
         self.assertEqual(1, tab.evaluate_count)
 
@@ -1000,7 +1134,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
 
-        self.assertTrue(await nodriver_ctbc_date_auto_select(
+        self.assertFalse(await nodriver_ctbc_date_auto_select(
             tab, config(date_keyword='"9/18"')
         ))
         self.assertEqual(1, button.click_count)
@@ -1019,13 +1153,13 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
 
-        self.assertTrue(await nodriver_ctbc_date_auto_select(
+        self.assertFalse(await nodriver_ctbc_date_auto_select(
             tab, config(date_keyword='"9/08"')
         ))
         self.assertEqual(1, button.click_count)
         self.assertEqual(0, tab.evaluate_count)
 
-    async def test_empty_button_keeps_structural_native_fallback(self):
+    async def test_empty_button_is_not_ready_for_purchase(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P16MXT0U"
         button = FakeElement("<button></button>")
         row = FakeElement(
@@ -1035,10 +1169,83 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
 
-        self.assertTrue(await nodriver_ctbc_date_auto_select(
-            tab, config(date_keyword='"9/08"')
-        ))
+        cfg = config(date_keyword='"9/08"')
+        cfg["advanced"]["auto_reload_page_interval"] = 1.0
+        with patch(
+            "platforms.ctbc._reload_ctbc_date_page",
+            AsyncMock(return_value=False),
+        ) as reload_date:
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertEqual(0, button.click_count)
+        reload_date.assert_awaited_once_with(
+            tab, cfg, "no purchasable date matched"
+        )
+
+    async def test_date_action_is_not_reclicked_before_a_new_document(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P16MXT0U"
+        button = FakeElement(
+            "<button>會員立即選位</button>",
+            attrs={"onclick": "DragonMemberCheck('P1DRAGON')"},
+        )
+        row = FakeElement(
+            "<tr><td>2026/09/08(二)18:35</td><td>臺北大巨蛋</td>"
+            "<td><button>會員立即選位</button></td></tr>",
+            child_lists={CTBC_DATE_PURCHASE_CONTROL_SELECTOR: [button]},
+        )
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
+        cfg = config(date_keyword='"9/08"')
+        identity = _ctbc_tab_identity(tab)
+
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
         self.assertEqual(1, button.click_count)
+
+        _state["date_action_attempt"][identity]["started_at"] -= 10.0
+        with patch(
+            "platforms.ctbc._reload_ctbc_date_page",
+            AsyncMock(return_value=False),
+        ) as reload_date:
+            self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertEqual(1, button.click_count)
+        reload_date.assert_awaited_once()
+
+        _state["last_document"][identity] = source + "|new-document"
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertEqual(2, button.click_count)
+
+    async def test_date_progress_accepts_only_expected_purchase_pages(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        attempt = {
+            "source_url": source,
+            "expected_url": (
+                "https://tix.ctbcsports.com/BROTHERS/UTK0204_?"
+                "PERFORMANCE_ID=PERF&PRODUCT_ID=P1"
+            ),
+            "kind": "normal",
+            "started_at": time.monotonic(),
+        }
+        tab = FakeTab("", [], url=attempt["expected_url"])
+        self.assertEqual(
+            "success", await _ctbc_date_attempt_progress(tab, attempt)
+        )
+        tab.target.url = "https://tix.ctbcsports.com/BROTHERS/member/login"
+        self.assertEqual(
+            "left_date", await _ctbc_date_attempt_progress(tab, attempt)
+        )
+
+        tab.target.url = source
+        attempt.update({
+            "expected_url": "",
+            "kind": "vip_native",
+            "next_modal_probe_at": 0.0,
+        })
+        with patch(
+            "platforms.ctbc._ctbc_vip_prompt_visible",
+            AsyncMock(return_value=True),
+        ):
+            self.assertEqual(
+                "manual_prompt", await _ctbc_date_attempt_progress(tab, attempt)
+            )
 
     async def test_anchor_requires_a_same_tenant_same_product_purchase_target(self):
         source = (
@@ -1057,7 +1264,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
             child_lists={CTBC_DATE_PURCHASE_CONTROL_SELECTOR: [safe_anchor]},
         )
         safe_tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [safe_row], url=source)
-        self.assertTrue(await nodriver_ctbc_date_auto_select(safe_tab, config()))
+        self.assertFalse(await nodriver_ctbc_date_auto_select(safe_tab, config()))
         self.assertTrue(safe_anchor.clicked)
 
         unsafe_hrefs = (
@@ -1268,7 +1475,7 @@ class CtbcDomFlowTest(unittest.IsolatedAsyncioTestCase):
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [row], url=source)
         cfg = config(date_keyword='"9/08"', area_keyword='"L2"')
 
-        self.assertTrue(await nodriver_ctbc_date_auto_select(tab, cfg))
+        self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
         self.assertTrue(button.clicked)
         self.assertEqual(0, tab.evaluate_count)
 
@@ -1364,14 +1571,23 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(marker_patch.stop)
         self.addCleanup(remaining_patch.stop)
 
+    async def asyncTearDown(self):
+        _state["reload_request"].clear()
+        _state["reload_inflight"].clear()
+        _state["reload_acknowledged"].clear()
+        _state["reload_event"].clear()
+
     @staticmethod
     def coordinator_for(decision, *, report=None):
+        if not hasattr(decision, "dispatch_token"):
+            decision.dispatch_token = "dispatch-1"
         reservation = types.SimpleNamespace(
             reserved=bool(decision.granted),
             status="reserved" if decision.granted else decision.status,
             retry_after_seconds=getattr(decision, "retry_after_seconds", 0.0),
             reservation_id="reservation-1" if decision.granted else "",
             is_recovery_probe=getattr(decision, "is_recovery_probe", False),
+            is_opening_burst=getattr(decision, "is_opening_burst", False),
             cooldown_until=getattr(decision, "cooldown_until", 0.0),
             error=getattr(decision, "error", ""),
         )
@@ -1379,6 +1595,9 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
             cancel_request=AsyncMock(return_value=False),
             reserve_refresh=AsyncMock(return_value=reservation),
             commit_refresh=AsyncMock(return_value=decision),
+            claim_dispatch=AsyncMock(return_value=True),
+            complete_dispatch=AsyncMock(return_value=True),
+            abort_opening_campaigns=AsyncMock(return_value=False),
             release_refresh=AsyncMock(return_value=True),
             report_rate_limited=AsyncMock(return_value=report),
         )
@@ -1427,6 +1646,7 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
                 "ready": True,
                 "body_text": "429 - 請求頻率過高 HTTP 429 - Too Many Requests",
                 "document_id": source + "|123",
+                "document_started_at": 123.0,
                 "url": source,
                 "ready_state": "complete",
                 "has_normal_root": False,
@@ -1435,6 +1655,15 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
         snapshot = await _inspect_utk_document(tab)
         self.assertEqual("blocked", snapshot["classification"])
         self.assertEqual(source + "|123", snapshot["document_id"])
+        self.assertTrue(snapshot["document_identity_verified"])
+
+    async def test_document_inspection_marks_fallback_identity_unverified(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        snapshot = await _inspect_utk_document(tab, force=True)
+        self.assertEqual("unknown", snapshot["classification"])
+        self.assertEqual(source, snapshot["document_id"])
+        self.assertFalse(snapshot["document_identity_verified"])
 
     async def test_429_guard_runs_before_date_dispatch_and_reports_once(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -1555,9 +1784,480 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
                 coordinator.reserve_refresh.await_args.kwargs["min_interval_seconds"],
             )
             coordinator.commit_refresh.assert_awaited_once()
+            coordinator.claim_dispatch.assert_awaited_once_with(
+                "utk-sports", "permit-1", "dispatch-1"
+            )
+            coordinator.complete_dispatch.assert_awaited_once_with(
+                "utk-sports",
+                "permit-1",
+                "dispatch-1",
+                possibly_dispatched=True,
+            )
+            self.assertIn(identity, _state["reload_inflight"])
         finally:
             _state["reload_request"].pop(identity, None)
             _state["recovery_probe"].pop(identity, None)
+
+    async def test_request_specific_shared_interval_skips_profile_local_delay(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        snapshot = {
+            "classification": "normal",
+            "document_id": source + "|100",
+            "url": source,
+        }
+        decision = types.SimpleNamespace(
+            granted=True,
+            status="granted",
+            retry_after_seconds=0.0,
+            permit_id="permit-date-policy",
+            is_recovery_probe=False,
+            error="",
+        )
+        coordinator = self.coordinator_for(decision)
+        cfg = config()
+        cfg["advanced"]["auto_reload_page_interval"] = 9.0
+        identity = _ctbc_tab_identity(tab)
+        try:
+            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+                self.assertTrue(await nodriver_utk_sports_reload(
+                    tab,
+                    cfg,
+                    "shared date policy",
+                    apply_local_interval=True,
+                    shared_min_interval_seconds=0.75,
+                ))
+            self.assertEqual(
+                0.75,
+                coordinator.reserve_refresh.await_args.kwargs[
+                    "min_interval_seconds"
+                ],
+            )
+            self.assertTrue(tab.reloaded)
+        finally:
+            _state["reload_request"].pop(identity, None)
+            _state["recovery_probe"].pop(identity, None)
+
+    async def test_date_purchase_and_scheduled_reload_use_distinct_policies(self):
+        date_url = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=date_url)
+        cfg = config()
+        cfg["advanced"]["auto_reload_page_interval"] = 1.0
+        reload_once = AsyncMock(return_value=True)
+        with patch("platforms.ctbc.nodriver_utk_sports_reload", reload_once):
+            self.assertTrue(await _reload_ctbc_date_page(tab, cfg, "date"))
+            self.assertTrue(await _reload_ctbc_purchase_page(tab, cfg, "purchase"))
+            self.assertTrue(await nodriver_utk_sports_scheduled_reload(
+                tab, cfg, "scheduled"
+            ))
+
+        date_call, purchase_call, scheduled_call = reload_once.await_args_list
+        self.assertEqual(1.0, date_call.kwargs["shared_min_interval_seconds"])
+        self.assertTrue(date_call.kwargs["apply_local_interval"])
+        self.assertNotIn("shared_min_interval_seconds", purchase_call.kwargs)
+        self.assertFalse(purchase_call.kwargs["apply_local_interval"])
+        self.assertEqual(
+            1.0, scheduled_call.kwargs["shared_min_interval_seconds"]
+        )
+        self.assertFalse(scheduled_call.kwargs["apply_local_interval"])
+        self.assertFalse(scheduled_call.kwargs["allow_unknown_document"])
+        self.assertFalse(scheduled_call.kwargs["allow_blocked_recovery"])
+        self.assertIsNone(scheduled_call.kwargs["opening_burst"])
+
+    async def test_scheduled_date_reload_builds_one_shared_opening_campaign(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        cfg = config()
+        settings = {
+            "utk_sports": {
+                **self.global_settings["utk_sports"],
+                "opening_boost": {
+                    "enabled": True,
+                    "interval_seconds": 0.25,
+                    "max_participants": 4,
+                    "window_seconds": 2.0,
+                },
+            }
+        }
+        reload_once = AsyncMock(return_value=True)
+        with patch("platforms.ctbc.load_global_settings", return_value=settings), \
+                patch("platforms.ctbc.nodriver_utk_sports_reload", reload_once), \
+                patch("platforms.ctbc.util.get_instance_id", return_value="profile-a"):
+            self.assertTrue(await nodriver_utk_sports_scheduled_reload(
+                tab, cfg, "scheduled", scheduled_at=1000.0
+            ))
+
+        burst = reload_once.await_args.kwargs["opening_burst"]
+        self.assertEqual("scheduled:1000", burst.campaign_id)
+        self.assertEqual("profile-a", burst.participant_id)
+        self.assertEqual(1002.0, burst.window_until)
+        self.assertEqual(0.25, burst.interval_seconds)
+        self.assertEqual(4, burst.max_participants)
+
+    async def test_scheduled_gate_rechecks_wall_time_after_an_early_wake(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        cfg = config()
+        cfg["refresh_datetime"] = "2026/10/06 13:00:00"
+        target = datetime(2026, 10, 6, 13, 0, 0)
+        state = {
+            "target_str": cfg["refresh_datetime"],
+            "reached": False,
+            "reload_dispatched": False,
+            "waiting_for_previous_reload": False,
+            "last_countdown_print": time.time(),
+        }
+        scheduled = AsyncMock(return_value=True)
+        sleep = AsyncMock()
+
+        with patch(
+            "nodriver_tixcraft.parse_refresh_datetime", return_value=target
+        ), patch("nodriver_tixcraft.datetime") as mocked_datetime, patch(
+            "nodriver_tixcraft.asyncio.sleep", sleep
+        ), patch(
+            "nodriver_tixcraft.nodriver_utk_sports_scheduled_reload", scheduled
+        ):
+            mocked_datetime.now.side_effect = [
+                target - timedelta(milliseconds=1),
+                target - timedelta(microseconds=100),
+                target,
+            ]
+            self.assertTrue(await check_refresh_datetime_gate(tab, cfg, state))
+
+        self.assertEqual(2, sleep.await_count)
+        scheduled.assert_awaited_once()
+        self.assertEqual(target.timestamp(), scheduled.await_args.kwargs["scheduled_at"])
+
+    async def test_reload_document_ack_requires_a_new_document_id(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source + "|100",
+            "permit_id": "permit",
+            "dispatched_at": time.monotonic(),
+        }
+
+        self.assertTrue(_update_utk_reload_inflight(
+            tab, source + "|100", document_identity_verified=True
+        ))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertFalse(_update_utk_reload_inflight(
+            tab, source + "|200", document_identity_verified=True
+        ))
+        self.assertTrue(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+
+    async def test_unverified_document_identity_cannot_ack_reload(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source + "|100",
+            "source_identity_verified": True,
+            "permit_id": "permit",
+            "dispatched_at": time.monotonic(),
+        }
+
+        self.assertTrue(_update_utk_reload_inflight(
+            tab, source, document_identity_verified=False
+        ))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertTrue(_update_utk_reload_inflight(
+            tab, source + "|100", document_identity_verified=True
+        ))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertFalse(_update_utk_reload_inflight(
+            tab, source + "|200", document_identity_verified=True
+        ))
+        self.assertTrue(nodriver_utk_sports_consume_reload_ack(tab))
+
+    async def test_document_ack_timeout_clears_inflight_without_ack(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source + "|100",
+            "source_identity_verified": True,
+            "permit_id": "permit",
+            "dispatched_at": time.monotonic() - 11.0,
+        }
+
+        self.assertFalse(nodriver_utk_sports_reload_pending(tab))
+        self.assertNotIn(identity, _state["reload_inflight"])
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+
+    async def test_late_old_document_cannot_ack_newer_reload_generation(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        dispatched_wall_at = time.time()
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source + "|200",
+            "source_identity_verified": True,
+            "permit_id": "new-permit",
+            "dispatched_at": time.monotonic(),
+            "dispatched_wall_at": dispatched_wall_at,
+        }
+
+        self.assertTrue(_update_utk_reload_inflight(
+            tab,
+            source + "|150",
+            document_identity_verified=True,
+            document_started_at=dispatched_wall_at - 0.2,
+        ))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertFalse(_update_utk_reload_inflight(
+            tab,
+            source + "|300",
+            document_identity_verified=True,
+            document_started_at=dispatched_wall_at + 0.1,
+        ))
+        self.assertTrue(nodriver_utk_sports_consume_reload_ack(tab))
+
+    async def test_late_redirect_cannot_bypass_document_generation_fence(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        redirected = "https://tix.ctbcsports.com/BROTHERS/UTK0204_?PERFORMANCE_ID=P2"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=redirected)
+        identity = _ctbc_tab_identity(tab)
+        dispatched_wall_at = time.time()
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source + "|200",
+            "source_identity_verified": True,
+            "permit_id": "new-permit",
+            "dispatched_at": time.monotonic(),
+            "dispatched_wall_at": dispatched_wall_at,
+        }
+
+        self.assertTrue(_update_utk_reload_inflight(
+            tab,
+            redirected + "|150",
+            document_identity_verified=True,
+            document_started_at=dispatched_wall_at - 0.2,
+        ))
+        self.assertTrue(nodriver_utk_sports_reload_pending(tab))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertFalse(_update_utk_reload_inflight(
+            tab,
+            redirected + "|300",
+            document_identity_verified=True,
+            document_started_at=dispatched_wall_at + 0.1,
+        ))
+        self.assertTrue(nodriver_utk_sports_consume_reload_ack(tab))
+
+    async def test_unverified_source_can_ack_a_verified_post_dispatch_document(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        identity = _ctbc_tab_identity(tab)
+        dispatched_wall_at = time.time()
+        _state["reload_inflight"][identity] = {
+            "source_document_id": source,
+            "source_identity_verified": False,
+            "permit_id": "local-disabled",
+            "dispatched_at": time.monotonic(),
+            "dispatched_wall_at": dispatched_wall_at,
+        }
+
+        self.assertTrue(_update_utk_reload_inflight(
+            tab,
+            source + "|old",
+            document_identity_verified=True,
+            document_started_at=dispatched_wall_at - 20.0,
+        ))
+        self.assertFalse(nodriver_utk_sports_consume_reload_ack(tab))
+        self.assertFalse(_update_utk_reload_inflight(
+            tab,
+            source + "|fresh",
+            document_identity_verified=True,
+            document_started_at=dispatched_wall_at + 0.1,
+        ))
+        self.assertTrue(nodriver_utk_sports_consume_reload_ack(tab))
+
+    async def test_disabled_shared_protection_scheduled_reload_is_not_repeated(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        snapshot = json.dumps({
+            "ready": True,
+            "body_text": "售票頁",
+            "document_id": source + "|100",
+            "document_started_at": 100.0,
+            "url": source,
+            "ready_state": "complete",
+            "has_normal_root": True,
+            "requires_normal_root": True,
+        })
+        tab = FakeTab(
+            CTBC_DATE_ROW_SELECTOR, [], url=source, evaluate_results=[snapshot]
+        )
+        cfg = config()
+        cfg["refresh_datetime"] = "2000/01/01 00:00:00"
+        state = {
+            "target_str": cfg["refresh_datetime"],
+            "reached": False,
+            "reload_dispatched": False,
+            "waiting_for_previous_reload": False,
+            "last_countdown_print": 0,
+        }
+        disabled = {
+            "utk_sports": {
+                **self.global_settings["utk_sports"],
+                "enabled": False,
+            }
+        }
+        with patch("platforms.ctbc.load_global_settings", return_value=disabled):
+            self.assertTrue(await check_refresh_datetime_gate(tab, cfg, state))
+            self.assertTrue(await check_refresh_datetime_gate(tab, cfg, state))
+
+        self.assertEqual(1, tab.reload_count)
+        self.assertTrue(nodriver_utk_sports_reload_pending(tab))
+
+    async def test_expired_claim_is_not_sent_to_browser(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        snapshot = {
+            "classification": "normal",
+            "document_id": source + "|100",
+            "document_identity_verified": True,
+            "url": source,
+        }
+        decision = types.SimpleNamespace(
+            granted=True,
+            status="granted",
+            retry_after_seconds=0.0,
+            permit_id="expired-permit",
+            dispatch_token="expired-token",
+            is_recovery_probe=False,
+            error="",
+        )
+        coordinator = self.coordinator_for(decision)
+        coordinator.claim_dispatch.return_value = time.time() - 1.0
+        identity = _ctbc_tab_identity(tab)
+        try:
+            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator):
+                self.assertFalse(await nodriver_utk_sports_reload(
+                    tab, config(), "expired claim", apply_local_interval=False
+                ))
+            self.assertEqual(0, tab.reload_count)
+            coordinator.complete_dispatch.assert_awaited_once_with(
+                "utk-sports",
+                "expired-permit",
+                "expired-token",
+                possibly_dispatched=False,
+            )
+        finally:
+            _state["reload_request"].pop(identity, None)
+
+    async def test_rate_limit_marker_after_claim_prevents_browser_reload(self):
+        source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        snapshot = {
+            "classification": "normal",
+            "document_id": source + "|100",
+            "document_identity_verified": True,
+            "document_started_at": time.time() - 10.0,
+            "url": source,
+        }
+        decision = types.SimpleNamespace(
+            granted=True,
+            status="granted",
+            retry_after_seconds=0.0,
+            permit_id="incident-permit",
+            dispatch_token="incident-token",
+            is_recovery_probe=False,
+            error="",
+        )
+        coordinator = self.coordinator_for(decision)
+        coordinator.claim_dispatch.return_value = time.time() + 2.0
+        identity = _ctbc_tab_identity(tab)
+        try:
+            with patch("platforms.ctbc.load_global_settings", return_value=self.global_settings), \
+                    patch("platforms.ctbc._inspect_utk_document", AsyncMock(return_value=snapshot)), \
+                    patch("platforms.ctbc.get_shared_refresh_coordinator", return_value=coordinator), \
+                    patch(
+                        "platforms.ctbc._utk_emergency_remaining",
+                        side_effect=[0.0, 0.0, 5.0],
+                    ):
+                self.assertFalse(await nodriver_utk_sports_reload(
+                    tab, config(), "incident after claim", apply_local_interval=False
+                ))
+            self.assertEqual(0, tab.reload_count)
+            coordinator.complete_dispatch.assert_awaited_once_with(
+                "utk-sports",
+                "incident-permit",
+                "incident-token",
+                possibly_dispatched=False,
+            )
+        finally:
+            _state["reload_request"].pop(identity, None)
+
+    async def test_old_reload_ack_does_not_satisfy_changed_target(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        cfg = config()
+        cfg["refresh_datetime"] = "2000/01/01 00:00:00"
+        state = {
+            "target_str": "1999/01/01 00:00:00",
+            "reached": False,
+            "reload_dispatched": True,
+            "waiting_for_previous_reload": False,
+            "last_countdown_print": 0,
+        }
+        scheduled = AsyncMock(return_value=True)
+        with patch(
+            "nodriver_tixcraft.nodriver_utk_sports_cancel_refresh",
+            AsyncMock(return_value=True),
+        ), patch(
+            "nodriver_tixcraft.nodriver_utk_sports_reload_pending",
+            side_effect=[True, True, False],
+        ), patch(
+            "nodriver_tixcraft.nodriver_utk_sports_consume_reload_ack",
+            side_effect=[False, True, False],
+        ), patch(
+            "nodriver_tixcraft.nodriver_utk_sports_scheduled_reload",
+            scheduled,
+        ):
+            self.assertTrue(await check_refresh_datetime_gate(tab, cfg, state))
+            self.assertFalse(state["reached"])
+            self.assertTrue(await check_refresh_datetime_gate(tab, cfg, state))
+
+        self.assertFalse(state["reached"])
+        self.assertTrue(state["reload_dispatched"])
+        scheduled.assert_awaited_once()
+
+    async def test_scheduled_gate_waits_for_new_document_ack(self):
+        source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
+        tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
+        cfg = config()
+        cfg["refresh_datetime"] = "2000/01/01 00:00:00"
+        state = {
+            "target_str": cfg["refresh_datetime"],
+            "reached": False,
+            "reload_dispatched": False,
+            "last_countdown_print": 0,
+        }
+        with patch(
+            "nodriver_tixcraft.nodriver_utk_sports_scheduled_reload",
+            AsyncMock(return_value=True),
+        ) as scheduled, patch(
+            "nodriver_tixcraft.nodriver_utk_sports_reload_pending",
+            return_value=False,
+        ), patch(
+            "nodriver_tixcraft.nodriver_utk_sports_consume_reload_ack",
+            return_value=True,
+        ):
+            self.assertTrue(await check_refresh_datetime_gate(tab, cfg, state))
+            self.assertFalse(state["reached"])
+            self.assertTrue(state["reload_dispatched"])
+            self.assertFalse(await check_refresh_datetime_gate(tab, cfg, state))
+
+        self.assertTrue(state["reached"])
+        scheduled.assert_awaited_once()
+        self.assertIsInstance(
+            scheduled.await_args.kwargs["scheduled_at"], float
+        )
 
     async def test_reload_orders_reserve_preflight_commit_then_network(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
@@ -1577,6 +2277,7 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
                 retry_after_seconds=0.0,
                 reservation_id="reservation-order",
                 is_recovery_probe=False,
+                is_opening_burst=False,
                 cooldown_until=0.0,
                 error="",
             )
@@ -1592,6 +2293,7 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
                 status="granted",
                 retry_after_seconds=0.0,
                 permit_id="permit-order",
+                dispatch_token="dispatch-order",
                 is_recovery_probe=False,
                 error="",
             )
@@ -1604,6 +2306,9 @@ class CtbcSharedRefreshTest(unittest.IsolatedAsyncioTestCase):
         coordinator = types.SimpleNamespace(
             reserve_refresh=AsyncMock(side_effect=reserve),
             commit_refresh=AsyncMock(side_effect=commit),
+            claim_dispatch=AsyncMock(return_value=True),
+            complete_dispatch=AsyncMock(return_value=True),
+            abort_opening_campaigns=AsyncMock(return_value=False),
             release_refresh=AsyncMock(return_value=True),
         )
         identity = _ctbc_tab_identity(tab)

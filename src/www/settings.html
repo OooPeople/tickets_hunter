@@ -605,7 +605,7 @@
               </div>
               <div class="row g-2">
                 <div class="col-md-4">
-                  <label class="form-label" for="utk_shared_reload_min_interval" id="utk-shared-min-interval-label">最小間隔（秒）</label>
+                  <label class="form-label" for="utk_shared_reload_min_interval" id="utk-shared-min-interval-label">其他重載最小間隔（秒）</label>
                   <input class="form-control" id="utk_shared_reload_min_interval" type="number" step="0.1" value="1.5" />
                 </div>
                 <div class="col-md-4">
@@ -617,8 +617,30 @@
                   <input class="form-control" id="utk_rate_limit_max_cooldown" type="number" min="1" step="1" value="240" />
                 </div>
               </div>
+              <hr />
+              <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" id="utk_opening_boost_enabled">
+                <label class="form-check-label" for="utk_opening_boost_enabled" id="utk-opening-boost-enabled-label">啟用開賣首輪加速</label>
+              </div>
+              <div class="row g-2">
+                <div class="col-md-4">
+                  <label class="form-label" for="utk_opening_boost_interval" id="utk-opening-boost-interval-label">首輪間隔（秒）</label>
+                  <input class="form-control" id="utk_opening_boost_interval" type="number" step="0.05" value="0.25" />
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="utk_opening_boost_max_participants" id="utk-opening-boost-max-label">首輪最多 profiles</label>
+                  <input class="form-control" id="utk_opening_boost_max_participants" type="number" min="1" max="16" step="1" value="4" />
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label" for="utk_opening_boost_window" id="utk-opening-boost-window-label">首輪保留時間（秒）</label>
+                  <input class="form-control" id="utk_opening_boost_window" type="number" max="30" step="0.1" value="2" />
+                </div>
+              </div>
+              <div class="form-text mt-2" id="utk-opening-boost-help">
+                僅在「刷新在指定時間」到點後套用於 UTK0201 日期頁。同一輪依設定上限，讓不同 profile 各取得一次快速重新載入指令機會；保留時間內不會持續高速刷新，首輪結束後會回到日期頁共享間隔。同一 profile 多開仍只算一個名額。預設為 4 個 profiles、2 秒。
+              </div>
               <div class="form-text mt-2" id="utk-shared-throttle-help">
-                這是所有 profiles 與執行中的中信兄弟、味全龍實例共用的全域設定，不會隨 profile 切換。個別刷新間隔仍由上方欄位控制；共用節流會再避免多個實例同時刷新。
+                這是所有 profiles 與執行中的中信兄弟、味全龍實例共用的全域設定。日期頁（UTK0201）會把上方「自動刷新頁面間隔」作為所有實例合計的最小間隔；進入選區或座位頁後，一般點擊不受限制，只有實際重新載入才使用此處的間隔。所有階段仍共用 429 冷卻保護。
               </div>
               <div class="form-text text-warning" id="utk-shared-throttle-warning">
                 關閉後，多開分頁／程式將不再共用刷新間隔與 429 冷卻保護，較容易再次觸發站方限制。
@@ -1041,9 +1063,9 @@
         </div>
 
         <div class="row mb-3" data-under="ctbc">
-          <label for="ctbc_cookie" class="col-sm-2 col-form-label">中信育樂 Cookie<span class="help-icon" data-help="ctbc_cookie" title="中信育樂 Cookie 說明" tabindex="0" role="button" aria-label="中信育樂 Cookie 說明"></span></label>
+          <label for="ctbc_cookie" class="col-sm-2 col-form-label">職棒售票 Cookie<span class="help-icon" data-help="ctbc_cookie" title="職棒售票 Cookie 說明" tabindex="0" role="button" aria-label="職棒售票 Cookie 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <textarea class="form-control" id="ctbc_cookie" rows="3" placeholder="貼上完整 Cookie header（所有 CTBC_ 開頭的 Cookie）"></textarea>
+            <textarea class="form-control" id="ctbc_cookie" rows="3" placeholder="貼上完整 Cookie header（中信 CTBC_…；味全龍 WDRAGONS|…）"></textarea>
             <div class="form-text">Cookie 優先；失效時會回退到下方帳號密碼。Cookie 等同登入憑證，請勿分享。</div>
           </div>
         </div>

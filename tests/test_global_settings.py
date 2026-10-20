@@ -35,6 +35,12 @@ class GlobalSettingsTest(unittest.TestCase):
             "min_interval_seconds": 1.5,
             "initial_cooldown_seconds": 60,
             "max_cooldown_seconds": 240,
+            "opening_boost": {
+                "enabled": False,
+                "interval_seconds": 0.25,
+                "max_participants": 4,
+                "window_seconds": 2.0,
+            },
         }, first["utk_sports"])
         first["utk_sports"]["enabled"] = False
         self.assertTrue(second["utk_sports"]["enabled"])
@@ -107,6 +113,53 @@ class GlobalSettingsTest(unittest.TestCase):
         normalized = validate_global_settings(value)
 
         self.assertEqual(0.5, normalized["utk_sports"]["min_interval_seconds"])
+
+    def test_legacy_settings_keep_existing_values_and_add_boost_defaults(self):
+        legacy = {
+            "utk_sports": {
+                "enabled": True,
+                "min_interval_seconds": 0.5,
+                "initial_cooldown_seconds": 75,
+                "max_cooldown_seconds": 180,
+            }
+        }
+
+        normalized = validate_global_settings(legacy)
+
+        self.assertEqual(0.5, normalized["utk_sports"]["min_interval_seconds"])
+        self.assertEqual(75, normalized["utk_sports"]["initial_cooldown_seconds"])
+        self.assertEqual(
+            get_default_global_settings()["utk_sports"]["opening_boost"],
+            normalized["utk_sports"]["opening_boost"],
+        )
+
+    def test_opening_boost_validation(self):
+        invalid_updates = (
+            {"enabled": 1},
+            {"interval_seconds": 0},
+            {"max_participants": 17},
+            {"max_participants": 4.5},
+            {"window_seconds": 31},
+            {"interval_seconds": 1.0, "max_participants": 4, "window_seconds": 2.0},
+        )
+        for update in invalid_updates:
+            value = get_default_global_settings()
+            value["utk_sports"]["opening_boost"].update(update)
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                validate_global_settings(value)
+
+        value = get_default_global_settings()
+        value["utk_sports"]["opening_boost"].update({
+            "enabled": True,
+            "interval_seconds": 0.1,
+            "max_participants": 4,
+            "window_seconds": 0.31,
+        })
+        self.assertTrue(
+            validate_global_settings(value)["utk_sports"]["opening_boost"][
+                "enabled"
+            ]
+        )
 
     def test_revision_is_stable_and_changes_with_content(self):
         first = get_default_global_settings()

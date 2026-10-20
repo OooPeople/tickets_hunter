@@ -16,7 +16,7 @@
 3. 同一 tab 的購票與刷新只能有一個副作用 owner。填值須檢查結果；點擊、reload、submit 的指令返回不等於網站接受。只在需求和實際 caller 支持時新增抽象。
 4. 依改動範圍選擇[驗證層級與命令](docs/02-development/testing_execution_guide.md)，回報實際執行結果與未驗證項目。聚焦檢查、本機完整檢查、GitHub CI、真站手動驗收分開陳述。
 5. 功能只有在涉及的設定、正式入口、執行、結果與必要測試接通後才可稱完成；新增檔案、測試數或歷史 PASS 都不能代替這條流程。高風險變更須檢查停止、重入、未知結果、資源清理和可回復性。
-6. Commit 使用 Conventional Commits；PR 依 [CONTRIBUTING.md](CONTRIBUTING.md) 關聯 Issue。只提交本次工作。
+6. Commit 一律由使用者決定。未經使用者明確下令，不得執行 `git commit`；長時間工作、階段完成、驗證通過、文件整理與交接都不構成例外，也不得自行建立 checkpoint commit。使用者檢查後下令提交時，先核對暫存範圍，只提交本次工作，並使用 Conventional Commits；PR 依 [CONTRIBUTING.md](CONTRIBUTING.md) 關聯 Issue。
 
 ## 文件入口與整理規則
 

@@ -1,7 +1,7 @@
 {
   "catalog_id": "utiki-required-cases",
-  "catalog_revision": "1.5.0",
-  "catalog_sha256": "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1",
+  "catalog_revision": "1.6.0",
+  "catalog_sha256": "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf",
   "phase": "P2",
   "probes": [
     {
@@ -768,23 +768,6 @@
       "rejection_token": "TYPED_SCOPE_MISSING",
       "target": "source-linux-x64",
       "variant_id": "new-core-bridge-file"
-    },
-    {
-      "argument_contract": "H08.arch.new-upgrade-tool-file:new-upgrade-tool-file:argv-v1",
-      "case_id": "H08",
-      "child_kind": "repository-python",
-      "child_producer": "tools/run_utiki_typecheck.py",
-      "environment": "host",
-      "input_kinds": [
-        "mutated-typecheck-input"
-      ],
-      "job_id": "architecture-types",
-      "mutation": "new-upgrade-tool-file",
-      "obligation_id": "H08.arch.new-upgrade-tool-file",
-      "payload_contract": "H08.arch.new-upgrade-tool-file:new-upgrade-tool-file:payload-v1",
-      "rejection_token": "TYPED_SCOPE_MISSING",
-      "target": "source-linux-x64",
-      "variant_id": "new-upgrade-tool-file"
     },
     {
       "argument_contract": "H08.arch.broad-ignore-any:broad-ignore-any:argv-v1",

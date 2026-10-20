@@ -34,7 +34,7 @@ def test_canonical_only_loads_without_mutating_profile() -> None:
     assert profile == before
 
 
-def test_mixed_equal_requires_offline_upgrade_without_comparing_values() -> None:
+def test_mixed_equal_requires_reentry_without_comparing_values() -> None:
     profile: dict[str, object] = {"utiki": _canonical(), "ctbc": _canonical()}
     before = copy.deepcopy(profile)
 
@@ -45,17 +45,61 @@ def test_mixed_equal_requires_offline_upgrade_without_comparing_values() -> None
     assert profile == before
 
 
-def test_legacy_only_is_upgrade_required_and_defaults_only_missing_keys() -> None:
+def test_mixed_complementary_requires_reentry_without_moving_values() -> None:
+    profile: dict[str, object] = {
+        "utiki": {"ticket_type_keyword": ""},
+        "ctbc": {
+            "seat_sorting": "display",
+            "seat_selection_mode": "computer",
+        },
+    }
+    before = copy.deepcopy(profile)
+
+    with pytest.raises(ConfigError) as error:
+        load_current_policy(profile)
+
+    assert error.value.code == "UPGRADE_REQUIRED"
+    assert profile == before
+
+
+def test_legacy_only_requires_reentry_without_defaults_or_mutation() -> None:
     profile: dict[str, object] = {"ctbc": {"ticket_type_keyword": ""}}
     before = copy.deepcopy(profile)
 
     with pytest.raises(ConfigError) as error:
         load_current_policy(profile)
-    inspection = inspect_upgrade_input(profile)
 
     assert error.value.code == "UPGRADE_REQUIRED"
-    assert inspection.kind is UpgradeKind.LEGACY_ONLY
-    assert inspection.projected == UtikiBehavior("", "row_seat", "manual")
+    assert profile == before
+
+
+def test_current_explicit_empty_keyword_is_not_defaulted() -> None:
+    profile: dict[str, object] = {
+        "utiki": {
+            "ticket_type_keyword": "",
+            "seat_sorting": "display",
+            "seat_selection_mode": "computer",
+        }
+    }
+    before = copy.deepcopy(profile)
+
+    policy = load_current_policy(profile)
+
+    assert policy == UtikiBehavior("", "display", "computer")
+    assert profile == before
+
+
+def test_mixed_conflict_requires_reentry_without_comparing_values() -> None:
+    current = _canonical()
+    legacy = _canonical()
+    legacy["seat_sorting"] = "display"
+    profile: dict[str, object] = {"utiki": current, "ctbc": legacy}
+    before = copy.deepcopy(profile)
+
+    with pytest.raises(ConfigError) as error:
+        load_current_policy(profile)
+
+    assert error.value.code == "UPGRADE_REQUIRED"
     assert profile == before
 
 

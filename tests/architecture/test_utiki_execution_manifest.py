@@ -20,7 +20,7 @@ PERSISTED = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "manifest.json"
 P2_REGISTRY = PROJECT_ROOT / "ci" / "utiki-p2-execution-bindings.json"
 P2_PERSISTED = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "manifest-p2.json"
 P2_NEGATIVE = PROJECT_ROOT / "ci" / "utiki-p2-negative-probes.json"
-APPROVED_CATALOG_SHA256 = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+APPROVED_CATALOG_SHA256 = "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -82,9 +82,9 @@ def test_persisted_manifest_is_byte_stable_and_has_fixed_counts(tmp_path):
     assert generated.read_bytes() == PERSISTED.read_bytes()
     report = json.loads(first.stdout)
     assert report == {
-        "case_count": 153,
-        "execution_count": 490,
-        "mapped_count": 63,
+        "case_count": 143,
+        "execution_count": 457,
+        "mapped_count": 62,
         "output_sha256": hashlib.sha256(PERSISTED.read_bytes()).hexdigest(),
         "status": "PASS",
     }
@@ -94,9 +94,9 @@ def test_persisted_manifest_is_byte_stable_and_has_fixed_counts(tmp_path):
         for case in manifest["cases"]
         for execution in case["executions"]
     ]
-    assert len(manifest["cases"]) == 153
-    assert len(executions) == 490
-    assert sum(item["status"] == "MAPPED" for item in executions) == 63
+    assert len(manifest["cases"]) == 143
+    assert len(executions) == 457
+    assert sum(item["status"] == "MAPPED" for item in executions) == 62
     assert all(
         item["node_id"] is None and item["evidence"] == []
         for item in executions
@@ -140,6 +140,23 @@ def test_p2_phase_requires_all_new_bindings_instead_of_reusing_p1_result(tmp_pat
     assert not (tmp_path / "p2-manifest.json").exists()
 
 
+def test_p3a_phase_rejects_relabelled_p2_bindings(tmp_path):
+    registry = json.loads(P2_REGISTRY.read_text(encoding="utf-8"))
+    registry["registry_id"] = "utiki-p3a-execution-bindings"
+    registry["phase"] = "P3a"
+    registry_path = tmp_path / "p3a-incomplete.json"
+    _write_json(registry_path, registry)
+
+    result = _run(registry_path, tmp_path / "p3a-manifest.json", phase="P3a")
+
+    assert result.returncode != 0
+    failure = json.loads(result.stderr)
+    assert failure["reason"] == "BINDING_SET_MISMATCH"
+    assert "(55)" in failure["detail"]
+    assert "(0)" in failure["detail"]
+    assert not (tmp_path / "p3a-manifest.json").exists()
+
+
 def test_p2_persisted_manifest_and_negative_registry_bind_exact_due_keys(tmp_path):
     generated = tmp_path / "manifest-p2.json"
     first = _run(P2_REGISTRY, generated, phase="P2")
@@ -149,7 +166,7 @@ def test_p2_persisted_manifest_and_negative_registry_bind_exact_due_keys(tmp_pat
     assert generated.read_bytes() == P2_PERSISTED.read_bytes()
     manifest = json.loads(P2_PERSISTED.read_text(encoding="utf-8"))
     assert manifest["phase"] == "P2"
-    assert json.loads(first.stdout)["mapped_count"] == 105
+    assert json.loads(first.stdout)["mapped_count"] == 104
     mapped = {
         (case["id"], execution["obligation_id"], execution["variant_id"],
          execution["job_id"], execution["target"])
@@ -157,7 +174,7 @@ def test_p2_persisted_manifest_and_negative_registry_bind_exact_due_keys(tmp_pat
         for execution in case["executions"]
         if execution["status"] == "MAPPED"
     }
-    assert len(mapped) == 105
+    assert len(mapped) == 104
     negative = {
         (case["id"], execution["obligation_id"], execution["variant_id"],
          execution["job_id"], execution["target"])
@@ -175,7 +192,7 @@ def test_p2_persisted_manifest_and_negative_registry_bind_exact_due_keys(tmp_pat
          entry["job_id"], entry["target"])
         for entry in registry["probes"]
     }
-    assert len(negative) == len(registry_keys) == len(registry["probes"]) == 57
+    assert len(negative) == len(registry_keys) == len(registry["probes"]) == 56
     assert negative == registry_keys
 
 

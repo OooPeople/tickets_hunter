@@ -1,7 +1,7 @@
 # 函式結構分析與平台索引
 
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
-**最後更新**：2026-10-16
+**最後更新**：2026-10-17
 
 ---
 
@@ -73,8 +73,8 @@
 - **platforms/ibon.py** - iBon + Tour iBon 平台（25 函式）
 - **platforms/kham.py** - KHAM + ticket.com.tw + UDN 平台（21 函式）
 - **platforms/hkticketing.py** - HKTicketing + GalaxyMacau + Ticketek 平台（30 函式）
-- **platforms/utiki/** - uTiki2 職棒售票家族；目前仍是 legacy workflow owner，Issue #17 將依 v1.5 切換至 engine/session 架構
-- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade；P6c removal candidate，新邏輯不得加在此檔
+- **platforms/utiki/** - uTiki2 職棒售票家族；production 路由仍由 legacy workflow 持有，target engine/session 模組逐階段接入中
+- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade；符合 v1.6 替代、離線驗收、獨立覆核及可回復條件後才是 removal candidate，新邏輯不得加在此檔
 
 ### 🌐 支援平台清單
 
@@ -389,11 +389,16 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### Baseline 現行模組邊界（切換前）
+#### 現行過渡模組邊界
 
 ```text
 platforms/utiki/
-├── __init__.py   # eager re-export 現行 workflow API；不是 v1.5 target root
+├── __init__.py   # 現行公開入口與 legacy workflow 轉接
+├── bootstrap.py  # target engine 組裝入口；production 尚未完成切換
+├── domain/       # target 純模型、snapshot、plan 與 effect 規則
+├── application/  # target engine、ports 與 quantity 協調
+├── adapters/     # target script resource adapter
+├── scripts/      # 外部化 production JavaScript 與 manifest
 ├── profiles.py   # tenant allowlist、PageKind 與 route classifier
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
@@ -404,12 +409,12 @@ platforms/utiki/
 platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 ```
 
-- 現行 allowlist tenant：中信育樂、味全龍；此處只描述路由範圍，不代表本輪已完成真站驗證。
+- 現行 allowlist tenant：中信育樂、味全龍；此處只描述路由範圍，不代表已完成真站驗證。
 - baseline 的 `workflow.py` 持有唯一 registry，並單向傳入 runtime、tab identity 與 cancel-task registry 給 `refresh.py`；refresh 不得反向 import workflow 或建立 mirror registry。兩個模組目前都會直接修改該 runtime，因此這是 single registry，不是 v1.5 target 的 single writer。
-- baseline 共用行為設定以 `utiki.*` 優先，`ctbc.*` 仍是 runtime/UI相容鏡像。已採用 v1.5 target則要求正式 runtime只接受 canonical `utiki` behavior，legacy/mixed格式由 offline upgrader處理；目前尚未切換。
+- 現行共用行為設定仍處於過渡狀態。維護者已採用 v1.6：正式 runtime 只接受 canonical `utiki` behavior，使用者自行重填，不提供 legacy upgrader；其他平台設定與私人資料不得重設。v1.6 catalog 已正式接入，但尚未執行的 gate 不能由本段或舊 PASS 冒充通過。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
-- 已採用 target 是 `main -> platforms.utiki.bootstrap.create_engine(...)`，由一個 engine instance持有 registry、application session writer單一寫入、reducers只提 proposal、所有 mutation經唯一 `ActiveEffect` 仲裁。這些模組目前尚未實作，不能從本節誤讀為 production 已切換。
-- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，正式階段與 gates見 [uTiki 根本重構計劃 v1.5](utiki-root-refactor-plan-v1.5.md)；[先前重構計劃](utiki-refactor-plan.md)只保留歷史脈絡。
+- target 是 `main -> platforms.utiki.bootstrap.create_engine(...)`，由一個 engine instance持有 registry、application session writer單一寫入、reducers只提 proposal、所有 mutation經唯一 `ActiveEffect` 仲裁。模組存在只代表逐階段實作中，不能從本節誤讀為 production 已切換或正式 phase 已出站。
+- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)。[uTiki 根本重構計劃 v1.6](UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) 已由 [採用紀錄](utiki-refactor/adoption-v1.6.md) 固定；原文的 `PROPOSED / REVIEW REQUIRED` 是交付時狀態。v1.6 required catalog 由 [核准紀錄](utiki-refactor/catalog-approval-v1.6.md) 固定；這不會把舊 PASS 變成新版 gate 結果。[先前重構計劃](utiki-refactor-plan.md)只保留歷史脈絡。
 
 ### 🎪 **Fansigo** (platforms/fansigo.py)
 

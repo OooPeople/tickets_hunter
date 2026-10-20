@@ -1,21 +1,22 @@
 {
   "schema_version": 1,
   "catalog_id": "utiki-required-cases",
-  "revision": "1.5.0",
-  "plan_version": "1.5",
-  "plan_sha256": "c8fcc741a37db3d404cefd73cfcda6731a24a922f42522777fbdbc3eeddf6328",
+  "revision": "1.6.0",
+  "plan_version": "1.6",
+  "plan_sha256": "f2e7e88edfbb3f40f9d8775d77c95ac48745ad9133c08d4762334f449b302220",
   "status": "APPROVED",
   "governance": {
     "source_of_truth": [
       "§16",
-      "§18.15"
+      "§18.15",
+      "§19"
     ],
     "generated_from_tests": false,
-    "approval_record": "docs/02-development/utiki-refactor/catalog-approval.md",
+    "approval_record": "docs/02-development/utiki-refactor/catalog-approval-v1.6.md",
     "rule": "Any case, obligation, variant, condition, layer, job, target, evidence, result-policy, or required-gate change requires independent specification review and a newly pinned external digest."
   },
-  "case_count": 153,
-  "obligation_count": 341,
+  "case_count": 143,
+  "obligation_count": 320,
   "cases": [
     {
       "id": "A01",
@@ -132,8 +133,8 @@
       "spec_refs": [
         "16.4"
       ],
-      "scenario": "production JS 或 script resource 故意損壞",
-      "invariant": "browser／packaging gate 必須失敗",
+      "scenario": "production JS 或 source script resource 故意損壞",
+      "invariant": "source-resource／真 browser 契約必須失敗，不 fallback 到舊 inline",
       "obligations": [
         {
           "obligation_id": "A04.browser.primary",
@@ -159,41 +160,6 @@
           "required_evidence": [
             "junit",
             "browser-isolation-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "A04.package.primary",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "bundle-report"
           ],
           "result_policy": "PASS_ONLY"
         },
@@ -230,7 +196,6 @@
             "junit",
             "native-platform-report",
             "browser-isolation-report",
-            "bundle-report",
             "checker-exit-nonzero"
           ],
           "result_policy": "PASS_ONLY"
@@ -413,8 +378,8 @@
       "spec_refs": [
         "16.4"
       ],
-      "scenario": "canonical-only／legacy-only／mixed equal",
-      "invariant": "canonical-only 合規直接使用；legacy-only 與 mixed equal 都須離線轉換，runtime 不比較／轉換 mirror",
+      "scenario": "canonical-only／legacy-only／mixed",
+      "invariant": "canonical-only 合規直接使用；legacy／mixed 拒絕並提示重新設定，不解碼、比較、搬值或 fallback",
       "obligations": [
         {
           "obligation_id": "C01.unit.canonical-only",
@@ -496,6 +461,33 @@
             "junit"
           ],
           "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "C01.unit.mixed-complementary",
+          "required_gates": [
+            "P2",
+            "P3a",
+            "P3b",
+            "P4",
+            "P5",
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "unit-contract",
+          "layer": "unit",
+          "variants": [
+            "mixed-complementary"
+          ],
+          "applies_when": {
+            "all": []
+          },
+          "required_evidence": [
+            "junit"
+          ],
+          "result_policy": "PASS_ONLY"
         }
       ]
     },
@@ -504,8 +496,8 @@
       "spec_refs": [
         "16.4"
       ],
-      "scenario": "離線轉換 mixed conflict／explicit empty",
-      "invariant": "衝突需明示策略；空值不當 missing；執行期不重新解讀舊欄位",
+      "scenario": "current 明確空值、選擇值與舊值干擾",
+      "invariant": "合法空值不當 missing；只使用 current 值，舊值不觸發 conflict-policy 或轉換",
       "obligations": [
         {
           "obligation_id": "C02.unit.mixed-conflict",
@@ -632,8 +624,8 @@
       "spec_refs": [
         "16.4"
       ],
-      "scenario": "save fail／replace fail／多檔部分失敗",
-      "invariant": "原檔保留，manifest 正確，無混合啟動",
+      "scenario": "current 設定保存／replace 失敗",
+      "invariant": "原檔保留、回報失敗；不以預設值或半寫入檔啟動",
       "obligations": [
         {
           "obligation_id": "C04.unit.save-failure",
@@ -680,33 +672,6 @@
           "layer": "unit",
           "variants": [
             "replace-failure"
-          ],
-          "applies_when": {
-            "all": []
-          },
-          "required_evidence": [
-            "junit"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "C04.unit.partial-multifile-failure",
-          "required_gates": [
-            "P2",
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "unit-contract",
-          "layer": "unit",
-          "variants": [
-            "partial-multifile-failure"
           ],
           "applies_when": {
             "all": []
@@ -1566,696 +1531,6 @@
             "junit",
             "native-platform-report",
             "browser-isolation-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G01",
-      "spec_refs": [
-        "11/14"
-      ],
-      "scenario": "mixed equal",
-      "invariant": "runtime拒絕；frozen converter 產生 canonical-only、三個值不變",
-      "obligations": [
-        {
-          "obligation_id": "G01.upgrade.primary",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G02",
-      "spec_refs": [
-        "11/14"
-      ],
-      "scenario": "canonical-only 合規、重跑轉換",
-      "invariant": "runtime接受；converter合法no-op，不強加schema2",
-      "obligations": [
-        {
-          "obligation_id": "G02.upgrade.primary",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G03",
-      "spec_refs": [
-        "11/14"
-      ],
-      "scenario": "legacy-only／部分缺鍵／complementary",
-      "invariant": "離線依已列規則補入；未知key不靜默丟棄",
-      "obligations": [
-        {
-          "obligation_id": "G03.upgrade.legacy-only",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "legacy-only"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G03.upgrade.partial-missing-keys",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "partial-missing-keys"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G03.upgrade.complementary-mixed",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "complementary-mixed"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G04",
-      "spec_refs": [
-        "14.4"
-      ],
-      "scenario": "mixed conflict／explicit empty",
-      "invariant": "預設非零；明示策略後合法輸出，空值不當缺值",
-      "obligations": [
-        {
-          "obligation_id": "G04.upgrade.mixed-conflict",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "mixed-conflict"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G04.upgrade.explicit-empty",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "explicit-empty"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G05",
-      "spec_refs": [
-        "11/14"
-      ],
-      "scenario": "duplicate JSON key／root/type錯／未知版本",
-      "invariant": "不覆寫來源，不默默以default執行",
-      "obligations": [
-        {
-          "obligation_id": "G05.upgrade.duplicate-json-key",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "duplicate-json-key"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G05.upgrade.wrong-root-or-type",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "wrong-root-or-type"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G05.upgrade.unknown-schema-version",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "unknown-schema-version"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G06",
-      "spec_refs": [
-        "14.4"
-      ],
-      "scenario": "寫入中來源改變／target存在／權限錯／多檔部分失敗",
-      "invariant": "拒絕或精確manifest；備份/原檔保護，不宣稱跨檔交易",
-      "obligations": [
-        {
-          "obligation_id": "G06.upgrade.source-race",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "source-race"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G06.upgrade.target-exists",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "target-exists"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G06.upgrade.permission-denied",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "permission-denied"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "G06.upgrade.partial-multifile-failure",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "partial-multifile-failure"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G07",
-      "spec_refs": [
-        "14.5/14.6"
-      ],
-      "scenario": "Windows x64無system Python升級",
-      "invariant": "獨立exe→新profile→frozen bot/settings驗證與真正startup通過",
-      "obligations": [
-        {
-          "obligation_id": "G07.upgrade.primary",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G08",
-      "spec_refs": [
-        "14.5/14.6"
-      ],
-      "scenario": "macOS arm64無system Python升級",
-      "invariant": "獨立artifact同流程，任意cwd/中文空白路徑/執行權限可操作",
-      "obligations": [
-        {
-          "obligation_id": "G08.upgrade.primary",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G09",
-      "spec_refs": [
-        "14.5/18.1"
-      ],
-      "scenario": "checksum／manifest／final _internal 資源錯配",
-      "invariant": "可識別版本與文件；錯配必失敗，checksum不冒充publisher認證",
-      "obligations": [
-        {
-          "obligation_id": "G09.upgrade.primary",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "G10",
-      "spec_refs": [
-        "11/22"
-      ],
-      "scenario": "其他平台opaque資料／secrets／配對回退",
-      "invariant": "未用legacy資料不被清除或遷移；秘密不進artifact；舊binary配舊設定",
-      "obligations": [
-        {
-          "obligation_id": "G10.upgrade.primary",
-          "required_gates": [
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "source-linux-x64",
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "upgrade-report",
-            "bundle-report"
           ],
           "result_policy": "PASS_ONLY"
         }
@@ -4150,37 +3425,6 @@
           "result_policy": "PASS_ONLY"
         },
         {
-          "obligation_id": "H08.arch.new-upgrade-tool-file",
-          "required_gates": [
-            "P1",
-            "P2",
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "variants": [
-            "new-upgrade-tool-file"
-          ],
-          "applies_when": {
-            "all": []
-          },
-          "required_evidence": [
-            "junit",
-            "architecture-report",
-            "typecheck-report",
-            "checker-exit-nonzero"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
           "obligation_id": "H08.arch.broad-ignore-any",
           "required_gates": [
             "P1",
@@ -4218,8 +3462,8 @@
       "spec_refs": [
         "10/19.5"
       ],
-      "scenario": "P3首次JS外部化、資源缺失或digest錯",
-      "invariant": "同階段build/frozen任意cwd自測必失敗；不fallback舊inline",
+      "scenario": "P3a 首次 JS 外部化、source 資源缺失或錯配",
+      "invariant": "同期 source loader／任意 cwd／真 browser 驗收必須拒絕錯配；不 fallback 到舊 inline",
       "obligations": [
         {
           "obligation_id": "H09.browser.externalized-js",
@@ -4303,111 +3547,6 @@
           "result_policy": "PASS_ONLY"
         },
         {
-          "obligation_id": "H09.package.externalized-js",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "variants": [
-            "externalized-js"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "H09.package.resource-missing",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "variants": [
-            "resource-missing"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "H09.package.resource-digest-mismatch",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "variants": [
-            "resource-digest-mismatch"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
           "obligation_id": "H09.native.externalized-js",
           "required_gates": [
             "P3a",
@@ -4440,7 +3579,6 @@
             "junit",
             "native-platform-report",
             "browser-isolation-report",
-            "bundle-report",
             "checker-exit-nonzero"
           ],
           "result_policy": "PASS_ONLY"
@@ -4478,7 +3616,6 @@
             "junit",
             "native-platform-report",
             "browser-isolation-report",
-            "bundle-report",
             "checker-exit-nonzero"
           ],
           "result_policy": "PASS_ONLY"
@@ -4516,143 +3653,6 @@
             "junit",
             "native-platform-report",
             "browser-isolation-report",
-            "bundle-report",
-            "checker-exit-nonzero"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
-      "id": "H10",
-      "spec_refs": [
-        "17.7/19.10"
-      ],
-      "scenario": "未做指定live／未取得final-delete核准",
-      "invariant": "P6c不執行；candidate只標LIVE/DELETE_BLOCKED",
-      "obligations": [
-        {
-          "obligation_id": "H10.arch.missing-authorized-live-evidence",
-          "required_gates": [
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "variants": [
-            "missing-authorized-live-evidence"
-          ],
-          "applies_when": {
-            "all": []
-          },
-          "required_evidence": [
-            "junit",
-            "architecture-report",
-            "checker-exit-nonzero"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "H10.arch.missing-final-delete-approval",
-          "required_gates": [
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "variants": [
-            "missing-final-delete-approval"
-          ],
-          "applies_when": {
-            "all": []
-          },
-          "required_evidence": [
-            "junit",
-            "architecture-report",
-            "checker-exit-nonzero"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "H10.live.pre-delete-candidate-evidence",
-          "required_gates": [
-            "P6b",
-            "P6c"
-          ],
-          "job_id": "live-evidence",
-          "layer": "live",
-          "variants": [
-            "pre-delete-candidate-evidence"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "authorized-live"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "live-review-record"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "H10.live.post-runtime-change-evidence",
-          "required_gates": [
-            "P7",
-            "P8"
-          ],
-          "job_id": "live-evidence",
-          "layer": "live",
-          "variants": [
-            "post-runtime-change-evidence"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "authorized-live"
-                ]
-              },
-              {
-                "field": "runtime_or_resource_changed_since_live",
-                "one_of": [
-                  true
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "live-review-record",
-            "reviewed-candidate-delta"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "H10.arch.reviewed-live-delta-classification",
-          "required_gates": [
-            "P7",
-            "P8"
-          ],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "variants": [
-            "reviewed-live-delta-classification"
-          ],
-          "applies_when": {
-            "all": []
-          },
-          "required_evidence": [
-            "junit",
-            "architecture-report",
-            "reviewed-candidate-delta",
             "checker-exit-nonzero"
           ],
           "result_policy": "PASS_ONLY"
@@ -4953,6 +3953,134 @@
           },
           "required_evidence": [
             "python-syntax-report",
+            "checker-exit-nonzero"
+          ],
+          "result_policy": "PASS_ONLY"
+        }
+      ]
+    },
+    {
+      "id": "H12",
+      "spec_refs": [
+        "14.7",
+        "19.10"
+      ],
+      "scenario": "P6c 清理缺少同候選離線驗收／替代責任／獨立覆核／可回復版本",
+      "invariant": "缺任一前置不得清理或出站；真站未驗證本身不阻擋；舊版 live PASS 不得代填",
+      "obligations": [
+        {
+          "obligation_id": "H12.offline.prerequisite-rejections",
+          "required_gates": [
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "variants": [
+            "missing-offline-evidence",
+            "missing-independent-review",
+            "wrong-candidate",
+            "unreplaced-caller",
+            "missing-recovery-point"
+          ],
+          "applies_when": {
+            "all": []
+          },
+          "required_evidence": [
+            "junit",
+            "offline-review-record",
+            "checker-exit-nonzero"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "H12.offline.candidate-ready",
+          "required_gates": [
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "variants": [
+            "fixed-candidate"
+          ],
+          "applies_when": {
+            "all": []
+          },
+          "required_evidence": [
+            "offline-review-record",
+            "replacement-inventory",
+            "recovery-record"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "H12.offline.post-cleanup-delta",
+          "required_gates": [
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "variants": [
+            "reviewed-cleanup-delta"
+          ],
+          "applies_when": {
+            "all": []
+          },
+          "required_evidence": [
+            "offline-review-record",
+            "reviewed-candidate-delta",
+            "recovery-record"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "H12.offline.live-not-verified-nonblocking",
+          "required_gates": [
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "variants": [
+            "live-not-verified"
+          ],
+          "applies_when": {
+            "all": []
+          },
+          "required_evidence": [
+            "junit",
+            "offline-review-record"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "H12.offline.historical-live-pass-rejected",
+          "required_gates": [
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "variants": [
+            "historical-live-pass"
+          ],
+          "applies_when": {
+            "all": []
+          },
+          "required_evidence": [
+            "junit",
+            "offline-review-record",
             "checker-exit-nonzero"
           ],
           "result_policy": "PASS_ONLY"
@@ -6988,51 +6116,6 @@
       ]
     },
     {
-      "id": "P01",
-      "spec_refs": [
-        "16.4"
-      ],
-      "scenario": "frozen app 從任意 cwd 執行",
-      "invariant": "JS resource 可取得，無 source-tree 偷渡依賴",
-      "obligations": [
-        {
-          "obligation_id": "P01.package.primary",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "bundle-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        }
-      ]
-    },
-    {
       "id": "P02",
       "spec_refs": [
         "16.4"
@@ -7041,7 +6124,7 @@
       "invariant": "不因新增 Unicode／stream 改寫而崩潰",
       "obligations": [
         {
-          "obligation_id": "P02.package.primary",
+          "obligation_id": "P02.source.windows-non-utf8",
           "required_gates": [
             "P3a",
             "P3b",
@@ -7053,10 +6136,10 @@
             "P7",
             "P8"
           ],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "variants": [
-            "primary"
+            "windows-non-utf8"
           ],
           "applies_when": {
             "all": [
@@ -7070,22 +6153,23 @@
           },
           "required_evidence": [
             "junit",
-            "bundle-report"
+            "source-startup-report"
           ],
           "result_policy": "PASS_ONLY"
         }
       ]
     },
     {
-      "id": "P03",
+      "id": "P04",
       "spec_refs": [
-        "16.4"
+        "16.4",
+        "19.5"
       ],
-      "scenario": "settings 與 bot 打包",
-      "invariant": "使用同一 canonical schema，升級／回退流程可操作",
+      "scenario": "原始碼入口／source loader 從 root 與外部 cwd 執行",
+      "invariant": "Windows x64／macOS arm64 均取得同版本 JS，中文／空白路徑可用，缺檔或錯配非零",
       "obligations": [
         {
-          "obligation_id": "P03.package.bot",
+          "obligation_id": "P04.source.windows-x64-cwd",
           "required_gates": [
             "P3a",
             "P3b",
@@ -7097,30 +6181,31 @@
             "P7",
             "P8"
           ],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "variants": [
-            "bot"
+            "root-cwd",
+            "external-cwd",
+            "unicode-space-path"
           ],
           "applies_when": {
             "all": [
               {
                 "field": "target",
                 "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
+                  "windows-x64"
                 ]
               }
             ]
           },
           "required_evidence": [
             "junit",
-            "bundle-report"
+            "source-startup-report"
           ],
           "result_policy": "PASS_ONLY"
         },
         {
-          "obligation_id": "P03.package.settings",
+          "obligation_id": "P04.source.windows-x64-resource-rejection",
           "required_gates": [
             "P3a",
             "P3b",
@@ -7132,17 +6217,54 @@
             "P7",
             "P8"
           ],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "variants": [
-            "settings"
+            "resource-missing",
+            "resource-digest-mismatch"
           ],
           "applies_when": {
             "all": [
               {
                 "field": "target",
                 "one_of": [
-                  "windows-x64",
+                  "windows-x64"
+                ]
+              }
+            ]
+          },
+          "required_evidence": [
+            "junit",
+            "source-startup-report",
+            "checker-exit-nonzero"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "required_gates": [
+            "P3a",
+            "P3b",
+            "P4",
+            "P5",
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "variants": [
+            "root-cwd",
+            "external-cwd",
+            "unicode-space-path"
+          ],
+          "applies_when": {
+            "all": [
+              {
+                "field": "target",
+                "one_of": [
                   "macos-arm64"
                 ]
               }
@@ -7150,7 +6272,180 @@
           },
           "required_evidence": [
             "junit",
-            "bundle-report"
+            "source-startup-report"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "P04.source.macos-arm64-resource-rejection",
+          "required_gates": [
+            "P3a",
+            "P3b",
+            "P4",
+            "P5",
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "variants": [
+            "resource-missing",
+            "resource-digest-mismatch"
+          ],
+          "applies_when": {
+            "all": [
+              {
+                "field": "target",
+                "one_of": [
+                  "macos-arm64"
+                ]
+              }
+            ]
+          },
+          "required_evidence": [
+            "junit",
+            "source-startup-report",
+            "checker-exit-nonzero"
+          ],
+          "result_policy": "PASS_ONLY"
+        }
+      ]
+    },
+    {
+      "id": "P05",
+      "spec_refs": [
+        "16.4",
+        "19.9"
+      ],
+      "scenario": "source bot 與設定網頁的 current 契約／啟動",
+      "invariant": "Windows x64／macOS arm64 使用同一 canonical schema；loopback 保存與隔離啟動成立，其他平台及 accounts 不受損",
+      "obligations": [
+        {
+          "obligation_id": "P05.source.windows-x64-startup",
+          "required_gates": [
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "variants": [
+            "bot-startup",
+            "settings-startup"
+          ],
+          "applies_when": {
+            "all": [
+              {
+                "field": "target",
+                "one_of": [
+                  "windows-x64"
+                ]
+              }
+            ]
+          },
+          "required_evidence": [
+            "junit",
+            "source-startup-report"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "required_gates": [
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "variants": [
+            "canonical-schema",
+            "loopback-save",
+            "other-platform-and-accounts-preserved"
+          ],
+          "applies_when": {
+            "all": [
+              {
+                "field": "target",
+                "one_of": [
+                  "windows-x64"
+                ]
+              }
+            ]
+          },
+          "required_evidence": [
+            "junit",
+            "source-startup-report"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "P05.source.macos-arm64-startup",
+          "required_gates": [
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "variants": [
+            "bot-startup",
+            "settings-startup"
+          ],
+          "applies_when": {
+            "all": [
+              {
+                "field": "target",
+                "one_of": [
+                  "macos-arm64"
+                ]
+              }
+            ]
+          },
+          "required_evidence": [
+            "junit",
+            "source-startup-report"
+          ],
+          "result_policy": "PASS_ONLY"
+        },
+        {
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "required_gates": [
+            "P6a",
+            "P6b",
+            "P6c",
+            "P7",
+            "P8"
+          ],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "variants": [
+            "canonical-schema",
+            "loopback-save",
+            "other-platform-and-accounts-preserved"
+          ],
+          "applies_when": {
+            "all": [
+              {
+                "field": "target",
+                "one_of": [
+                  "macos-arm64"
+                ]
+              }
+            ]
+          },
+          "required_evidence": [
+            "junit",
+            "source-startup-report"
           ],
           "result_policy": "PASS_ONLY"
         }
@@ -9745,7 +9040,7 @@
         "16.5"
       ],
       "scenario": "舊棒球設定出現在 load/hot reload",
-      "invariant": "不自動轉換／不 fallback／不雙寫；顯示升級指引，不丟其他平台資料",
+      "invariant": "不自動轉換／fallback／雙寫；明確要求重新設定，其他平台資料保持",
       "obligations": [
         {
           "obligation_id": "U10.core.primary",
@@ -9809,8 +9104,8 @@
       "spec_refs": [
         "16.5"
       ],
-      "scenario": "移除舊 API/型別/legacy fixtures 後新模組獨立測試／frozen 自測",
-      "invariant": "新 contract 正常；舊模組不被載入／打包，migration 不可由 runtime import",
+      "scenario": "移除舊 API／型別／legacy fixtures 後新模組獨立測試",
+      "invariant": "新 contract 正常；舊模組不被載入，runtime 不匯入 migration／converter",
       "obligations": [
         {
           "obligation_id": "U12.arch.primary",
@@ -9831,35 +9126,6 @@
             "junit",
             "architecture-report",
             "typecheck-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "U12.package.primary",
-          "required_gates": [
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "variants": [
-            "primary"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64",
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "bundle-report"
           ],
           "result_policy": "PASS_ONLY"
         }
@@ -10428,78 +9694,6 @@
             "browser-isolation-report"
           ],
           "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "V12.perf.frozen-windows-x64",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "variants": [
-            "frozen-windows-x64"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "windows-x64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "benchmark-report",
-            "bundle-report",
-            "browser-isolation-report"
-          ],
-          "result_policy": "PASS_ONLY"
-        },
-        {
-          "obligation_id": "V12.perf.frozen-macos-arm64",
-          "required_gates": [
-            "P3a",
-            "P3b",
-            "P4",
-            "P5",
-            "P6a",
-            "P6b",
-            "P6c",
-            "P7",
-            "P8"
-          ],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "variants": [
-            "frozen-macos-arm64"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "target",
-                "one_of": [
-                  "macos-arm64"
-                ]
-              }
-            ]
-          },
-          "required_evidence": [
-            "junit",
-            "benchmark-report",
-            "bundle-report",
-            "browser-isolation-report"
-          ],
-          "result_policy": "PASS_ONLY"
         }
       ]
     },
@@ -10508,8 +9702,8 @@
       "spec_refs": [
         "18.15"
       ],
-      "scenario": "cold start／fresh document／frozen app",
-      "invariant": "初始化成本單列，不能只公佈最有利的 warm 數字",
+      "scenario": "source cold start／fresh document",
+      "invariant": "初始化成本單列；Windows／macOS 原始碼測試不以 warm 或 Linux 結果代替",
       "obligations": [
         {
           "obligation_id": "V13.perf.source-cold-start",
@@ -10583,7 +9777,7 @@
           "result_policy": "PASS_ONLY"
         },
         {
-          "obligation_id": "V13.perf.frozen-windows-x64",
+          "obligation_id": "V13.perf.source-cold-windows-x64",
           "required_gates": [
             "P3a",
             "P3b",
@@ -10598,7 +9792,7 @@
           "job_id": "performance-contract",
           "layer": "performance",
           "variants": [
-            "frozen-windows-x64"
+            "source-cold-windows-x64"
           ],
           "applies_when": {
             "all": [
@@ -10613,13 +9807,12 @@
           "required_evidence": [
             "junit",
             "benchmark-report",
-            "bundle-report",
             "browser-isolation-report"
           ],
           "result_policy": "PASS_ONLY"
         },
         {
-          "obligation_id": "V13.perf.frozen-macos-arm64",
+          "obligation_id": "V13.perf.source-cold-macos-arm64",
           "required_gates": [
             "P3a",
             "P3b",
@@ -10634,7 +9827,7 @@
           "job_id": "performance-contract",
           "layer": "performance",
           "variants": [
-            "frozen-macos-arm64"
+            "source-cold-macos-arm64"
           ],
           "applies_when": {
             "all": [
@@ -10649,7 +9842,6 @@
           "required_evidence": [
             "junit",
             "benchmark-report",
-            "bundle-report",
             "browser-isolation-report"
           ],
           "result_policy": "PASS_ONLY"
@@ -11531,13 +10723,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         }
       ],
@@ -11615,13 +10807,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         }
       ],
@@ -11699,13 +10891,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -11792,13 +10984,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -11885,13 +11077,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -11901,18 +11093,6 @@
           ],
           "layers": [
             "core-integration"
-          ]
-        },
-        {
-          "job_id": "upgrade-frozen-e2e",
-          "targets": [
-            "source-linux-x64",
-            "windows-x64",
-            "macos-arm64"
-          ],
-          "layers": [
-            "upgrade-e2e",
-            "package"
           ]
         }
       ],
@@ -11990,13 +11170,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -12009,28 +11189,13 @@
           ]
         },
         {
-          "job_id": "upgrade-frozen-e2e",
+          "job_id": "offline-cutover-review",
           "targets": [
-            "source-linux-x64",
-            "windows-x64",
-            "macos-arm64"
+            "source-linux-x64"
           ],
           "layers": [
-            "upgrade-e2e",
-            "package"
+            "offline-review"
           ]
-        },
-        {
-          "job_id": "live-evidence",
-          "targets": [
-            "authorized-live"
-          ],
-          "layers": [
-            "live"
-          ],
-          "applies_when": {
-            "all": []
-          }
         }
       ],
       "aggregation": {
@@ -12107,13 +11272,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -12126,28 +11291,13 @@
           ]
         },
         {
-          "job_id": "upgrade-frozen-e2e",
+          "job_id": "offline-cutover-review",
           "targets": [
-            "source-linux-x64",
-            "windows-x64",
-            "macos-arm64"
+            "source-linux-x64"
           ],
           "layers": [
-            "upgrade-e2e",
-            "package"
+            "offline-review"
           ]
-        },
-        {
-          "job_id": "live-evidence",
-          "targets": [
-            "authorized-live"
-          ],
-          "layers": [
-            "live"
-          ],
-          "applies_when": {
-            "all": []
-          }
         }
       ],
       "aggregation": {
@@ -12156,18 +11306,7 @@
         "require_same_catalog_revision": true,
         "candidate_sha_policy": {
           "default": "exact-current-candidate",
-          "inherited_jobs": [
-            {
-              "job_id": "live-evidence",
-              "from_gate": "P6b",
-              "evidence_candidate": "pre-delete-candidate",
-              "requires": [
-                "approved-live-record",
-                "exact-p6b-sha",
-                "p6b-to-p6c-delta-review"
-              ]
-            }
-          ]
+          "inherited_jobs": []
         },
         "reject_unreviewed_mixed_candidate_sha": true
       }
@@ -12235,13 +11374,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -12254,35 +11393,13 @@
           ]
         },
         {
-          "job_id": "upgrade-frozen-e2e",
+          "job_id": "offline-cutover-review",
           "targets": [
-            "source-linux-x64",
-            "windows-x64",
-            "macos-arm64"
+            "source-linux-x64"
           ],
           "layers": [
-            "upgrade-e2e",
-            "package"
+            "offline-review"
           ]
-        },
-        {
-          "job_id": "live-evidence",
-          "targets": [
-            "authorized-live"
-          ],
-          "layers": [
-            "live"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "runtime_or_resource_changed_since_live",
-                "one_of": [
-                  true
-                ]
-              }
-            ]
-          }
         }
       ],
       "aggregation": {
@@ -12359,13 +11476,13 @@
           ]
         },
         {
-          "job_id": "package-smoke",
+          "job_id": "source-startup",
           "targets": [
             "windows-x64",
             "macos-arm64"
           ],
           "layers": [
-            "package"
+            "source-startup"
           ]
         },
         {
@@ -12378,35 +11495,13 @@
           ]
         },
         {
-          "job_id": "upgrade-frozen-e2e",
+          "job_id": "offline-cutover-review",
           "targets": [
-            "source-linux-x64",
-            "windows-x64",
-            "macos-arm64"
+            "source-linux-x64"
           ],
           "layers": [
-            "upgrade-e2e",
-            "package"
+            "offline-review"
           ]
-        },
-        {
-          "job_id": "live-evidence",
-          "targets": [
-            "authorized-live"
-          ],
-          "layers": [
-            "live"
-          ],
-          "applies_when": {
-            "all": [
-              {
-                "field": "runtime_or_resource_changed_since_live",
-                "one_of": [
-                  true
-                ]
-              }
-            ]
-          }
         }
       ],
       "aggregation": {
@@ -12419,43 +11514,6 @@
         },
         "reject_unreviewed_mixed_candidate_sha": true
       }
-    }
-  },
-  "condition_sources": {
-    "runtime_or_resource_changed_since_live": {
-      "value_type": "boolean",
-      "authority": "checker-derived",
-      "required_for_gates": [
-        "P7",
-        "P8"
-      ],
-      "evidence_kind": "reviewed-candidate-delta",
-      "evidence_required_for_both_values": true,
-      "untrusted_run_metadata_value_forbidden": true,
-      "derivation": {
-        "anchor_fields": [
-          "p6b_candidate_sha",
-          "p6c_candidate_sha",
-          "current_candidate_sha"
-        ],
-        "compared_inventories": [
-          "runtime-python-inventory",
-          "production-browser-resource-inventory",
-          "build-spec-and-assembly-inventory"
-        ],
-        "compared_digests": [
-          "source",
-          "production-resources",
-          "build-contract"
-        ],
-        "review_fields": [
-          "reviewer",
-          "review_status",
-          "reviewed_at",
-          "evidence_sha256"
-        ]
-      },
-      "rule": "The checker derives true or false from the reviewed candidate delta. A candidate, test, execution manifest, or run metadata cannot self-declare this condition or omit false-value evidence."
     }
   }
 }

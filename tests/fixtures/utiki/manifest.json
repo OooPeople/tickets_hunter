@@ -59,26 +59,6 @@
         },
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "A04.package.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "A04.package.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
           "job_id": "browser-native-platform",
           "layer": "native-platform",
           "node_id": null,
@@ -248,6 +228,16 @@
           "status": "NOT_DUE",
           "target": "source-linux-x64",
           "variant_id": "mixed-equal"
+        },
+        {
+          "evidence": [],
+          "job_id": "unit-contract",
+          "layer": "unit",
+          "node_id": null,
+          "obligation_id": "C01.unit.mixed-complementary",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "mixed-complementary"
         }
       ],
       "id": "C01"
@@ -323,16 +313,6 @@
           "status": "NOT_DUE",
           "target": "source-linux-x64",
           "variant_id": "replace-failure"
-        },
-        {
-          "evidence": [],
-          "job_id": "unit-contract",
-          "layer": "unit",
-          "node_id": null,
-          "obligation_id": "C04.unit.partial-multifile-failure",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "partial-multifile-failure"
         }
       ],
       "id": "C04"
@@ -676,596 +656,6 @@
         }
       ],
       "id": "D10"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G01.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G01.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G01.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "G01"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G02.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G02.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G02.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "G02"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.legacy-only",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "legacy-only"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.legacy-only",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "legacy-only"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.legacy-only",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "legacy-only"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.partial-missing-keys",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "partial-missing-keys"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.partial-missing-keys",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "partial-missing-keys"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.partial-missing-keys",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "partial-missing-keys"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.complementary-mixed",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "complementary-mixed"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.complementary-mixed",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "complementary-mixed"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G03.upgrade.complementary-mixed",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "complementary-mixed"
-        }
-      ],
-      "id": "G03"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G04.upgrade.mixed-conflict",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "mixed-conflict"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G04.upgrade.mixed-conflict",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "mixed-conflict"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G04.upgrade.mixed-conflict",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "mixed-conflict"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G04.upgrade.explicit-empty",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "explicit-empty"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G04.upgrade.explicit-empty",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "explicit-empty"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G04.upgrade.explicit-empty",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "explicit-empty"
-        }
-      ],
-      "id": "G04"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.duplicate-json-key",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "duplicate-json-key"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.duplicate-json-key",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "duplicate-json-key"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.duplicate-json-key",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "duplicate-json-key"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.wrong-root-or-type",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "wrong-root-or-type"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.wrong-root-or-type",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "wrong-root-or-type"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.wrong-root-or-type",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "wrong-root-or-type"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.unknown-schema-version",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "unknown-schema-version"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.unknown-schema-version",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "unknown-schema-version"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G05.upgrade.unknown-schema-version",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "unknown-schema-version"
-        }
-      ],
-      "id": "G05"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.source-race",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "source-race"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.source-race",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "source-race"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.source-race",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "source-race"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.target-exists",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "target-exists"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.target-exists",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "target-exists"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.target-exists",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "target-exists"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.permission-denied",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "permission-denied"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.permission-denied",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "permission-denied"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.permission-denied",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "permission-denied"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.partial-multifile-failure",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "partial-multifile-failure"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.partial-multifile-failure",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "partial-multifile-failure"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G06.upgrade.partial-multifile-failure",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "partial-multifile-failure"
-        }
-      ],
-      "id": "G06"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G07.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G07.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G07.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "G07"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G08.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G08.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G08.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "G08"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G09.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G09.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G09.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "G09"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G10.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G10.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "upgrade-frozen-e2e",
-          "layer": "upgrade-e2e",
-          "node_id": null,
-          "obligation_id": "G10.upgrade.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "G10"
     },
     {
       "executions": [
@@ -2401,29 +1791,6 @@
             },
             {
               "kind": "checker-exit-nonzero",
-              "path": "evidence/negative/H08.arch.new-upgrade-tool-file--new-upgrade-tool-file.json"
-            },
-            {
-              "kind": "typecheck-report",
-              "path": "evidence/typecheck-report.json"
-            }
-          ],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "node_id": "tests/architecture/test_utiki_p1_negative_probes.py::test_h08_each_new_typed_file_omitted_from_scope_fails[tools/migrations/convert_utiki_config.py-new-upgrade-tool-file]",
-          "obligation_id": "H08.arch.new-upgrade-tool-file",
-          "status": "MAPPED",
-          "target": "source-linux-x64",
-          "variant_id": "new-upgrade-tool-file"
-        },
-        {
-          "evidence": [
-            {
-              "kind": "architecture-report",
-              "path": "evidence/architecture-report.json"
-            },
-            {
-              "kind": "checker-exit-nonzero",
               "path": "evidence/negative/H08.arch.broad-ignore-any--broad-ignore-any.json"
             },
             {
@@ -2472,66 +1839,6 @@
           "obligation_id": "H09.browser.resource-digest-mismatch",
           "status": "NOT_DUE",
           "target": "isolated-linux-x64",
-          "variant_id": "resource-digest-mismatch"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "H09.package.externalized-js",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "externalized-js"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "H09.package.externalized-js",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "externalized-js"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "H09.package.resource-missing",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "resource-missing"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "H09.package.resource-missing",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "resource-missing"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "H09.package.resource-digest-mismatch",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "resource-digest-mismatch"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "H09.package.resource-digest-mismatch",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
           "variant_id": "resource-digest-mismatch"
         },
         {
@@ -2596,61 +1903,6 @@
         }
       ],
       "id": "H09"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "node_id": null,
-          "obligation_id": "H10.arch.missing-authorized-live-evidence",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "missing-authorized-live-evidence"
-        },
-        {
-          "evidence": [],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "node_id": null,
-          "obligation_id": "H10.arch.missing-final-delete-approval",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "missing-final-delete-approval"
-        },
-        {
-          "evidence": [],
-          "job_id": "live-evidence",
-          "layer": "live",
-          "node_id": null,
-          "obligation_id": "H10.live.pre-delete-candidate-evidence",
-          "status": "NOT_DUE",
-          "target": "authorized-live",
-          "variant_id": "pre-delete-candidate-evidence"
-        },
-        {
-          "evidence": [],
-          "job_id": "live-evidence",
-          "layer": "live",
-          "node_id": null,
-          "obligation_id": "H10.live.post-runtime-change-evidence",
-          "status": "NOT_DUE",
-          "target": "authorized-live",
-          "variant_id": "post-runtime-change-evidence"
-        },
-        {
-          "evidence": [],
-          "job_id": "architecture-types",
-          "layer": "architecture",
-          "node_id": null,
-          "obligation_id": "H10.arch.reviewed-live-delta-classification",
-          "status": "NOT_DUE",
-          "target": "source-linux-x64",
-          "variant_id": "reviewed-live-delta-classification"
-        }
-      ],
-      "id": "H10"
     },
     {
       "executions": [
@@ -2846,6 +2098,101 @@
         }
       ],
       "id": "H11"
+    },
+    {
+      "executions": [
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.prerequisite-rejections",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "missing-offline-evidence"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.prerequisite-rejections",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "missing-independent-review"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.prerequisite-rejections",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "wrong-candidate"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.prerequisite-rejections",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "unreplaced-caller"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.prerequisite-rejections",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "missing-recovery-point"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.candidate-ready",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "fixed-candidate"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.post-cleanup-delta",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "reviewed-cleanup-delta"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.live-not-verified-nonblocking",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "live-not-verified"
+        },
+        {
+          "evidence": [],
+          "job_id": "offline-cutover-review",
+          "layer": "offline-review",
+          "node_id": null,
+          "obligation_id": "H12.offline.historical-live-pass-rejected",
+          "status": "NOT_DUE",
+          "target": "source-linux-x64",
+          "variant_id": "historical-live-pass"
+        }
+      ],
+      "id": "H12"
     },
     {
       "executions": [
@@ -3831,48 +3178,23 @@
       "executions": [
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "node_id": null,
-          "obligation_id": "P01.package.primary",
+          "obligation_id": "P02.source.windows-non-utf8",
           "status": "NOT_DUE",
           "target": "macos-arm64",
-          "variant_id": "primary"
+          "variant_id": "windows-non-utf8"
         },
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "node_id": null,
-          "obligation_id": "P01.package.primary",
+          "obligation_id": "P02.source.windows-non-utf8",
           "status": "NOT_DUE",
           "target": "windows-x64",
-          "variant_id": "primary"
-        }
-      ],
-      "id": "P01"
-    },
-    {
-      "executions": [
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "P02.package.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "P02.package.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
+          "variant_id": "windows-non-utf8"
         }
       ],
       "id": "P02"
@@ -3881,46 +3203,411 @@
       "executions": [
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "node_id": null,
-          "obligation_id": "P03.package.bot",
+          "obligation_id": "P04.source.windows-x64-cwd",
           "status": "NOT_DUE",
           "target": "macos-arm64",
-          "variant_id": "bot"
+          "variant_id": "root-cwd"
         },
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "node_id": null,
-          "obligation_id": "P03.package.bot",
+          "obligation_id": "P04.source.windows-x64-cwd",
           "status": "NOT_DUE",
           "target": "windows-x64",
-          "variant_id": "bot"
+          "variant_id": "root-cwd"
         },
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "node_id": null,
-          "obligation_id": "P03.package.settings",
+          "obligation_id": "P04.source.windows-x64-cwd",
           "status": "NOT_DUE",
           "target": "macos-arm64",
-          "variant_id": "settings"
+          "variant_id": "external-cwd"
         },
         {
           "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
+          "job_id": "source-startup",
+          "layer": "source-startup",
           "node_id": null,
-          "obligation_id": "P03.package.settings",
+          "obligation_id": "P04.source.windows-x64-cwd",
           "status": "NOT_DUE",
           "target": "windows-x64",
-          "variant_id": "settings"
+          "variant_id": "external-cwd"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.windows-x64-cwd",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "unicode-space-path"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.windows-x64-cwd",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "unicode-space-path"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.windows-x64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "resource-missing"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.windows-x64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "resource-missing"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.windows-x64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "resource-digest-mismatch"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.windows-x64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "resource-digest-mismatch"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "root-cwd"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "root-cwd"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "external-cwd"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "external-cwd"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "unicode-space-path"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-cwd",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "unicode-space-path"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "resource-missing"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "resource-missing"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "resource-digest-mismatch"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P04.source.macos-arm64-resource-rejection",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "resource-digest-mismatch"
         }
       ],
-      "id": "P03"
+      "id": "P04"
+    },
+    {
+      "executions": [
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-startup",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "bot-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-startup",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "bot-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-startup",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "settings-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-startup",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "settings-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "canonical-schema"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "canonical-schema"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "loopback-save"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "loopback-save"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "other-platform-and-accounts-preserved"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.windows-x64-current-contract",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "other-platform-and-accounts-preserved"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-startup",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "bot-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-startup",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "bot-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-startup",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "settings-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-startup",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "settings-startup"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "canonical-schema"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "canonical-schema"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "loopback-save"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "loopback-save"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "status": "NOT_DUE",
+          "target": "macos-arm64",
+          "variant_id": "other-platform-and-accounts-preserved"
+        },
+        {
+          "evidence": [],
+          "job_id": "source-startup",
+          "layer": "source-startup",
+          "node_id": null,
+          "obligation_id": "P05.source.macos-arm64-current-contract",
+          "status": "NOT_DUE",
+          "target": "windows-x64",
+          "variant_id": "other-platform-and-accounts-preserved"
+        }
+      ],
+      "id": "P05"
     },
     {
       "executions": [
@@ -5153,26 +4840,6 @@
           "status": "NOT_DUE",
           "target": "source-linux-x64",
           "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "U12.package.primary",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "primary"
-        },
-        {
-          "evidence": [],
-          "job_id": "package-smoke",
-          "layer": "package",
-          "node_id": null,
-          "obligation_id": "U12.package.primary",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "primary"
         }
       ],
       "id": "U12"
@@ -5719,66 +5386,6 @@
           "status": "NOT_DUE",
           "target": "windows-x64",
           "variant_id": "baseline-event-loop-lag"
-        },
-        {
-          "evidence": [],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "node_id": null,
-          "obligation_id": "V12.perf.frozen-windows-x64",
-          "status": "NOT_DUE",
-          "target": "isolated-linux-x64",
-          "variant_id": "frozen-windows-x64"
-        },
-        {
-          "evidence": [],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "node_id": null,
-          "obligation_id": "V12.perf.frozen-windows-x64",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "frozen-windows-x64"
-        },
-        {
-          "evidence": [],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "node_id": null,
-          "obligation_id": "V12.perf.frozen-windows-x64",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "frozen-windows-x64"
-        },
-        {
-          "evidence": [],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "node_id": null,
-          "obligation_id": "V12.perf.frozen-macos-arm64",
-          "status": "NOT_DUE",
-          "target": "isolated-linux-x64",
-          "variant_id": "frozen-macos-arm64"
-        },
-        {
-          "evidence": [],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "node_id": null,
-          "obligation_id": "V12.perf.frozen-macos-arm64",
-          "status": "NOT_DUE",
-          "target": "macos-arm64",
-          "variant_id": "frozen-macos-arm64"
-        },
-        {
-          "evidence": [],
-          "job_id": "performance-contract",
-          "layer": "performance",
-          "node_id": null,
-          "obligation_id": "V12.perf.frozen-macos-arm64",
-          "status": "NOT_DUE",
-          "target": "windows-x64",
-          "variant_id": "frozen-macos-arm64"
         }
       ],
       "id": "V12"
@@ -5859,60 +5466,60 @@
           "job_id": "performance-contract",
           "layer": "performance",
           "node_id": null,
-          "obligation_id": "V13.perf.frozen-windows-x64",
+          "obligation_id": "V13.perf.source-cold-windows-x64",
           "status": "NOT_DUE",
           "target": "isolated-linux-x64",
-          "variant_id": "frozen-windows-x64"
+          "variant_id": "source-cold-windows-x64"
         },
         {
           "evidence": [],
           "job_id": "performance-contract",
           "layer": "performance",
           "node_id": null,
-          "obligation_id": "V13.perf.frozen-windows-x64",
+          "obligation_id": "V13.perf.source-cold-windows-x64",
           "status": "NOT_DUE",
           "target": "macos-arm64",
-          "variant_id": "frozen-windows-x64"
+          "variant_id": "source-cold-windows-x64"
         },
         {
           "evidence": [],
           "job_id": "performance-contract",
           "layer": "performance",
           "node_id": null,
-          "obligation_id": "V13.perf.frozen-windows-x64",
+          "obligation_id": "V13.perf.source-cold-windows-x64",
           "status": "NOT_DUE",
           "target": "windows-x64",
-          "variant_id": "frozen-windows-x64"
+          "variant_id": "source-cold-windows-x64"
         },
         {
           "evidence": [],
           "job_id": "performance-contract",
           "layer": "performance",
           "node_id": null,
-          "obligation_id": "V13.perf.frozen-macos-arm64",
+          "obligation_id": "V13.perf.source-cold-macos-arm64",
           "status": "NOT_DUE",
           "target": "isolated-linux-x64",
-          "variant_id": "frozen-macos-arm64"
+          "variant_id": "source-cold-macos-arm64"
         },
         {
           "evidence": [],
           "job_id": "performance-contract",
           "layer": "performance",
           "node_id": null,
-          "obligation_id": "V13.perf.frozen-macos-arm64",
+          "obligation_id": "V13.perf.source-cold-macos-arm64",
           "status": "NOT_DUE",
           "target": "macos-arm64",
-          "variant_id": "frozen-macos-arm64"
+          "variant_id": "source-cold-macos-arm64"
         },
         {
           "evidence": [],
           "job_id": "performance-contract",
           "layer": "performance",
           "node_id": null,
-          "obligation_id": "V13.perf.frozen-macos-arm64",
+          "obligation_id": "V13.perf.source-cold-macos-arm64",
           "status": "NOT_DUE",
           "target": "windows-x64",
-          "variant_id": "frozen-macos-arm64"
+          "variant_id": "source-cold-macos-arm64"
         }
       ],
       "id": "V13"
@@ -6274,8 +5881,8 @@
     }
   ],
   "catalog_id": "utiki-required-cases",
-  "catalog_revision": "1.5.0",
-  "catalog_sha256": "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1",
+  "catalog_revision": "1.6.0",
+  "catalog_sha256": "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf",
   "phase": "P1",
   "schema_version": 1
 }

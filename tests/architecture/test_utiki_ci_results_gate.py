@@ -16,7 +16,7 @@ CHECKER = PROJECT_ROOT / "tools" / "verify_utiki_ci_results.py"
 EVIDENCE_LAUNCHER = PROJECT_ROOT / "tools" / "run_utiki_evidence.py"
 CATALOG = PROJECT_ROOT / "ci" / "utiki-required-cases.json"
 NEGATIVE_REGISTRY = PROJECT_ROOT / "ci" / "utiki-p1-negative-probes.json"
-APPROVED_CATALOG_SHA256 = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+APPROVED_CATALOG_SHA256 = "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
 PHASE = "P1"
 RUN_ID = "utiki-p1-attempt-1"
 CANDIDATE_SHA = "1" * 40
@@ -55,7 +55,6 @@ def _canonical_negative_fixture(
             "new-current-config-file": "src/utiki_config.py",
             "new-keyword-file": "src/keyword_rules.py",
             "new-core-bridge-file": "src/utiki_core_services.py",
-            "new-upgrade-tool-file": "tools/migrations/convert_utiki_config.py",
         }.get(request["variant_id"])
         typecheck_report = destination / "typecheck-report.json"
         _write_json(
@@ -507,7 +506,7 @@ def _make_manifest(root, *, compact=False):
     manifest = {
         "schema_version": 1,
         "catalog_id": "utiki-required-cases",
-        "catalog_revision": "1.5.0",
+        "catalog_revision": "1.6.0",
         "catalog_sha256": APPROVED_CATALOG_SHA256,
         "phase": PHASE,
         "cases": cases,
@@ -2797,7 +2796,7 @@ def test_aggregate_accepts_artifacts_after_file_modes_are_normalized(
     report = json.loads(result.stdout)
     assert report["status"] == "PASS"
     assert report["scope"] == "phase"
-    assert report["required"] == 63
+    assert report["required"] == 62
 
 
 def test_relocated_evidence_rejects_unsafe_artifact_path(gate_inputs):

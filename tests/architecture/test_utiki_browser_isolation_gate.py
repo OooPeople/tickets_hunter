@@ -460,7 +460,7 @@ def test_p2_browser_context_and_container_use_p2_manifest_and_probes(
     run_dir = tmp_path / "evidence"
     run_dir.mkdir()
     catalog_sha256 = (
-        "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+        "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
     )
     manifest_sha256, _, _ = launcher._prepare_reporter_context(
         repository=PROJECT_ROOT,
@@ -510,6 +510,62 @@ def test_p2_browser_context_and_container_use_p2_manifest_and_probes(
     assert command[command.index("--execution-manifest") + 1] == str(manifest)
     assert command[command.index("--probe-registry") + 1] == str(
         PROJECT_ROOT / "ci/utiki-p2-negative-probes.json"
+    )
+    assert command[command.index("--network") + 1] == "none"
+
+
+def test_p3a_browser_context_requires_four_new_catalog_nodes(tmp_path, monkeypatch):
+    launcher = _load_launcher()
+    manifest = json.loads(
+        (PROJECT_ROOT / "tests/fixtures/utiki/manifest-p2.json").read_text(encoding="utf-8")
+    )
+    manifest["phase"] = "P3a"
+    prefix = "tests/browser/utiki/test_production_origin_contract.py::"
+    new_nodes = {
+        "A04.browser.primary": prefix + "test_invalid_production_resource_cannot_reach_browser[production-corruption]",
+        "H09.browser.externalized-js": prefix + "test_h09_externalized_js_runs_on_production_origin",
+        "H09.browser.resource-missing": prefix + "test_invalid_production_resource_cannot_reach_browser[resource-missing]",
+        "H09.browser.resource-digest-mismatch": prefix + "test_invalid_production_resource_cannot_reach_browser[resource-digest-mismatch]",
+    }
+    updated = set()
+    for case in manifest["cases"]:
+        for execution in case["executions"]:
+            node_id = new_nodes.get(execution["obligation_id"])
+            if node_id is not None and execution["target"] == "isolated-linux-x64":
+                assert execution["status"] == "NOT_DUE"
+                execution["status"] = "MAPPED"
+                execution["node_id"] = node_id
+                updated.add(execution["obligation_id"])
+    assert updated == set(new_nodes)
+    mappings = launcher._managed_mappings(
+        manifest, "browser-contract-isolated", "isolated-linux-x64", "P3a"
+    )
+    assert len(mappings) == 17
+    assert {item["node_id"] for item in mappings} >= set(new_nodes.values())
+    with pytest.raises(launcher.IsolationBlocked, match="P2 browser contract must bind exactly 13"):
+        launcher._managed_mappings(
+            manifest, "browser-contract-isolated", "isolated-linux-x64", "P2"
+        )
+    for case in manifest["cases"]:
+        for execution in case["executions"]:
+            if execution["obligation_id"] == "H09.browser.resource-missing":
+                execution["status"] = "NOT_DUE"
+    with pytest.raises(launcher.IsolationBlocked, match="P3a browser contract must bind exactly 17"):
+        launcher._managed_mappings(
+            manifest, "browser-contract-isolated", "isolated-linux-x64", "P3a"
+        )
+    monkeypatch.setattr(launcher, "_user_options", lambda: ["--user", "65532:65532"])
+    command = launcher._isolated_command(
+        "docker", "example/isolation@sha256:" + "a" * 64,
+        "utiki-test-isolated", PROJECT_ROOT, PROJECT_ROOT, tmp_path,
+        "172.31.0.2", "fd42:1:2::2", "p3a-browser-test-attempt-1", 1,
+        "P3a", "b" * 64, "c" * 40, "ours",
+    )
+    assert command[command.index("--execution-manifest") + 1] == str(
+        PROJECT_ROOT / "tests/fixtures/utiki/manifest-p3a.json"
+    )
+    assert command[command.index("--probe-registry") + 1] == str(
+        PROJECT_ROOT / "ci/utiki-p3a-negative-probes.json"
     )
     assert command[command.index("--network") + 1] == "none"
 

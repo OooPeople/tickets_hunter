@@ -25,7 +25,7 @@ MANIFEST = PROJECT_ROOT / "tests" / "fixtures" / "utiki" / "manifest.json"
 REGISTRY = PROJECT_ROOT / "ci" / "utiki-p1-negative-probes.json"
 RUNNER = PROJECT_ROOT / "tools" / "run_utiki_negative_job.py"
 BUILDER = PROJECT_ROOT / "tools" / "build_utiki_negative_inputs.py"
-CATALOG_SHA256 = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+CATALOG_SHA256 = "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
 
 H08_AFFECTED_PATHS = {
     "new-domain-file": "src/platforms/utiki/domain/state.py",
@@ -36,7 +36,6 @@ H08_AFFECTED_PATHS = {
     "new-current-config-file": "src/utiki_config.py",
     "new-keyword-file": "src/keyword_rules.py",
     "new-core-bridge-file": "src/utiki_core_services.py",
-    "new-upgrade-tool-file": "tools/migrations/convert_utiki_config.py",
 }
 
 
@@ -275,7 +274,7 @@ def test_negative_registry_exactly_covers_manifest_and_catalog() -> None:
         )
     }
 
-    assert len(registry_keys) == len(registry["probes"]) == 57
+    assert len(registry_keys) == len(registry["probes"]) == 56
     assert registry_keys == manifest_keys
     assert sum(item["environment"] == "isolated" for item in registry["probes"]) == 12
 

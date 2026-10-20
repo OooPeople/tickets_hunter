@@ -49,7 +49,7 @@ def test_p1_workflow_has_exact_required_jobs_and_minimal_permissions() -> None:
     assert jobs == REQUIRED_JOBS | {"aggregate"}
     assert re.search(r"(?m)^permissions:\n  contents: read$", text)
     assert "continue-on-error:" not in text
-    assert "APPROVED_CATALOG_SHA256: d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1" in text
+    assert "APPROVED_CATALOG_SHA256: 73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf" in text
     assert "PINNED_BASE_IMAGE: ${{ vars.UTIKI_P1_BASE_IMAGE }}" in text
 
 
@@ -213,7 +213,7 @@ def test_browser_workflow_arguments_are_accepted_by_real_parser(tmp_path) -> Non
             "--phase",
             "P1",
             "--catalog-sha256",
-            "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1",
+            "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf",
             "--candidate-sha",
             "b" * 40,
             "--runtime",
@@ -439,7 +439,7 @@ def test_main_local_parsers_accept_exact_browser_performance_and_manifest_argv(
     tmp_path,
 ) -> None:
     sha = "a" * 40
-    digest = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+    digest = "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
     manifest = PROJECT_ROOT / "tests/fixtures/utiki/manifest.json"
     commands = [
         [

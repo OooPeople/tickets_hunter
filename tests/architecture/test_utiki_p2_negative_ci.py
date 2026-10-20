@@ -16,7 +16,7 @@ from tools.utiki_negative_contract import NegativeContractError, validate_reques
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "ci/utiki-p2-negative-probes.json"
 CATALOG = ROOT / "ci/utiki-required-cases.json"
-APPROVED = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+APPROVED = "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
 EXPECTED_REJECTIONS = {
     "A05.arch.zero-collected": ("EMPTY_OR_MISSING_RESULT", "JUnit lacks"),
     "A05.arch.all-skipped": ("REQUIRED_OUTCOME_NOT_PASS", "testcase[0]"),

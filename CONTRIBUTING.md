@@ -13,11 +13,11 @@
 
 本專案使用 **zendriver**（nodriver 的活躍 fork，支援 Chrome 145+）作為唯一搶票引擎。平台邏輯位於 `src/platforms/`。
 
-送出 PR 前請先閱讀根目錄的 [`AGENTS.md`](AGENTS.md) 與
-[`docs/02-development/code-boundaries.md`](docs/02-development/code-boundaries.md)。前者是所有 AI 編碼工具的權威入口，
-後者定義模組職責、依賴方向、命名慣例與禁止模式；測試與審查分別依
-[`testing_execution_guide.md`](docs/02-development/testing_execution_guide.md) 及
-[`engineering-review.md`](docs/02-development/engineering-review.md)。
+送出 PR 前先依根目錄 [`AGENTS.md`](AGENTS.md) 核對範圍、Git 保護與當次授權。
+修改跨模組依賴或公開接口時，再閱讀
+[`code-boundaries.md`](docs/02-development/code-boundaries.md) 的相關章節；需要實際命令或 finding
+格式時，分別查 [`testing_execution_guide.md`](docs/02-development/testing_execution_guide.md)
+與 [`engineering-review.md`](docs/02-development/engineering-review.md) 的對應部分。
 
 ## 貢獻流程
 
@@ -128,10 +128,8 @@ git checkout -b fix/123-ticketplus-date-list
 `type` 與 `scope` 保留英文關鍵字或模組名稱，`description`、內文與 footer 使用
 繁體中文。完整規則見 [`GIT_COMMIT_RULES.md`](GIT_COMMIT_RULES.md)。
 
-Commit 是可獨立審查、驗證與回退的邏輯單位，不是除錯紀錄。開發中發現的單一小錯誤、
-同一根因的補修與測試調整，應先留在工作目錄，用 focused tests 收斂後併入同一實作切片
-或 phase checkpoint；不要每修一個錯誤就建立一個 commit。建立 commit 前，該切片的
-程式碼、測試、文件與審查 finding 必須一致且已處理完成。
+Commit／checkpoint 的建立時機、暫存範圍與遠端操作權限依 `AGENTS.md` 及當次授權；
+本節只定義公開貢獻的訊息格式，不授權 commit 或 push。
 
 | Type | 用途 |
 |------|------|
@@ -181,6 +179,8 @@ git push origin fix/123-ticketplus-date-list
 
 ## 測試
 
+以下是常用入口，不代表每次修改都無條件執行全部命令：
+
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest
@@ -189,9 +189,8 @@ git diff --check
 ```
 
 pytest 是主要測試入口；保留 unittest 命令是為了在測試遷移期間核對既有 suite 的收集與執行結果。
-開發內迴圈只執行本次修改直接相關的 pytest node／測試檔；上述完整 pytest 與 unittest
-命令在一個 phase 或可獨立交付批次完成、審查收斂後各執行一次。正式 CI 亦只在本機
-出站驗證通過後觸發，不以連續 push 逐錯除錯。
+實際驗證範圍、順序、必要重驗與 CI 時機依 `AGENTS.md`、已採用計劃及變更影響判斷，
+不在貢獻指南另設固定次數或 checkpoint 政策。
 
 Python、瀏覽器流程與打包驗證的分級及完整命令見
 [`docs/02-development/testing_execution_guide.md`](docs/02-development/testing_execution_guide.md)。

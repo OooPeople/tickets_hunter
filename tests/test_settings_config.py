@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 import sys
 import tempfile
@@ -65,6 +67,49 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
                 json.loads(target.read_text(encoding="utf-8")),
             )
             self.assertEqual([], list(Path(temp_dir).glob(".profile_settings_*.tmp")))
+
+    def test_save_failure_preserves_the_previous_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "settings.json"
+            target.write_text('{"previous": true}\n', encoding="utf-8")
+
+            with patch("settings.json.dump", side_effect=OSError("save failed")):
+                with self.assertRaises(OSError):
+                    save_profile_config({"replacement": True}, target)
+
+            self.assertEqual(
+                {"previous": True},
+                json.loads(target.read_text(encoding="utf-8")),
+            )
+            self.assertEqual([], list(Path(temp_dir).glob(".profile_settings_*.tmp")))
+
+    def test_current_round_trip_preserves_other_platform_and_private_data(self):
+        config = {
+            "utiki": {
+                "ticket_type_keyword": "",
+                "seat_sorting": "display",
+                "seat_selection_mode": "computer",
+            },
+            "ibon": {"enabled": True},
+            "accounts": {
+                "ctbc_cookie": "fixture-cookie-secret",
+                "ctbc_account": "fixture-account",
+                "ctbc_password": "fixture-password",
+            },
+            "coordinator": {"lease": "keep"},
+            "profile": {"directory": "keep"},
+        }
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "settings.json"
+            with redirect_stdout(output), redirect_stderr(output):
+                save_profile_config(config, target)
+            persisted = json.loads(target.read_text(encoding="utf-8"))
+
+        self.assertEqual(config, persisted)
+        self.assertNotIn("fixture-cookie-secret", output.getvalue())
+        self.assertNotIn("fixture-password", output.getvalue())
 
     def test_utiki_behavior_migration_is_new_wins_idempotent_and_secret_safe(self):
         config = {

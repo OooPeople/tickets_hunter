@@ -6,7 +6,8 @@
 
 ## 1. 原則
 
-- 驗證強度要與風險相稱，但驗證範圍不得無條件逐次擴大：實作切片期間先跑最相關的測試，固定候選再完成 phase 出站驗證；遠端特有條件可依 [自主執行規範](autonomous-execution.md) 做有目標的診斷。
+- 日常驗證節奏、CI 重跑、checkpoint、覆核與停止判斷以根目錄
+  [`AGENTS.md`](../../AGENTS.md) 為準；本文件只保存可執行命令、環境條件與結果契約。
 - 任何新測試必須實際執行；不能只建立測試檔就宣告完成。
 - 平台流程可以拆成純邏輯、DOM 契約與瀏覽器流程測試，不應一概視為「無法測試」。
 - 單元測試通過不代表真實網站流程通過；實機測試也不能取代可重複的自動測試。
@@ -14,17 +15,19 @@
 - 不得用廣泛的程序終止指令關閉所有 Python 或 Chrome；只停止本次測試啟動的程序。
 - 實機測試的刷新頻率必須使用使用者設定，不得為加速測試而私自縮短。沒有明確設定時，人工調查預設至少間隔 5 秒。
 
-### 1.1 Phase 驗證節奏
+### 1.1 正式義務與本指南的關係
 
-大型計劃以核准文件定義的 phase 為驗證單位；一般修改若沒有正式 phase，則以一個可獨立交付、可回退的工作批次視為 phase。
+大型重構的 phase、required cases、target、收集範圍與 evidence 綁定以已採用計劃、
+required catalog 及現行 workflow 為準。本指南的命令範例不能新增、刪除、延後或取代正式義務，
+也不設定固定的 CI 次數或 commit 數。
 
-1. **切片迭代**：修改哪個模組，就執行該模組的精確 pytest node、直接相依契約與修改檔 `py_compile`；共用程式變動擴及受影響呼叫端。同一失敗未修好前，不無目的擴大到完整 suite。
-2. **切片收斂**：相關測試通過後完成自我審查；高風險變更由獨立審查者覆核固定候選。審查修改仍先以 focused tests 驗證。
-3. **Phase 出站**：全部切片完成、檔案固定且審查無阻擋 finding 後，完成核准計劃的完整 pytest 與其他已到期驗收；unittest 獨立執行依現行契約與 runner 相容性要求決定。失敗經局部修正、覆核後須必要重驗，不以一次為上限。
-4. **CI**：本機可定位問題先本機處理；遠端才具備的 OS／隔離／打包條件可做有目標的診斷。正式出站對固定候選執行必要 gate；每次重跑須有新修正、新證據或有依據的暫時故障，不連續推送碰運氣。
-5. **CI 特有失敗**：對 runner、OS、容器隔離或 artifact 搬移等差異，先下載真實 artifact 或建立等價 fixture；以 focused regression 收斂後，對修正後候選完成受影響驗證及必要正式 CI，不混用不同 SHA／run／attempt 的成果。
-
-完整 suite、coverage、打包與正式 CI 的必要義務沒有被取消；本節只限制執行時機，避免把高成本驗證當成開發內迴圈。
+目前 uTiki 個人原始碼需求不包含產品 PyInstaller／frozen 成品、安裝包、舊設定升級器或正式發布；
+這不取消 pytest、mypy、逐檔語法、CI、測試 image、hard isolation 或 source resource 驗證。
+[v1.6 計劃](UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) 已由
+[採用紀錄](utiki-refactor/adoption-v1.6.md) 固定，v1.6 required catalog 由
+[核准紀錄](utiki-refactor/catalog-approval-v1.6.md) 固定。這只代表規格與 repository 內直接
+輸入已接入；尚未執行的 gate 不能宣稱通過。其他平台或另有授權的產品打包工作仍可使用
+本文件的建置章節。
 
 ## 2. 目前測試基線
 
@@ -74,8 +77,8 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 | A. 靜態檢查 | 發現語法、空白與文件問題 | `py_compile`、`git diff --check`、連結檢查 |
 | B. 聚焦測試 | 快速驗證本次修改的模組或案例 | `python -m pytest tests/test_<module>.py` |
 | C. Phase 出站完整套件 | 固定候選發現跨模組回歸；失敗修正後必要重驗 | `python -m pytest` |
-| D. Phase 出站建置 | 涉及 import、相依、資源或打包時依核准計劃於適用 target 驗證 | `python build_scripts/build_local.py` |
-| E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
+| D. 適用的產品建置 | 只有當已採用計劃與當次授權包含產品打包時，才於指定 target 驗證 | `python build_scripts/build_local.py` |
+| E. 實機煙霧測試 | 有另行真站授權時驗證真實網站 DOM、導頁與瀏覽器行為 | 使用專用測試設定啟動，人工觀察並記錄範圍 |
 
 ## 4. 常用命令
 
@@ -119,7 +122,7 @@ python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 
 ### 4.4 完整測試
 
-本節命令用於固定候選的 phase 出站，不是每個 commit 或 focused test 通過後的固定下一步；修正出站失敗後按影響範圍必要重驗。
+本節只列完整套件命令；何時到期由 `AGENTS.md`、已採用計劃及本次變更影響決定。
 
 ```bash
 python -m pytest
@@ -295,7 +298,11 @@ python -m pytest --cov=src --cov-report=term-missing
 
 ### 4.5 建置驗證
 
-在以下情況執行：
+本節保留給產品打包仍在已採用計劃及當次授權範圍內的工作；不能因新增 import、資源或 package
+就自行取得產品建置、發布或遠端 runner 權限。uTiki 本輪個人原始碼需求明確不交付產品打包、
+frozen 成品或安裝包；測試 image 與 hard-isolation 準備不屬於產品打包。
+
+產品打包適用時，常見觸發條件包括：
 
 - 新增或移除 import。
 - 修改 `requirement.txt`。
@@ -316,12 +323,12 @@ python build_scripts/build_local.py
 | 變更 | 最低要求 |
 |------|----------|
 | 純文件 | `git diff --check`、連結與現況核對 |
-| 純函式／選擇演算法 | 切片期間跑語法與相關測試；phase 出站跑完整單元套件 |
+| 純函式／選擇演算法 | 語法與相關測試；到期時依正式範圍跑完整單元套件 |
 | 平台 DOM reader 或 selector | 上述項目、脫敏 fixture／契約測試；可用時加實機煙霧測試 |
 | 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例、實機煙霧測試 |
-| 刷新／429 協調 | 切片期間跑聚焦協調器、多實例或時間控制測試；phase 出站跑完整套件 |
-| 設定 schema／遷移 | default、舊設定遷移、儲存回讀、UI 顯示、相關流程測試 |
-| import／相依／spec | 切片期間跑語法與 import focused tests；phase 出站跑完整套件與本地建置 |
+| 刷新／429 協調 | 聚焦協調器、多實例或時間控制測試；到期時依正式範圍跑完整套件 |
+| 設定 schema／載入儲存 | default、嚴格驗證、儲存回讀、UI 顯示與相關流程；只有契約要求時才驗遷移 |
+| import／相依／spec | 語法與 import focused tests；到期時依正式範圍跑完整套件，產品建置僅在適用時執行 |
 
 ## 6. 測試設計準則
 
@@ -372,7 +379,10 @@ fixture 必須：
 
 ## 7. 實機煙霧測試
 
-實機測試只在有合法活動、使用者授權且風險可控時執行。使用既有私人設定與瀏覽器 profile，不把內容複製到命令輸出或文件。
+本節不是執行授權。實機測試只在有合法活動、使用者明確授權測試範圍、帳號／profile、停止點，
+且風險可控時執行；預設使用專用合成或隔離 profile，不得自行使用日常 profile、真實帳密或私人設定。
+目前 uTiki 真站由使用者另行手動驗收，`LIVE_NOT_VERIFIED` 與 `SOURCE_REFACTOR_COMPLETE`
+分開記錄，不能把本節當成代理可操作真站或 legacy 刪除前必須真站成功的依據。
 
 建議流程：
 
@@ -415,12 +425,9 @@ fixture 必須：
 
 ## 9. 失敗處理
 
-測試失敗時：
-
-1. 保留第一個完整 traceback 與執行命令。
-2. 以最小案例重跑，確認是否穩定重現。
-3. 判斷是 production regression、測試耦合、fixture 過期或環境問題。
-4. 修正後先跑失敗案例，再跑受影響模組；完整套件只在該 phase 再次收斂並完成審查後執行。
-5. 若無法安全修正，停止擴張修改範圍並在交付說明未解問題。
+測試失敗時保留第一個完整 traceback、原命令與必要輸出，區分 production regression、
+測試耦合、fixture 過期、結果收集錯誤及環境／權限不足。重跑與停止節奏依 `AGENTS.md`；
+需要最小重現、首因分群或有限診斷重置的例子時，再查
+[有限診斷與恢復案例](autonomous-execution.md)。
 
 工程審查的嚴重度與輸出格式見 [engineering-review.md](engineering-review.md)。

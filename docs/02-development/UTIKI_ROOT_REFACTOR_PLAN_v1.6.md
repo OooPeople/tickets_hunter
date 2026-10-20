@@ -1,74 +1,75 @@
-# uTiki 低延遲重構 v1.5：零歷史相容、完整狀態轉移與可交付升級
+# uTiki 低延遲重構 v1.6：個人原始碼使用、零歷史相容與離線可驗收清理
 
 **專案：** `OooPeople/tickets_hunter`
-**設計參考基準：** `f307f7caba054fb40aab807a4629c891e69fb200`
-**文件日期：** 2026-10-16（Asia/Taipei）
-**版本：** 1.5 — 依 Codex 對 v1.4 的複審進行四項窄幅驗收硬化
-**狀態：** `PROPOSED / REVIEW REQUIRED`。本文件不是實作授權，也不是正確性、測試或發布已通過的證明。
-**唯一修訂底稿：** `UTIKI_ROOT_REFACTOR_PLAN_v1.4.md`（原始位元組 SHA-256：`6d07b70b9eb91dedd06e2a5aca2081ab215a127587c31bf79d508c9c60b94827`）。本輪修訂依使用者提供的四項複審 finding；歷史附件僅供來源核對，不作替代底稿。
-**替代關係：** 維護者正式採用後，本版全文取代 v1.1–v1.4 及舊清理摘要中衝突的規定；目前仍是提案，既有核准／授權不由本文件代填。v1.4 已補齊的核心契約完整保留。
+**架構設計參考基準：** `f307f7caba054fb40aab807a4629c891e69fb200`
+**文件日期：** 2026-10-17（Asia/Taipei）
+**版本：** 1.6 — 依使用者確認的 1A／2保留／3B／4B，縮減產品交付範圍；不重寫核心架構
+**狀態：** `PROPOSED / REVIEW REQUIRED`。需求方向已確認；本版全文、實際 catalog 位元組與 repository 接入仍須依當次授權採用。本文件不等於程式、測試或真站驗收已通過。
+**唯一修訂底稿：** `UTIKI_ROOT_REFACTOR_PLAN_v1.5.md`，2,679 行；SHA-256：`c8fcc741a37db3d404cefd73cfcda6731a24a922f42522777fbdbc3eeddf6328`。
+**P1 歷史出站基準：** 使用者轉述的 `32c626dcb89e979a18b3b3d91e267bb9137a5899`、P1 run `38965038276`／attempt 1；本輪未重新查核遠端，不假設目前 HEAD 仍停在此處。[Q06]
 
-> **模組清理：** 最終棒球 runtime 只有新架構；舊 API／alias、舊模型、舊 workflow、舊設定 fallback／mirror、舊測試 bridge 全部退場。不能把歷史相容移到 settings／integrations 冒充刪除。
+> **用途：** 僅供維護者個人使用；Windows x64 與 macOS arm64 直接執行原始碼，保留現有設定網頁、其他平台功能與設定。
 >
-> **核心接合：** 只容許為目前共用核心真實契約所必需的薄適配；不為舊棒球 caller 留 wrapper。預設直接使用新 `platforms.utiki.bootstrap` 工廠；是否需要模組外服務適配須有 ADR 與 caller 證據，不預設建立一整套頂層 integration framework。
+> **刪除的交付要求：** 不提供設定升級器、舊設定自動轉換、PyInstaller 成品、frozen／無 Python 驗證、安裝包、產品發布或 release 流程。測試專用 Docker image、CI artifacts 與原始碼依賴準備保留，不屬於產品打包。
 >
-> **正確性：** 三個 reducer 只提出 proposal。session 級唯一 arbiter 與 `ActiveEffect` 決定可否產生副作用；尚未確認的提交不能被排程刷新、導航恢復或新操作破壞證據。
+> **設定：** uTiki 只接受唯一 current 格式；舊 uTiki 行為由使用者重新設定，不自動搬值、比較 mirror 或選邊。其他平台與帳號資料不得因重設而受損；本文件不授權代理覆寫私人設定。
 >
-> **低延遲：** 仲裁是本地、同步、有界的狀態判斷，不是額外排隊、50 ms tick、全量掃描或 CDP 查詢。已就緒購票不被一般刷新搶先；正常路徑保留一次合併 observation＋一次 guarded operation 的目標。
+> **刪舊碼：** 新責任接替、適用離線驗收、必要獨立覆核與可回復版本成立後，可依本版採用與既有實作授權在工作分支清除無用 legacy。真站由使用者之後另行手動驗收，不再是 P6c／P8 的出站前提；未知交易仍不可自動重送。
 >
-> **可交付：** 基準會產生 `utiki`／`ctbc` mirror；本版選擇「mixed equal 亦先離線轉換」。公開升級必須有 Windows/macOS 獨立 frozen upgrader。JS 首次外部化的同一階段就更新資源打包並測 frozen；指定真站驗證先於最終 legacy 刪除。
+> **不變的重點：** 單一 session writer／arbiter／ActiveEffect、完整 Purchase／Input／CAPTCHA 轉移、唯一 native setter、精確 cleanup、低延遲、strict/type/modified-Python、獨立 catalog 與 hard-egress 全部保留。不新增大型框架。
 
 ## 採用與授權欄位
 
 | 欄位 | 本文件交付時 |
 |---|---|
-| 設計偏好 | 使用者已表達乾淨模組、僅必要核心適配、低延遲與維持上游可整合性 |
-| v1.5 正式採用人／日期 | 未填；待維護者決策 |
-| Issue／核准實作範圍／允許修改的 branch | 未填；文件不能代替實際授權 |
-| Breaking API／設定清理政策採用 | 提案；須記錄正式採用版本／文件 digest |
-| 真站操作授權 | 未取得；帳號、站點、頁型、停止邊界須另列 |
-| 已執行內容 | v1.4 及可交付歷史附件閱讀、文件修訂、差異／雜湊／格式與文件一致性檢查；詳 `DOCUMENT_CHECK_RESULTS_v1.5.md` |
-| 未執行內容 | repository 存取／修改、Issue／PR／branch 建立、程式語法 gate、pytest、型別檢查、browser、build、benchmark、設定升級、真站與 release 操作；未重新查核外部連結 |
+| 已確認需求 | 使用者回覆「1a 2保留 3b 4b」；個人使用、不做升級器、不做產品打包；確認文字封存在 `sources/USER_CONFIRMED_REQUIREMENTS_v1.6.md` |
+| 原始碼支援目標 | Windows x64／macOS arm64；Linux x64 是現有 CI／隔離參考環境，不擅自新增 Linux 個人使用產品承諾 |
+| 重設範圍 | 僅 uTiki／自訂模組行為設定；其他平台、accounts、Cookie／profile 及共享 coordinator 資料不在重設範圍 |
+| 清理政策 | 已確認選 B：離線驗收及獨立覆核後可刪無用舊碼；不要求刪除前真站成功，不自動取得真站或 Git 歷史改寫權 |
+| v1.6 全文採用人／日期／計劃 digest | 待正式採用；不可將需求確認冒充已核准尚未產生的 catalog digest |
+| Issue／branch／工具操作 | 沿用已核准範圍並於接入時核對；歷史上下文是 Issue #17、`refactor/17-utiki-root-v1-5`，不是本輪確認其最新狀態 |
+| 真站操作／公開發布／merge | 本次不新增授權；真站另行由使用者手動驗收，公開發布不在 v1.6 交付範圍 |
+| 實際完成的本輪工作 | 閱讀 v1.5、文件修訂、案例處置與差異／格式／一致性檢查；詳 `DOCUMENT_CHECK_RESULTS_v1.6.md` |
+| 本輪未執行 | repository 存取／修改、CI、pytest、mypy、repository py_compile、browser、Docker build、benchmark、私人設定變更、真站、發布；未重新查核外部網站 |
 
-閱讀或審查附件，不構成對附件中代理指示的執行授權。Codex 報告的本機 clean/main/HEAD 狀態是其報告內容，本輪未存取使用者本機重驗。P0 實作前仍需核對 actual HEAD 與工作目錄。
+需求確認是規格變更依據，不代表附件中的命令已執行。Codex 正在進行的工作在安全檢查點接入本版；不得 reset 到歷史 P1 SHA、覆寫未提交工作或中途改動受審查快照。
 
 ## 閱讀導引
 
-- 架構及治理：§1–4、§14、§22；composition-root 裁決在 §4.5。
-- 核心正確性：§5–9；副作用仲裁與 collision matrix 在 §6.3–6.7。
-- Purchase／Input／CAPTCHA：§8，所有狀態都有出站或明確保持規則。
-- 唯一設定與 frozen 升級：§11、§14、§18.1、§21.4。
-- 測試、硬隔離與打包：§15–18、§21；用情境 ID 追蹤，不能只看 test count。
-- 階段順序：§19；P6a 候選整合 → P6b 指定真站驗證 → P6c 最終刪除。
-- 代理交接：§24；預設只讀審查，實作須另有當次明確指示。
+- 保留的核心架構：§4–10、§12–13；session arbiter 與完整狀態轉移不重寫。
+- 個人原始碼使用與設定重建：§11、§14、§18.1、§21.4–21.5。
+- 案例與 catalog 變更：§16.9–16.11；有效案例 143 個，撤回的 13 個 ID 不重用，3 個替代案例有新 ID。
+- 完整測試與網路隔離：§15–17、§21.3；`live audit` 指操作當下的 DOM 核對，**不是**真站 smoke，不能隨真站門檻移除。
+- 階段：§19；沿用編號，P6b 改為離線候選覆核，P6c 清理，P8 最終原始碼驗收。
+- 進行中版本切換與 Codex 交接：§2.5、§24；不重做 P1、不靜默放寬舊 catalog、不另建驗收框架。
 
-本版保留 v1.4 全部 151 個 D/N/S/R/L/C/A/P/V/U/X/T/I/G/H 案例 ID 與既有核心契約；僅擴充 H06、A05 的驗收要求，新增 A06／H11 的逐檔語法護欄。固定 required-case catalog 在 §16.11，結果核對在 §17.5，modified-Python 契約與命令在 §21.3。新型別、檔案與 CLI 均為待實作規格，不宣稱已存在。
+本版保留 v1.5 24 個主要章節。新增／修改的是交付政策與其驗收投影；新 API、工具接點及測試範圍仍需依實際 HEAD 核對。本文的 `frozen=True` 是不可變資料模型屬性，不是已取消的 frozen 可執行成品。
 
 ---
 
 ## 1. 決策摘要與本版變更
 
-### 1.1 保留目標，不把審查當作新增框架清單
+### 1.1 個人使用目標與必須解決的根因
 
-本計劃保留使用者已表達的方向：棒球模組只實作新架構、正常路徑低延遲、與上游共用部分保持小而明確的交界。是否採用 v1.5、何時開始修改與發布，由維護者另行核准；偏好陳述不是任意執行權。
+本計劃的主體仍是購票模組架構重構，不是驗證平台、安裝器或產品發布系統。使用者願意重填 uTiki 行為設定，換取單一新格式與乾淨的正常執行路徑。[Q05]
 
 | 編號 | 根因／目標 | 結構解法 | 可驗證結果 |
 |---|---|---|---|
 | F1 | workflow 混雜流程、DOM、JavaScript、輸入與恢復 | 純 domain、薄 application、具體 browser 邊界 | application 不直接操作 DOM／檔案或拼腳本 |
 | F2 | 狀態可被分散修改 | engine-instance registry、單一 writer、具名不可變 state | adapter/task 只能回報結果 |
-| F3 | production JS 未形成必要自動驗收 | 真瀏覽器、production scripts、不可假綠的 CI | guard／JS／資源損壞會失敗 |
+| F3 | production JS 缺少必要自動驗收 | 真瀏覽器、production scripts、不可假綠的 CI | guard／JS／資源損壞會失敗 |
 | F4 | snapshot 位置 tuple | 具名 records、單一 codec | domain 不靠 seat[8] 解讀欄位 |
-| F5 | 純 import 拉入瀏覽器 | 輕量 root、真正的新 bootstrap 工廠 | 無 browser/OCR 依賴可測純核心 |
-| F6 | 新舊棒球 API／模型／設定共存 | caller 同步遷移、離線升級、最終刪除 | runtime 沒有歷史 fallback 或鏡射 |
-| F7 | 測試依賴 private 字典／包裝 | typed contracts、事件序列、fixture | 不為舊測試保留 production alias |
-| F8 | 規範無法防回歸 | import/type/resource/scenario gates | 缺失測試、違反 ownership 能被攔住 |
-| F9 | 分層增加延遲 | 同 worker 立即續行、批次讀取／guarded commit、冷熱分離 | 無新增固定 sleep／無用途 CDP |
-| F10 | 上游交界深改或假借核心相容留下舊模組 | ADR、current-core inventory、語意更新演練 | 只有有必要性的現行核心接合 |
-| F11 | 三個 reducer 各自正確但效果競爭 | session 級 proposal 仲裁、唯一 ActiveEffect、collision matrix | unresolved submit 不被其他 reducer 破壞 |
-| F12 | 購票恢復／人工處理出口不全 | 完整主狀態／InputState／retire/new-cycle 事件 | 沒有模糊的「等待之後回 READY」 |
-| F13 | 升級與發布只寫意向 | mixed-equal 固定政策、frozen upgrader、P3 build、刪除前 live | 沒有 Python 的使用者能完成可回退升級 |
+| F5 | 純 import 拉入瀏覽器 | 輕量 root、新 bootstrap 工廠 | 無 browser/OCR 依賴可測純核心 |
+| F6 | 新舊 API／模型／設定共存 | caller 同步遷移、使用者重新設定 uTiki、離線驗收後清理 | runtime 無歷史 fallback／mirror |
+| F7 | 測試依賴私有字典／包裝 | typed contracts、事件序列、fixture | 不為舊測試保留 production alias |
+| F8 | 規範無法防回歸 | 既有 import/type/resource/scenario gates | 漏測與違反 ownership 可被攔住 |
+| F9 | 分層增加延遲 | 同 worker 立即續行、批次讀取與 guarded commit | 無新增固定 sleep／無用途 CDP |
+| F10 | 上游交界深改或假借核心相容留下舊模組 | ADR、current-core inventory、語意演練 | 只保留真正必要的核心接合 |
+| F11 | reducer 各自正確但效果衝突 | session 級 proposal 仲裁、唯一 ActiveEffect | unresolved submit 不被其他操作破壞 |
+| F12 | 恢復／人工處理出口不完整 | 完整主狀態、InputState、retire/new-cycle | 沒有未定義的自動回 READY |
+| F13 | 交付超出個人用途 | 取消升級器與產品打包，雙平台原始碼驗收 | 不再為無人使用的成品維護 gate |
 
-F11–F13 與原 F2/F3/F6 有關，列出是為對應 Codex finding，不要求為每項新增一層 manager。這些是規格要補齊的契約，不是已證明的 production bug 列表。[Q01]
+F 系列是設計根因與目標，不是 required case ID，也不是已重現 bug 的嚴重度清單。
 
 ### 1.2 採用的責任配置
 
@@ -76,73 +77,77 @@ Domain 處理資料、規則與 transition；application 的 session writer 歸�
 
 current-core 必要適配只映射現行服務／控制契約，可位於模組外；domain/application 不反向依賴核心或適配。ADR-01 預設不建立 `integrations/` 家族框架，也不以「檔案移到模組外」證明比較乾淨。
 
-### 1.3 與 Codex 建議的取捨
+### 1.3 保留與取消的範圍
 
-接受 session arbiter、完整轉移、明確升級、早期打包、刪除前 live、CI/type/isolation 與治理缺口。**不照抄一條通用 `navigation > refresh > new purchase` 優先序**：先做 eligibility；普通刷新必須讓位給已就緒購票，任何優先序不能搶佔未決外部效果。
+保留 session arbiter、Purchase/Input 全出口、唯一格式、strict/type/語法完整集合、hard-egress、原始碼資源測試及效能方法。**不採用 `navigation > refresh > new purchase` 的固定通用優先序**；先驗 eligibility，普通刷新讓位已就緒購票。
 
-不把「bootstrap 曾出現在舊文件」理解為 legacy。判斷依用途、資料與 caller：新工廠可以保留；舊函式群的轉送 facade 不可以。
+取消的是個人不用的升級／產品成品／發布要求及刪除前真站 gate，不取消必要的資料保護、原生事件語意、帳號隱私與真站操作授權。
 
 ### 1.4 乾淨的完成定義
 
-完成指已知歷史架構根因與遺留清單有接替、刪除及驗收證據；不表示未來永無技術債。沒有必要為這次重構建立全平台 scheduler、actor framework、event bus、DI 容器或 event store。
+最終只有新 uTiki 架構，無用舊 API／模型／workflow／設定 fallback／private test bridge 已被接替並移除。Windows／macOS 可直接執行原始碼，設定網頁可用，其他平台不受損，速度無無理由退化。
 
----
+結案可為 `SOURCE_REFACTOR_COMPLETE / LIVE_NOT_VERIFIED`：原始碼工程驗收完成，但未宣稱真站成功。這不是 release，也不表示未來永無技術債。
 
-### 1.5 v1.5 僅修四項驗收／證據問題
+### 1.5 v1.6 需求變更的完整投影
 
-使用者提供的 Codex v1.4 複審摘要指出先前核心阻擋已補齊、未發現新的 P0/P1；這是複審摘要的陳述，不是本輪重新執行 repository 審查的結論。[Q03]
-
-| Finding | 本版窄幅修訂 | 不改動的邊界 |
+| 已確認選擇 | 本版規格 | 必須同步調整的位置 |
 |---|---|---|
-| P2 必要案例可隨測試一起消失 | 獨立固定 catalog、外部核准 digest、四輸入結果核對、H06 負向案例 | 不更動 session arbiter、購票／輸入／刷新演算法 |
-| P2 語法檢查可能漏檔 | Git 變更集合交叉核對的 manifest＋逐檔 `py_compile`，A06／H11 | 不以 type 或 pytest import 代替語法檢查，不新增 runtime 檢查 |
-| P3 來源不可重現 | 隨包附實際持有的 R01／清理規則原檔與 SHA-256；其他宣稱標明沿用與限制 | v1.4 是唯一底稿，不從缺失 v1.3 重新建構方案 |
-| P3 文件品質 | 繁體中文（台灣用語）、移除行尾空白、實際文件檢查與完整 diff | 原始證據附件維持位元組不變；文件 PASS 不等於實作 PASS |
+| 1A Windows＋macOS | Windows x64、macOS arm64 原始碼啟動／依賴／路徑／瀏覽器接合均需適用證據 | source target、P3a、P6a、P8；不得以 Linux 假裝兩平台 |
+| 2 保留 P1／測試隔離 | pytest、mypy、CI、modified-Python、Docker 測試 image、artifact 傳遞與 aggregate 保留 | 只調交付相關 scope；不重建 verifier |
+| 3B 離線驗收後刪舊碼 | P6b 離線覆核 → P6c 清理；真站由使用者另行手動驗收 | H10 撤回，新增 H12；刪除授權與離線證據仍需成立 |
+| 4B 只重新設定 uTiki | 不遷移舊值；提供 current 範例／既有 UI，保留其他平台與 accounts | C/U、設定指引、runtime 拒絕 legacy；G 升級套件整組撤回 |
+| 不需要打包 | 不新增／維護本次 PyInstaller 成品、frozen/no-Python、產品 release | P01/P03 撤回，新 P04/P05 驗 source；移除 package／upgrade／live 發布 job |
 
-required catalog 與 modified-Python checker 都是 CI／開發期契約，不進入選票熱路徑；沒有新增大型框架、第二套引擎或額外 CDP 往返。
+這是維護者主動改變需求，不是因測試紅燈放寬驗收。catalog 的實際新位元組需 review／digest；「沒有升級器」不得變成永久 skip 的升級器測試。
 
 ---
 
 ## 2. 基準、證據與治理前置條件
 
-### 2.1 已有的設計基礎
+### 2.1 原架構基礎與已完成 P1
 
-固定基準已有 snapshot → plan → commit、per-tab runtime、提交未知結果阻擋、跨程序 refresh coordinator 與 browser fixtures。本次保留其已驗證契約，不把它們當成空白系統重寫。[R02–R11]
+原架構基準已有 snapshot → plan → commit、per-tab runtime、提交未知結果阻擋、共享 refresh coordinator 與 browser fixtures；保留有效語意，不從空白系統重寫。[R02–R11]
 
-v1.3 已區分歷史相容與 current-core 適配，但未明訂 session arbiter、部分 PurchaseState 出站、mixed-equal 唯一路徑與完整 frozen upgrader。本版處理的是**執行規格缺口**；Codex 的 P1/P2 分類不能自動轉述成現有 repository 已重現的 P1/P2 bug。[Q01]
+使用者已提供 P1 出站回覆：候選 `32c626dcb89e979a18b3b3d91e267bb9137a5899`，P1 run `38965038276`／attempt 1 的五個 producer 與 aggregate 成功、63/63 到期義務；一般測試 run `38965038189` 的 Windows／Ubuntu 通過。[Q06] 本輪只依該回覆與先前可見紀錄定位，未重新執行或稽核這些結果。
 
-### 2.2 v1.4 證據紀錄與本輪重讀界線
+既有 P1 是後續工具基礎，不是待重建工作。v1.6 變更不追溯作廢舊版驗收；舊證據仍只屬舊 SHA／計劃／catalog。後續階段依新義務驗收，不能把舊 63/63 改標為新版本通過。
 
-| v1.4 記錄的來源（本輪未重新取得下表原始資料） | 原記錄所支持的內容 | 不能推出的結論 |
-|---|---|---|
-| v1.3 §6–8 | 有單一 writer／互斥原則；缺跨 reducer 可執行仲裁矩陣，Purchase 表偏向進站 | 不能證明當前 production 一定已發生 duplicate submit |
-| v1.3 §11/14/21 | 唯一格式政策，但 mixed equal／可選 converter 不夠明確；只有 script CLI | 不能證明 frozen 使用者已有可用升級工具 |
-| `settings.migrate_config` [R07] | 同時補值並鏡射 `utiki` 與 `ctbc` 行為 | 不能假設所有使用者實際檔案內容相同 |
-| `AGENTS.md` [R12] | 高風險變更要核准；PR 有 Issue 流程；輸入需使用現行 native setter 並檢查結果 | 不能因附件寫了實作指示就取得修改權 |
-| `engineering-review.md` §6 [R18] | 指定實機站點／流程驗證先於最後移除 legacy | 不能以修改規範的方式默默消除此 gate |
-| `code-boundaries.md` [R13] | 平台業務邏輯屬 platforms；現有 dependency/ownership 另須明示變更 | 不是禁止一切 factory 或必要邊界適配 |
-| `build-release.yml` [R19] | 正式管線建 bot/settings，含 Windows 及 macOS 分支 | 不代表本輪已 build；不代表 upgrader 已存在 |
-| 官方 pytest/PyInstaller/mypy/Docker 文件 [E04/E06/E11–E13] | 命令覆寫、資料打包、型別範圍與隔離工具的語意 | 不代表目標 OS 或本專案固定版本已實測 |
+### 2.2 本輪證據範圍
 
-上表是 v1.4 既有查核紀錄的保留，不是 v1.5 重新查核原始碼或官方網站的結果。v1.5 本輪確實全文讀取唯一底稿 v1.4、現存的前次審查 R01 與 `UTIKI_CLEAN_MODULE_RULES_v1.3.md`；三份原檔均附於 review bundle 的 `sources/`，SHA-256 見附錄 D。
+唯一底稿為 v1.5 完整原檔，隨包提供並核對原 SHA-256。本輪讀取底稿、使用者需求確認及既有自主規範以完成文件修訂，沒有取得目前工作樹、執行測試或重新瀏覽歷史連結。
 
-`UTIKI_ROOT_REFACTOR_PLAN_v1.3.md` 及 Codex v1.3 的完整貼文／子代理報告本輪未取得，相關內容只依 v1.4／前次對話的先前產出陳述，未在本輪獨立重讀。R02–R20、E01–E13 只保留原連結與原用途，本輪未存取、未封存其原始位元組，不宣稱連結有效、內容未變或已重新驗證。資料可交付與事實已獨立查證是不同狀態；完整對照見 `SOURCE_MANIFEST_v1.5.json`。
+R01–R20／E01–E13 是由 v1.5 繼承的歷史定位與技術背景，不是 v1.6 新增的實證。底稿中曾宣稱「本輪重讀」的舊描述不沿用為本輪事實。實際附件及可重現界線見附錄 D、`SOURCE_MANIFEST_v1.6.json`。
 
-### 2.3 實作前必須記錄的採用決策
+本版依使用者的新需求取代舊 frozen／upgrader／live-before-delete 政策；不得再以舊 R17–R19 或早期清理摘要恢復已撤回要求。這不授權更動無關上游規範。
 
-若維護者採用本版政策，P0 需建立 `adoption.md`：計劃版本/digest、維護者、日期、Issue、允許變更的 repository/branch/範圍、breaking API/config 決策、core-service 例外、review owner。
+### 2.3 正式採用與既有授權的區分
 
-文件核准、程式修改、遠端 Issue/PR 建立、真站操作、發布是不同授權範圍。沒有當次實作授權就只讀審查，不因計劃附有 CLI 而直接執行。
+接入時沿用現有 Issue、分支、adoption 與自主工作紀錄，只記錄本次 v1.5→v1.6 政策差異、文件 digest、source targets、案例處置與允許操作。需求確認已成立；未核准的實體 catalog、未知 reviewer／日期／遠端值不可代填。
 
-需要正式調整的既有規範：module `_state` 改為 engine-instance owner、純配置依賴、必要 native-setter 資源注入、候選 worktree 的驗證／合併單位。只修改受影響條款，不刪除錯誤防護規則來通過審查。
+正式採用 v1.6 後，3B 的政策授權可供 Codex 在指定工作分支、離線出站及必要覆核成立時執行 P6c；不需要每刪一個已證明無用符號再請示。但資料、Git 歷史、其他平台、尚未接替的能力與不明檔案都不在任意刪除範圍。
 
-保留「指定 live smoke 在 final legacy deletion 之前」。若想另改此門檻，必須另外提出範圍、理由與核准；本版不預先核准例外。
+文件生成、repository 實作、CI、遠端 variable、真站操作與合併仍是不同權限。本次只製作文件。執行中的 Codex 應依使用者另行貼送的採用指示接入，不因附件存在自行更改遠端核准值。
 
-### 2.4 可合併階段與候選驗證
+### 2.4 中間候選與原始碼驗證
 
-已修改 production 依賴的中間階段必須可編譯、測試、打包、回退。P4/P5 的新引擎尚未接 production 時，可在隔離 harness 測試，不能標為 production 已切換。
+修改 production 依賴的中間階段必須可編譯、完成適用測試並可回復原始碼版本；不要求產品打包。未接主入口的新引擎可在隔離 harness 運作，不等於已切換正式路由。
 
-正式 cutover 使用最小不可拆的 ownership／API 組合；先在 review worktree 建立候選做 smoke，再核准最後刪除。開發中未被正式入口載入的舊檔可暫存於分支，最後交付前移除；不得打包兩套 fallback engine 或同時操作同一 tab。
+cutover 以最小不可拆 ownership／API／current-config 單位進行；只有一個 owner。未被新入口使用的舊檔可在 P6a 暫存，P6b 離線覆核完成後 P6c 刪除。不保留 runtime fallback 或雙引擎副作用。
+
+### 2.5 進行中的 v1.5 實作如何安全接入 v1.6
+
+1. 到安全檢查點核對 actual HEAD、工作樹與在途 review／CI。保留已完成的 domain／arbiter／browser／P1 成果；不 reset 到 `32c626d…`，不打斷另一個 writer。
+2. 盤點本版撤回的升級器、產品打包、發布、刪除前真站 gate：區分尚未開始、已寫未接、已接與正在驗證。停止新增不再需要的工作；已完成內容只作必要可回復清理，不刪其他平台共享程式。
+3. 以 §16.9／§16.11 的處置核對現有 catalog 每個 obligation：保留、撤回、改寫適用層級或新增替代。資料／隱私／source 資源檢查不得隨整列升級測試一起遺失。
+4. 計劃／catalog revision、固定 ID 集合、gate_profiles、execution manifest、型別範圍、必要 CI 路由與文件在一個可審查接入單位同步。修改 schema 欄位前先查已完成工具；可用既有格式表達就不新增 envelope／registry。
+5. 本版文件 hash 與新 catalog hash 都不同於 v1.5。新 catalog 需獨立規格 review、完整 digest 與既有外部核准方式；舊核准不能自動批准新位元組。這是一次有界的需求變更接入，不是重開 P1 的信任模型。
+6. 先在隔離副本驗新 scope 的合法對照、舊 catalog／錯版本拒絕、必要案例聯合刪除仍拒絕、撤回案例不再要求、target/job 完整性與語法範圍。測試用核准值不能成為正式 fallback。
+7. 正式值尚缺時，可在既有授權內繼續不依賴正式 gate 的工作，但不得宣稱 v1.6 階段出站。只需要維護者對實體新 catalog 做一次明確核准，不反覆為未變內容重開審查。
+8. 若既有 `UTIKI_P1_APPROVED_CATALOG_SHA256` 接點只用於 v1.5 歷史 P1，不無故改名或覆寫；若繼續承載現行 scope，須明確記錄版本切換。具體沿用或局部調整由實作者按現況提出一個最小方案；不自動改 variables／branch protection。
+9. 新接入完成後，從 actual HEAD 對應的下一個前置成立切片繼續。規範文字提交不代表 runtime 已重測，亦不應製造無限「改紀錄→改 SHA→全套重跑」循環。
+
+自主執行規範的演算法與收斂方式保留；只同步其中「P3 必須 frozen」「P6b 真站擋刪除」「P8 release」等直接衝突政策。§24 提供一次性的接續指示。
 
 ---
 
@@ -150,7 +155,7 @@ v1.3 已區分歷史相容與 current-core 適配，但未明訂 session arbiter
 
 ### 3.1 必做與不做
 
-本次處理 uTiki 家族的資料／選擇／輸入／購票／導覽／刷新、session 仲裁、瀏覽器契約、設定與升級、測試、打包及必要核心接合。其他售票平台的購票策略／等待不在本輪遷移範圍；測試或 caller 受影響的部分才作最小修改。
+本次處理 uTiki 家族的資料／選擇／輸入／購票／導覽／刷新、session 仲裁、瀏覽器契約、current 設定、原始碼資源、測試與必要核心接合。不提供 uTiki 升級器、產品打包或發布；不清空整份設定。其他平台策略與等待不在重構範圍，只有受影響 caller／測試作最小修改。
 
 不重寫既有 SQLite transaction engine，不改 shared scope、不提高刷新頻率、不新增自動付款或驗證規避。不能全域覆寫 sleep/timeout 來冒充速度優化，也不因架構整理而重排全部上游檔案。
 
@@ -167,7 +172,7 @@ v1.3 已區分歷史相容與 current-core 適配，但未明訂 session arbiter
 
 ### 3.3 修改範圍與核准
 
-自訂棒球模組內可根本改造；原本為棒球加入主程式的 import／route／reload caller 跟著改成新接口。共用 helper/gate/settings/spec 改動分離提交，盤點所有 caller 與上游觸點，不用「主程式有人呼叫」替舊棒球 API 豁免。
+自訂棒球模組內可根本改造；原本為棒球加入主程式的 import／route／reload caller 跟著改成新接口。共用 helper/gate/settings 改動分離提交，盤點所有 caller 與上游觸點，不用「主程式有人呼叫」替舊棒球 API 豁免。
 
 是否採用 breaking change、允許改哪些分支、是否建立 Issue/PR、是否真站 smoke 分別記錄；見 §2。未取得當次實作授權時只讀審查。
 
@@ -182,8 +187,8 @@ v1.3 已區分歷史相容與 current-core 適配，但未明訂 session arbiter
 | 刷新 | 既有 interval/cooldown/single-probe/coordinator transaction 保留；普通刷新不壓過 ready purchase |
 | 暫停／關閉 | 先阻止新 claim；已發送事實仍處理，不能以取消宣稱 rollback |
 | 成功／quota | 不自動新 cycle；需正式新任務／人工核對事件，不利用換帳號逃限制 |
-| 資料 | 唯一格式、無 runtime 遷移；保護原值與其他平台設定；frozen 升級可操作 |
-| 驗證 | 首次外部化資源同階段測 frozen；指定真站 smoke 先於最終刪除；證據與版本對應 |
+| 資料 | 唯一格式、無 uTiki 自動遷移；手動重新設定有清楚步驟；其他平台與 accounts 受保護 |
+| 驗證 | 外部化資源同階段驗 source loader／真 browser；離線覆核後清理；原始證據與版本對應 |
 | 速度 | ready 立即續行；新狀態模型不能要求多一輪 CDP、tick、queue hop 或全量 copy |
 
 ---
@@ -237,22 +242,17 @@ src/
   utiki_core_services.py           # 條件式：只在 ADR 證明現行核心映射必要時建立
 
 tools/
-  migrations/convert_utiki_config.py
   check_utiki_architecture.py
   check_upstream_boundary.py
   verify_utiki_ci_results.py
   verify_modified_python.py          # 開發／CI：從 Git 交叉核對範圍，逐檔 py_compile
   run_utiki_typecheck.py
   benchmarks/{bench_utiki,compare_utiki}.py
-build_scripts/
-  utiki_profile_upgrader.spec       # 獨立 upgrade artifact，不進 bot/settings
-  test_frozen_utiki_upgrade.py
-  verify_utiki_bundle.py
 ci/
   utiki-isolation/                 # 無 egress 的測試啟動與負向 canary
   mypy-utiki.ini
   utiki-typed-scope.txt
-  utiki-release-targets.json
+  # source target 直接列於 required catalog 的 gate_profiles，不另建產品 target manifest
   utiki-required-cases.json         # 獨立核准的必要案例／義務；不是 execution manifest
 
 tests/
@@ -260,7 +260,6 @@ tests/
   architecture/
   upstream_integration/
   fixtures/utiki/
-  upgrade/utiki/
 ```
 
 `{...}` 是責任集合記法，不是實際檔名。只有同一變更原因的小檔案可合併；不要為湊表格建立空 class。**不預設建立 `src/integrations/utiki.py`、`utiki_services.py`、`execution_contracts.py` 三層新結構。**
@@ -297,7 +296,7 @@ native input setter 以目前核心 `CONST_NATIVE_INPUT_SETTER_JS` 為 source-of
 
 ### 4.5 ADR-01：直接 bootstrap vs. 頂層 integration
 
-**狀態：PROPOSED；本版推薦 A，正式採用欄位尚未填。**
+**ADR-01 延續原採用紀錄；本版不重開此選擇。若先前採用 A，繼續 A；缺少可核對紀錄才列待確認，不捏造新核准。**
 
 | 方案 | 優點 | 成本／風險 | 裁決 |
 |---|---|---|---|
@@ -309,12 +308,12 @@ native input setter 以目前核心 `CONST_NATIVE_INPUT_SETTER_JS` 為 source-of
 
 若 B 真被採用，A 的多餘 factory/轉送須同時收斂，不讓兩套 root 並存。真正外部核心適配仍放模組外；選 A 不是允許把舊相容塞回 bootstrap。
 
-### 4.6 ADR-02／ADR-03 摘要
+### 4.6 ADR-02／ADR-03：已確認的新方向
 
-- ADR-02 設定政策：唯一 canonical section；mixed equal/conflict 都在離線 upgrader 處理；正式使用路徑不轉換。規格在 §11/14。
-- ADR-03 發布順序：P3 當期驗證 frozen resources；P6b live gate 在 P6c final delete 前；P8 只重新驗證最終 artifact，不首次驗證關鍵能力。
+- ADR-02：唯一 canonical `utiki` 行為格式；legacy-only／mixed 在 uTiki 啟用時拒絕並指引使用者重填；不提供 converter、不搬值、不比較 equal/conflict，不動 accounts 與其他平台。
+- ADR-03：個人原始碼交付。P3a 同期驗 source resources；P6a 整合 → P6b 離線獨立覆核 → P6c 刪舊碼；P8 最終 source 驗收。真站由使用者之後另行手動驗收，不作工程出站前提。
 
-兩項均為待採用提案；不能由代理自行修改現行治理門檻後宣佈取得批准。
+兩項方向來自本次需求確認；正式全文／catalog 位元組採用及 repository 操作仍依 §2 記錄。不新增升級器、reset framework 或公開安裝產品。
 
 ---
 
@@ -598,7 +597,7 @@ arbiter 僅看當前小型 state 與至多固定類別數的 proposals；正常�
 
 保留唯一 canonical document token；URL query/hash 漂移不等於新 document，BFCache 返回不自動解除 blocker。marker schema 只支援本版一種；operation id/source/destination/expiry 需匹配 local intent，清除採 compare-and-delete。
 
-不讀舊 marker schema。升級前停止舊程序且不承接舊分頁 intent。沒有本地來源、只有 marker 或直接進既有購票頁時，按 §8 的 startup/manual gate，不因「新 marker 不存在」就准送。
+不讀舊 marker schema。切換原始碼版本前停止舊程序且不承接舊分頁 intent。沒有本地來源、只有 marker 或直接進既有購票頁時，按 §8 的 startup/manual gate，不因「新 marker 不存在」就准送。
 
 ### 7.5 Fast-path 與 fixture 範圍
 
@@ -776,7 +775,7 @@ reported-not-accepted 是使用者判斷，不是機器證明；畫面需說明�
 
 ACCEPTED 遇到新活動/key/auth 不自動開新 cycle；使用者明確指定新活動且從可信安全起點開始，才允許。BLOCKED_QUOTA 不因改帳號欄位自動再嘗試；新任務不得以繞過站點限額為目的。
 
-跨崩潰沒有持久化購票 ledger 的前提不變：重啟不能證明前次沒有送出。第一版在接回來源不明購票頁／使用已有瀏覽器購票 context 時要求人工確認；新 session 的正常合法來源導航不每步再問。單靠從首頁重新啟動也不能提供跨崩潰 exactly-once 保證，發布說明須明示此限制。
+跨崩潰沒有持久化購票 ledger 的前提不變：重啟不能證明前次沒有送出。第一版在接回來源不明購票頁／使用已有瀏覽器購票 context 時要求人工確認；新 session 的正常合法來源導航不每步再問。單靠從首頁重新啟動也不能提供跨崩潰 exactly-once 保證，使用說明須明示此限制。
 
 ### 8.8 最終 submit 與現行設定語意
 
@@ -932,17 +931,17 @@ common/document/input/selection/submit 原語只有一份來源；融合 operati
 
 未 ready 才安裝 bounded observer/waiter。browser waiter 自己有 deadline/cleanup，Python cancellation 不保證 page Promise 自動清理。observer 的 property-only 缺漏依 fixture 證明所需補充輪詢；ready 立即返回，不為每個 await 固定 sleep。
 
-### 10.4 外部化的同階段打包義務
+### 10.4 外部化的同期原始碼資源驗收
 
-**第一次把已被 production 使用的 JS 移到資源檔時，同一個可合併變更單位就必須完成：**
+第一次將 production 使用的 JS 移到資源檔，同一個可驗收變更須完成 source loader、assembler、必要 source-resource digest／清單與負向測試，不把缺資源問題延到 P8。
 
-- 所有會到達此程式的 spec/build entry 的 datas/module-relative resource 更新。
-- resource manifest/digest 與 assembler 的無網路 frozen self-test。
-- bot/settings 的 assembled distribution 驗證，不只各自 dist；合併 `_internal` 後重新檢查資源一致。
-- 從與 source tree 無關的 cwd 執行 frozen binary；缺檔、錯 digest、錯 path 一律非零退出。
-- 在適用的正式 OS/architecture 實際 build 與自測。沒有環境就標該階段阻擋，不等 P8 才補。
+- 依模組／package 位置讀取受信任本地檔案，不依賴目前工作目錄；支援 Windows／macOS 路徑與中文／空白目錄。
+- 從 repository root 與外部暫存 cwd，以實際支援的原始碼入口／模組位置執行。checkout／source tree 本來就是必要依賴，不做「沒有 source tree 仍可執行」的測試。
+- 缺 JS、錯配資源、錯誤 schema／組裝版本均非零，不能 fallback 到舊 inline script、另一 checkout 或舊 decoder。
+- browser fixture 真正使用 production assembler、現行 native setter 與同份資源；保留原 guard／selector／事件順序，融合優化另以行為驗證。
+- 目標平台的 source loader 與 runtime 接合需要原生適用證據；真 browser 執行仍符合 §17 的隔離要求。缺環境不是通過。
 
-資源檔不會只因新增 Python import 就自動獲得正確的打包路徑；使用 spec datas 並在成品核對。[E06] scripts 外部化先保留 guard/selector順序；效率合併放後續獨立 commit。
+不執行 PyInstaller、不改寫 `_internal`、不新增產品 spec／安裝包／frozen 自測。既有上游打包檔沒有本次需求就不碰；不得為省 diff 保留正式程式的舊 inline fallback。
 
 ### 10.5 Fake 與 production script 的分界
 
@@ -952,56 +951,58 @@ hard-isolated production-origin job 與 loopback DOM-shape job 分開命名，�
 
 ---
 
-## 11. 唯一設定格式與明確升級判定
+## 11. 唯一設定格式與使用者重新設定
 
-### 11.1 ADR-02 的確定選擇
+### 11.1 ADR-02：不轉換，僅重建 uTiki 行為設定
 
-**本版提案選擇嚴格一次性升級：`utiki` 與 `ctbc` mirror 即使值完全相同，也不由正式 loader 接受後順便清理。先用獨立 upgrader 移除舊 section，再啟動新版 uTiki。**
+使用者明確選擇只有自己使用，可重新設定 uTiki，但其他平台設定要保留。[Q05] 新 runtime／loader／save／hot reload 只使用 canonical `utiki`，不提供獨立 upgrader，也不把轉換器藏進 UI、bootstrap 或一般 migrator。
 
-理由：使用者要求正常使用路徑不含歷史解碼/雙讀/雙寫；基準 migrator 本來就會建立 mirror，[R07] 因此對從該基準升級的使用者，converter 是主要交付路徑，不是規格中可省略的假設。
+current 契約沿用已核准的 `ticket_type_keyword`、`seat_sorting`、`seat_selection_mode` 與真正必要的新欄位；不為本版文件版本任意新增 `schema_version=2`。對合法 canonical-only 設定不強制重填。
 
-不強加 `schema_version=2`。這一版 current 契約可沿用既有 `utiki.ticket_type_keyword/seat_sorting/seat_selection_mode` 三鍵，只接受該組正式表示；如果 P0 證明資料語意另需改版，必須先修 ADR/測試/升級規格，不能留多版 decoder。
+基準三個預設值為 `全票`、`row_seat`、`manual`；實作時從既有單一 current metadata／採用紀錄核對，不另抄一套常數。空字串若為合法值必須保留，不能當成 missing。runtime policy 的無效輸入不自動回退成預設以繼續購票。
 
-### 11.2 格式分類與行為矩陣
+### 11.2 邊界分類與操作結果
 
-分類由邊界決定；runtime 判定 forbidden legacy section 時不必解析其舊值。**比較 mixed 是否 equal/conflict 是 upgrader 的工作，不是每次載入的工作。**
-
-| 輸入狀況 | uTiki 正式 load/save/hot reload | 獨立 upgrader |
+| 輸入狀況 | 新 uTiki 啟動／行為保存／hot reload | 使用者處理方式 |
 |---|---|---|
-| canonical-only，三鍵完整合法，無 `ctbc` 行為 section | 直接驗證使用；無需轉換、無需假造新版號 | 驗證後 no-op，輸出至新檔時僅正規寫入 |
-| canonical-only 但缺必需鍵／型別錯／值不合法 | 明確 validation error，不默補舊值或整份 defaults | 只有有文件依據的缺鍵補值可做；不合類型拒絕 |
-| legacy-only `ctbc` | UPGRADE_REQUIRED，不能以新 profile 解讀 | allowlist 三鍵搬到 canonical，缺鍵依明示轉換表補值 |
-| mixed equal：兩 section 三鍵值及型別相同 | UPGRADE_REQUIRED；不在 save 時偷偷刪 mirror | 保留 canonical 值，移除 mirror；不需要 conflict option |
-| mixed complementary：某鍵只在一側 | UPGRADE_REQUIRED | 用存在的合法值；缺兩側者依明示 default；不覆蓋顯式空字串 |
-| mixed conflict：任一同名有效鍵不同 | UPGRADE_REQUIRED，不在 runtime 選邊 | 預設錯誤；使用者明確 `--conflict-policy canonical/legacy` 才選邊 |
-| 任一舊 section 有未知鍵／疑似擺錯的秘密 | UPGRADE_REQUIRED，不顯示值 | 拒絕破壞性轉換，列鍵名/原因；不默刪未知欄位 |
-| duplicate JSON key／root 非 object／全檔毀損 | common config error；不以 defaults覆蓋 | 拒絕且來源不變 |
-| 明確建立全新 profile／無來源檔 | 建 current defaults | 非轉換，不碰任何舊檔 |
+| canonical-only、必要鍵完整合法 | 直接驗證使用 | 不需重設 |
+| canonical 缺必需鍵／錯型別／不合法值 | 明確 validation error，禁止新 mutation | 在現有設定 UI 或指定 JSON 區段重填，不自動套用舊值 |
+| 只有舊 `ctbc` 行為 section | `SETTINGS_RECREATE_REQUIRED` 或既有等效明確錯誤；不解碼舊值 | 使用者保存備份後移除該舊行為 section，填入完整新 `utiki` |
+| `utiki` 與舊 `ctbc` 行為 section 同時存在，無論 equal／complementary／conflict | 相同重新設定提示；不比較、合併或選邊 | 使用者明確決定並填寫新格式；程式不維持 mixed 轉換策略 |
+| 只有新 uTiki 設定尚未建立 | 未啟用時不妨礙其他平台；啟用需完成 current 設定 | 現有 UI 可顯示待保存的 current defaults；未明確保存前不假裝配置完成 |
+| 重複 JSON key／root 非 object／全檔毀損 | common config error，來源不被覆寫 | 使用者自行修復或取回備份；不以清空全檔來恢復 |
+| 明確建立全新測試設定 | 可由唯一 current defaults 建立 | 只作用於指定的新檔／合成 fixture，不碰私人設定 |
 
-正式 defaults 不產生 `ctbc` 行為 section。真正 `accounts.ctbc_*` 是現行 tenant 憑證，保持原值與唯一來源，不屬本表的 legacy mirror。
+「舊 `ctbc`」只指歷史 uTiki 行為 section，不包含 `accounts.ctbc_*`、Cookie 名稱、網域或共享協調 scope。只在啟用／保存 uTiki 的邊界判斷該 section 是否存在；不要為拒絕 legacy 發展另一套 decoder。
 
-### 11.3 不傷害未使用 uTiki 的其他平台
+### 11.3 保留設定網頁，避免無法重填的死結
 
-全檔 JSON parse 與「本次啟用平台」validation 分開。其他平台 profile 中未使用的舊棒球 section 可作 opaque data 原樣保留，**不解碼、不轉換、不供 uTiki 使用**。修改其他平台自身設定不得順便丟掉 opaque sections。
+設定網頁仍是正常使用介面。uTiki 設定無效可以阻擋 uTiki worker，不能令使用者連設定頁與錯誤指引都打不開。其他平台自身設定仍可在合法整體 JSON 上讀取／保存。
 
-一旦要啟動 uTiki、保存 uTiki 行為、從 UI 切成 uTiki 或啟用其 worker，就需通過唯一 current schema。不能先讓通用 migrate_config 補 defaults/鏡射，再聲稱格式已有效。uTiki專屬保存只接受 canonical；無關平台保存原樣保留未使用 opaque fields，不是假裝已完成 uTiki migration。
+不強制新增一鍵重設按鈕、修復 wizard 或額外 CLI。最小交付是合法 current 範例、三鍵說明及手動替換 uTiki 行為區段的步驟；既有 UI 繼續編輯合法 current 設定。UI 不自動把舊三鍵轉成新值，也不藉 save 偷刪未知欄位。
 
-UI 應顯示 upgrade-required 與獨立工具使用方式，不能繼續顯示新預設讓使用者以為舊選擇已保存。共用讀取其他平台不因一個未啟用 uTiki 舊欄位整個故障。
+其他平台未使用的 legacy uTiki section 可以當 opaque data 原樣保留，既有非 uTiki migrator 保持原責任。只有切成／啟用 uTiki 時才要求唯一格式。移除舊 uTiki migrator 分支不得順便移除其他平台的遷移能力。
 
 ### 11.4 當前型別、UI 與 hot reload
 
-current validator 建立 immutable policy；engine 不接完整 raw config/accounts/webhook。UI 只讀寫 current 行為，新自訂元素/helper命名不用保留舊 ID bridge。options/default 由單一 metadata 或 parity tests 保護；後端獨立驗證。
+current validator 建立 immutable policy；engine 不接完整 raw config/accounts/webhook。UI 和後端使用同一 current schema／metadata 或 parity tests，不能以 UI 預設值取代後端驗證。
 
-只在成功載入且內容改變時編譯 keyword/revision。invalid hot reload 保留最後有效資料以供結果歸屬，但撤銷新 uTiki 購票/普通刷新/輸入 mutation 的授權；必要只讀結果與 cleanup仍可做。不能繼續用舊 policy 偷跑新操作，也不能清掉已發送 attempt。
+只在成功載入且內容改變時編譯 keyword/revision。invalid hot reload 保留最後有效資料供舊結果歸屬，但撤銷新購票、普通刷新、輸入 mutation 權；必要只讀結果與 exact cleanup 可繼續。不能用重新設定當作清除在途 unknown 的理由。
 
 | 變更 | 處理 |
 |---|---|
-| keyword/張數/排序/相鄰 | 未提交 plan失效；已送出按原context追蹤 |
-| manual/computer | 未送出重新規劃；在途導航先確認，不中途換目的地 |
-| interval/cooldown | 新 intent採新值；舊 deadline不延長，committed不回捲 |
-| credential source replacement | 更改 CredentialRevision；AuthEpoch只在可信邊界更新；未決submit仍blocked |
-| 通知/顯示 | 不重送購票；通知自身狀態獨立 |
-| legacy/mixed/invalid | validation拒絕並呈現原因；不自動轉換或fallback |
+| keyword／張數／排序／相鄰 | 未提交 plan 失效；已送出按原 context 追蹤 |
+| manual/computer | 未送出重新規劃；在途導航先確認 |
+| interval/cooldown | 新 intent 用新值；舊 deadline 不延長，committed 不回捲 |
+| credential source replacement | 更新 CredentialRevision；AuthEpoch 只依可信邊界；未決 submit 仍阻擋 |
+| 通知／顯示 | 不重新送出購票；通知狀態獨立 |
+| legacy／mixed／invalid | 明確拒絕並提示重填；不比較 mirror、不轉換、不 fallback |
+
+### 11.5 只改行為區段的資料保護
+
+人工切換指引必須要求停止使用同一設定的 writer、保留私人備份、只替換 uTiki 行為區段；不要讓代理在本次實作／測試中直接操作使用者 `src/settings.json`、帳密、profile 或 Cookie。
+
+合成 fixture 驗證：其他平台及 accounts 的解析後值不變，空密碼不 trim、秘密不進 log／artifact；current save 的暫存寫入／replace 失敗保留原檔，無效 JSON 不會被 defaults 覆蓋。保留原有單檔原子保存機制，不為不存在的多 profile 升級建立兩階段交易框架。
 
 ---
 
@@ -1082,88 +1083,64 @@ HTTP outcome unknown 是否重試，依通知 policy 明定；重試不會觸發
 
 ---
 
-## 14. 零歷史相容與可交付的獨立 frozen 升級
+## 14. 零歷史相容、離線清理與原始碼使用
 
-### 14.1 正式 runtime 最終必須移除
+### 14.1 最終必須移除的歷史路徑
 
-`platforms/ctbc.py` facade、舊API/alias、as_legacy_dict/profile projection、舊snapshot decoder、舊workflow/committer/runtime、`ctbc`行為fallback/mirror、舊UI ID bridge/private test bridge、失效hiddenimports。自訂caller同步更新，不能因還有舊測試就保留wrapper。
+`platforms/ctbc.py` facade、舊 API／alias、legacy model／snapshot decoder、舊 workflow／committer／runtime、舊 `ctbc` 行為 fallback／mirror、舊 UI ID bridge／private test bridge 必須退場。caller 同步用新 API；不能搬到 settings／integrations 冒充刪除。
 
-把它們移到bootstrap、settings、integrations、util仍是歷史相容。基準/Git/離線升級工具中為重現舊資料而存在的測試資料，不可被正式bot/settings import或打包為可達fallback。
+已為本次重構加入但現已不需要的 uTiki converter、專用產品打包程式／測試及其可達 imports，於範圍切換或 P6c 作有界清理。舊 Git 歷史、歷史報告、驗證「拒絕 legacy」的合成 fixture 可以保留；不要求抹去舊版本。
 
 ### 14.2 現行核心適配例外
 
-保留適配必須有四項證據：目前核心來源版本與真實caller；刪除舊棒球後仍獨立存在的需求；較小直接新接點不能滿足的原因；無舊模型/state/邏輯與無用途延遲的測試。
+保留薄適配需有現行核心版本／caller、移除舊棒球後仍存在的需求、直接注入不足的原因，以及無舊 state／無用途延遲的契約測試。例外只列精確 symbol/path，不放行整個目錄。
 
-寫入core-integration-inventory，只許精確symbol/path例外，不放行整個資料夾。真正CTBC域名/credential keys/Cookie名稱/共享`utk-sports`scope與當前browser/coordinator ports不是歷史相容。
+CTBC 網域、credential keys、Cookie 名稱、`utk-sports` scope、目前 browser/coordinator ports 與新 bootstrap 都不是 legacy。其他平台仍使用的共用工具也不得誤刪。
 
-新bootstrap factory不是例外shim，直接作新架構的一部分。真正為現行核心資料形狀做的適配放模組外；不要求為了目錄純潔新增沒有用途的轉送層。
+### 14.3 不交付升級器或產品成品
 
-### 14.3 升級工具是本次公開升級的必要交付
+本版不實作 source converter、frozen upgrader、舊資料 merge/conflict policy、no-Python 升級 E2E、bot/settings 可分發 binary、installer、簽章／quarantine 發布驗證或公開 release assets。
 
-基準會產生mixed mirror。[R07] 本版§11選擇reject mixed equal，因此**提供從基準升級的正式release，就必須提供轉換工具；不得以「可重建profile」替代產品的主要升級路徑。**
+使用者安裝專案需要的 Python／依賴並直接執行原始碼。已有 canonical-only 設定可使用；舊 uTiki 行為以 §11 的手動重新設定取代。不要求保留舊值或自動從舊格式取回選擇。
 
-對一個確實全新或已canonical-only的本機安裝，可記錄該次「不需轉換」。這只免除該次使用，不免除正式發布需附frozen upgrader和升級測試。
+### 14.4 舊設定的手動切換範圍
 
-工具不啟動browser、不連售票網站、不import engine、不由loader/hot reload自動呼叫。可以import唯一current-config純validator；依賴方向只從upgrader到current規格，不能反向可達。
+切換指引只說明停止舊實例、私人備份、識別舊 uTiki 行為區段、建立合法 current 區段及重新開啟既有設定 UI。遇到不明欄位不由代理猜測刪除；由使用者確認，不建自動修復器。
 
-### 14.4 Source converter 規格
+其他平台、accounts、通知端點、Chrome profile、coordinator DB/cooldown/lease 不在重設範圍。測試使用合成值驗證該界線，不讀取真正私人設定來產生 review artifact。
 
-唯一conversion body在 `tools/migrations/convert_utiki_config.py` 或其獨立工具package，由source CLI和frozen CLI共用。不得在bot/settings內複製另一份升級函式。
+### 14.5 原始碼雙平台交付
 
-預設dry-run或輸出新檔。明確in-place才覆寫，且強制備份。接受明確檔案/manifest，不掃全磁碟。
-
-1. strict JSON：重複key、root/type/future schema不合規拒絕，不把bool當int。
-2. mixed equal按§11直接保留canonical三鍵、移除mirror；不是錯誤，也不需要人工選邊。
-3. mixed conflict預設拒絕，只有explicit canonical/legacy選項允許選邊；空字串是值不是missing。
-4. unknown legacy欄位不默刪；選定來源欄位型別不合法時，不用conflict policy掩飾。
-5. legacy-only/complementary缺鍵補值有逐鍵書面表；本版維持keyword=`全票`、sorting=`row_seat`、mode=`manual`的基準defaults前須在P0核對固定源。顯式空keyword保留。
-6. accounts與非uTiki資料的解析後值完全相同；不trim password、不拷貝秘密到行為section。
-7. 讀寫前後核對來源identity/digest，防止dry-run後檔案被其他settings程序改寫；upgrader要求停掉使用該profile的writer。
-8. temp與目標同filesystem、flush/fsync/replace；目標已存在預設拒絕，失敗來源不變。備份有適當本機權限且不進Git/artifact。
-9. 多profile先全部驗證、再寫入新目錄；manifest記成功/失敗/來源digest/輸出digest；不宣稱多檔原子交易。
-10. partial failure不得自動啟動混合設定；明確rollback指引。日誌只寫檔案/鍵名/原因，不寫秘密值。
-
-### 14.5 Frozen upgrader 的正式 artifact
-
-| Target | 獨立artifact（名稱規格） | 內容 |
+| 目標 | 需要交付／驗證 | 不需要 |
 |---|---|---|
-| Windows x64 | `utiki-profile-upgrader-<release>-windows-x64.zip` | `utiki-profile-upgrader.exe`、runtime dependencies（需要時）、升級/回退說明、tool manifest |
-| macOS arm64 | `utiki-profile-upgrader-<release>-macos-arm64.zip` | 同名可執行檔或bundle、runtime dependencies、說明、tool manifest |
+| Windows x64 | 可核對的 source SHA、Python／依賴指引、bot 與設定 UI 原始碼入口、Windows 路徑／編碼／子程序測試 | exe／installer／frozen／無 Python 執行 |
+| macOS arm64 | 同一 current 契約與功能；原生 source 啟動、路徑／資源／driver 相容證據 | app／封裝／簽章／quarantine 產品流程 |
+| Linux x64 | 保留 P1 CI、測試 Docker image、hard-egress 與參考 benchmark | 不自動新增個人日常使用平台承諾 |
 
-這個 target 集合沿用 v1.4 記錄的固定 build-release 分支；v1.5 未重新取得原始碼，P0 須核對實際發布矩陣。不宣稱額外支援Intel macOS。若正式target改變，兩種產品與upgrade artifact矩陣一起修訂。[R19]
+相依套件可按既有安裝流程準備；不為不打包而重新發明環境管理器。測試 image 的 build 是保留的 CI 能力，不是被取消的產品打包。
 
-每個壓縮成品有SHA-256，release附 `SHA256SUMS`；manifest含tool/candidate source SHA、current-config contract digest、OS/arch、runtime版本、測試證據。checksum用於核對傳輸/配對，不冒充發布者簽章；既有簽章/attestation政策另遵循並如實標示。
+### 14.6 原始碼端到端驗收
 
-使用者不需要安裝Python、uv、Node或source tree。`--help`/無參數不能修改任何資料。以獨立spec建置，不合併進bot/settings的 `_internal` 或正常import graph。工具可保留在歷史release供跳版使用者下載，但不是新版模組的常駐依賴。
-
-### 14.6 Frozen 升級端到端驗收
-
-在**沒有可用開發Python/source tree的目標環境**執行，不能只移除PATH就宣稱乾淨：
+在各目標原生環境，以合成設定與專用 profile，完成：
 
 ```text
-合成舊profile（包含mixed equal與sentinel secrets）
- → 解壓公開 upgrader artifact
- → 執行frozen dry-run（來源byte不變）
- → frozen轉換到新檔
- → current-config完整驗證；非uTiki欄位保留
- → 解壓同release的bot/settings正式bundle
- → 兩個frozen程式用轉換檔離線self-test並實際啟動
- → settings在loopback讀取/保存仍canonical-only
- → bot以隔離fixture啟動，不對真站請求
- → 回退使用原binary與原設定備份
+可識別 source checkout＋已記錄 Python／依賴
+ → current 合法設定（其他平台與 accounts 使用 sentinel）
+ → 既有 settings 原始碼啟動及 loopback 讀取／保存
+ → bot 原始碼啟動並載入同一 current 契約
+ → 硬隔離中的真 browser＋production JS／fixture 流程
+ → 停止、資源清理與不含秘密的結果
 ```
 
-涵蓋G01–G10：equal/conflict/empty/corrupt/no-op、空白與非ASCII路徑、只讀/檔案佔用/replace失敗、多檔部分失敗、錯target artifact、no-Python、秘密不出artifact及bot/settings archive不可達converter。
+不只測 import 或 `--help`。source tree 存在是正常條件；任意 cwd 指「cwd 不必是 repository root」，不是要求無原始碼也能執行。故意破壞 JS／配置／資源對應要非零，不能接回舊 inline 或模組。
 
-macOS quarantine/簽章與可執行權限、Windows實際使用者權限都須依release說明驗證；不能「本機Python能跑」就視作frozen交付成功。
+### 14.7 P6c 清理前置與回復
 
-### 14.7 最終刪除順序
+本版採用後，刪除 gate 是 P6a 的適用離線驗收、P6b 對同一候選的必要獨立覆核、替代責任／caller 清單及可回復 source 版本；**不再以真站成功或另一份逐檔 final-delete 許可作為前提。** 本政策只適用已核准工作分支的無用 legacy。
 
-P6a建立只用新owner的候選，舊檔只可暫存為未被正式入口/候選bundle載入的開發內容；P6b完成指定live smoke和維護者核准；**P6c才最後刪除舊檔/alias/測試bridge與啟用全量retired-symbol gate**。
+清理中若出現尚未接替的能力或行為改變，先處理對應功能／離線回歸及差異覆核，不藉「可刪舊碼」任意刪功能。清理後重新驗 final source；不把清理前 SHA 的結果冒充新 SHA 已執行。
 
-沒有真站窗口就停在 `READY_FOR_LIVE / DELETE_BLOCKED`，不宣稱legacy已核准刪完，也不為了等窗口發布雙引擎。最終交付仍是單一新模組；開發中的等待不等於允許永久歷史相容。
-
-回退是已驗證的舊binary/commit＋原設定備份配對；不靠新版本持續雙寫，也不假裝撤回已發到網站的請求。
+回復使用舊 source commit＋原私人設定備份的正確配對；不保留新程式內的舊 engine fallback，不 reset／clean 覆寫混合的使用者工作，不刪 coordinator 狀態。不論是否真站驗收，本地回復都不會撤銷已發生的網站請求。
 
 ---
 
@@ -1293,25 +1270,26 @@ catalog 必須涵蓋本節以及 §18.15 的完整 ID 聯集；F 系列根因編
 | L05 | 啟動／URL read／health／handler 任一路徑例外 | finally 清理涵蓋，不僅 handler catch |
 | L06 | 長時間重複 attach/close | registry、task、tab 強參照及檔案資源回到基準 |
 
-### 16.4 設定、打包與架構
+### 16.4 設定、原始碼執行與架構
 
 | ID | 情境 | 必須成立 |
 |---|---|---|
-| C01 | canonical-only／legacy-only／mixed equal | canonical-only 合規直接使用；legacy-only 與 mixed equal 都須離線轉換，runtime 不比較／轉換 mirror |
-| C02 | 離線轉換 mixed conflict／explicit empty | 衝突需明示策略；空值不當 missing；執行期不重新解讀舊欄位 |
+| C01 | canonical-only／legacy-only／mixed | 合法 canonical-only 直接使用；legacy／mixed 只提示重新設定，不解碼、比較、搬值或 fallback |
+| C02 | current 明確空值、選擇值與舊值干擾 | 合法空值不當 missing；只使用使用者填入的 current 值，沒有 conflict-policy 轉換 |
 | C03 | corrupted JSON／不合目前 schema | 不覆寫、不猜 default；只有 uTiki 不合規時不無故阻擋其他平台 |
-| C04 | save fail／replace fail／多檔部分失敗 | 原檔保留，manifest 正確，無混合啟動 |
+| C04 | current 設定保存／replace 失敗 | 原檔保留、回報失敗；不以預設值或半寫入檔啟動，不新增多檔升級交易 |
 | C05 | credentials 與其他平台欄位 | 解析後內容相等，log 不洩漏 |
 | C06 | hot reload invalid／in-flight policy change | gate／state 規則符合第 11 節 |
 | A01 | 無 zendriver 的 subprocess 匯入 domain | 成功且無 I/O side effect |
 | A02 | application 加入 evaluate／逆向 import | architecture test 失敗 |
 | A03 | 舊棒球 alias／fallback 搬回 module 或 integrations/settings | final legacy scan 失敗；必要 current-core 適配有 ADR/證據，直接新 bootstrap 非 legacy |
-| A04 | production JS 或 script resource 故意損壞 | browser／packaging gate 必須失敗 |
+| A04 | production JS 或 source script resource 故意損壞 | source-resource／真 browser 契約必須失敗，不 fallback 到舊 inline |
 | A05 | browser CI 沒選到案例／全部 skip，或測試與 execution manifest 同時刪例 | 依獨立 catalog 核對完整 required 集合，必須失敗；見 §16.11／§17.5 |
 | A06 | 修改的 Python 檔不在固定 uTiki 目錄或未被 pytest import | §21.3 從 Git 獨立核對全部實際變更並逐檔 py_compile；任何漏列／缺檔／編譯失敗均非零 |
-| P01 | frozen app 從任意 cwd 執行 | JS resource 可取得，無 source-tree 偷渡依賴 |
 | P02 | Windows 非 UTF-8 輸出環境 | 不因新增 Unicode／stream 改寫而崩潰 |
-| P03 | settings 與 bot 打包 | 使用同一 canonical schema，升級／回退流程可操作 |
+| P04 | 原始碼入口／source loader 從 root 與外部 cwd 執行 | Windows x64／macOS arm64 均可取得同版本 JS，含中文／空白路徑；缺檔／錯配非零 |
+| P05 | source bot 與設定網頁的 current 契約／啟動 | 同一 canonical schema，loopback 保存與隔離 fixture 啟動成立；其他平台及 accounts 不受損 |
+
 
 ---
 
@@ -1328,9 +1306,9 @@ catalog 必須涵蓋本節以及 §18.15 的完整 ID 聯集；F 系列根因編
 | U07 | pause/stop 與 late completion | 不新增未授權 claim；在途 evidence 不丟，控制延遲可量 |
 | U08 | 核心參數／回傳契約變更 | 明確失配可被測試攔住，不能把 Unknown/Pending 壓成可重試 bool |
 | U09 | startup/scheduled/health及其他core副作用入口 | 全經session仲裁／正式handoff，handle不混用，不能繞過held barrier |
-| U10 | 舊棒球設定出現在 load/hot reload | 不自動轉換／不 fallback／不雙寫；顯示升級指引，不丟其他平台資料 |
+| U10 | 舊棒球設定出現在 load/hot reload | 不轉換／fallback／雙寫；提示使用者重新設定 uTiki，不丟其他平台資料 |
 | U11 | 把舊 facade／decoder 移到 integrations，或只以舊 caller 申請例外 | gate 必須失敗；位置不等於核心契約證據 |
-| U12 | 移除舊 API/型別/legacy fixtures 後新模組獨立測試／frozen 自測 | 新 contract 正常；舊模組不被載入／打包，migration 不可由 runtime import |
+| U12 | 移除舊 API／型別／legacy helper 後，新模組獨立 source 測試 | 新 contract／source 啟動正常；舊 engine／decoder 不可達，不依賴 converter |
 
 U05/U06/U08 是隔離測試分支／fixture 的受控更新演練，不是假裝已整合最新 upstream，也不保證未來零衝突。不得對使用者日常分支注入演練 patch。
 
@@ -1391,22 +1369,33 @@ U05/U06/U08 是隔離測試分支／fixture 的受控更新演練，不是假裝
 | I11 | 取消 OCR future 但底層工作繼續 | 有界工作數，晚結果不寫 state/不發副作用 | §6.8/8.6 |
 | I12 | 融合 mutation 觸發同步／異步原生更新 | 同一套原語；partial mutation 精確回報、失敗不送出 | §8.8/10 |
 
-### 16.9 設定與 frozen upgrade
+### 16.9 v1.5 案例的正式撤回與替代
 
-| ID | 情境 | 必須成立 | 規格 |
-|---|---|---|---|
-| G01 | mixed equal | runtime拒絕；frozen converter 產生 canonical-only、三個值不變 | §11/14 |
-| G02 | canonical-only 合規、重跑轉換 | runtime接受；converter合法no-op，不強加schema2 | §11/14 |
-| G03 | legacy-only／部分缺鍵／complementary | 離線依已列規則補入；未知key不靜默丟棄 | §11/14 |
-| G04 | mixed conflict／explicit empty | 預設非零；明示策略後合法輸出，空值不當缺值 | §14.4 |
-| G05 | duplicate JSON key／root/type錯／未知版本 | 不覆寫來源，不默默以default執行 | §11/14 |
-| G06 | 寫入中來源改變／target存在／權限錯／多檔部分失敗 | 拒絕或精確manifest；備份/原檔保護，不宣稱跨檔交易 | §14.4 |
-| G07 | Windows x64無system Python升級 | 獨立exe→新profile→frozen bot/settings驗證與真正startup通過 | §14.5/14.6 |
-| G08 | macOS arm64無system Python升級 | 獨立artifact同流程，任意cwd/中文空白路徑/執行權限可操作 | §14.5/14.6 |
-| G09 | checksum／manifest／final _internal 資源錯配 | 可識別版本與文件；錯配必失敗，checksum不冒充publisher認證 | §14.5/18.1 |
-| G10 | 其他平台opaque資料／secrets／配對回退 | 未用legacy資料不被清除或遷移；秘密不進artifact；舊binary配舊設定 | §11/22 |
+本節是使用者改變用途後的**規格變更**，不是執行期 waiver。下列 ID 從 v1.6 有效 required 集合移除，保留歷史且永不重用；不要用 `skip`、`xfail` 或永久 `NOT_DUE` 假裝已處理。
 
-### 16.10 隔離／CI／早期交付
+| v1.5 ID | 原責任 | v1.6 處置及仍須保留的保障 |
+|---|---|---|
+| G01 | mixed-equal frozen 轉換 | 撤回轉換；C01/U10 仍驗 runtime 拒絕 mixed、指引重填 |
+| G02 | converter no-op／重跑 | 撤回 converter；C01 保留合法 canonical-only 直接接受 |
+| G03 | legacy／complementary 補值 | 撤回舊值遷移／補值表；由使用者重新設定，其他平台資料不動 |
+| G04 | conflict-policy／empty 轉換 | 撤回轉換策略；C02 保留 current 明確空值語意 |
+| G05 | 升級器 JSON／型別拒絕 | 撤回升級器案例；C03 仍驗設定 parser／current validator 的錯誤及來源保護 |
+| G06 | 多檔升級／備份交易 | 撤回多 profile 升級流程；C04 保留正常設定 save／replace 失敗保護 |
+| G07 | Windows 無 Python 升級 | 全部撤回；P05 用 Windows source 啟動驗收，不宣稱等同 frozen |
+| G08 | macOS 無 Python 升級 | 全部撤回；P05 用 macOS source 啟動驗收，不宣稱等同 frozen |
+| G09 | 產品 checksum／`_internal` 配對 | 撤回產品驗收；A04/H09/P04 保留 source JS／資源一致性 |
+| G10 | 升級中的其他平台／秘密／binary 回退 | 撤回升級流程；C05/§22 保留原設定、秘密與 source 回復責任 |
+| P01 | frozen 任意 cwd／無 source tree | 撤回；新 P04 檢查有 checkout 的原始碼 cwd／資源，不重用 P01 |
+| P03 | bot/settings 成品與升級配對 | 撤回；新 P05 檢查 source 入口／設定契約，不重用 P03 |
+| H10 | 未真站驗證不得 final-delete | 撤回；新 H12 檢查離線前置、獨立覆核與回復；不重用 H10 |
+
+C01/C02/C04、A04、U10/U12、H09、V13 的有效 ID 保留，但只保留與 current 設定、source、資料保護或低延遲有關的責任；撤回的 converter／frozen／release／live-blocking variants 在實體 catalog 逐項列 old→new 處置，不沿用舊結果充數。
+
+特別核對 H08 的 `new-upgrade-tool-file`：後續 active gates 不再要求存在或檢查已取消的 converter；該升級器專屬 obligation 撤回。H08 的其他新檔／核心 bridge／廣泛 ignore 拒絕保留，H11 的任何實際修改 Python 工具／測試／generated source 都不能漏。v1.5 P1 的原 63 項歷史結果不改寫。
+
+其餘 case 的純 unit／contract／browser／integration／performance 責任保留；同 case 下只屬 frozen、產品 build、release 或真站作為出站前提的子義務撤回。資料／scope／隱私／即時 audit／正確性不能因共處一個舊測試檔而一起刪掉。
+
+### 16.10 隔離／CI／同期 source 驗收
 
 | ID | 情境 | 必須成立 | 規格 |
 |---|---|---|---|
@@ -1418,11 +1407,11 @@ U05/U06/U08 是隔離測試分支／fixture 的受控更新演練，不是假裝
 | H06 | required catalog／execution manifest／JUnit／run metadata 不一致 | 缺例、重複／未知 ID、未核准 catalog 變更、偽造不適用、skip/xfail/xpass、舊 run-id/SHA 或 digest 錯配均非零；負向清單見 §17.5.6 | §16.11/17.5 |
 | H07 | application/adapter/bridge 回傳錯型別 | typed gate失敗，不只domain | §17.2 |
 | H08 | 新檔未列typed scope／廣泛ignoreAny | scope coverage gate拒絕，不以缺檔默默skip | §17.2 |
-| H09 | P3首次JS外部化、資源缺失或digest錯 | 同階段build/frozen任意cwd自測必失敗；不fallback舊inline | §10/19.5 |
-| H10 | 未做指定live／未取得final-delete核准 | P6c不執行；candidate只標LIVE/DELETE_BLOCKED | §17.7/19.10 |
+| H09 | P3a 首次 JS 外部化、source 資源缺失或錯配 | 同期 source loader／任意 cwd／真 browser 驗收；錯誤非零、不 fallback | §10.4/19.5 |
 | H11 | modified-Python manifest／Git 集合／位元組與語法結果不一致 | staged／working／untracked／改名／刪除精確分類；未列新檔、非預期缺檔、過期 digest、錯 base/SHA、未編譯或語法錯均非零 | §21.3 |
+| H12 | P6c 清理缺少同候選離線驗收／替代責任／獨立覆核／可回復版本 | 缺任一前置不得清理或出站；真站未驗證本身不阻擋；不得用舊版 live PASS 冒充本版離線 gate | §14.7/19.10 |
 
-所有情境均為待建立／核對的驗收要求，不表示本文已執行。可用一個參數化測試對應多 case，但必須能逐一辨識未執行／skip／失敗；不得把一個成功 case 複製標記冒充矩陣全綠。
+所有情境均為驗收要求；已有且仍適用的實作／測試應沿用，缺少的部分才建立，不表示本輪文件工作執行過它們。可用一個參數化測試對應多 case，但必須能逐一辨識未執行／skip／失敗；不得把一個成功 case 複製標記冒充矩陣全綠。
 
 ---
 
@@ -1430,7 +1419,7 @@ U05/U06/U08 是隔離測試分支／fixture 的受控更新演練，不是假裝
 
 #### 16.11.1 固定集合與權威方向
 
-`ci/utiki-required-cases.json` 是**規格檔**，不是測試輸出。初始 v1.5 catalog 的 `cases[].id` 必須恰等於下表 153 個 ID；不得由 pytest 收集結果、JUnit、execution manifest 或現有測試數反推生成。實作者依本計劃逐例建置 catalog，再由規格審查核准；可用工具核對文件與 catalog 一致，但不能用測試存在與否決定需求。
+`ci/utiki-required-cases.json` 是**規格檔**，不是測試輸出。v1.6 active catalog 的 `cases[].id` 必須恰等於下表 143 個 ID；不得由 pytest 收集結果、JUnit、execution manifest 或現有測試數反推生成。實作者依本計劃逐例建置 catalog，再由規格審查核准；可用工具核對文件與 catalog 一致，但不能用測試存在與否決定需求。
 
 | 類別 | 固定 ID 清單 | 數量 |
 |---|---|---:|
@@ -1441,22 +1430,23 @@ U05/U06/U08 是隔離測試分支／fixture 的受控更新演練，不是假裝
 | L | L01, L02, L03, L04, L05, L06 | 6 |
 | C | C01, C02, C03, C04, C05, C06 | 6 |
 | A | A01, A02, A03, A04, A05, A06 | 6 |
-| P | P01, P02, P03 | 3 |
+| P | P02, P04, P05 | 3 |
 | U | U01, U02, U03, U04, U05, U06, U07, U08, U09, U10, U11, U12 | 12 |
 | V | V01, V02, V03, V04, V05, V06, V07, V08, V09, V10, V11, V12, V13, V14, V15, V16 | 16 |
 | X | X01, X02, X03, X04, X05, X06, X07, X08, X09, X10, X11, X12, X13, X14, X15, X16 | 16 |
 | T | T01, T02, T03, T04, T05, T06, T07, T08, T09, T10, T11, T12 | 12 |
 | I | I01, I02, I03, I04, I05, I06, I07, I08, I09, I10, I11, I12 | 12 |
-| G | G01, G02, G03, G04, G05, G06, G07, G08, G09, G10 | 10 |
-| H | H01, H02, H03, H04, H05, H06, H07, H08, H09, H10, H11 | 11 |
+| H | H01, H02, H03, H04, H05, H06, H07, H08, H09, H11, H12 | 11 |
 
-ID 不重用；測試搬家只更新 execution manifest 中的 node ID。必要的多情境、OS／tenant／層級、H06／H11 負向子案例，必須在 catalog 的 `obligations` 中分列穩定 `obligation_id` 與必要 variants，不能只保留一個概括的 case ID 就算全部通過。例：S08 的 general／server-assigned fixture、G07／G08 的不同 target，不可用同一次成功互相代替。
+ID 不重用；測試搬家只更新 execution manifest 中的 node ID。必要的多情境、OS／tenant／層級、H06／H11 負向子案例，必須在 catalog 的 `obligations` 中分列穩定 `obligation_id` 與必要 variants，不能只保留一個概括的 case ID 就算全部通過。例：S08 的 general／server-assigned fixture、P04/P05 的 Windows／macOS target，不可用同一次成功互相代替。
+
+153 − 13 個撤回 ID ＋ 3 個新 ID = 143。撤回清單只放在規格變更紀錄，不塞入 active `cases[]` 做空 obligations 或假 PASS；檢查器仍對目前核准的 143 個 ID 做完整集合核對。實際 obligation 總數依現有完整 catalog 逐項投影後核對，本文件不猜測新數字，也不將舊 341 沿用為新總數。
 
 #### 16.11.2 最小格式與責任
 
 | 檔案／欄位 | 必要內容與限制 |
 |---|---|
-| catalog：`schema_version`、`catalog_id`、`revision` | 一種正式 schema；未知版本／重複 JSON key 拒絕；本輪只是格式規格，沒有已核准的實體 catalog |
+| catalog：`schema_version`、`catalog_id`、`revision` | 優先沿用既有 schema，catalog revision／plan version 改為 1.6 對應版本；未知版本／重複 key 拒絕；本包沒有已核准的 v1.6 實體 catalog |
 | catalog：`plan_version`、`plan_sha256`、`status` | 指向正式採用的計劃位元組；未核准時為 PROPOSED，不能作為已通過階段的權威 |
 | catalog：`cases[]` | 每例唯一 `id`、`spec_refs`、`invariant`、非空 `obligations[]`；不得有未知或缺失 ID |
 | obligation | 唯一 `obligation_id`、`required_gates`、`job_id`、`layer`、明示 `variants`、`applies_when`、`required_evidence`、`result_policy` |
@@ -1474,14 +1464,14 @@ CI 從受保護且經審查的核准紀錄取得 expected catalog digest，不�
 
 #### 16.11.3 結構範例（非完整 catalog、非核准成品）
 
-以下只示範 H06 的一項 obligation；省略其他 152 個 case 及 H06 其餘義務，因此不能用此範例通過正式完整性 gate。
+以下只示範 H06 的一項 obligation；省略其他 142 個 case 及 H06 其餘義務，因此不能用此範例通過正式完整性 gate。
 
 ```json
 {
   "schema_version": 1,
   "catalog_id": "utiki-required-cases",
-  "revision": "1.5",
-  "plan_version": "1.5",
+  "revision": "1.6.0",
+  "plan_version": "1.6",
   "plan_sha256": null,
   "status": "PROPOSED",
   "cases": [
@@ -1513,13 +1503,23 @@ CI 從受保護且經審查的核准紀錄取得 expected catalog digest，不�
 
 checker 依 catalog 及經核對的 run context 自行算出本 job 的 required obligation 集合。execution manifest 必須保持全 catalog 的 case/obligation 映射；某 job 只執行其中一部分，不等於其餘 case 可以從 manifest 消失。
 
-`NOT_APPLICABLE` 只有在 catalog 明訂條件確實不成立、提供匹配條件／target／ADR 證據與核准來源時才成立；沒有宣告條件的 obligation 預設適用。OS 不同可使 G08 在 Windows job 不適用，但 gate 彙總仍需 macOS job 履行 G08。停用 server assignment 不得免除其既有 fixture／禁止誤啟用案例；真站不存在的頁型仍依原 live 規格判定。
+`NOT_APPLICABLE` 只有在 catalog 明訂條件確實不成立、提供匹配條件／target／ADR 證據與核准來源時才成立；沒有宣告條件的 obligation 預設適用。OS 不同可使 P05 的 macOS variant 在 Windows job 不適用，但 gate 彙總仍需 macOS job 履行該 variant。停用 server assignment 不得免除其既有 fixture／禁止誤啟用案例。另行手動真站驗收不屬 active 自動出站矩陣，也不能替代任何離線義務。
 
 階段尚未到期用 `NOT_DUE`，與 `NOT_APPLICABLE` 分開；不得拿 P1 的分階段結果宣稱 P6a/P8 已完成。缺實作、browser、Python、隔離權限、目標環境或授權，是 `NOT_RUN / BLOCKED`，不是不適用。任何必要條件缺失／未知值／條件解析失敗一律不放行。
 
 ---
 
-## 17. CI、型別、網路硬隔離與真站門檻
+#### 16.11.5 版本切換的核准與完整性
+
+新 case／obligation 投影只接受 §16.9 與 §19 的明確變更。review 必須核對：撤回恰為批准的範圍；保留的設定資料／source 資源責任有去處；新 P04/P05/H12 全部映射；其餘核心案例未遺失。不要依現有測試通過與否產生新 required 集合。
+
+利用既有 H06/A05/architecture 回歸驗證：新合法 catalog／映射通過；用舊 digest 驗新版被拒絕；少任一仍 active 的 case／target 仍失敗；撤回的 G/P01/P03/H10 不被錯算為漏跑；純文件舊 ID 提及不會成為必跑案例。這是必要的版本接合，不是新增另一套 verifier。
+
+新 catalog、execution manifest、plan hash、固定 ID 列舉與 gate profile 同步，避免新 plan 配舊 expected count 而永久失敗。修改的 checker 只支援所採用的明確版本；舊成果從 Git 歷史重現，不要求新 checker 永久支援舊產品交付 schema。
+
+---
+
+## 17. CI、型別、網路硬隔離與手動真站界線
 
 ### 17.1 不讓命令自己關掉strict
 
@@ -1529,7 +1529,7 @@ pytest的arg組合/override可以改變預設選擇；strict flags與marker選�
 
 ### 17.2 Typed scope涵蓋整個新架構
 
-`ci/utiki-typed-scope.txt` 列明domain、application、ports、adapters、bootstrap、current config/keyword和實際存在的外部core-service bridge、upgrade tool。新目錄新增檔案預設進scope，不能因沒寫在命令列就漏掉。
+`ci/utiki-typed-scope.txt` 列明domain、application、ports、adapters、bootstrap、current config/keyword和實際存在的外部core-service bridge。已取消的 upgrade tool 不列為必需新檔；其他真正新增／重寫的 production 模組不可漏列。新目錄新增檔案預設進scope，不能因沒寫在命令列就漏掉。
 
 `mypy --strict` 的effective config隨artifact保存；動態第三方模組使用精確stub/adapter與code-specific ignore，不全域 `ignore_errors`、`follow_imports=skip` 或廣域`Any`放行。上游未改typed債可隔離，但跨ports暴露的輸入/receipt/result必須具名型別。[E12]
 
@@ -1567,11 +1567,13 @@ Windows/macOS原生驗證需具備等效、已實證的整個測試process tree�
 | modified-python-syntax | Git 變更集合與 manifest 交叉核對、所有適用 Python 檔逐檔 py_compile | 每個有 Python 變更的階段／候選；P1 起自動強制，P0 有修改亦須逐檔編譯 |
 | architecture-types | dependency、retired符號、typed scope、負向注入 | P1骨架、P2起逐項強制、P6c全量 |
 | browser-contract-isolated | 真production JS，real-origin與硬隔離 | P1建立隔離，P3使用新資源時必需 |
-| browser-native-platform | 實際release OS的DOM/input/driver差異 | P3及其後所有受影響變更 |
-| package-smoke | bot/settings assembled bundle、resources/cwd/missing-file故障 | P3首次production資源變更起，不等P8 |
-| upgrade-frozen-e2e | 獨立upgrader→current config→frozen bot/settings | P6a前準備完成，P6/P8驗收 |
+| browser-native-platform | Windows x64／macOS arm64 原始碼下的 DOM/input/driver 差異；仍需硬隔離 | P3 及其後受影響變更、P6a/P8 |
+| source-startup | 現有 bot/settings 原始碼入口、current 配置、source resources／cwd／錯配拒絕；可由既有 job 承載 | P3a 資源首次變更；P6a/P8 完整啟動 |
+| performance-contract | 相同設定／環境的 source 基準與候選、CDP／lag／資源 | P1 基礎、熱路徑變更及 P7/P8 |
 | core-integration | 控制revocation/核心reload旁路/契約演練 | P4–P6與shared變更 |
-| live-evidence | 指定tenant/page的已授權真站記錄 | P6b在final delete前，最後candidate變更後再核對 |
+| offline-cutover-review | 替代責任、適用離線證據、獨立覆核與可回復 source 候選；沿用既有 review 記錄 | P6b 清理前；P6c 核對差異 |
+
+job 名稱表是責任分工，不要求每列新建一個 runner；能由既有工作精確承載就重用。產品 package／upgrade／release 與真站成功不再是 v1.6 required job。
 
 job 必須按 §16.11 的獨立 catalog 驗證完整 required 義務，不是只看 nonempty。每次驗證同時讀 required catalog、execution manifest、JUnit 與 run metadata；四者皆是必要輸入，不能用 execution manifest 自我宣告集合。0 collected、required 義務未收集／skip／xfail／xpass、缺 browser/隔離/啟用旗標、缺少或錯配 run-id/SHA/digest，一律非零。
 
@@ -1583,9 +1585,9 @@ JUnit 寫入唯一 run/attempt/job 目錄；run metadata、manifest 與 XML 都�
 
 `verify_utiki_ci_results.py` 必須明確接收 `--required-catalog`、`--execution-manifest`、`--junit`、`--run-metadata`，另接 `--approved-catalog-sha256` 及其 review 紀錄參照。expected digest 取自 §16.11 的核准來源；CLI 參數本身不會創造核准。文件修訂包不包含可執行的 repository checker 或已核准 catalog。
 
-run metadata 最少包含：`run_id`（含 attempt）、`job_id`、`phase`、`candidate_sha`、`working_tree_digest`／clean 狀態、`os`、`architecture`、`layer`、`tenant/mode`（適用時）、`catalog_sha256`、`execution_manifest_sha256`、`junit_sha256`、`fixture_digest`、`script_digest`、相關 binary/config-contract/target-manifest digest、isolation evidence、effective command/flags、測試與收集器 exit code、起迄時間。候選／job／target 的期望值須與 CI 事件及核准 gate 矩陣核對，不由測試自己決定。
+run metadata 最少包含：`run_id`（含 attempt）、`job_id`、`phase`、`candidate_sha`、`working_tree_digest`／clean 狀態、`os`、`architecture`、`layer`、`tenant/mode`（適用時）、`catalog_sha256`、`execution_manifest_sha256`、`junit_sha256`、`fixture_digest`、`script_digest`、相關 config-contract/source-resource／target 對應 digest（既有測試 image 另記 image digest）、isolation evidence、effective command/flags、測試與收集器 exit code、起迄時間。候選／job／target 的期望值須與 CI 事件及核准 gate 矩陣核對，不由測試自己決定。
 
-只在適用的層級要求對應資源 digest；例如純語法 job 沒有 binary，須依 catalog 的 evidence 類型明示不適用，不能任意省略欄位。摘要使用原始檔 SHA-256；多資源 digest 必須以已排序的相對路徑＋各檔位元組 digest 建立固定清單，包含缺檔／多檔偵測，不只 hash 檔名。
+只在適用的層級要求對應資源 digest；例如純語法 job 沒有 browser resource，須依 catalog 的 evidence 類型明示不適用；產品 binary 欄位不再是 v1.6 有效證據要求。只同步撤回欄位的契約，不可任意省略仍適用的欄位。摘要使用原始檔 SHA-256；多資源 digest 必須以已排序的相對路徑＋各檔位元組 digest 建立固定清單，包含缺檔／多檔偵測，不只 hash 檔名。
 
 JUnit 的 suite/run properties，以及受 catalog 管理的 testcase properties，必須能核對 exact `case_id`、`obligation_id`、`variant_id`、`node_id`、run-id、job-id、candidate SHA、catalog/execution manifest 與 fixture/script digest。缺少識別 properties 的舊 XML 非法；可以由正式 pytest reporter／外部 harness 寫入，不得事後從 manifest 臆造一組成功 testcase。JUnit 不內嵌自身 digest；run metadata 封存實際 XML digest，避免循環。
 
@@ -1594,9 +1596,9 @@ JUnit 的 suite/run properties，以及受 catalog 管理的 testcase properties
 1. strict 解析四輸入，拒絕重複 JSON key、未知 schema、無效 ID／digest、空 required 義務；核對受保護的核准 digest 與計劃版本。
 2. 驗 `catalog.case_ids == execution_manifest.case_ids`，再驗每 case 的 obligation／variant 完整映射；缺少、重複或未知 case/obligation/variant 均失敗。一般非 catalog 的輔助測試可另跑，但不得宣告未知 required ID，也不能充數。
 3. 由 catalog 的 gate/job/target/layer/條件計算本 job 的 required execution keys；execution manifest 只能提供映射，不得縮減集合。expected execution key 為 `(case_id, obligation_id, variant_id, job_id, target)`。
-4. 每個適用 key 必須恰有一份對應 testcase，setup/call/teardown 全部成功，無 fail/error/skip/xfail/xpass，所需的非 JUnit evidence 也必須齊全且 digest 相符。重複 testcase、重複 XML／結果、錯參數化 ID、錯層級或借用其他 target 的成功均失敗。
+4. 每個適用 key 必須有 catalog 要求的當次證據：pytest 類型恰有一份對應 testcase，setup/call/teardown 全部成功，無 fail/error/skip/xfail/xpass；非 pytest 類型依既有 schema 核對原始 report／退出碼，不捏造 testcase。適用的其他 evidence 齊全且 digest 相符。重複 testcase、重複 XML／結果、錯參數化 ID、錯層級或借用其他 target 的成功均失敗。
 5. 不適用／尚未到期逐項回報條件與依據，不填 PASS；適用卻漏收集就是失敗。人工宣告不適用不能覆寫 catalog。
-6. 比對本輪 run/attempt/job、候選 SHA、實際檔案 digest、fixture/scripts/binary/config 版本與隔離證據；前次 run 的成功結果無效，單改 metadata 的檔名或 timestamp 也不能重用。
+6. 比對本輪 run/attempt/job、候選 SHA、實際檔案 digest、fixture/scripts/source/config 版本與隔離證據；前次 run 的成功結果無效，單改 metadata 的檔名或 timestamp 也不能重用。
 7. 產出 checked/required/missing/failed/inapplicable/not-due 與逐項原因；required 失敗時非零。任何原 test/harness/collector 非零也須保留，不准由後續 checker 成功洗掉。
 
 一個參數化測試可覆蓋不同 variant，但各 variant 必須有獨立執行 key 與結果；catalog 明確要求多項 assertions 的單次義務，測試本體仍需真的驗證全部，JUnit 只能證明執行結果，不能證明 assertion 品質。此剩餘限制由獨立審查及既有 mutation tests 補足。
@@ -1611,9 +1613,9 @@ JUnit 的 suite/run properties，以及受 catalog 管理的 testcase properties
 
 單一 job 只能宣稱其 catalog 子集合結果。階段 aggregator 仍使用同一核准 catalog 與完整 execution manifest，接收各 job 的 JUnit／metadata 成對紀錄（`--run-index` 指向 exact 路徑與 digest），重新執行相同核對，並依 `gate_profiles` 檢查全部必要 job/target/layer。
 
-不同 job 可有不同 job-id，但必須屬同一 run/attempt、候選 SHA 與 catalog／execution manifest 版本；不能拼接別次成功。重跑屬新 attempt，不能只替換失敗 case 再拼舊 XML。跨工作流程執行的 native/frozen/live 證據依原規格記錄明確候選與人工核准關聯，不偽裝成同一 run；需要繼承較早證據時必須遵守既有 P6b→P6c／P8 的差異覆核，不自動豁免。
+不同 job 可有不同 job-id，但必須屬同一 run/attempt、候選 SHA 與 catalog／execution manifest 版本；不能拼接別次成功。重跑屬新 attempt，不能只替換失敗 case 再拼舊 XML。跨工作流程執行的 native source 證據按既有 schema 記明 exact 候選及核准關聯，不偽裝同一 run；不為方便任意跨 attempt 拼接。P6b 離線 review 記錄可對清理差異作覆核，但不把清理前測試冒充清理後執行。
 
-live 證據維持原本授權、站點與人工覆核制度，不得為了統一 JUnit 而偽造執行過的測試。aggregator 只能驗其必要記錄／digest／核准關聯是否齊備，不能把文件存在判成真站成功。
+使用者另行手動真站紀錄放在工程出站矩陣之外，列 exact 候選及實際操作，不填入 active gate 充數。缺真站不使 v1.6 離線 aggregate 失敗；文件存在也不代表真站成功。
 
 #### 17.5.5 Catalog 變更與聯合刪除保護
 
@@ -1635,46 +1637,42 @@ catalog 本身改動須作正式規格 review，記錄 old/new digest、影響�
 | required-outcome-not-pass | 分別注入 skip、xfail、strict XPASS、non-strict XPASS、setup/teardown error | PASS_ONLY、reporter 與原 exit code 保留 |
 | empty-or-missing-result | 0 collected、全 skip、刪 testcase 或 XML | required 義務沒有當次成功 evidence |
 | stale-run-or-sha | 舊 run-id、另一 attempt、不同候選 SHA 或偽造時間 | run/context 不匹配 |
-| digest-mismatch | 改 catalog/mapping/XML/fixture/script/binary 一者，或借其他 target digest | 原始位元組與適用 evidence 不匹配 |
-| duplicate-result-or-wrong-layer | 複製同一成功 testcase，或用 loopback 代 origin／source 代 frozen | execution key 不唯一或層級不足 |
+| digest-mismatch | 改 catalog/mapping/XML/fixture/script/source 或適用 image evidence 一者，或借其他 target digest | 原始位元組與適用 evidence 不匹配 |
+| duplicate-result-or-wrong-layer | 複製同一成功 testcase，或用 loopback 代 origin／Linux 代 Windows 或 macOS 原生 source 結果 | execution key 不唯一或層級不足 |
 | missing-job-or-target | 彙總缺一個必要 job/OS/arch，或多放未知結果 | gate_profiles 完整集合不符 |
 | failure-exit-overwritten | test/harness 非零，但後續收集器回 0 | 最終 gate 仍非零，不能被 always() 洗綠 |
 
 ### 17.6 Coverage與失敗模型
 
-原有domain/schema branch 95%、application branch 85%保留為工程目標，不是普遍門檻。arbiter collision、state出站、input stale、exact cleanup、手動retire、升級矩陣為**必測功能門檻**，不能以coverage百分比抵消。
+原有domain/schema branch 95%、application branch 85%保留為工程目標，不是普遍門檻。arbiter collision、state出站、input stale、exact cleanup、手動retire、current 設定與 source 啟動矩陣為**必測功能門檻**，不能以coverage百分比抵消。
 
 不以Python行覆蓋率宣稱JS branches已跑。每種production operation都有happy/stale/rejected/possible/partial-mutation案例，必要時文件化不適用。對held barrier/document gate/exact token進行定向mutation，相關測試須確實變紅。
 
-### 17.7 Live smoke先於最後legacy刪除
+### 17.7 真站驗收另列，不擋原始碼重構出站
 
-遵守固定基準工程指南§6：[R18] **P6b先完成指定站點/核心流程實機驗證，P6c才final delete**。本輪文件修訂不授權真站操作。
+使用者已選擇：離線驗收與獨立覆核後可移除無用 legacy，真站由自己之後手動驗收。[Q05] 因而撤回 v1.5 的 H10/live-before-final-delete 與 P8 release/live blocking；不得再要求「先真站成功才算 P6c/P8 完成」。
 
-計劃矩陣至少包含CTBC與味全實際支援且受改動的manual/date/area/seat或quantity、登入/輸入/提交gate、結果與停止邊界；不可用fixture去捏造不存在的真站路徑。未啟用server assignment仍保持關閉。
+這不等於真站操作授權。Codex 在本輪不登入、刷新、選票、送出或付款；也不使用日常 browser profile／帳密。真正的交易結果 unknown、quota、interval 與安全頁型限制仍是 runtime 契約，不能因人工驗收延後而移除。
 
-每份記錄列tenant、頁型、source SHA/binary digest、browser/OS、設定模式/刷新間隔、實際到達步驟、停止點、未測部分及授權者。沒有交易測試授權就不能測實際提交；若門檻要求而未獲授權則標BLOCKED，不用讀DOM替代。
+交接附 CTBC／味全實際支援且受改動的頁型、設定模式、操作停止點、刷新間隔、原始碼 SHA，以及已做離線／未做真站項目。使用者手動測試結果另記 `LIVE_VERIFIED_BY_USER` 或 `LIVE_NOT_VERIFIED`；未支援 server assignment 仍不啟用。
 
-沒有窗口：保留candidate於P6a，標 `LIVE_BLOCKED / FINAL_DELETE_BLOCKED`。允許繼續不影響證據的開發或離線測試，但不能發布、核准刪除、宣稱完整完成。最後成品不含舊engine；這個順序不要求永久雙runtime。
+新的程式／腳本改動使既有人工真站結果可能不再適用時，標記對應範圍需要使用者重驗，不冒充新 SHA 已真站通過，但不因此阻止本版離線工程結案。若離線或使用者測試已證明一個真實 bug，仍須修正，不能以真站非必測為理由忽略。
 
----
+## 18. 極低延遲設計、原始碼環境與效能驗收
 
-## 18. 極低延遲設計、打包與效能驗收
+### 18.1 唯一 source 交付與測試環境的區分
 
-### 18.1 PyInstaller 與三種交付物
+交付同一 source checkout、Python／依賴指引、設定網頁與合法 current 設定範例、必要 JS 資源、測試及脫敏結果。Windows x64／macOS arm64 都使用該來源，不產生 bot/settings/upgrader 可分發成品。
 
-基準已有 bot/settings 的 source 與 frozen release 管線；本版新增獨立 profile upgrader。[R17/R19] 所有實際 spec、OS/arch、release assembly 路徑列入 target manifest。
+source loader 與 JS assembly 以模組位置為準，資源版本／digest 只支援當前契約；source／browser 實際使用同一份 script 與 native-setter fragment。冷路徑檢查資源，熱路徑不反覆 I/O／hash。
 
-**P3a 首次外部化 JS 即完成**：資料檔收錄、package-relative 載入、assembler/digest、同一 build 的 bot/settings 最終 bundle、自測與 source-tree 不可用的任意 cwd 測試。不能只補 hiddenimports 或等 P8 再檢查 datas。[E06]
+P3a 首次外部化就測 source 資源，P6a 接入口後測兩平台實際 source startup，P8 對最終 SHA 完成適用回歸。不保留 product binary、`_internal`、no-Python 或 release checks 作隱性完成條件。
 
-upgrader 在 P6a 前完成對 Windows x64/macOS arm64 的獨立 artifact/checksum/no-Python E2E。三個成品依賴分開，converter/legacy upgrade fixtures 不能進 bot/settings 正常 imports；也不能為了測試方便把 source tree 一起帶入成品。
-
-資源錯配直接非零退出，不 fallback 到舊 inline JS、另一個版本的工作目錄或模組副本。檢查 final `_internal` 合併後的結果，不只各自 dist 中未合併版本。Native-setter fragment 的來源和digest也列manifest；上游改變需同步驗證。
-
-每個公開 artifact 含或對應 source SHA/config contract/script digest/OS/architecture，發布另提供 SHA256SUMS；checksum 是完整性資訊，不取代來源認證。真正執行測試包括 §14.6 的升級→配置驗證→bot/settings startup/隔離fixture，而非只看 --help。
+保留測試 Docker image、固定 image 身分、依賴安裝／必要第三方 wheel 準備及 Actions artifacts；這些不是產品打包。不新增上游產品發布、不把測試成果 ZIP 說成可安裝搶票產品。
 
 ### 18.2 依賴政策
 
-維持專案 Python 3.11 基準，不為重構而同時大幅升級 runtime dependencies。新增 mypy／Hypothesis 等只進開發依賴；精確版本及 transitive resolution 在 P0 的實際環境驗證後記錄。
+維持專案 Python 3.11 與 P1 已驗證的依賴基準，不為文件改版同時大幅升級 runtime dependencies。mypy／Hypothesis 等開發工具沿用既有配置；只有真實接入需求才調整並記錄精確版本及相依解析結果，不重新從 P0 選一次套件。
 
 不要在計劃裡捏造尚未驗證的版本，也不要為純單元測試匯入 browser／OCR 大套件。
 
@@ -1781,7 +1779,7 @@ Python-side cancellation 不代表 browser 裡的 Promise／observer 自動被�
 
 | 資料 | 可快取的範圍 | 失效條件／不可用法 |
 |---|---|---|
-| JS source、assembled template、resource digest | process lifetime／build version | 不得快取含帳密的完整 invocation 或把 template cache 當頁面 cache |
+| JS source、assembled template、resource digest | process lifetime／source version | 不得快取含帳密的完整 invocation 或把 template cache 當頁面 cache |
 | keyword compiled rules、排序 mode、policy fingerprint | 同一已驗證 settings revision | 設定變更重建，tick 不重算 |
 | tenant route specs、immutable profile | process lifetime | 新版 profile 改變則隨版本更新 |
 | document identity 的 routing hint | 同 context／generation，僅用於喚醒與路由 | commit 仍讀 live document，不能靠 TTL 免檢 |
@@ -1826,7 +1824,7 @@ Python-side cancellation 不代表 browser 裡的 Promise／observer 自動被�
 
 ### 18.11 量測點、時鐘與結果檔
 
-新增 benchmark harness，至少記錄：
+沿用 P1 已有 benchmark harness，按實際重構接入必要量測，不重建平台；至少記錄：
 
 | Metric | 定義 |
 |---|---|
@@ -1862,10 +1860,10 @@ benchmark 輸出 JSON，包含 baseline/candidate SHA、Python/browser/OS、硬�
 | 大小 | date/area 到既有合法上限；seat 100、500、2,000、5,000 作測試規模，超過正式上限者只列 stress，不冒充新增支援 |
 | readiness | 已 ready、延後出現、root re-render、input 非 DOM attribute 變更 |
 | 結果 | 立即成功／延後成功／明確拒絕／transport unknown |
-| 執行環境 | 使用者實際 Windows+Chrome 優先；正式支援 macOS 時另測；source/frozen 分列 |
+| 執行環境 | Windows x64＋Chrome／macOS arm64 各自記 source 結果；Linux 是 CI 參考，不混用結果；不做 frozen |
 | 乾擾 | 單 tab、少量多 tab、慢 log sink、慢 notification、設定熱更新、coordinator contention |
 
-本地純運算採固定輸入做足夠多次迭代；browser 情境先 warm-up，再分多批量測。例如每組 20 次 warm-up、300 次有效樣本、至少 3 批，實際樣本數可依穩定性調整並在報告列出。cold-start 另測，不能用 warm-up 隱藏每一個新 document 都會再付出的初始化成本。
+本地純運算採固定輸入做足夠多次迭代；browser 情境先 warm-up，再分多批量測。例如每組 20 次 warm-up、300 次有效樣本、至少 3 批，實際樣本數可依穩定性調整並在報告列出。cold-start 另測，不能用 warm-up 隱藏每一個新 document 都會再付出的初始化成本。P1 歷史少量 cold 樣本只能作定位基準，不把例如三筆樣本的 p95/p99 宣稱為穩健尾端估計；後續實際比較需足夠樣本及不確定度。
 
 baseline 與 candidate 用不同工作目錄、暫存設定／profile／DB。不得對同一真站交易同時跑兩套引擎。可交替 A/B 順序以減少 CPU 熱度與背景負載影響，不能只挑 candidate 最快的一批。
 
@@ -1928,7 +1926,7 @@ P7 必須比較下列方案，保留有效的優化，無收益的實驗移除�
 | V10 | 在 audit 前變更 document／selection／可售量 | 即使採快取與融合仍拒絕 stale effect |
 | V11 | 重複 ready event／batch completion | 不重複 submit 或 reload，去重是本機 O(1) scope 檢查 |
 | V12 | 同設定與 fixture 的 baseline/candidate | 輸出行為一致，CDP／站點請求數可核對，延遲無實質退化 |
-| V13 | cold start／fresh document／frozen app | 初始化成本單列，不能只公佈最有利的 warm 數字 |
+| V13 | source cold start／fresh document | 初始化成本單列；Windows／macOS 原始碼測試不以 warm 或 Linux 結果代替；取消 frozen variants |
 | V14 | 429／pause／coordinator contention | 速度優化未改動 interval、single-probe 與清理語意 |
 | V15 | ready purchase 和未 commit 的普通 refresh 同時存在 | 不先刷新，精確撤銷舊 dispatch 權，無額外 50 ms/CDP仲裁查詢 |
 | V16 | 新arbiter／input契約冷熱路徑 | 不重載模型或腳本、不掃歷史、不deep-copy；最終input audit融合既有operation |
@@ -1952,132 +1950,132 @@ P0 的 wait inventory 區分核心分派／控制、共用 helper、平台固定
 
 X/T/I 的完整性主要由建構、純 reducer／arbiter 與測試建立，不是讓每次 ready action 都呼叫所有檢查器。沒有 pending 時讀當前 small state，資格成立即 grant；已取得相同 observation 的欄位不再各層查一次。
 
-input/image evidence 的 live 部分放在最後 browser operation；需要額外輪詢只能因原生狀態確實未就緒。仲裁不新增瀏覽器／SQLite往返，frozen升級／manifest／型別／schema全面驗證都不進選票熱路徑。
+input/image evidence 的 live 部分放在最後 browser operation；需要額外輪詢只能因原生狀態確實未就緒。仲裁不新增瀏覽器／SQLite 往返，manifest／型別／schema 全面驗證都不進選票熱路徑；本版不存在 uTiki 升級工作。
 
 速度結果只能從相同可觀察行為與限制的成對量測得出；不得用取消 unknown blocker、刪限流或減少必要回讀換取分數。
 
 ---
 
-## 19. 實作階段與不能跳過的交付閘門
+## 19. 實作階段與有界交付門檻
 
-### 19.1 階段圖
+### 19.1 保留編號，調整不再需要的交付
 
-本節P0–P8是工程階段，不是findings嚴重度。
+P0–P8 是工程階段，不是 finding 嚴重度。P6b 沿用識別但改為離線候選覆核；不得沿用舊的 live 語意或 evidence key。
 
 ```text
-P0 採用紀錄/Issue/actual HEAD/upstream/contract/wait inventory
- → P1 characterization、isolation、strict CI、performance baseline
- → P2 新模型/policy/ports/完整transition規格與ADR
- → P3a production JS外部化 + 同期spec/data/frozen build/self-test
- → P3b 同原語批次化與readiness改善
- → P4 session arbiter + navigation/purchase/input lifecycle
- → P5 refresh與核心所有副作用入口整合
- → P6a 新owner候選接入 + source/frozen upgrader + 全離線驗收
- → P6b 授權範圍內指定真站smoke + 維護者final-delete gate
- → P6c 最終刪除legacy + 全量negative gate + 重建成品
- → P7 有證據的端到端調校/碰撞與上游演練
- → P8 最終SHA/artifact再驗證 + release核准
+既有 P0／P1 成果（保留歷史，不重做）
+ → 一次 v1.6 範圍接入：計劃／catalog／mapping／必要 CI 與治理同步
+ → P2 純模型／current policy／ports／型別
+ → P3a JS 外部化＋同期 source resource／cwd／browser 驗證
+ → P3b 同原語批次操作與 readiness
+ → P4 session arbiter＋navigation／purchase／input lifecycle
+ → P5 refresh 與核心副作用入口整合
+ → P6a 新 owner 接入＋current 設定 UI＋雙平台 source 離線驗收
+ → P6b 固定候選離線獨立覆核＋替代清單＋可回復版本
+ → P6c 最後 legacy 清理＋清理後 source 回歸
+ → P7 依證據做端到端低延遲／碰撞／上游演練
+ → P8 最終 source SHA 驗收與個人使用交接
+
+使用者之後另行手動真站驗收（不阻擋上述工程完成，不是代理操作授權）
 ```
 
-所有熱路徑改動從P0起量測，P7不是第一次看速度；每次可合併變更都必須能build/回退，且對本階段全部實際 Python 變更依 §21.3 逐檔編譯；typed/pytest 不能代替。尚未接production的新引擎可先在隔離測試運作；它的存在不等於已切換，也不允許同一tab雙dispatch。
+actual HEAD 可能已在 P2 或之後；接入本版後從適用位置續做，不要求回到 P0。熱路徑每次實際改動都需量測或有可核對的影響分析；P7 不是第一次看速度。任何階段都只有單一正式 owner。
 
-### 19.2 P0：核對與正式採用
+### 19.2 P0：沿用採用基礎，僅補 v1.6 差異
 
-**前置：** 確認當次工作是review或implementation。只有review則止於只讀資料/文件；沒有授權不自建Issue/PR或改repo。
+核對 actual HEAD、未提交工作、Issue／branch、舊採用紀錄與已完成 review。保留 core-effect／wait／upstream／behavior inventory，移除本次不再適用的產品 target 與轉換策略要求。
 
-**工作：** 核對actual HEAD/工作目錄/upstream URL/SHA/merge base；盤點舊符號、核心effect旁路、共享helper/native setter、全部spec/release目標、設定mixed實際類型、所有已存在測試。依本計劃固定的 153 個案例及原失敗模型細化 obligations；建立獨立 required catalog 與 gate/target 條件並取得規格 review，不從既有測試收集反推。採用ADR-01/02/03，更新直接衝突的規範。
+交付一次 v1.6 adoption／scope-change 紀錄與新 catalog 投影；有效 case 固定 143，實體 obligations 逐項處置且 independent review/digest 成立。不得因 scope 變更再建新的信任服務。需要取得新核准值時提出 exact digest 與差異，不自行把舊值當新值。
 
-**交付：** adoption.md（未核准欄不可假填）、baseline、behavior-contracts、legacy-removal、core-integration/core-effect inventory、upstream-touchpoints、wait-inventory、typed scope、release target manifest、baseline benchmark、required catalog 的固定 ID／obligation 清單與核准 digest 紀錄、語法 gate 的核准 base/candidate 範圍。
+### 19.3 P1：已完成的工具基礎，僅必要版本接合
 
-**驗收：** 原測試實際結果可核對；基準失敗原樣列出；每個核心例外有真實caller而非舊棒球caller；mixed equal策略唯一；對所有§6/8出口有事件/證據/owner。
+P1 歷史結果對應 §2.1 的 exact SHA／v1.5 catalog，不重新製作。現有 pytest／type／syntax／hard-egress／benchmark／artifact／aggregate 繼續使用。
 
-### 19.3 P1：可靠測試、隔離與量測
+v1.6 的新 active catalog／phase 接合須測合法與必要負向回歸，尤其已撤回項不再被當成漏跑、保留項聯合刪除仍失敗、錯 plan/catalog digest 拒絕。必要時在實際修改候選重跑受影響 P1 工具與正常 CI；這是維護與接入，不是重新做 P1 設計。
 
-先讓現有fixtures在可信環境運作，建立CDP之外的hard-egress防線，完成interception失效負向canary。先建立 browser enable/strict flags、required catalog→execution manifest→JUnit→run metadata 四輸入 gate、當次 run-id/SHA/digest 與 modified-Python 逐檔語法 gate，再做 production 遷移。catalog 與 execution manifest 的完整集合核對從 P1 起強制；尚未到期 obligations 保持映射並標 NOT_DUE，不偽造 PASS。
+不得因「個人使用」跳過 strict flags、完整 collection、原始退出碼、硬隔離或結果歸屬；也不得因先前 P1 PASS 宣稱正式購票 runtime 已全面 typed 或真站正確。
 
-有些舊fixture patch route/classifier，只算DOM-shape測試；新增至少一組真origin契約測試，不能用全部舊fixture綠燈冒充此層。建立fake clock/provider/受控pending I/O，避免用固定sleep猜測事件順序。
+### 19.4 P2：純資料、current 設定與完整型別
 
-**驗收：** 故意破壞strict marker、guard、resource、manifest、interception後測試各自變紅；加 H06 全部四輸入／聯合刪除負向案例及 A06/H11 的漏檔／編譯失敗案例，outbound仍被硬隔離攔住。效能baseline記cold/warm/CDP/lag，不設定無根據的加速幅度。
+建立 §4/5 具名 records、current-config validator、ports、claim／receipt、Input/CAPTCHA 型別與 states。所有新／重寫 production 程式進 typed scope；無需求不造額外 core-service framework。
 
-### 19.4 P2：純資料、設定與完整型別
+先驗 canonical-only、missing/invalid、legacy/mixed 的拒絕與提示、current 空值及其他平台 opaque 保留；沒有 converter、conflict-policy 或舊值補入。正式私人設定不被測試覆寫。
 
-依§4/5建立具名records、current-config validator、ports、claim/receipt、input/captcha型別和states。更新新程式typed scope；保留唯一keyword/native setter來源，core服務實作未需要時不造額外integration。
+驗收：D01–D09／C01–C03／A01、適用 H07/H08、完整 typed 與 modified-Python；非法 state 組合不可建構，image generation 不由隨機 UUID 假造；不複製上游規則。
 
-upgrader與current loader輸入分類先做unit tests，尤其canonical-only、legacy-only、mixed-equal/complementary/conflict與empty。正式入口此階段不擅自覆寫使用者設定。
+### 19.5 P3a：JS 外部化與同期 source 資源驗收
 
-**驗收：** D01–D09/C01–C03/A01/typed負向cases，以及當階段 catalog 義務、modified-Python 完整逐檔語法 report；輸入圖像generation不以隨機token假造；所有state不能建出缺attempt/claim的非法組合。新helper不能為了純性複製另一份上游規則。
+先搬移 source，不改 selector、guard 順序或原生事件語意。建立／沿用唯一 assembler、module-relative source loader、current native setter 注入及 codecs。
 
-### 19.5 P3a：JS外部化必須連打包一起完成
+同一變更單位驗 Windows／macOS source loader、root／外部 cwd、中文空白路徑、資源缺失與錯配拒絕；真 browser 執行 production scripts 且 hard-egress 成立。P04/H09/A04 的適用義務在這一階段完成，不延後到 P8。
 
-先機械搬移source、不改selector/guard順序/原生事件語意。建立單一assembler/manifest、current native setter注入與對應browser codecs。
-
-**同一合併單位必做：** spec datas、實際build入口、資源frozen自測、任意cwd、bot/settings最終合併bundle測試。Windows/macOS適用target均實際執行；缺環境則此階段狀態為BLOCKED，不延到P8。
-
-舊workflow在開發過程可直接呼叫新ports，但不建立legacy-model bridge/第二套state/錯誤fallback；最遲P6c移除未替代完的舊入口。新增依賴資料檔時不允許source先合併、spec另開未完成TODO。
-
-**驗收：** source/browser/frozen資源相同digest；catalog 中 P3a 的各 target obligations 齊備，修改的 adapters/build helpers/tests/spec 逐檔編譯；故意缺JS或混合_internal版本時成品自測非零；正式bundle在無source tree也可載入。原guard順序有parity。
+不 build 產品、不新增 spec／frozen/no-Python；既有外部化成果若已完成則直接沿用。開發期舊 workflow 可呼叫新 ports，但不能建立第二套模型／state／fallback；P6c 清除未接替完的歷史入口。
 
 ### 19.6 P3b：可證明的批次操作
 
-合併當頁必要identity/dialog/readiness/候選與目的attestation；live audit留在同次mutation。複用一套原語提供融合操作，不為1次CDP強跨async原生狀態。
+同次 observation 合併 identity/dialog/readiness／候選與目的 attestation；live audit 留在同次 mutation。共用一套原語，不為一次 CDP 強跨真正的 async 原生狀態。
 
-**驗收：** N/S中的browser契約、I01–I08、V01/V03/V04/V09/V10；記command counts、source/frozen延遲；本地input setter失敗禁止submit。P3b若動資源仍重跑P3a打包gate；本階段依 catalog 核對全部必要結果與逐檔語法 report，不因測試搬家減少 required 義務。
+驗 N/S、I01–I08、V01/V03/V04/V09/V10，記實際 commands 與 source 延遲。setter 失敗禁止 submit；資源改動回歸 P3a source gate，不添加產品打包工作。
 
-### 19.7 P4：Arbiter與Purchase/Input完整出口
+### 19.7 P4：Arbiter 與 Purchase/Input 全出口
 
-先建立session writer/ActiveEffect/eligibility/priority/collision matrix，再接三組reducer proposals。輸入子機沒有獨立owner。完整實作§8的RECOVERING/BLOCKED/ACCEPTED/HELD/retire/new-cycle出口及default保持規則；加本地人工恢復控制入口，不保留空白「人工處理」TODO。
+先完成 session writer／ActiveEffect／eligibility／priority／collision matrix，再接三組 reducer proposals。輸入子機沒有獨立 owner。§8 的 recovery、blocked、accepted、held、retire/new-cycle 及預設保持都要有實作；本地人工恢復控制不得留空白 TODO。
 
-**驗收：** X01–X16/T01–T12/I01–I12、submit事實晚到且settings已變、ready purchase與普通refresh競爭、stop與receipt同批、local vs possible效果、manual模式不自動送出。型別scope包含application/adapters，不僅domain；本階段 catalog 結果核對及所有修改 Python 檔逐檔語法檢查亦必須通過。
+驗 X01–X16/T01–T12/I01–I12，涵蓋 late fact／新 policy、ready 與普通 refresh 競爭、stop 與 receipt 同批、local／possible effect、manual 不自動送出。新引擎先在隔離 harness，原正式 route 只有現行 owner；只允許 shadow decision，不允許 shadow effect。
 
-**切換：** 新引擎只在隔離harness驗證，正式route仍只有現行owner；不得用shadow effect比較。僅允許shadow decision。
+### 19.8 P5：Refresh、核心服務與完整生命週期
 
-### 19.8 P5：Refresh、core services與完整生命週期
+保留 SQLite scope/interval/cooldown/lease，使用精確 ReloadHandle；startup/scheduled/health/return/challenge/reset 的旁路按 inventory 接入 arbiter／revoke／handoff。必要核心適配在模組外，不直改 state。
 
-保留SQLite scope/interval/cooldown/lease；用精確ReloadHandle。所有startup/scheduled/health/return入口經arbiter；外層challenge/reset旁路按core-effect inventory納入revoke/handoff。核心適配在模組外且不直改state。
+permit commit unknown 與 browser attempted 分開；確需 receipt API 才作最小已測擴充。驗 R01–R12/L01–L06/X/U04–U09、多程序 SQLite、late cleanup、崩潰／失去 lease；不藉速度放寬已 commit barrier。
 
-permit commit unknown與browser attempted分開；沒有可靠receipt API時只允許最小已測擴充，不從controller偷讀資料庫或重reserve。必要typed結果不能折成可重試bool。
+### 19.9 P6a：原始碼接入、設定可重填與完整離線候選
 
-**驗收：** R01–R12/L01–L06/X碰撞及U04–U09；真SQLite多程序/late cleanup/崩潰/失去lease。普通queued refresh不餓死ready purchase，已commit不能以速度名義搶佔；核心改檔／條件式 bridge／CI helpers／測試一併進本階段語法集合，catalog 不可隨測試刪減。
+主入口切新 bootstrap／ports，候選只用新 owner，正常 import 不到舊 engine。未刪舊檔僅供清理前比較，不能成為 fallback。
 
-### 19.9 P6a：候選接入與可交付升級
+UI/default/load/save/hot reload 只使用 current `utiki`；設定頁能開啟，錯誤可解釋，手動重填步驟清楚；非 uTiki／accounts 合成資料保持。沒有升級器或產品打包。
 
-建立review worktree/候選SHA，main的自訂uTiki接點切新bootstrap/ports，候選只有新owner且不匯入/打包舊engine。舊檔可暫存在開發分支，尚未核准最終刪除，不能用那些檔案作正式fallback。
+對 Windows x64／macOS arm64 的 bot／settings source 入口、資源、依賴及適用隔離 browser 完成驗收。依 143 個 active case 的階段 obligations 與累積 modified-Python 核對；必需 target 缺環境為 BLOCKED，不拿 Linux 代填。
 
-source converter與Windows/macOS frozen upgrader必須在此階段前後完成且**作為P6a完成條件**：artifact/checksum/manifest/no-Python G矩陣全通過；mixed-equal有實際成功輸出。UI/default/load/save/hot reload同步唯一格式，其他平台opaque保留不受損。
+成立後進 P6b，不因 `LIVE_NOT_VERIFIED` 停在 P6a。
 
-**驗收：** D/N/S/R/L/C/A/P/U/V/X/T/I/G/H 的完整 catalog 映射及本 gate 適用 obligations 皆有當次結果；累積 base→candidate 語法 report 全量核對；all-new運作可測，正式bundle不可達legacy/converter。沒有live只可標READY_FOR_LIVE，不能進P6c。
+### 19.10 P6b：離線候選獨立覆核與清理前置
 
-### 19.10 P6b：指定真站驗證與刪除核准
+對固定 P6a source 候選及其直接完整路徑做必要獨立覆核，沿用內容／依賴未變的既有 review。盤點替代責任、所有 caller、舊符號引用、其他平台影響及可回復 source／設定備份指引。
 
-維護者另行指定合法帳號、tenant/page、操作允許範圍、刷新間隔與停止點；用P6a可識別candidate驗證。不增請求頻率，不自動付款。缺頁型或未允許提交的部分如實列明，不能用fixture代填live成功。
+H12 驗證缺必要離線證據、缺覆核、錯候選、尚有未接替 caller 或沒有回復點會阻擋。未真站驗證不構成缺項，不能把舊版 H10 的 live 成功當作本版 gate。沿用現有 review 紀錄與核對方式；自動檢查只驗證紀錄、候選與範圍對應，不宣稱可以機器證明審查品質，不為本 gate 新建 approval service。
 
-**出站gate：** 指定站點/核心流程證據齊全、對應candidate/腳本digest，catalog 的本 gate job/target/evidence 完整（不由 manifest 豁免）；若有 Python 改動先重跑逐檔語法 gate，第二審查者覆核，維護者記錄final-delete核准。無窗口/失敗/授權不足 → LIVE_BLOCKED/FINAL_DELETE_BLOCKED；停止此階段而不是偷偷改規範。
+採用本版且既有工作分支清理授權成立，以上前置全通過即可 P6b 出站並自動進 P6c；不再等待使用者逐檔核准。主代理不能自審冒充獨立覆核；真正無法裁決的功能差異仍需維護者決策。
 
-### 19.11 P6c：最後清除歷史架構
+### 19.11 P6c：最後清除無用歷史架構
 
-在P6b核准後，刪facade/alias/legacy-model/舊workflow/inline替代路徑/private橋接/失效spec依賴，啟用完整negative checks。清理diff限定舊碼移除與引用更新；若又夾帶runtime行為改動，回對應實機gate，不繼承之前證據。
+限定刪除已接替的 facade／alias／legacy model／舊 workflow／inline fallback／private test bridge／失效 current imports。只清本次自訂模組與直接接點；不清其他平台、個人設定或上游歷史打包目錄。
 
-**驗收：** final import graph/打包archive不含舊engine或converter；新typed scope無遺漏；累積 modified-Python 集合明列刪除／改名與現存編譯結果，catalog 的 final-delete 義務齊備；重新build最終bundle和回歸測試。證據記錄「P6b驗證SHA→刪除SHA」差異，不直接把它們當同一SHA測過。
+清理後驗 final import graph、所有 caller、新 typed scope、累積 modified-Python 的 delete/rename／現存檔編譯、source startup 與適用 browser／回歸。若清理牽涉新行為，回相應切片處理、差異覆核後再驗，不冒充純刪除。
 
-開發分支的過渡層此時必須空；最後交付與runtime不保留待未來刪除的歷史相容。這不要求Git抹掉歷史或刪除獨立upgrade tool的legacy資料測試。
+保留清理前→後 SHA 對應；舊證據是比較基準，不是清理後已測證明。最終 runtime 不留下等待未來刪除的相容層；Git 歷史與拒絕 legacy 的測試不必刪。
 
 ### 19.12 P7：低延遲與上游語意演練
 
-依量測排序改善，不重做無收益框架；保持§6仲裁與§8輸入audit，不把檢查變成額外I/O。加入slow sink、readiness storm、casecollisions、resource/retained-task/多tab壓力。
+依量測排序改善，保留 §6 仲裁與 §8 live audit。加入 slow sink、readiness storm、case collisions、多 tab／retained task 資源情境；無收益實驗可回復移除，不建立泛用優化框架。
 
-上游演練包含新gate、變更helper、結果回傳形狀、native-setter修正與spec/核心reload旁路。只在隔離分支/fixture演練，不對使用者日常分支注入假變更。無Git衝突不等於功能正確。
+上游演練涵蓋新 gate、helper／receipt 形狀、native setter、source resource／核心 reload 旁路；只在隔離 worktree／fixture，不注入使用者日常流程。
 
-**驗收：** V01–V16/U/X 必要 obligations 依 catalog 用同 SHA 核對，cold/warm/p95/p99/command counts/失敗與CPU分列；所有效能／build／test helper 改動同樣逐檔編譯。效能改到runtime後，適用browser/frozen/live gate重跑，不以已做過P6b免測。
+驗 V01–V16/U/X 及相關 source/browser／型別／語法。Windows／macOS 成對量測不混平台；相同語意與限制下不接受無理由退化。真站結果另列，不以未手動真站為 P7 blocker。
 
-### 19.13 P8：最終artifact與發布
+### 19.13 P8：最終原始碼驗收與個人使用交接
 
-全部正式target重build bot/settings/upgrader；依已核准 required catalog 的 gate_profiles 彙總全部必要 job/target，累積語法範圍不得漏檔；源SHA、binary與JS digest、current-config契約、JUnit/隔離/升級/live證據一一對應。對最終candidate做適用真站確認，不能把P6b較早SHA報告直接當最後成品驗證。
+固定最終 source SHA；兩個使用目標、適用核心與 UI 行為、JS 資源、current 設定、typed／syntax／catalog／browser／效能／資源清理都有對應證據。核對本版 active obligations，不再包含產品 binary、frozen、upgrader 或 release gate。
 
-維護者批准發布與breaking說明；列出retired APIs、required upgrade、current-core必要適配、支援模式、已測／未測邊界、unknown人工流程與回退。發布門檻不足標RELEASE_BLOCKED；不宣稱永久零技術債或未來零merge conflict。
+交付 source 使用／依賴／設定重填說明、無用舊碼清理結果、可回復版本、已測／未測／限制，以及供使用者之後手動真站檢查的範圍清單。全部離線要求與必要覆核通過可宣告 `SOURCE_REFACTOR_COMPLETE / LIVE_NOT_VERIFIED`，不等待 release 授權。
 
-### 19.14 回退單位
+不推 main、不發布、不建 tag、不自動操作真站。真站由使用者另行執行，不因此把 offline 完成誇大成「搶票必定成功」。
 
-P3a資源/loader/spec自測同組回退；P3b融合優化獨立回退；P4/P5新引擎未上production時可按功能回退；P6 ownership/API/config必要部分配對回退，資料已轉換時用舊binary＋原設定備份。回退不刪coordinator DB/cooldown/lease，不撤銷網站已發生的效果。
+### 19.14 回復單位與局部阻擋
+
+P3a source／loader／resources 同組回復；P3b 融合優化獨立；P4/P5 未接正式入口時按功能回復；P6 ownership/API/current-config 接點一起回復。舊 source 配原設定備份，不提供轉換器或雙寫。
+
+不刪 coordinator DB/cooldown/lease，不假裝回復會撤回網站效果。缺 reviewer／native 隔離／核准值只阻擋相關依賴；可做原計劃允許的獨立工作，但不得跳 phase gate 宣稱完成。工作節奏沿用已採用自主收斂規範，不改回「每個小修都等人」。
 
 ---
 
@@ -2091,7 +2089,7 @@ P3a資源/loader/spec自測同組回退；P3b融合優化獨立回退；P4/P5新
 | `_ctbc_tab_identity`／`_existing_utiki_tab_context` | SessionHandle／TabKey lifecycle | lookup 不 allocate；target recycle 有 generation；close 後不復活 |
 | `_ctbc_purchase_state_key` | `domain.identity` | 明確 tenant/document/auth context；不重新從零拼整份 URL 來做每次小檢查 |
 | `_get_ctbc_page_type`／`_get_utk_sports_profile` | `profiles` | 直接 typed return；刪 legacy dict projection |
-| `_get_utiki_behavior` | `utiki_config` 在載入邊界建立 policy | 正常 runtime 無 legacy fallback；mixed equal 升級在獨立工具，沒有每步 config migration |
+| `_get_utiki_behavior` | `utiki_config` 在載入邊界建立 policy | 正常 runtime 無 legacy fallback；mixed 只提示使用者重填 uTiki，沒有轉換器／每步 config migration |
 | `_ctbc_*_payload` | `adapters.snapshot_codec`／明確 plan serializer | Python domain 使用具名資料；wire mapping 一處定義 |
 | `_ctbc_prefetch_area_snapshot` | browser adapter／`navigation.js` | 保留已驗證的 tenant/response/action 限制；不擴大預取範圍 |
 | fast marker 讀／刪／match | navigation reducer＋browser marker primitive | marker 只是 evidence；compare-and-delete；不因 cache 命中授權購買 |
@@ -2115,14 +2113,14 @@ P3a資源/loader/spec自測同組回退；P3b融合優化獨立回退；P4/P5新
 | `selection._freeze_*` | snapshot_codec＋named snapshots | 刪除 magic field offsets；strict boundary decode 一次 |
 | `selection.parse_*`＋planner/audit | codec／domain／browser audit | 把 raw parsing 與純選擇分離；live audit 留在 browser |
 | `utiki.__init__`／`platforms.ctbc` | 輕量 root／刪除 facade | 所有 caller 直接用新 API；不留下 deprecated forwarding stub |
-| `settings.migrate_config` 中舊 uTiki 遷移／鏡射 | 刪除正常路徑；必要轉換在獨立升級工具 | 其他平台 migrator 保留；不在 load/hot reload 自動接回舊棒球格式 |
+| `settings.migrate_config` 中舊 uTiki 遷移／鏡射 | 刪除舊 uTiki 分支；不建立替代 converter | 其他平台 migrator 保留；uTiki 只讀 current，舊值由使用者重填 |
 | settings UI 的 ctbc 行為元件 | canonical `utiki_*` UI／schema metadata | default/read/save/dirty-check 一致，無雙寫 |
 | `tests.ctbc_support`、private patch | 新 semantic fixtures／ports／事件 trace | 保留行為覆蓋，不保留舊 API 轉接；不以測試 caller 豁免 |
 | 核心 ↔ uTiki 接入／組裝 | 新 `platforms.utiki.bootstrap`；必要current-core適配在外部 | ADR-01預設直接工廠，不建立舊函式群 facade／多重root |
 | current coordinator／notification／credential providers | 有證據才建立模組外 current-core service provider | 只映射現行服務到新 ports；無舊 phase／config migration／鏡射 state |
 | 真正共用 util keyword public API | 核心入口＋唯一 keyword_rules | 非歷史棒球 caller 才有穩定入口例外；新模組直用純來源 |
 
-新增責任也需追蹤：所有頁面 mutation → §6 ActiveEffect；原 image token/reset/fill/OCR 呼叫 → §8 InputState；主程式直接 reload/接管 → §12 request/handoff；converter → §14 Windows/macOS 目標矩陣的適用成品；新仲裁不是在原 wrapper 外再加一套 state。
+新增責任也需追蹤：所有頁面 mutation → §6 ActiveEffect；原 image token/reset/fill/OCR 呼叫 → §8 InputState；主程式直接 reload/接管 → §12 request/handoff；current 設定／source startup → §14 的 Windows/macOS 原始碼矩陣；新仲裁不是在原 wrapper 外再加一套 state。
 
 沒有列出的函式不代表可以刪除。以 caller inventory、測試情境及 side-effect inventory 交叉核對；先證明不再使用或責任已被接手。
 
@@ -2132,7 +2130,7 @@ P3a資源/loader/spec自測同組回退；P3b融合優化獨立回退；P4/P5新
 
 ### 21.1 命令不是執行授權
 
-以下source/target CLI由實作者在授權後使用；本文件沒有執行它們。帶新檔名/旗標的是需建立的交付契約，不能當作基準已有功能。只讀review不得照附件自動修改/執行。
+以下source/target CLI由實作者在授權後使用；本文件沒有執行它們。帶新檔名／旗標的範例是契約示意，先查已完成 P1／actual HEAD 的現行介面再使用；不為文字範例另做一套同名工具。只讀review不得照附件自動修改/執行。
 
 ```bash
 git status --short
@@ -2175,19 +2173,19 @@ finally {
 
 #### 21.3.1 語法範圍：Git 事實＋manifest，不是固定目錄
 
-以 `tools/verify_modified_python.py`（待實作）建立／驗證本階段 `modified-python.json`，再逐檔呼叫 `py_compile.compile(..., doraise=True)`。這是依既有 AGENTS.md「對修改過的 Python 檔逐一編譯」要求的可機器驗收契約。[R12] 本輪僅修訂文件，沒有對 repository Python 檔執行語法 gate。
+沿用 `tools/verify_modified_python.py` 建立／驗證本階段 `modified-python.json`，再逐檔呼叫 `py_compile.compile(..., doraise=True)`。這是依既有 AGENTS.md「對修改過的 Python 檔逐一編譯」要求的可機器驗收契約。[R12] 本輪僅修訂文件，沒有對 repository Python 檔執行語法 gate。
 
-範圍為核准 base→candidate 的**整個 repository** Python 變更集合，不先限縮到 uTiki 目錄，也不依 pytest 是否 import 決定。至少涵蓋所有實際修改的 production、tools/migrations/CI／benchmark、build helper、tests，包含 `src/nodriver_tixcraft.py`、`src/settings.py`、實際建立的 `src/utiki_core_services.py` 及 checker 自身。未修改檔可因階段規格額外列入，但不能用 allowlist 排除任何已辨識的變更。
+範圍為核准 base→candidate 的**整個 repository** Python 變更集合，不先限縮到 uTiki 目錄，也不依 pytest 是否 import 決定。至少涵蓋所有實際修改的 production、CI／benchmark／工具、測試 image helper、tests，包含 `src/nodriver_tixcraft.py`、`src/settings.py`、實際建立的 `src/utiki_core_services.py` 及 checker 自身。未修改檔可因階段規格額外列入，但不能用 allowlist 排除任何已辨識的變更。
 
 | 集合來源 | 必須處理 |
 |---|---|
 | `base_ref..candidate_ref` | 比較已解析的 exact Git SHA，讀 NUL 分隔 name-status；不可由 caller 任選較近 base 來縮小集合 |
 | local staged／working tree | 與 HEAD／index 的變更聯集，涵蓋 staged 後又修改的檔案；編譯實際工作目錄位元組，非過期 index 副本 |
 | untracked | `git ls-files --others --exclude-standard -z` 的所有新增 Python 檔；不可只看 tracked diff |
-| added／modified／copied／type-changed | 現存 `.py` 全列入；可執行 Python build recipe `.spec` 亦作額外 compile-only 項，不執行 PyInstaller |
+| added／modified／copied／type-changed | 現存 `.py` 全列入；若確實修改既有 Python recipe `.spec`，仍按既有 gate 額外 compile-only，不執行 PyInstaller，也不因此要求新增或維護產品 spec |
 | renamed | 新路徑為 Python 則編譯新路徑；保留原路徑與 status；改名不得漏檔 |
 | deleted／改名至非 Python | Git 明確確認移除者列 `DELETED/RETIRED_PATH`，驗不存在後不編譯；這不是可默默忽略的缺檔 |
-| ignored／generated source | 正式或測試 Python 原始碼不得藏於 ignore 規則逃逸；必要 generated build source 須在核准 build-source inventory 列明來源、路徑與 digest 並加入範圍，無 inventory 則阻擋 |
+| ignored／generated source | 正式或測試 Python 原始碼不得藏於 ignore 規則逃逸；必要 generated Python source 須在沿用的核准 build-source inventory 列明來源、路徑與 digest 並加入範圍，無 inventory 則阻擋 |
 
 正常 `.venv`／第三方快取不是本計劃原始碼，不掃整個環境；但不能用寬泛目錄排除把真正修改的 tracked/untracked/build-source 檔一起跳過。symlink、路徑穿越、大小寫碰撞、unmerged entries 或無法確定的 type change，拒絕並列原因，不追到 repository 外編譯不明檔案。
 
@@ -2207,7 +2205,7 @@ manifest 至少包含 `schema_version`、`run_id`、`job_id`、`phase`、`base_s
 
 #### 21.3.3 命令契約
 
-以下變數由正式 launcher 在授權後建立：`BASE_SHA`、`CANDIDATE_SHA`、`RUN_DIR`、`RUN_ID`、`APPROVED_CATALOG_SHA256`。`RUN_DIR` 為唯一 run/attempt/job 目錄；核准 digest 不從測試清單取得。參數未提供、仍是 placeholder、與 metadata 不一致皆非零。
+以下變數由正式 launcher 在授權後建立：`BASE_SHA`、`CANDIDATE_SHA`、`RUN_DIR`、`RUN_ID`、`PHASE`、`APPROVED_CATALOG_SHA256`。`RUN_DIR` 為唯一 run/attempt/job 目錄；核准 digest 不從測試清單取得。參數未提供、仍是 placeholder、與 metadata 不一致皆非零。
 
 ```bash
 python tools/verify_modified_python.py --base-ref "$BASE_SHA" --candidate-ref "$CANDIDATE_SHA" --run-metadata "$RUN_DIR/run-context.json" --write-manifest "$RUN_DIR/modified-python.json" && \
@@ -2215,11 +2213,11 @@ python tools/verify_modified_python.py --base-ref "$BASE_SHA" --candidate-ref "$
 python tools/check_utiki_architecture.py --strict --core-inventory docs/02-development/utiki-refactor/core-integration-inventory.md
 python tools/check_upstream_boundary.py --inventory docs/02-development/utiki-refactor/upstream-touchpoints.md
 python tools/run_utiki_typecheck.py --manifest ci/utiki-typed-scope.txt --config ci/mypy-utiki.ini
-python -m pytest --strict-config --strict-markers tests/unit/utiki tests/contract/utiki tests/integration/utiki tests/architecture tests/upstream_integration tests/upgrade/utiki
+python -m pytest --strict-config --strict-markers tests/unit/utiki tests/contract/utiki tests/integration/utiki tests/architecture tests/upstream_integration
 python -m pytest --strict-config --strict-markers tests/performance/utiki
 ```
 
-CI 每行視為必要 step，shell 必須採失敗即停或明確保存各 exit code；不能把以上多行貼成只看最後一行結果。`--write-manifest` 僅建立查核清單，**不是**語法 PASS；第二行重新推導範圍、逐檔編譯才是 gate。local dirty 執行須明確開 `--include-worktree`，生成與驗證兩次皆使用同一模式，報告不得供 clean/release gate 冒用。
+CI 每行視為必要 step，shell 必須採失敗即停或明確保存各 exit code；不能把以上多行貼成只看最後一行結果。`--write-manifest` 僅建立查核清單，**不是**語法 PASS；第二行重新推導範圍、逐檔編譯才是 gate。local dirty 執行須明確開 `--include-worktree`，生成與驗證兩次皆使用同一模式，報告不得供 clean candidate 的正式工程 gate 冒用。
 
 type runner 仍必須實際呼叫 mypy strict 並列被檢檔案，維持 §17.2 的完整 typed scope。syntax manifest 可以包含未全面型別化的上游修改檔及相關測試，**範圍不得被較小的 typed manifest 截斷**。兩種 checker 不互相取代。
 
@@ -2235,16 +2233,16 @@ python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cas
 各 job 彙總範例：
 
 ```bash
-python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --run-index "$RUN_DIR/gate-runs.json" --phase P6a
+python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cases.json --approved-catalog-sha256 "$APPROVED_CATALOG_SHA256" --execution-manifest tests/fixtures/utiki/manifest.json --run-index "$RUN_DIR/gate-runs.json" --phase "$PHASE" --run-id "$RUN_ID" --candidate-sha "$CANDIDATE_SHA"
 ```
 
-`--run-index` 列出每個 job 的 JUnit＋run metadata 路徑、digest 與 job/target，不替代四輸入核對；aggregator 對每一組仍接收四份資料並按 catalog 的 gate_profiles 驗完整集合。source/type/syntax/frozen 非 pytest 工具的必要結果以原始 report/exit code 作 evidence；不得製造不存在的 testcase 冒充測過。live 仍走既有人工授權／證據門檻。
+`--run-index` 列出每個 job 的 JUnit＋run metadata 路徑、digest 與 job/target，不替代四輸入核對；aggregator 對每一組仍接收四份資料並按 catalog 的 gate_profiles 驗完整集合。source/type/syntax 等非 pytest 工具的必要結果以原始 report/exit code 作 evidence；只有該 catalog job 明示無 testcase 才可使用空 JUnit，不得為應跑測試的 job 豁免零收集。手動真站紀錄獨立於工程出站。
 
 #### 21.3.4 A06／H11 必備負向驗收
 
 | 子案例 | 注入 | 必須結果 |
 |---|---|---|
-| outside-fixed-roots | 僅修改主入口、settings、migration、CI/build helper 或測試檔，並放入語法錯 | 即使 pytest 不 import，逐檔 gate 仍發現並非零 |
+| outside-fixed-roots | 僅修改主入口、settings、CI／測試 image helper 或測試檔，並放入語法錯 | 即使 pytest 不 import，逐檔 gate 仍發現並非零 |
 | new-or-untracked-omitted | 新增 `.py` 卻刪其 manifest entry；含 untracked 與新目錄 | 重新推導 Git 集合發現漏列；非零 |
 | staged-and-working | staged 成功版本之後把 working tree 改壞 | local 模式編譯真實位元組；CI dirty 候選拒絕 |
 | missing-file | manifest 要求 compile，但檔案意外不存在 | 不 skip，不以空集合通過 |
@@ -2255,57 +2253,41 @@ python tools/verify_utiki_ci_results.py --required-catalog ci/utiki-required-cas
 | ignored-build-source | generated／ignored Python 被交付或執行卻無 build-source inventory | 範圍無法完整證明，BLOCKED／非零 |
 | self-or-zero-compile | checker 自身修改漏列，或有變更但編譯數為零 | 不予通過；確實無變更另回 NO_PYTHON_CHANGES |
 
-這些是待實作的 repository gate 測試規格，不是 v1.5 文件檢查已執行的程式測試。負向測試的合成故障只能在隔離副本／臨時 fixture，不能破壞使用者分支。
+這些是沿用的 repository gate 測試契約，不是本輪 v1.6 文件檢查已執行的程式測試。負向測試的合成故障只能在隔離副本／臨時 fixture，不能破壞使用者分支。
 
-### 21.4 升級CLI與frozen CLI
+### 21.4 使用者重新設定：不新增轉換命令
 
-source與frozen共用相同參數／exit-code契約：
+不提供 `convert_utiki_config.py`／upgrader／conflict-policy 指令，也不要求建立另一支 reset CLI。個人使用指引只包含：
 
-```bash
-python tools/migrations/convert_utiki_config.py --input old-profile.json --dry-run
-python tools/migrations/convert_utiki_config.py --input old-profile.json --output converted-profile.json
-python tools/migrations/convert_utiki_config.py --input conflicting-profile.json --output converted-profile.json --conflict-policy canonical
+1. 停止使用該設定檔的 bot/settings；另行人工核對既有未決交易。
+2. 在本機私人位置備份原設定；不加入 Git／artifact。
+3. 只手動移除確認為歷史 uTiki 行為的 `ctbc` section，填入 current `utiki` 區段；不要刪 `accounts` 或其他平台內容。
+4. 用既有設定網頁檢查／保存 current 值，開新流程前確定新格式有效。
+5. 測試與代理實作只使用合成檔案，不擅自替使用者完成上述私人檔案操作。
+
+最小 current 區段示意如下，這不是完整設定檔，也不是覆寫整份 `settings.json` 的命令：
+
+```json
+{
+  "utiki": {
+    "ticket_type_keyword": "全票",
+    "seat_sorting": "row_seat",
+    "seat_selection_mode": "manual"
+  }
+}
 ```
 
-Windows使用解壓成品（執行前核對checksum；以下目標路徑是規格）：
+實際完整欄位及值以 current schema／既有 UI 為準；例子不為其他平台重建預設，也不移動 credentials。使用者已有合法 canonical-only 設定就不需重填。
 
-```powershell
-.\utiki-profile-upgrader.exe --input .\old-profile.json --dry-run
-if ($LASTEXITCODE -ne 0) { throw 'Upgrade validation failed' }
-.\utiki-profile-upgrader.exe --input .\old-profile.json --output .\converted-profile.json
-if ($LASTEXITCODE -ne 0) { throw 'Upgrade failed' }
-.\nodriver_tixcraft.exe --self-test-utiki-config --input .\converted-profile.json
-if ($LASTEXITCODE -ne 0) { throw 'Frozen bot configuration failed' }
-.\settings.exe --self-test-utiki-config --input .\converted-profile.json
-if ($LASTEXITCODE -ne 0) { throw 'Frozen settings configuration failed' }
-```
+### 21.5 Source 啟動與測試 image 的命令責任
 
-macOS arm64解壓獨立成品：
+實作者先核對 actual HEAD 的 bot/settings 啟動入口、虛擬環境、設定位置與現行 CLI。交付 Windows／macOS 各一份實測 source 啟動命令與必要環境說明；不要抄舊 exe 指令，也不要把未支援的自測旗標寫成已存在。
 
-```bash
-./utiki-profile-upgrader --input ./old-profile.json --dry-run && \
-./utiki-profile-upgrader --input ./old-profile.json --output ./converted-profile.json && \
-./nodriver_tixcraft --self-test-utiki-config --input ./converted-profile.json && \
-./settings --self-test-utiki-config --input ./converted-profile.json
-```
+最終需要驗到 source settings 的 loopback 讀取／保存，以及 source bot 在隔離 fixture 的實際初始化／運作。可使用既有 harness／自測入口，不要求為此新增一組發布 CLI。所有例行原始碼測試與 browser 命令仍遵循 §17、§21.2–21.3。
 
-這些`--self-test-utiki-config`是需新增的無網路驗收入口；不能啟動真站、不能自動轉換。config自測以外仍須§14.6真正frozen startup/loopback CRUD/隔離fixture E2E。沒有system Python的目標VM可由CI外部host控制，不必在該VM以Python啟動test harness。
+Docker 測試 image 準備沿用 P1 已驗證的 builder 與 workflow，先核對實際介面，不重造包裝。依賴安裝、必要第三方 wheel、固定 image 準備在測試前完成；執行 browser／driver／子程序時保留 hard-egress、非日常 profile、無秘密與可核對 cleanup。
 
-CLI：conflict policy `error`預設／`canonical`／`legacy`；in-place需explicit備份且不能與output並用；目標存在預設拒絕。exit0只代表成功或合法no-op；格式/衝突/I/O錯誤非零並有機器可讀reason。不得在stdout/stderr印secret值。
-
-### 21.5 Build與frozen驗收
-
-```bash
-python -m PyInstaller build_scripts/nodriver_tixcraft.spec --clean --noconfirm
-python -m PyInstaller build_scripts/settings.spec --clean --noconfirm
-python -m PyInstaller build_scripts/utiki_profile_upgrader.spec --clean --noconfirm
-python build_scripts/verify_utiki_bundle.py --targets ci/utiki-release-targets.json --require-current-resources --reject-legacy-runtime
-python build_scripts/test_frozen_utiki_upgrade.py --targets ci/utiki-release-targets.json --fixtures tests/upgrade/utiki
-```
-
-每個OS只build其適用target，target manifest不能要求跨OS生出未測binary。既有release assembly及macOS封裝方式沿用，不直接假設三份dist合併就可交付。以上兩個新test script的實作要驗證實際bundle/digest/非source路徑；不可只看檔案存在。
-
-P3首次改production resource時bot/settings先完成build+frozen自測；upgrader在P6a前成為必要完成項。公開release workflow必須上傳獨立upgrade assets、SHA256SUMS/manifest，不只build後留在workspace。
+本版沒有 PyInstaller／bot/settings/upgrader 產品建置命令，也不要求無 Python／無 source tree／`_internal` 自測。若較早自訂 build helper 已不再使用，只在證明 caller 清空後作範圍內清理；上游其他用途 build 檔不順便刪。
 
 ### 21.6 Benchmark與結果表
 
@@ -2317,46 +2299,43 @@ python tools/benchmarks/compare_utiki.py --baseline artifacts/baseline.json --ca
 
 同環境成對量測；seed/sample只是初始規格，最終附不確定度與失敗樣本，不以平均值掩蓋tail latency。包括arbiter/ready-vs-refresh案例，不能只測沒有競爭的happy path。
 
-每階段報告：adoption/Issue、actual/baseline/upstream/candidate SHA、source與script/binary digest、變更行為、原根因→案例→實作、retired符號與真核心例外、typed scope、required catalog 與核准 digest、execution manifest／run metadata／JUnit digests、適用性與 gate 彙總、modified-Python 的 base/candidate／逐檔語法 report、完整test命令/collected/pass/fail/skip/xfail/xpass、isolation canary、frozen升級、live範圍、效能與資源、未測與下一個blocked gate、rollback。
+每階段報告：adoption/Issue、actual/baseline/upstream/candidate SHA、source 與 script／適用測試 image digest、變更行為、原根因→案例→實作、retired符號與真核心例外、typed scope、required catalog 與核准 digest、execution manifest／run metadata／JUnit digests、適用性與 gate 彙總、modified-Python 的 base/candidate／逐檔語法 report、完整 test 命令／collected/pass/fail/skip/xfail/xpass、isolation canary、source/native startup、另列手動真站狀態、效能與資源、未測與下一個 blocked gate、source 回復。
 
-沒有執行的測試記NOT RUN；沒有真站窗口記LIVE/DELETE/RELEASE BLOCKED，不能用code compile代填PASS。
+沒有執行的必要離線測試記 NOT_RUN／BLOCKED，不能用 compile 代填 PASS。尚未手動真站記 LIVE_NOT_VERIFIED，與離線工程結果分列，不因此阻擋本版清理與完成。
 
 ---
 
-## 22. 上游同步、升級與回退
+## 22. 上游同步、手動重新設定與回復
 
 ### 22.1 上游交界的最小變更策略
 
 P0 固定 actual HEAD、真實 upstream URL/ref/SHA、merge base 與上次整合點。`fetch` 與 `merge/rebase` 分開；不假設 origin 是原作者，也不宣稱本輪重新核對最新分支。
 
-自訂模組的清理提交、shared helper 改動、core gate/route 接入、settings/upgrader、打包分開管理。主入口使用新 bootstrap 而非重排整份路由。真正需要的 current-core mapping 放入精確 inventory；不能以減少 diff 為由保留舊棒球 API。
+自訂模組的清理提交、shared helper 改動、core gate/route 接入、settings/current 設定與 source resources 分開管理。主入口使用新 bootstrap 而非重排整份路由。真正需要的 current-core mapping 放入精確 inventory；不能以減少 diff 為由保留舊棒球 API。
 
 ### 22.2 上游更新演練與正式整合
 
 在獨立整合分支／worktree 查看上游增量與 touchpoint 的交集，包括已搬到新檔、但原作者仍在原位置修改的同一規則。跟隨維護者選擇的 merge/rebase 策略，不擅自重寫已分享歷史。
 
-檢查新 gate 是否能限制已 attach worker；所有外層自動 reload/導航是否走 session 仲裁；共用規則是否仍只有一份；API/設定/打包變動是否有無損結果映射。沒有文字衝突不代表行為正確。
+檢查新 gate 是否能限制已 attach worker；所有外層自動 reload/導航是否走 session 仲裁；共用規則是否仍只有一份；API／current 設定／source resources 變動是否有正確結果映射。沒有文字衝突不代表行為正確。
 
-跑受影響的 unit/contract、U/X/I、browser、frozen 與 V cases。runtime 或 scripts 有變就更新相關 live gate，不沿用不同 SHA 的結果。U05/U06/U08 是代表性的受控演練，不保證將來零衝突，也不需要先重構其他平台。
+跑受影響的 unit/contract、U/X/I、browser、source startup 與 V cases。runtime 或 scripts 有變就做適用離線回歸；既有手動真站結果僅標示其原 SHA，不宣稱涵蓋新版本。U05/U06/U08 是代表性的受控演練，不保證將來零衝突，也不需要先重構其他平台。
 
-### 22.3 升級程序
+### 22.3 個人原始碼版本切換
 
-1. 保存可回退的 binary/commit、設定備份及其配對關係；秘密檔案不提交。
-2. 停止使用同組設定／coordinator 的舊實例，人工核對在途交易；不要把舊 session memory 搬到新型別。
-3. 使用符合 OS/architecture 的獨立 frozen upgrader，先 dry-run。基準的 mixed-equal profile 一樣要轉換；衝突預設失敗，操作者明示取捨。
-4. 輸出新路徑、驗證 accounts/非 uTiki 資料保持，記錄 manifest；多檔失敗依 manifest 處理，不宣稱跨檔 atomic。
-5. 用新 frozen bot/settings 檢查資源與配置，且不匯入 converter。真正啟動測試依 §14.6，不只 `--help` 或匯入成功。
-6. 從明確新起點建立 session；已知／未知舊交易按 §8.7 人工處理，不自動再次加入購物車。
+保存可回復 source commit 與私人設定備份，停止舊實例；只有 uTiki 行為重新設定。先使用合成設定完成工程驗收，真正私人檔案由使用者按 §11／§21.4 手動處理。
 
-新 profile 本來完全符合唯一正式格式可直接使用。個別操作者明確選擇重建配置可以不用 converter，但不影響公開升級版本必須提供可用 frozen upgrader 的要求。
+在記錄的 Python／依賴環境啟動同一新 source 的 settings 與 bot；正式 uTiki 入口只理解 current 格式。首次真站使用由使用者自行決定，從可信新起點進入，不承接來源不明的舊 submit intent。
 
-### 22.4 回退程序與限制
+沒有 converter，也不要求舊值自動保留。accounts／其他平台不因 uTiki 重填而重建；不藉更換設定解除網站 quota 或舊 unknown 結果。
 
-停止新版，保存脫敏 evidence，核對網站實際交易，再配對回退舊 binary/commit 與原設定備份；ownership 接合組合一起回退，不讓兩版同時操作 tab。不要靠新版內的一套舊引擎作 fallback。
+### 22.4 回復程序與限制
 
-coordinator schema 預設不變；不可清 cooldown/lease、刪 DB 來讓程式重試。若確有 schema 變更，另核准升降版矩陣；只換 wrapper 不應偷偷改 shared 協議。
+停止新版，保留脫敏診斷，配對舊 source commit 與原設定備份；ownership/API/current-config 接合一起回復，不在同一 tab 執行兩版。使用者工作與秘密不可被 reset／clean 或整批 restore 覆寫。
 
-本地回退不取消已送出的網站請求。使用者回報「沒有訂單」也不會變成可證明的 server receipt；保留資訊來源與警示。跨崩潰沒有持久化 ledger，不宣稱 exactly-once。
+coordinator schema 預設不變；不得刪 cooldown／lease／DB 來讓程式再嘗試。若真的需要 schema 變更，另作明確需求決策，不假借小型 adapter 改 shared 協議。
+
+本地回復不會取消已送出的網站請求。沒有持久化購票 ledger，不能宣稱跨崩潰 exactly-once；使用者回報與 server evidence 仍分開。
 
 ### 22.5 主要風險與對應驗收
 
@@ -2366,58 +2345,55 @@ coordinator schema 預設不變；不可清 cooldown/lease、刪 DB 來讓程式
 | 普通刷新優先級過高拖慢購票 | ready-vs-refresh 測試與 V15，本地撤銷未 commit refresh 權限 |
 | 模型有進無出、人工 restart 清掉未知 | T 系列、完整 state/event 預設保持規則、retired-unresolved |
 | input ready 虛假或 stale OCR 填新頁 | I 系列、native setter與框架回讀、input/challenge identity |
-| 設定鏡射被 loader 偷轉換 | C/G/U10，mixed-equal 輸入拒絕與獨立轉換 |
-| source 可用但 frozen 缺 scripts/upgrader | P3/P6a package gate、G/H、無 source tree/無 system Python |
+| 設定鏡射被 loader 偷轉換或重填誤傷其他平台 | C01–C06/U10/P05，legacy/mixed 拒絕；current 空值／原子保存／其他資料保持 |
+| source 換 cwd／OS 後缺 JS 或 settings/bot 契約分歧 | P04/P05/H09/A04，原生 source 啟動與同版本資源 |
 | interception 失效真的外送 | H01–H04，獨立 OS 網路限制＋故障注入 |
 | 型別／marker／案例集合或語法 gate 假綠 | H05–H08/H11/A06；獨立 catalog＋四輸入核對、逐檔語法範圍；聯合刪例／錯 marker／漏新檔／舊 JUnit 均拒絕 |
 | 頂層 integration 增生或藏 legacy | ADR-01、U11/U12、精確 current-core inventory |
-| 刪除／發布前沒有 live 授權或證據 | P6b→P6c／P8 adoption/evidence gate，不預設放行 |
+| 未完成替代／離線覆核就刪 legacy，或誇大真站能力 | H12/P6b→P6c；缺前置阻擋清理；離線完成另列 LIVE_NOT_VERIFIED |
 
 ---
 
 ## 23. 完成定義與防回歸護欄
 
-### 23.1 必須逐項附證據
+### 23.1 原始碼工程完成清單
 
-- [ ] 維護者正式採用 v1.5/digest、Issue/branch/實作範圍已記錄；live/release 授權獨立。
-- [ ] ADR-01 選擇直接新 bootstrap 或有證據的 current-core 適配；無重複 composition root。
-- [ ] domain/profile/config 不拉入 browser/UI/OCR/I/O；application 不拼 JS 或直接操作 tab。
-- [ ] 唯一 session writer、唯一 ActiveEffect；三個 reducer 只提 proposals，所有 mutation 經仲裁。
-- [ ] unresolved submit 跨 callback/timeout 仍禁止旁路 reload/nav/input；matched late receipt 不被 policy revision 丟棄。
-- [ ] ordinary refresh 讓位 ready purchase；已進 permit commit 或可能發送者不可被假定無效果而搶佔。
-- [ ] PurchaseState/InputState 每個 state 有出站／保持／拒絕規則；人工 resolution、retire、新 cycle 可測且不自動重送。
-- [ ] CAPTCHA/reset/OCR/input evidence 有 context/version，native setter 唯一來源與回讀失敗會阻止送出。
-- [ ] snapshot 不使用 magic 欄位索引；raw decode 一次，狀態更新 structural sharing。
-- [ ] 關閉與 late completion 不復活 session、不清其他 token；所有工作／waiter／lease 有界。
-- [ ] 新 runtime/load/hot reload 不轉換舊棒球配置；mixed equal 拒絕並指向獨立升級。
-- [ ] 公開升級有 Windows x64/macOS arm64 frozen upgrader、checksums、manifest、無 Python E2E與配對回退。
-- [ ] 新 API/caller/UI/default/save/spec 一致；舊 facade/model/decoder/workflow/alias/mirror/test bridge 最終清零。
-- [ ] current-core 必要適配只在模組外且有獨立契約證據；沒有整個目錄掃描豁免。
-- [ ] 所有新增／重寫模組含 application/ports/adapters/bridge/upgrader 都在 typed manifest；沒有廣泛 Any 逃逸。
-- [ ] required catalog 已按本計劃 153 個固定 ID／全部必要 obligations 核准，獨立於測試收集及 execution manifest；所有修改附 review 與 old/new digest。
-- [ ] checker 同時核對 catalog、execution manifest、JUnit、run metadata 與受保護 expected digest；完整集合、重複／未知 ID、適用性、run/attempt/SHA/digest 及全 gate job/target 均可驗。
-- [ ] browser job 保留 strict-config/strict-markers；適用 required case 的缺失/skip/xfail/xpass/未執行皆非零，不能用舊 XML 或輔助 case 假綠。
-- [ ] 本階段及最終累積 Git 變更集合與 modified-Python manifest 相符；production、tool、build helper、test 及所有新檔逐檔 py_compile；明確刪除另記，非預期缺檔／漏檔／編譯失敗非零。
-- [ ] A06/H06/H11 負向測試確實能攔截聯合刪例、未核准 catalog、偽造不適用、錯 digest/SHA、漏新檔及未被 pytest import 的語法錯。
-- [ ] production-origin fixture 有獨立 hard-egress deny；interceptor 故障測試證明無真站外送。
-- [ ] P3 首次資源外部化已同步打包／frozen 自測；不是到 P8 才發現 missing JS。
-- [ ] P6b 指定 live evidence 已先於 P6c 最後刪除；無窗口則 DELETE_BLOCKED，不把規範改掉湊過。
-- [ ] D/N/S/R/L/C/A/P/U/V/X/T/I/G/H 的適用案例都映射到執行證據，未驗證如實列出。
-- [ ] 同條件 cold/warm/median/p95/p99、CDP／網站請求數、失敗率、CPU/資源可核對；沒有無收益排程退化。
-- [ ] 最終 source/build/runtime/script digest 一致；P7/P8 修改後重跑相關驗證，舊 SHA 報告不冒充新版本已測。
-- [ ] 殘餘新風險有影響與處理範圍；不聲稱永久零技術債、跨崩潰 exactly-once、全平台已加速或上游零衝突。
+- [ ] v1.6 全文／digest、需求變更、當次 Issue/branch/實作授權與新 catalog 核准已記錄；舊 P1 原始成果保留。
+- [ ] ADR-01 的直接新 bootstrap 或必要 current-core 薄適配有依據，沒有重複 root。
+- [ ] domain/profile/config 不拉 browser/UI/OCR/I/O；application 不拼 JS、不直接操作 tab。
+- [ ] 唯一 writer／ActiveEffect，三個 reducer 只提 proposals，所有 mutation 與核心旁路經仲裁。
+- [ ] unknown submit 不因 timeout／設定／刷新被抹掉；matched late receipt 仍歸原 attempt。
+- [ ] ordinary refresh 讓位 ready purchase，已進 permit commit／possible effect 不被假設未發生。
+- [ ] Purchase／Input 所有出站／保持／拒絕／人工 retire／新 cycle 有效；原 native setter 及 stale OCR/reset 保護完整。
+- [ ] 具名 snapshot、單一 raw codec、structural sharing，沒有 magic 欄位索引或無意義深複製。
+- [ ] close／late completion／exact cleanup／waiter／lease 有界，不復活 session 或清別人的 token。
+- [ ] current `utiki` 唯一格式；legacy/mixed 只提示重新設定，沒有 converter、mirror、fallback 或舊值自動搬入。
+- [ ] 設定網頁仍可用；其他平台／accounts／私人資料不因 uTiki 重填受損；正常保存失敗保留來源。
+- [ ] 新 API/caller/UI/default/save/source-resource 一致；舊 facade/model/decoder/workflow/alias/test bridge 清理完成。
+- [ ] 不交付升級器／產品打包／frozen／無 Python／release；沒有只改名稱而保留的替代框架。
+- [ ] Windows x64 與 macOS arm64 直接 source 啟動／配置／資源／適用 browser 契約都具有原生證據。
+- [ ] 全部新／重寫 production 模組在 typed scope，無廣域 Any／ignore 逃逸；P1 受控 fixture 的 PASS 不代替 production 型別驗收。
+- [ ] 143 個 active case 及其 obligations 由獨立 catalog 定義；13 個撤回 ID 有正式處置，3 個新 ID 未重用舊義務結果。
+- [ ] 四輸入 gate 核對完整集合、PASS_ONLY、run/attempt/SHA/digest／job/target；case 搬家不縮需求，舊版核准值不冒充新版。
+- [ ] Git 推導的完整 modified-Python 集合涵蓋所有實際 production/tool/test/image-helper 改動，含新檔／rename／delete／checker 本身；逐檔 compile 結果可核對。
+- [ ] A05/A06/H06/H11 的聯合刪除／偽造不適用／錯版本／漏編譯負向保護保留；非 pytest 空 JUnit 例外只用於對應 evidence job。
+- [ ] production-origin／native browser 測試保留 hard-egress；interceptor 失效仍不外送；Linux 不代填其他 OS。
+- [ ] P3a source 資源同期驗證；P6b 離線候選覆核後 P6c 刪除，清理後重新驗對應 source，不重開真站門檻。
+- [ ] 相同條件的 source cold/warm／CDP／failure／CPU/資源與效能差異可核對，沒有為分層增加無用途 hop／sleep／I/O。
+- [ ] 最終 source SHA、JS/current-config／catalog／測試 image 與原始報告吻合；新候選不拼舊 run／attempt 充數。
+- [ ] 完成 source 使用／重填／回復指引；原始碼工程結果與 `LIVE_NOT_VERIFIED` 分開，不以未真站作工程 blocker，也不宣稱實際購票保證。
 
 ### 23.2 機器檢查與人工審查的分工
 
 AST/import scanner 驗 DAG、retired symbol、raw browser/filesystem primitive、不可信資料進入點、resources 與 typed manifest；它不能證明動態 Python 沒有任何非法行為。
 
-contract/stateful tests 驗 claim/reducer/控制/receipt 時序，browser tests 驗 production JS，frozen tests 驗真正交付物，live evidence 驗當前受影響站點。各層不互相冒充。
+contract/stateful tests 驗 claim/reducer/控制/receipt 時序，browser tests 驗 production JS，原生 source tests 驗雙平台啟動與依賴，使用者另行手動真站才驗當前站點。各層不互相冒充，沒有 frozen／產品成品 gate。
 
 required catalog 獨立定義必要 case/obligation/variant、層級、gate/OS/tenant 與適用條件；execution manifest 只映射實作／node ID／證據。`verify_utiki_ci_results.py` 同時接收這兩份檔、JUnit、run metadata，核對外部核准 catalog digest 及完整集合。測試搬家可更新 node ID，不能刪除 invariant 或讓不適用條件由執行清單自行宣告；細節見 §16.11／§17.5。
 
-逐檔語法 checker 另外從 Git／核准 build-source inventory 推導完整 modified-Python 集合，交叉核對 manifest，再以 py_compile 編譯每個應編譯檔。不得依 pytest import、typed scope 或固定 compileall 目錄猜測覆蓋完整；syntax PASS 只證明該 interpreter 下語法可編譯，不證明測試／browser／build／live 已通過。
+逐檔語法 checker 另外從 Git／核准 build-source inventory 推導完整 modified-Python 集合，交叉核對 manifest，再以 py_compile 編譯每個應編譯檔。不得依 pytest import、typed scope 或固定 compileall 目錄猜測覆蓋完整；syntax PASS 只證明該 interpreter 下語法可編譯，不證明功能／browser／原生 source startup／真站已通過。
 
-本輪文件交付的格式／引用／差異檢查結果獨立記錄於 `DOCUMENT_CHECK_RESULTS_v1.5.md`。本文件內以上 checker、required catalog 與語法 report 是待實作契約，不因文件檢查 PASS 而視為已建立或可執行。
+本輪文件檢查結果記錄於 `DOCUMENT_CHECK_RESULTS_v1.6.md`。已有 P1 工具沿用，新 scope 接合與程式成果仍須實作驗證；文件 PASS 不等於 repository、CI 或真站 PASS。
 
 不以固定 class/檔案數或每函式 50 行替代責任審查；尤其不能把同一次 browser guard+commit 為湊行數拆成多輪 CDP。
 
@@ -2435,104 +2411,90 @@ E：上游新增 gate，已執行 worker 的新 claim 會受限制；舊已發�
 
 F：故意將 ordinary refresh 與 ready submit 同時提出，普通刷新不能搶先；將 submit 改成 held unknown，兩者都不能製造新 mutation。
 
-G：故意拔掉 JS data 或 interception，frozen／isolation gate 正確變紅；不能 fallback 舊 script 或外連真站。
+G：故意拔掉 source JS resource 或 interception，source-resource／isolation gate 正確變紅；不能 fallback 舊 script 或外連真站。這個字母是實驗項次，不是已撤回的 G 系列案例。
 
 ---
 
 ## 24. 交給 Codex／程式代理的工作指示
 
-### 24.1 預設為審查，不是自動實作
+### 24.1 文件審查的範圍
+
+只讀確認 v1.6 已一致投影個人 source 用途：無升級器、無產品打包、只重填 uTiki、其他資料受保護、Windows/macOS source、測試隔離保留、離線覆核後清理、真站另列。
+
+對 §16 的有效/撤回/替代 ID、§19 的階段、§21 的命令與 §23 的完成條件交叉核對。未改動的 §5–9 與原有效 review 可沿用；不重審整個 repository 或另建威脅模型，只找具體矛盾。
+
+本文件是規格，不因有命令或代理指示而授權外部操作。現有工作接入依使用者另行採用訊息。
+
+### 24.2 正式採用後的一次性接入
 
 ```text
-請審查 UTIKI_ROOT_REFACTOR_PLAN_v1.5.md。
-這是待採用計劃，不是修改 repository、建立 Issue/PR、升級設定或真站操作的授權。
-維護者尚未明確核准當次實作前，僅做只讀審查與必要的文件回覆。
+以維護者採用的 v1.6 全文／digest 與既有連續工作授權為準。
+先在安全檢查點核對 actual HEAD／dirty 狀態與已到哪個 phase。
+不 reset 到歷史 P1，不打斷在途 review／CI，不開第二個 writer。
 
-優先核對：
-1. §6 ActiveEffect 是否涵蓋三個 reducer、輸入 mutation 與外層核心副作用旁路。
-2. eligibility barrier 與 priority 是否分開；held submit 不被任何 refresh破壞；ready purchase不被普通refresh餓死。
-3. §8 所有狀態的合法出站/保持/late receipt/close/人工retire及new-cycle邊界。
-4. Input/CAPTCHA的context/token/reset/provider/native setter evidence是否完整，且無額外不必要CDP。
-5. mixed equal是否一致要求offline轉換，公開升級是否真的交付no-Python frozen upgrader。
-6. P3同步resources/spec/frozen；P6b指定live在P6c最終delete之前；最後artifact證據是否吻合。
-7. strict/type/hard-egress 原契約保留；required catalog 是否獨立核准，四輸入是否能抓聯合刪例／xfail／xpass／偽造不適用；逐檔語法 gate 是否涵蓋全部實際修改 Python 檔。
-8. ADR-01是否有理由採直接新bootstrap或必要外部核心服務映射；不以假平台自動批准通用integration層。
+停止新增 uTiki upgrader、產品打包、frozen/no-Python、release 與
+刪除前真站 gate 的工作；已完成內容先保留，再按本版範圍作最小清理。
+保留狀態機、native setter、低延遲、資料保護、P1 工具與測試隔離。
 
-找出具體矛盾或缺失，不以類別/行數/多位agent同意作正確性證明。
-區分計劃缺口、從原始碼確認的現況、已重現bug、尚未驗證的假設。
+僅一次同步 plan/catalog/mapping/phase/必要 CI 與規範：
+143 個 active case；G01–G10、P01/P03、H10 撤回；新 P04/P05/H12。
+不把撤回變成永久 skip；其他仍有效的 obligations 不漏。
+新 catalog 位元組需要一次 review/digest／正式核准，不用舊值冒充。
+沿用 P1 checker，必要固定版本／ID／scope 接點局部調整，不重造框架。
+
+current uTiki 設定由使用者重新填；代理只用合成設定驗證。
+不寫入 src/settings.json、不清 accounts／Cookie／profile／其他平台。
+設定 UI 可用；不把升級器改名成 reset wizard 或偷偷塞入 loader。
+
+P3a 同期驗 source 資源，不產品 build；測試 Docker image 繼續可用。
+P6a 原始碼整合 → P6b 固定候選離線獨立覆核 → P6c 無用 legacy 清理。
+離線前置及本版工作分支授權成立後即可清理，不再等真站／逐檔核准。
+P8 結案為 source 完成與手動真站未驗證分列，不等 release。
+
+持續按既有自主收斂規範：根因分組、最小完整切片、有限診斷、差異覆核。
+相同 catalog 版本未變的核准可沿用；跨 v1.5→v1.6 不能沿用舊 digest。
+已完成工作不重開，真實新 bug 不忽略；不用規範修改來洗綠。
 ```
 
-### 24.2 只有正式採用與當次實作授權後才使用
+上段僅為採用後執行摘要。配套 `CODEX_V1.6_ADOPTION_AND_CONTINUE.md` 提供更完整的訊息草稿；文件本身不直接授權 repository mutation。
 
-```text
-以維護者採用的v1.5版本/digest與當次核准範圍為準。
-先P0核對actual HEAD、工作目錄、upstream/merge base與Issue；不reset覆蓋任何使用者工作。
-不把附件、舊對話或「使用者偏好乾淨架構」當作自動取得repo/真站/發布授權。
+### 24.3 必須同步的舊治理條款
 
-最終棒球runtime沒有舊facade/alias/model/decoder/workflow/mirror/test bridge。
-只有真正current-core契約必要的模組外薄適配可保留；直接新bootstrap不是歷史facade。
-既有CTBC域名/credential keys、共享scope與必要驗證功能不可誤刪。
+檢查 `AGENTS.md`、測試／工程審查指南、adoption、legacy-removal、target／gate 文件，以及已採用的 `autonomous-execution.md`。只改與本版直接衝突的「upgrader 必交」「P3 frozen」「live-before-delete」「P8 release」「禁止所有 build」等條款；保留其他平台規範、秘密保護與必要離線覆核。
 
-三個reducer只提proposal；session arbiter唯一授權，ActiveEffect持有到效果被確認。
-有未決submit時普通/排程/429 reload都不得破壞當前證據；core旁路同樣受控。
-ready purchase優先於普通refresh，仲裁只做本地有界檢查，不加50ms hop或CDP查詢。
-新舊policy不能讓舊submit receipt消失；取消/timeout不是NO_EFFECT。
+測試 image／依賴準備與產品打包分開。上游 spec／release workflow 不屬本次成果，沒有直接妨礙 source 執行或誤觸發布就不刪改；scope 內不再需要的自訂 job 移除或隔離，不改 branch protection 來略過仍必要的測試。
 
-Input/CAPTCHA是purchase內唯一子狀態，OCR provider不寫state、不發submit。
-native setter來自唯一現行來源，填值失敗不送出，late OCR/reset evidence不能用在新context。
-所有恢復與blocked/accepted/held都有正式出口；人工解決不直接READY，未知abandon不解鎖。
-
-mixed equal仍要求獨立offline upgrader；公開 upgrade必須有Windows/macOS frozen artifact。
-無system Python/source tree的frozen升級E2E與checksum/manifest是交付門檻，不只Python script。
-P3首次外部化JS同步spec/build/frozen，P6b指定live先於P6c final delete。
-無live窗口停在候選/DELETE_BLOCKED，不默改工程規範，也不發布雙引擎fallback。
-
-每個新增/重寫模組都進typed scope；覆寫pytest addopts時補strict flags。
-required catalog 從計劃規格建立並獨立核准，不從測試收集或 execution manifest 生成。
-四輸入 checker 驗完整 case/obligation/variant、適用性、skip/xfail/xpass、run/attempt/SHA/digests；測試與 mapping 同刪仍失敗。
-所有實際修改的 production/tool/build/test Python 檔從 Git 獨立核對 manifest，再逐檔 py_compile；漏檔／新檔未列／編譯失敗不得放行。
-production-origin測試需CDP interception+獨立hard-egress封鎖；權限不足不能冒稱隔離通過。
-依D/N/S/R/L/C/A/P/U/V/X/T/I/G/H案例報告實際證據和未驗證項目。
-
-不提高刷新頻率/繞過網站或coordinator限制，不新增自動付款或驗證規避。
-不全面重寫其他平台/主迴圈，不為省自訂caller幾行diff留下歷史相容。
-```
-
-本次交付只生成計劃、審查回應與文件差異；沒有修改repository、建立branch/Issue/PR、執行購票／build／真站／升級。
+採用紀錄與 actual code/reference 若矛盾，用一份可核對差異說明；不新建第二套計劃／catalog／approval service。所有 formal result 仍依新 catalog 原始證據成立。
 
 ---
 
 ## 附錄 A：每階段證據紀錄範本
 
 ```text
-Plan version / digest / adoption / Issue:
-Phase / allowed scope:
-Baseline SHA / actual input SHA / candidate SHA:
-Upstream URL / SHA / merge base / touched symbols:
-Source / script / binary / config-contract digests:
-Case ID / invariant / old behavior / intended new behavior:
-Type: behavior-preserving / bug-fix / breaking-change / performance-change
-Canonical owner / ActiveEffect / event / receipt evidence:
-Retired API / model / config / test bridge:
-Retained CURRENT-core adapter and ADR/caller/necessity:
-Typed manifest / effective config:
-Required catalog / approved digest / review / plan digest:
-Execution manifest / JUnit / run metadata / run+attempt+job / digests:
-Applicable / not-applicable / not-due obligations / gate job+target completeness:
-Modified-Python base / candidate / working-tree digest / files / syntax report:
-Commands / collected / passed / failed / skipped / xfail / xpass:
-Isolation mode / independent canary / outbound evidence:
-Frozen OS / architecture / no-Python environment / assembled bundle:
-Upgrade source classification / output / rollback evidence:
-Live authorization / tenant / page / boundary / candidate:
-Performance cold+warm / samples / median+p95+p99 / uncertainty:
-CDP commands / ticketing requests / failures / event-loop lag / retained resources:
-Not run / assumptions / new risk / next blocked gate:
-Result: PASS / FAIL / NOT RUN / INCONCLUSIVE / LIVE_BLOCKED /
-        FINAL_DELETE_BLOCKED / RELEASE_BLOCKED / NOT APPLICABLE
+計劃版本／digest／需求變更與採用來源／Issue：
+phase／授權範圍／actual HEAD／dirty 狀態／已驗收 candidate：
+baseline／upstream／source／script／current-config digest：
+case／obligation／variant／invariant／預期行為：
+變更類型：保持行為／bug-fix／breaking-policy／performance
+唯一 owner／ActiveEffect／event／receipt：
+retired API/model/mirror／current-core 例外：
+typed scope／effective config／逐檔 syntax base/candidate／結果：
+required catalog／approved digest／scope-change review：
+execution manifest／JUnit／run metadata／run+attempt+job／digests：
+required／checked／failed／missing／not-due／inapplicable：
+Windows／macOS 原生 source 啟動／browser／設定 UI／resources：
+Linux 參考測試／Docker image／hard-egress／canary／cleanup：
+實際命令／collected／pass／fail／skip／xfail／xpass／exit code：
+設定保護：合成檔／current 值／其他平台及 accounts／私人資料未碰：
+P6b 離線覆核／替代清單／回復點／清理前後 SHA：
+效能 cold/warm／樣本／不確定度／CDP／請求／failure／資源：
+獨立覆核範圍／finding／處置／仍待補：
+手動真站：LIVE_NOT_VERIFIED 或使用者實際記錄（不作自動 gate）：
+結果：PASS／FAIL／NOT_RUN／BLOCKED／INCONCLUSIVE
+工程完成時：SOURCE_REFACTOR_COMPLETE；手動真站狀態另列。
 ```
 
-NOT APPLICABLE 必須符合獨立 required catalog 的條件並指出核准來源；尚未到期另記 NOT_DUE，缺授權／環境記 BLOCKED，不能免除公開升級的 frozen upgrader、主要 state collision 或適用 live gate。文件檢查的 PASS 只表示文件檢查，不能填到 browser/build/live 欄位。
+NOT_APPLICABLE 只能由 active catalog 的真實條件推出。撤回案例不做執行期 exemption，而是在正式規格變更中移出集合；尚未到期 NOT_DUE、缺環境／review BLOCKED 分開。文件檢查不填入程式測試欄位，不需要為每次狀態更新更改 candidate SHA。
 
 ## 附錄 B：正式 API 的最低契約
 
@@ -2564,8 +2526,8 @@ NOT APPLICABLE 必須符合獨立 required catalog 的條件並指出核准來�
 | 購票出口 | 明確recover/auth/quota/accepted/held/manual/new-cycle | 沒寫到的事件就READY或只靠新URL重設 |
 | 輸入 | first-class context/reset/provider/write evidence，purchase內唯一子機 | prepare_inputs黑箱、過期OCR寫新頁、每輪重載模型 |
 | 模組清理 | 舊API/model/config fallback/test bridge徹底刪 | 把歷史相容搬到bootstrap/settings/integrations |
-| 升級 | mixed equal也offline；必備獨立frozen工具 | loader「順便清理mirror」或只交Python script |
-| 驗證順序 | P3早期frozen、P6b live、P6c final delete、P8最終成品 | 先刪後用無真站窗口作長期驗證豁免 |
+| 設定 | 使用者重新填 uTiki，其他資料保留；唯一 current 格式 | converter／conflict 遷移／loader 偷清 mirror／重設整份私人設定 |
+| 驗證順序 | P3a source resources；P6b 離線覆核；P6c 清理；P8 source 結案 | 未接替就刪功能／用 Linux 代雙平台／沒有真站就誇大成功 |
 | CI隔離 | interception＋獨立OS egress deny | proxy/hostresolver/CDP log單獨當硬隔離 |
 | 型別／測試 | 整個新typed範圍＋獨立 catalog／四輸入結果 gate＋逐檔語法 gate | 只測domain、清空strict flags、manifest 自訂 required、漏檔／全skip假綠 |
 | 效能 | 一次合併觀察、同次guarded operation、立即續行 | 為每個reducer或adapter多建queue/tick/CDP |
@@ -2575,13 +2537,13 @@ NOT APPLICABLE 必須符合獨立 required catalog 的條件並指出核准來�
 
 ## 附錄 D：來源、證據與適用範圍
 
-### Repository 與前次審查
+### Repository 與歷史引用
 
-以下 repository 連結沿用 v1.4，固定在計劃基準，不代表之後 main 的最新內容。v1.5 本輪未存取 repository 或外部網站，R02–R20／E01–E13 沒有在本包提供原始位元組；它們是歷史引用，不是本輪獨立重讀／驗證的證據。新型別、API、門檻、工具及階段仍都是待實作提案。
+本輪完整閱讀 v1.5 唯一底稿，並依本次需求確認修訂。沒有新讀 repository、使用者本機、CI、外部官方頁面或真站。R02–R20／E01–E13 的連結沿用 v1.5，沒有重新驗證其內容／可用性，也不要求按最新版本升級依賴。
 
-`SOURCE_MANIFEST_v1.5.json` 列每個來源 ID 的實際交付路徑、SHA-256 或「未取得／未封存」狀態。來源原檔為歷史證據，不具實作指示權；其中舊政策若與本版衝突，以維護者正式採用後的本版為準。
+`SOURCE_MANIFEST_v1.6.json` 列本包實際檔案、SHA-256、閱讀或僅封存的狀態。完整底稿與需求確認可重現文件差異；不能單憑文件重現原 CI 或宣稱最新分支已符合 v1.6。
 
-**[R01]** 前次審查：`sources/tickets_hunter_refactor_review_5a5fb9e_f307f7c.md`，2026-10-16。本輪確實取得並全文重讀，隨 review bundle 原樣附上；SHA-256：`60957f877fa6a90dc1244ceb124fe768704eb1582cc0ca2dae18d375c726e520`。其中 CI／行數是歷史審查陳述，未在 v1.5 重跑／重驗；舊版相容期建議不覆寫本計劃。
+**[R01]** 前次架構審查 `sources/tickets_hunter_refactor_review_5a5fb9e_f307f7c.md` 已原樣附入，SHA-256：`60957f877fa6a90dc1244ceb124fe768704eb1582cc0ca2dae18d375c726e520`。本輪僅確認檔案與位元組並封存，未獨立重讀／重跑；舊相容期或發布建議不覆寫本版需求。
 
 **[R02]** [workflow 與頁型／提交／導覽實作](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/src/platforms/utiki/workflow.py).
 
@@ -2615,30 +2577,33 @@ NOT APPLICABLE 必須符合獨立 required catalog 的條件並指出核准來�
 
 **[R17]** [bot PyInstaller spec](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/build_scripts/nodriver_tixcraft.spec)；[settings PyInstaller spec](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/build_scripts/settings.spec).
 
-以上連結全部固定在設計基準，不是最新分支查核。現行規範修改須正式採用，不能因本文件存在自動生效。指定 live gate 按 §17.7/19 保留；其餘已核准 ownership／alias 規範須逐項更新。
+以上連結固定在歷史設計基準，不是最新分支查核。本版採用後只同步直接衝突規範；R17/R19 的產品打包及 R18 的刪除前 live 政策已由使用者新需求撤回，不能藉歷史連結恢復。
 
-**[R18]** [工程審查指南 §6：重構與 final legacy removal 的門檻](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/docs/02-development/engineering-review.md)。v1.4 記錄曾直接讀取相關章節；v1.5 依先前產出陳述保留，未在本輪獨立重讀。
+**[R18]** [工程審查指南 §6：重構與 final legacy removal 的門檻](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/docs/02-development/engineering-review.md)。此為 v1.5 保留的歷史查核陳述；v1.6 本輪未獨立重讀。
 
-**[R19]** [正式 build-release workflow](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/.github/workflows/build-release.yml)。v1.4 記錄曾讀取 Windows 流程與 macOS 分支設定；v1.5 未在本輪獨立重讀，亦未執行 workflow／build。
+**[R19]** [正式 build-release workflow](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/.github/workflows/build-release.yml)。此為 v1.5 保留的歷史管線定位；v1.6 本輪未獨立重讀，亦未執行 workflow／build。
 
-**[R20]** [目前核心 native input setter](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/src/nodriver_common.py#L298-L323)。v1.4 記錄曾用於核對唯一來源與回讀要求；v1.5 沿用該陳述，未在本輪獨立重讀。
+**[R20]** [目前核心 native input setter](https://github.com/OooPeople/tickets_hunter/blob/f307f7caba054fb40aab807a4629c891e69fb200/src/nodriver_common.py#L298-L323)。此為 v1.5 保留的唯一來源／回讀背景；v1.6 本輪未獨立重讀。
 
-**[Q01]** Codex v1.3 審查：本輪未取得當時完整貼文／各 subagent 報告；僅依 v1.4 與前次對話摘要／先前產出陳述，未在本輪獨立重讀。未存取使用者本機 worktree；不得轉述成已獨立確認「本機乾淨」或「多位審查者一致」。
+**[Q01]** Codex 早期 v1.3 複審僅為 v1.5 保留的歷史摘要；本輪未取得原始完整報告，不重新斷言先前本機狀態或審查人員結果。
 
-**[Q02]** 前版附件分開記錄：
+**[Q02]** `UTIKI_ROOT_REFACTOR_PLAN_v1.3.md` 未取得；`sources/UTIKI_CLEAN_MODULE_RULES_v1.3.md` 已原樣附入，SHA-256：`57cfd453d18a2330d6e3a9ee6aedb1e2b53a293d2f5947372a60c709b77fda78`。後者僅確認位元組並封存，不作底稿或現行規範，未在本輪獨立重讀。
 
-- `UTIKI_ROOT_REFACTOR_PLAN_v1.3.md`：本輪未取得原檔，未在本輪獨立重讀；只保留 v1.4／先前產出的歷史陳述，不提供虛構 SHA-256。
-- `sources/UTIKI_CLEAN_MODULE_RULES_v1.3.md`：本輪實際取得並全文重讀，原樣附入 review bundle；SHA-256：`57cfd453d18a2330d6e3a9ee6aedb1e2b53a293d2f5947372a60c709b77fda78`。只作歷史來源證據，不作 v1.5 底稿，也不恢復其中已被 v1.4 取代的建議。
+**[Q03]** v1.5 的四項驗收硬化與 Codex finding 依唯一底稿保留；新版本保留獨立 required catalog、逐檔語法、防假綠與來源限制，不把原貼文當成新版程式驗收。
 
-**[Q03]** 本次使用者提供的四項 Codex v1.4 複審 finding 與文件修訂授權：隨包附 `sources/USER_REVISION_REQUEST_v1.5.md`，其 digest 列於來源清單。只有貼出的複審摘要及四項 finding，不代表取得 Codex 的完整原始報告或自行完成新一輪程式審查。
+**[Q04]** 唯一底稿：`sources/UTIKI_ROOT_REFACTOR_PLAN_v1.5.md`，2,679 行、232,652 bytes；SHA-256 `c8fcc741a37db3d404cefd73cfcda6731a24a922f42522777fbdbc3eeddf6328`。本包 unified diff 僅比較此檔與 v1.6，不是 repository patch。
 
-**[Q04]** 唯一底稿：`sources/UTIKI_ROOT_REFACTOR_PLAN_v1.4.md`，2,409 行、198,367 bytes；原始 SHA-256：`6d07b70b9eb91dedd06e2a5aca2081ab215a127587c31bf79d508c9c60b94827`。全文原樣附上；unified diff 只比較此原檔與 v1.5，不是 tickets_hunter repository patch。
+**[Q05]** 本次需求：使用者表示「不需要升級器，這個專案只有我使用，可以直接重新設定」，再表示「也不需要打包，先跟我確認我的需求好了」，並確認「1a 2保留 3b 4b」。四項選擇、採用的預設及未取得的操作授權封存在 `sources/USER_CONFIRMED_REQUIREMENTS_v1.6.md`；這是本次範圍變更的直接來源。
 
-本包可以重現「底稿／修訂內容／已附歷史文件」的差異與雜湊，但不能單憑它重現 R02–R20 原始碼或 E01–E13 網頁的歷史抓取，也不能重現原審查的 CI 執行。這些未封存／未重驗部分就是本輪證據限制。
+**[Q06]** 使用者先前提供 P1 出站摘要：source `32c626dcb89e979a18b3b3d91e267bb9137a5899`，P1 run `38965038276`／attempt 1、63/63；Windows/Ubuntu run `38965038189`。本輪只封存摘要定位，不重算遠端 artifact 或驗證 reviewer 結果，也不推論現在 HEAD。
+
+**[Q07]** 既有 `autonomous-execution.md` v1.0 與當前對話已表達的連續工作方式：維持根因收斂／切片／差異覆核；本版只替換其中交付政策。隨包的 v1.1 是文件相容修訂，不新增代理框架或操作權限。
+
+來源原檔不具有執行權；其中舊打包／升級／live-before-delete 指示不再是本版需求。沒有封存或重驗的外部內容就是本輪證據限制，不以似是而非的引用補足。
 
 ### 官方技術文件
 
-下列連結與工具語意說明沿用 v1.4，v1.5 未重新開啟／封存網頁，也未驗證最新版本或 API。實作時仍須依 P0 核對固定版本；本輪僅修訂驗收規格，沒有新增外部查核成果或依最新頁面要求升級。
+下列技術背景由 v1.5 繼承，本輪未重開網頁或核對 API 最新版本；實作沿用專案已驗證依賴與必要的實際版本查核。引用不是升級套件或新增產品打包的要求。
 
 **[E01]** [Python 3.11 typing／Protocol／NewType](https://docs.python.org/3.11/library/typing.html) — 型別註記不會自動在執行期逐次驗證所有資料；靜態型別與不可信輸入驗證的責任應分開。
 
@@ -2650,7 +2615,7 @@ NOT APPLICABLE 必須符合獨立 required catalog 的條件並指出核准來�
 
 **[E05]** [Hypothesis stateful testing](https://hypothesis.readthedocs.io/en/latest/stateful.html) — 以動作序列與 invariant 測試狀態轉換；不代表可以自動替代真實 DOM。
 
-**[E06]** [PyInstaller run-time information](https://pyinstaller.org/en/stable/runtime-information.html) — frozen runtime 與資料檔路徑處理；JS data 必須明確被收錄並在 frozen app 驗證。
+**[E06]** [PyInstaller run-time information](https://pyinstaller.org/en/stable/runtime-information.html) — 僅保留歷史來源索引；v1.6 不以本連結建立任何 frozen／產品打包驗收義務。
 
 **[E07]** [Python 3.11 time](https://docs.python.org/3.11/library/time.html) — 以 monotonic／perf_counter_ns 量測本機時間差；不與其他時鐘域的絕對值直接相減。
 
@@ -2672,8 +2637,10 @@ NOT APPLICABLE 必須符合獨立 required catalog 的條件並指出核准來�
 
 ## 最終交付判準
 
-**正式棒球模組只有新架構；任何只為重構前版本存在的 API、模型、狀態、設定fallback或測試包裝都不保留。現行核心的必要薄適配獨立、有證據，不把正常的新工廠誤認為legacy。**
+**個人使用的 Windows／macOS 原始碼只有新 uTiki 架構，正常設定介面可用；舊 API／model／workflow／設定 fallback／private test bridge 已接替並清理。必要 current-core 適配有證據，不誤刪真實外部契約或其他平台能力。**
 
-新架構不只分層漂亮：跨reducer效果由一個session claim仲裁，未知結果不被刷新破壞；所有恢復與人工處理有明確出口；輸入generation與原生回讀能阻止過期填值。這些規則用本地有界判斷與既有browser operation實作，不增加無用途的等待。
+保留完整 session 仲裁、Purchase/Input 出口、unknown barrier、native setter、精確 cleanup 與低延遲；測試仍使用 P1 的 strict/type/完整語法範圍／獨立 catalog／hard-egress 與同候選正式結果。
 
-實作交付包括可使用的frozen升級路徑、硬隔離browser CI、完整typed scope、獨立 required catalog／四輸入核對、所有修改 Python 檔逐檔語法 gate、早期打包與刪除前實機證據。**本文件只完成設計修訂，仍須獨立審查、正式採用及實作驗收；沒有聲稱這些程式、測試、成品或真站結果已經完成。**
+**不提供升級器、不做產品打包、不以真站成功擋離線清理或 P8 結案。** 使用者只重新設定 uTiki；其他平台、私人帳號、profile 與 coordinator 狀態不被清空。工程結果可為 `SOURCE_REFACTOR_COMPLETE / LIVE_NOT_VERIFIED`，不把未做真站變成已驗證。
+
+本文件是完整 v1.6 設計修訂及 scope 調整，不是已完成 repository 接入、已核准新 catalog 或已執行測試的宣稱。最終以正式採用版本、實際 source 候選、必要獨立覆核與適用驗收證據裁決。

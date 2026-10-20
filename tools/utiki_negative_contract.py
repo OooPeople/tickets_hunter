@@ -485,7 +485,6 @@ TYPECHECK_PATHS = {
     "new-current-config-file": "repo/src/utiki_config.py",
     "new-keyword-file": "repo/src/keyword_rules.py",
     "new-core-bridge-file": "repo/src/utiki_core_services.py",
-    "new-upgrade-tool-file": "repo/tools/migrations/convert_utiki_config.py",
 }
 TYPECHECK_REQUIRED_ROOTS = (
     "src/platforms/utiki/domain",

@@ -21,9 +21,9 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 CATALOG_ID = "utiki-required-cases"
-CATALOG_REVISION = "1.5.0"
+CATALOG_REVISION = "1.6.0"
 PHASE = "P1"
-SUPPORTED_PHASES = {"P1": 63, "P2": 105}
+SUPPORTED_PHASES = {"P1": 62, "P2": 104, "P3a": 159}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}")
 PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9.-]")
@@ -154,8 +154,8 @@ def _catalog_keys(
     phase: str = PHASE,
 ) -> tuple[list[dict[str, Any]], set[tuple[str, str, str, str, str]]]:
     cases = catalog.get("cases")
-    if not isinstance(cases, list) or len(cases) != 153:
-        raise ManifestError("INVALID_CATALOG", "catalog must contain 153 cases")
+    if not isinstance(cases, list) or len(cases) != 143:
+        raise ManifestError("INVALID_CATALOG", "catalog must contain 143 cases")
     case_ids: set[str] = set()
     obligation_ids: set[str] = set()
     obligation_count = 0
@@ -225,10 +225,10 @@ def _catalog_keys(
                         }
                     )
         expanded.append({"id": case_id, "executions": executions})
-    if obligation_count != 341:
-        raise ManifestError("INVALID_CATALOG", "catalog must contain 341 obligations")
-    if sum(len(case["executions"]) for case in expanded) != 490:
-        raise ManifestError("INVALID_CATALOG", "catalog must expand to 490 execution keys")
+    if obligation_count != 320:
+        raise ManifestError("INVALID_CATALOG", "catalog must contain 320 obligations")
+    if sum(len(case["executions"]) for case in expanded) != 457:
+        raise ManifestError("INVALID_CATALOG", "catalog must expand to 457 execution keys")
     if len(due_keys) != SUPPORTED_PHASES[phase]:
         raise ManifestError(
             "INVALID_CATALOG",
@@ -414,10 +414,10 @@ def generate(
         "schema_version": SCHEMA_VERSION,
         "catalog_id": CATALOG_ID,
         "revision": CATALOG_REVISION,
-        "plan_version": "1.5",
+        "plan_version": "1.6",
         "status": "APPROVED",
-        "case_count": 153,
-        "obligation_count": 341,
+        "case_count": 143,
+        "obligation_count": 320,
     }
     for field, value in expected_headers.items():
         if catalog.get(field) != value:

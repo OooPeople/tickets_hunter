@@ -1,6 +1,6 @@
 **文件說明**：Tickets Hunter 公開技術文件導覽與索引
 
-**最後更新**：2026-10-16
+**最後更新**：2026-10-17
 
 ---
 
@@ -11,8 +11,9 @@
 ## 快速導航
 
 **新手入門** → [01-getting-started/](01-getting-started/)
-**開發新功能** → [02-development/](02-development/) → [06-api-reference/](06-api-reference/)
-**打包部署** → [07-deployment/](07-deployment/)
+**開發新功能** → [02-development/](02-development/)（依任務選章節）
+**API 行為** → [06-api-reference/](06-api-reference/)（實際使用對應能力時）
+**打包部署** → [07-deployment/](07-deployment/)（交付範圍包含產品打包時）
 
 ---
 
@@ -31,8 +32,10 @@ docs/
 │   ├── code-boundaries.md                             <- 程式碼邊界（模組職責、依賴 DAG、命名）
 │   ├── engineering-review.md                          <- 工程審查嚴重度、範圍與輸出格式
 │   ├── ticket_automation_standard.md                  <- 標準功能定義 (12 階段)
-│   ├── utiki-root-refactor-plan-v1.5.md               <- uTiki 根本重構正式計劃（Issue #17）
-│   ├── utiki-refactor/                                <- v1.5 採用與 P0 證據
+│   ├── UTIKI_ROOT_REFACTOR_PLAN_v1.6.md               <- 已由外部採用紀錄固定的 uTiki v1.6 計劃
+│   ├── V1.6_CHANGE_SUMMARY.md                         <- v1.6 需求差異摘要
+│   ├── utiki-refactor/                                <- v1.6／v1.5 採用紀錄與歷史證據
+│   ├── autonomous-execution.md                        <- 有限診斷與恢復案例（按需）
 │   ├── utiki-refactor-plan.md                         <- 先前 uTiki2 重構計劃（歷史）
 │   ├── structure.md                                   <- 程式架構與函數索引
 │   ├── development_guide.md                           <- 開發規範與檢查清單
@@ -90,20 +93,15 @@ docs/
 
 ### 情境 1：我想開發新平台支援
 
-**開發流程：**
-```
-ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指南
-```
+先依根目錄 [`AGENTS.md`](../AGENTS.md) 核對範圍與授權，再按實際任務選取資料：
 
-1. 閱讀 [ticket_automation_standard.md](02-development/ticket_automation_standard.md) 了解標準流程 (12 階段)
-2. 檢視 [structure.md](02-development/structure.md) 參考現有平台實作 (含完成度評分)
-3. 檢視對應的 [API 指南](06-api-reference/)：
+1. 涉及平台頁面流程時，閱讀 [ticket_automation_standard.md](02-development/ticket_automation_standard.md) 的相關階段。
+2. 需要定位既有入口時，檢視 [structure.md](02-development/structure.md)，再以實際 caller 為準。
+3. 新用或不確定瀏覽器能力時，檢視對應的 [API 指南](06-api-reference/)：
    - **Zendriver (主要參考)** → [zendriver_api_guide.md](06-api-reference/zendriver_api_guide.md)
    - **CDP 協定 (深入)** → [cdp_protocol_reference.md](06-api-reference/cdp_protocol_reference.md)
-4. 遵循 [development_guide.md](02-development/development_guide.md) 的規範
-5. 參考 [coding_templates.md](02-development/coding_templates.md) 的程式範本
-6. 依 [testing_execution_guide.md](02-development/testing_execution_guide.md) 驗證，並以
-   [engineering-review.md](02-development/engineering-review.md) 完成審查
+4. 需要具體既有寫法時，再參考 [coding_templates.md](02-development/coding_templates.md)。
+5. 執行不熟悉的 gate 或 runner 時，查 [testing_execution_guide.md](02-development/testing_execution_guide.md) 的對應命令；需要嚴重度與審查清單時，查 [engineering-review.md](02-development/engineering-review.md)。
 
 ### 情境 2：我想了解專案架構
 
@@ -113,6 +111,8 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 4. **座位選擇邏輯**：檢視 [ticket_seat_selection_algorithm.md](02-development/ticket_seat_selection_algorithm.md)
 
 ### 情境 3：我要打包部署
+
+以下是其他平台或另有授權之產品交付的既有指南；目前 uTiki v1.6 個人原始碼需求不包含產品打包、frozen 成品或安裝包。
 
 - [PyInstaller 打包指南](07-deployment/pyinstaller_packaging_guide.md) - 完整打包流程
 - [本地測試打包](../build_scripts/QUICK_START.md) - 5 分鐘快速開始
@@ -127,8 +127,12 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 | [code-boundaries.md](02-development/code-boundaries.md) | 模組責任與依賴邊界 | 開發者／審查者 |
 | [testing_execution_guide.md](02-development/testing_execution_guide.md) | 實際驗證命令與結果陳述 | 開發者／審查者 |
 | [engineering-review.md](02-development/engineering-review.md) | findings-first 工程審查 | 審查者 |
-| [utiki-root-refactor-plan-v1.5.md](02-development/utiki-root-refactor-plan-v1.5.md) | uTiki 根本重構正式計劃與 P0–P8 gates | Issue #17 實作者／審查者 |
-| [utiki-refactor/adoption.md](02-development/utiki-refactor/adoption.md) | v1.5 採用、breaking 決策與授權邊界 | 維護者／審查者 |
+| [UTIKI_ROOT_REFACTOR_PLAN_v1.6.md](02-development/UTIKI_ROOT_REFACTOR_PLAN_v1.6.md) | 已採用的 uTiki v1.6 完整計劃；原始位元組保留交付狀態 | Issue #17 維護者／審查者 |
+| [V1.6_CHANGE_SUMMARY.md](02-development/V1.6_CHANGE_SUMMARY.md) | v1.6 已確認需求與 v1.5 差異摘要 | Issue #17 實作者／審查者 |
+| [SCOPE_CHANGE_MATRIX_v1.6.json](02-development/SCOPE_CHANGE_MATRIX_v1.6.json) | v1.6 scope 處置索引；不是 executable catalog | 規格投影／審查者 |
+| [utiki-refactor/adoption-v1.6.md](02-development/utiki-refactor/adoption-v1.6.md) | v1.6 計劃採用與版本固定紀錄 | 維護者／審查者 |
+| [utiki-refactor/adoption.md](02-development/utiki-refactor/adoption.md) | v1.5 採用與既有 catalog 核准脈絡（歷史固定紀錄） | 維護者／審查者 |
+| [autonomous-execution.md](02-development/autonomous-execution.md) | 首因不明或恢復工作時的有限診斷案例 | 按需查閱 |
 | [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | 先前 uTiki2 家族重構計劃（歷史） | 歷史查閱 |
 | [structure.md](02-development/structure.md) | 程式架構索引與完成度評分 | 所有人 |
 | [zendriver_api_guide.md](06-api-reference/zendriver_api_guide.md) | Zendriver API 指南（主要參考） | 開發者 |
@@ -143,7 +147,7 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 適合第一次接觸專案的開發者或使用者。包含專案概覽、環境設定。
 
 ### 02-development/ - 開發指南
-開發新平台支援或新功能時必讀。包含標準流程定義、程式架構、開發規範、程式範本。
+包含標準流程定義、程式架構、技術操作、審查清單與程式範本；依任務觸發條件閱讀相關章節，不是每次工作前的全文清單。
 
 ### 03-mechanisms/ - 12 階段機制文件
 詳細的票券自動化流程文件。每個階段涵蓋流程說明、程式碼範例、平台特定考量。
@@ -155,15 +159,15 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 各 WebDriver 引擎的 API 使用指南。
 
 ### 07-deployment/ - 部署打包
-生產環境部署與打包指南。包含 PyInstaller 打包流程、依賴管理。
+其他平台或另有授權之產品交付的部署與打包指南。包含 PyInstaller 流程與依賴管理；不代表目前 uTiki v1.6 要求產品打包。
 
 ---
 
 ## 文件維護
 
-根目錄的 `AGENTS.md` 是代理起手規則；穩定架構、測試與審查規則分別由本目錄的專責文件維護，
-不在多份文件複製完整規範。每份文件的檔頭標註「文件說明」與「最後更新」。修改程式碼行為時，
-一併更新對應的機制文件，讓文件與程式碼保持同步。
+根目錄的 `AGENTS.md` 集中代理日常工作規則；已採用計劃與 required catalog 定義產品契約與
+階段門檻；本目錄保存按需查閱的架構、命令、狀態表、API 與案例。索引只描述用途與狀態，
+不複製另一套停止、CI、checkpoint 或打包政策。修改程式碼行為時，再更新對應的技術文件。
 
 ---
 

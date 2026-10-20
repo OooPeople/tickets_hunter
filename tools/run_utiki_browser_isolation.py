@@ -51,7 +51,12 @@ PHASE_INPUTS = {
         "tests/fixtures/utiki/manifest-p2.json",
         "ci/utiki-p2-negative-probes.json",
     ),
+    "P3a": (
+        "tests/fixtures/utiki/manifest-p3a.json",
+        "ci/utiki-p3a-negative-probes.json",
+    ),
 }
+MANAGED_BROWSER_COUNTS = {"P1": 13, "P2": 13, "P3a": 17}
 
 
 class IsolationBlocked(RuntimeError):
@@ -683,7 +688,7 @@ def _safe_name(run_id: str, suffix: str) -> str:
 
 
 def _managed_mappings(
-    manifest: dict[str, Any], job_id: str, target: str
+    manifest: dict[str, Any], job_id: str, target: str, phase: str
 ) -> list[dict[str, str]]:
     mappings: list[dict[str, str]] = []
     for case in manifest.get("cases", []):
@@ -710,8 +715,15 @@ def _managed_mappings(
             if any(not isinstance(value, str) or not value for value in values.values()):
                 raise IsolationBlocked("managed browser mapping is invalid")
             mappings.append(values)  # type: ignore[arg-type]
-    if len(mappings) != 13 or len({item["node_id"] for item in mappings}) != 13:
-        raise IsolationBlocked("browser contract must bind exactly 13 managed nodes")
+    expected = MANAGED_BROWSER_COUNTS.get(phase)
+    if (
+        expected is None
+        or len(mappings) != expected
+        or len({item["node_id"] for item in mappings}) != expected
+    ):
+        raise IsolationBlocked(
+            f"{phase} browser contract must bind exactly {expected} managed nodes"
+        )
     return sorted(mappings, key=lambda item: item["node_id"])
 
 
@@ -757,7 +769,7 @@ def _prepare_reporter_context(
         "fixture_digest": fixture_digest,
         "script_digest": script_digest,
         "mappings": _managed_mappings(
-            manifest, "browser-contract-isolated", "isolated-linux-x64"
+            manifest, "browser-contract-isolated", "isolated-linux-x64", phase
         ),
     }
     _write_json(run_dir / "browser-pytest-context.json", context)
@@ -1269,8 +1281,8 @@ def _main(argv: list[str] | None = None) -> int:
             reporter_result.get("schema_version") != 1
             or reporter_result.get("status") != "PASS"
             or reporter_result.get("final_exit_code") != 0
-            or reporter_result.get("required_count") != 13
-            or reporter_result.get("selected_count") != 13
+            or reporter_result.get("required_count") != MANAGED_BROWSER_COUNTS[args.phase]
+            or reporter_result.get("selected_count") != MANAGED_BROWSER_COUNTS[args.phase]
             or reporter_result.get("missing_node_ids") != []
             or reporter_result.get("invalid_node_ids") != []
         ):

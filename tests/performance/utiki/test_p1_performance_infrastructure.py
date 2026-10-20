@@ -501,7 +501,7 @@ def test_untrusted_candidate_is_blocked_before_container_runtime(tmp_path):
             "--phase",
             "P1",
             "--catalog-sha256",
-            "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1",
+            "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf",
             "--candidate-sha",
             CANDIDATE,
             "--runtime",
@@ -797,7 +797,7 @@ def test_p2_synthetic_outer_verification_requires_seven_managed_results(tmp_path
 
 
 def test_p2_synthetic_managed_nodes_follow_exact_manifest(tmp_path, monkeypatch) -> None:
-    approved = "d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1"
+    approved = "73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf"
     manifest_path = tmp_path / "p2-manifest.json"
     generated = subprocess.run([
         sys.executable, "tools/generate_utiki_execution_manifest.py",

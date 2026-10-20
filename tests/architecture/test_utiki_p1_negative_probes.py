@@ -349,7 +349,6 @@ def test_h06_missing_and_unknown_job_targets_are_rejected_by_real_aggregate(tmp_
         ("src/utiki_config.py", "new-current-config-file"),
         ("src/keyword_rules.py", "new-keyword-file"),
         ("src/utiki_core_services.py", "new-core-bridge-file"),
-        ("tools/migrations/convert_utiki_config.py", "new-upgrade-tool-file"),
     ],
     ids=lambda value: value if isinstance(value, str) and "/" not in value else None,
 )

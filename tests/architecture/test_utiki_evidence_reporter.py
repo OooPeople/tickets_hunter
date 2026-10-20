@@ -172,7 +172,7 @@ def _minimal_manifest(path, catalog_digest):
     value = {
         "schema_version": 1,
         "catalog_id": "utiki-required-cases",
-        "catalog_revision": "1.5.0",
+        "catalog_revision": "1.6.0",
         "catalog_sha256": catalog_digest,
         "phase": "P1",
         "cases": [
@@ -373,7 +373,7 @@ def test_non_pytest_assembler_writes_empty_harness_junit_without_fake_case(tmp_p
     manifest_value = {
         "schema_version": 1,
         "catalog_id": "utiki-required-cases",
-        "catalog_revision": "1.5.0",
+        "catalog_revision": "1.6.0",
         "catalog_sha256": catalog_digest,
         "phase": "P1",
         "cases": [
@@ -513,7 +513,7 @@ def test_evidence_launcher_records_actual_negative_process_transcript(tmp_path):
             "registry_id": "utiki-p1-negative-probes",
             "phase": "P1",
             "catalog_id": "utiki-required-cases",
-            "catalog_revision": "1.5.0",
+            "catalog_revision": "1.6.0",
             "catalog_sha256": "2" * 64,
             "probes": [
                 {

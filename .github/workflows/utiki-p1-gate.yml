@@ -10,7 +10,7 @@ permissions:
 
 env:
   # Diagnostic producer context only; the aggregate requires an independent value.
-  APPROVED_CATALOG_SHA256: d3aabf752e39832ce46cd4a827f6227e558f496ec46c9854af9181b45aab29f1
+  APPROVED_CATALOG_SHA256: 73455dc332d181b1350ec1bc8f3318a45a098ac9b23b88c1c7e712e59c7361cf
   P1_BASE_SHA: a1374bddc44cabfd5887d9ce991f5657e4c9628b
   P1_RUN_ID: p1-${{ github.run_id }}-${{ github.run_attempt }}-attempt-${{ github.run_attempt }}
   CANDIDATE_SHA: ${{ github.sha }}

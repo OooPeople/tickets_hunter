@@ -3,6 +3,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 
@@ -17,6 +18,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from platforms.utiki.profiles import PageKind, classify_utiki_page
+from platforms.utiki.dom import read_date_snapshot
+from platforms.utiki.adapters import script_resources
 
 
 pytestmark = pytest.mark.browser
@@ -49,7 +52,60 @@ def test_h04_production_origin_route_is_unpatched_and_locally_fulfilled():
     asyncio.run(_run_production_origin_fixture())
 
 
-async def _run_production_origin_fixture():
+def test_h09_externalized_js_runs_on_production_origin():
+    if os.environ.get("TICKETS_HUNTER_HARD_EGRESS_ACTIVE") != "1":
+        pytest.fail("externalized browser script requires hard-egress isolation")
+    asyncio.run(_run_production_origin_fixture(exercise_externalized=True))
+
+
+@pytest.mark.parametrize(
+    "change, expected_reason",
+    [
+        ("missing", "uTiki script is unavailable: date_snapshot"),
+        ("digest-mismatch", "uTiki script digest mismatch: date_snapshot"),
+        ("production-corruption", "uTiki script digest mismatch: date_snapshot"),
+    ],
+    ids=["resource-missing", "resource-digest-mismatch", "production-corruption"],
+)
+def test_invalid_production_resource_cannot_reach_browser(
+    tmp_path, monkeypatch, change, expected_reason
+):
+    if os.environ.get("TICKETS_HUNTER_HARD_EGRESS_ACTIVE") != "1":
+        pytest.fail("resource rejection requires hard-egress isolation")
+
+    class CountingTab:
+        calls = 0
+
+        async def evaluate(self, _script):
+            self.calls += 1
+            return None
+
+    resource_dir = tmp_path / "scripts"
+    shutil.copytree(script_resources.RESOURCE_DIR, resource_dir)
+    script_file = resource_dir / "date_snapshot.js"
+    if change == "missing":
+        script_file.unlink()
+    elif change == "digest-mismatch":
+        script_file.write_bytes(script_file.read_bytes() + b"\n")
+    else:
+        original = script_file.read_bytes()
+        damaged = original.replace(b"#PerformanceListTable", b"#DamagedTable", 1)
+        assert damaged != original
+        script_file.write_bytes(damaged)
+    monkeypatch.setattr(script_resources, "RESOURCE_DIR", resource_dir)
+    script_resources._manifest.cache_clear()
+    script_resources.load_script.cache_clear()
+    tab = CountingTab()
+    try:
+        with pytest.raises(script_resources.ScriptResourceError, match=expected_reason):
+            asyncio.run(read_date_snapshot(tab))
+        assert tab.calls == 0
+    finally:
+        script_resources._manifest.cache_clear()
+        script_resources.load_script.cache_clear()
+
+
+async def _run_production_origin_fixture(*, exercise_externalized=False):
     browser = None
     profile = tempfile.TemporaryDirectory(prefix="tickets-hunter-origin-fixture-")
     intercepted = []
@@ -134,6 +190,11 @@ async def _run_production_origin_fixture():
         assert intercepted.count(PRODUCTION_FIXTURE_URL) == 1
         assert rejected == []
         assert handler_errors == []
+        if exercise_externalized:
+            snapshot = await read_date_snapshot(tab)
+            assert snapshot.ok
+            assert snapshot.page_url == PRODUCTION_FIXTURE_URL
+            assert len(snapshot.rows) == 2
         _write_report(
             {
                 "schema_version": 1,

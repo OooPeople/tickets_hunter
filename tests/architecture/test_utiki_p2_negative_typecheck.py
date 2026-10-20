@@ -26,7 +26,6 @@ H08_PATHS = {
     "new-current-config-file": "src/utiki_config.py",
     "new-keyword-file": "src/keyword_rules.py",
     "new-core-bridge-file": "src/utiki_core_services.py",
-    "new-upgrade-tool-file": "tools/migrations/convert_utiki_config.py",
 }
 
 

@@ -3,7 +3,7 @@
 
 The checker deliberately treats the required catalog as specification input.  It
 does not infer required cases from pytest collection, the execution manifest, or
-the JUnit document.  See the v1.5 refactor plan, sections 16.11 and 17.5.
+the JUnit document.  See the v1.6 refactor plan, sections 16.11 and 17.5.
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ SCHEMA_VERSION = 1
 EVIDENCE_SCHEMA_VERSION = 2
 NEGATIVE_TRANSCRIPT_SCHEMA_VERSION = 2
 CATALOG_ID = "utiki-required-cases"
-CATALOG_REVISION = "1.5.0"
-PLAN_VERSION = "1.5"
-PLAN_SHA256 = "c8fcc741a37db3d404cefd73cfcda6731a24a922f42522777fbdbc3eeddf6328"
+CATALOG_REVISION = "1.6.0"
+PLAN_VERSION = "1.6"
+PLAN_SHA256 = "f2e7e88edfbb3f40f9d8775d77c95ac48745ad9133c08d4762334f449b302220"
 PHASES = ("P0", "P1", "P2", "P3a", "P3b", "P4", "P5", "P6a", "P6b", "P6c", "P7", "P8")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
@@ -69,17 +69,15 @@ EXPECTED_CASE_IDS = frozenset(
         "L": 6,
         "C": 6,
         "A": 6,
-        "P": 3,
         "U": 12,
         "V": 16,
         "X": 16,
         "T": 12,
         "I": 12,
-        "G": 10,
-        "H": 11,
+        "H": 9,
     }.items()
     for number in range(1, count + 1)
-)
+) | {"H11", "H12", "P02", "P04", "P05"}
 
 
 class GateError(Exception):
@@ -305,8 +303,8 @@ def validate_catalog(path: Path, approved_digest: str) -> CatalogModel:
         "plan_version": PLAN_VERSION,
         "plan_sha256": PLAN_SHA256,
         "status": "APPROVED",
-        "case_count": 153,
-        "obligation_count": 341,
+        "case_count": 143,
+        "obligation_count": 320,
     }
     for field, expected in expected_scalars.items():
         if catalog.get(field) != expected:
@@ -376,10 +374,10 @@ def validate_catalog(path: Path, approved_digest: str) -> CatalogModel:
 
     if len(case_ids) != len(set(case_ids)):
         fail("DUPLICATE_ID", "catalog contains duplicate case IDs")
-    if set(case_ids) != EXPECTED_CASE_IDS or len(case_ids) != 153:
-        fail("CATALOG_CASE_SET_MISMATCH", "catalog case IDs do not equal the fixed v1.5 set")
-    if len(obligations) != 341:
-        fail("CATALOG_OBLIGATION_SET_MISMATCH", "catalog must contain exactly 341 obligations")
+    if set(case_ids) != EXPECTED_CASE_IDS or len(case_ids) != 143:
+        fail("CATALOG_CASE_SET_MISMATCH", "catalog case IDs do not equal the fixed v1.6 set")
+    if len(obligations) != 320:
+        fail("CATALOG_OBLIGATION_SET_MISMATCH", "catalog must contain exactly 320 obligations")
 
     profiles: dict[str, dict[str, tuple[tuple[str, ...], tuple[str, ...]]]] = {}
     profile_values = require_dict(catalog.get("gate_profiles"), label="catalog.gate_profiles")
@@ -516,7 +514,7 @@ def validate_execution_manifest(
 
     if len(manifest_case_ids) != len(set(manifest_case_ids)):
         fail("DUPLICATE_ID", "execution manifest contains duplicate case IDs")
-    if set(manifest_case_ids) != EXPECTED_CASE_IDS or len(manifest_case_ids) != 153:
+    if set(manifest_case_ids) != EXPECTED_CASE_IDS or len(manifest_case_ids) != 143:
         fail("MANIFEST_CASE_SET_MISMATCH", "execution manifest case IDs do not match the required catalog")
 
     expected: dict[ExecutionKey, tuple[Obligation, str]] = {}
@@ -764,7 +762,6 @@ EVIDENCE_PRODUCERS = {
     "browser-isolation-report": "tools/run_utiki_browser_isolation.py",
     "production-origin-report": "tools/run_utiki_browser_isolation.py",
     "benchmark-report": "tools/benchmarks/compare_utiki.py",
-    "bundle-report": "build_scripts/build_local.py",
     "checker-exit-nonzero": "tools/run_utiki_negative_probe.py",
 }
 PERFORMANCE_EVIDENCE_PRODUCERS = {
@@ -843,16 +840,6 @@ EVIDENCE_INPUT_CONTRACTS: dict[
         "reporter-result": (
             "artifact",
             "evidence/performance-reporter-result.json",
-        ),
-    },
-    ("package-smoke", "bundle-report"): {
-        "source-manifest": (
-            "repository",
-            "src/platforms/utiki/scripts/manifest.json",
-        ),
-        "bundle-manifest": (
-            "artifact",
-            "evidence/bundle-manifest.json",
         ),
     },
 }
@@ -949,7 +936,6 @@ def _expected_output_contract(
         ("performance-contract", "benchmark-report"): sibling(
             "performance-verification-raw.json"
         ),
-        ("package-smoke", "bundle-report"): sibling("bundle-report-raw.json"),
     }
     if kind == "checker-exit-nonzero":
         producer_report = sibling(f"{pure.stem}.producer.json")
@@ -1890,83 +1876,6 @@ def _validate_benchmark_payload(
             fail("INVALID_EVIDENCE_CONTENT", "benchmark contains failed samples")
 
 
-def _validate_bundle_payload(
-    payload: dict[str, Any], metadata: dict[str, Any], inputs: dict[str, Path]
-) -> None:
-    require_exact_keys(
-        payload,
-        {
-            "schema_version", "status", "exit_code", "platform", "architecture",
-            "source_manifest_sha256", "bundle_manifest_sha256", "checks",
-        },
-        label="bundle report",
-    )
-    if payload["schema_version"] != 1 or payload["status"] != "PASS" or payload["exit_code"] != 0:
-        fail("INVALID_EVIDENCE_CONTENT", "bundle producer did not complete successfully")
-    expected_system = {
-        "windows-x64": ("win32", {"AMD64", "x86_64"}),
-        "macos-arm64": ("darwin", {"arm64"}),
-    }.get(metadata["target"])
-    if expected_system is None or (
-        payload["platform"] != expected_system[0]
-        or payload["architecture"] not in expected_system[1]
-    ):
-        fail("INVALID_EVIDENCE_CONTENT", "bundle report used the wrong native target")
-    for label, field in (
-        ("source-manifest", "source_manifest_sha256"),
-        ("bundle-manifest", "bundle_manifest_sha256"),
-    ):
-        expected = digest_file(inputs[label], label=f"bundle {label}")
-        if payload[field] != expected:
-            fail("EVIDENCE_DIGEST_MISMATCH", f"bundle {label} differs from bound input")
-    if payload["source_manifest_sha256"] != payload["bundle_manifest_sha256"]:
-        fail("INVALID_EVIDENCE_CONTENT", "final bundle manifest differs from source")
-    checks: dict[str, dict[str, Any]] = {}
-    for index, value in enumerate(require_list(payload["checks"], label="bundle.checks")):
-        item = require_dict(value, label=f"bundle.checks[{index}]")
-        require_exact_keys(item, {"name", "status", "detail"}, label=f"bundle.checks[{index}]")
-        name = require_str(item["name"], label="bundle.check.name")
-        if name in checks or item["status"] != "PASS" or not isinstance(item["detail"], str):
-            fail("INVALID_EVIDENCE_CONTENT", "bundle check is duplicate, invalid, or failed")
-        checks[name] = item
-    required = {
-        "bound source manifest is current source",
-        "bound bundle manifest matches final bundle",
-        "nodriver_tixcraft exists", "settings exists", "_internal present",
-        "uTiki scripts match source in final bundle", "bot binary starts",
-        "standalone frozen bundle outside source tree",
-        "bot frozen uTiki resource self-test", "settings frozen resource self-test",
-        "missing frozen uTiki script rejected", "mixed frozen uTiki script rejected",
-        "corrupt frozen uTiki production script rejected",
-    }
-    if metadata["target"] == "windows-x64":
-        required.update({
-            "Windows cp950 frozen bot resource self-test",
-            "Windows cp950 frozen settings resource self-test",
-        })
-    if not required.issubset(checks):
-        fail("INVALID_EVIDENCE_CONTENT", "bundle report is missing required frozen checks")
-    successful_self_tests = [
-        "bot frozen uTiki resource self-test", "settings frozen resource self-test",
-    ]
-    if metadata["target"] == "windows-x64":
-        successful_self_tests.extend([
-            "Windows cp950 frozen bot resource self-test",
-            "Windows cp950 frozen settings resource self-test",
-        ])
-    for name in successful_self_tests:
-        if checks[name]["detail"] != "exit 0":
-            fail("INVALID_EVIDENCE_CONTENT", f"{name} did not report exit 0")
-    for name in (
-        "missing frozen uTiki script rejected",
-        "mixed frozen uTiki script rejected",
-        "corrupt frozen uTiki production script rejected",
-    ):
-        detail = checks[name]["detail"]
-        if re.fullmatch(r"exit [1-9][0-9]*", detail) is None:
-            fail("INVALID_EVIDENCE_CONTENT", f"{name} did not report nonzero rejection")
-
-
 def _validate_positive_payload(
     kind: str,
     payload: dict[str, Any],
@@ -1999,7 +1908,6 @@ def _validate_positive_payload(
         "benchmark-report": lambda: _validate_benchmark_payload(
             payload, metadata, expected_keys, inputs
         ),
-        "bundle-report": lambda: _validate_bundle_payload(payload, metadata, inputs),
     }
     validator = validators.get(kind)
     if validator is None:

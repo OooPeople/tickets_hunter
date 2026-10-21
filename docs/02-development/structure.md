@@ -392,10 +392,10 @@ FunOne Tickets 主流程 (Feature 011)
 ```text
 platforms/utiki/
 ├── __init__.py   # 現行公開入口與 legacy workflow 轉接
-├── bootstrap.py  # target engine 組裝入口；production 尚未完成切換
-├── domain/       # target 純模型、snapshot、plan 與 effect 規則
-├── application/  # target engine、ports 與 quantity 協調
-├── adapters/     # target script resource adapter
+├── bootstrap.py  # 隔離新 engine 組裝入口；production 尚未切換
+├── domain/       # 新流程純模型、snapshot、plan 與 effect 規則
+├── application/  # 新流程 engine、ports、flow settings 與 quantity 協調
+├── adapters/     # 新流程 browser 與 script resource adapters
 ├── scripts/      # 外部化 production JavaScript 與 manifest
 ├── profiles.py   # tenant allowlist、PageKind 與 route classifier
 ├── auth.py       # tenant-specific Cookie / credential scope

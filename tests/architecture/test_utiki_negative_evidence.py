@@ -342,7 +342,7 @@ def test_builder_and_host_negative_job_execute_real_per_key_children(tmp_path: P
     )
     assert built.returncode == 0, built.stderr
     requests = list(input_root.glob("*/probe.json"))
-    assert len(requests) == 45
+    assert len(requests) == 44
     simulated_windows_root = (
         "C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/"
         "pytest-999/test_negative_fixture_path_budget0/inputs/"

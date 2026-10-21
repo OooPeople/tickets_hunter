@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
 from ..domain.effects import EffectReceipt, RunningEffect
-from ..domain.identity import OperationStamp, TabKey
-from ..domain.plans import QuantityPlan
-from ..domain.snapshots import QuantitySnapshot
+from ..domain.identity import AuthEpoch, OperationStamp, TabKey
+from ..domain.inputs import CaptchaImageKey
+from ..domain.plans import AreaActionPlan, DateActionPlan, QuantityPlan, SeatActionPlan, SubmitPlan
+from ..domain.snapshots import AreaSnapshot, DateSnapshot, DialogSnapshot, QuantitySnapshot, SeatSnapshot
 
 
 class CoreGate(str, Enum):
@@ -40,6 +41,43 @@ class CoreControlPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PurchaseAuthority:
+    auth_epoch: AuthEpoch
+    credential_revision: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.auth_epoch, AuthEpoch):
+            raise ValueError("purchase authority requires verified auth epoch")
+        if type(self.credential_revision) is not int or self.credential_revision < 0:
+            raise ValueError("credential revision must be nonnegative")
+
+
+class PurchaseAuthorityPort(CoreControlPort, Protocol):
+    def current_purchase_authority(self, tab: TabKey) -> PurchaseAuthority | None: ...
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class InlineLoginCredentials:
+    account: str
+    password: str
+    revision: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.account) is not str or not self.account.strip()
+            or type(self.password) is not str or not self.password
+            or type(self.revision) is not int or self.revision < 0
+        ):
+            raise ValueError("inline login requires nonempty credentials and revision")
+
+
+class InlineLoginCredentialPort(PurchaseAuthorityPort, Protocol):
+    def current_inline_login_credentials(
+        self, tab: TabKey, tenant_key: str
+    ) -> InlineLoginCredentials | None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class QuantityObservation:
     """A browser observation attributed to its actual source context."""
 
@@ -63,3 +101,180 @@ class QuantityBrowserPort(Protocol):
     ) -> EffectReceipt:
         """Perform the guarded mutation and report the original claim's result."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class PageObservation:
+    """An observed page attributed to the browser tab that produced it."""
+
+    tab: TabKey
+    snapshot: DateSnapshot | AreaSnapshot | QuantitySnapshot | SeatSnapshot
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tab, TabKey) or not isinstance(
+            self.snapshot, (DateSnapshot, AreaSnapshot, QuantitySnapshot, SeatSnapshot)
+        ):
+            raise ValueError("page observation requires a typed tab and snapshot")
+
+
+class SelectionBrowserPort(QuantityBrowserPort, Protocol):
+    async def observe_date(self, tab: TabKey) -> PageObservation: ...
+
+    async def observe_area(self, tab: TabKey) -> PageObservation: ...
+
+    async def observe_quantity(self, tab: TabKey) -> PageObservation: ...
+    async def observe_seat(self, tab: TabKey) -> PageObservation: ...
+
+    async def commit_date(
+        self, snapshot: DateSnapshot, plan: DateActionPlan, claim: RunningEffect
+    ) -> EffectReceipt: ...
+
+    async def commit_area(
+        self, snapshot: AreaSnapshot, plan: AreaActionPlan,
+        ticket_number: int, claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
+    async def commit_quantity_snapshot(
+        self, snapshot: QuantitySnapshot, plan: QuantityPlan, claim: RunningEffect
+    ) -> EffectReceipt: ...
+
+    async def commit_seat_snapshot(
+        self, snapshot: SeatSnapshot, plan: SeatActionPlan, claim: RunningEffect
+    ) -> EffectReceipt: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PurchaseInputObservation:
+    tab: TabKey
+    page_url: str
+    document_id: str
+    captcha_present: bool
+    captcha_unique: bool
+    captcha_enabled: bool
+    manual_value_ready: bool
+    login_required: bool
+    login_ready: bool
+    button_ready: bool
+    dialog_visible: bool
+    login_fields_usable: bool = False
+    login_account_present: bool = False
+    login_password_present: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tab, TabKey) or not self.page_url or not self.document_id:
+            raise ValueError("input observation requires tab and page identity")
+        for name in (
+            "captcha_present", "captcha_unique", "captcha_enabled",
+            "manual_value_ready", "login_required", "login_ready",
+            "button_ready", "dialog_visible",
+            "login_fields_usable", "login_account_present", "login_password_present",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class InlineLoginIntent:
+    page_url: str
+    document_id: str
+    expected_origin: str
+    credential_revision: int
+    write_account: bool
+    write_password: bool
+
+    def __post_init__(self) -> None:
+        if not self.page_url or not self.document_id or not self.expected_origin:
+            raise ValueError("inline login intent requires page identity and origin")
+        if type(self.credential_revision) is not int or self.credential_revision < 0:
+            raise ValueError("inline login intent requires credential revision")
+        if type(self.write_account) is not bool or type(self.write_password) is not bool:
+            raise ValueError("inline login write masks must be boolean")
+        if not (self.write_account or self.write_password):
+            raise ValueError("inline login intent requires a missing field")
+
+
+@dataclass(frozen=True, slots=True)
+class InlineLoginAudit:
+    tab: TabKey
+    page_url: str
+    document_id: str
+    matched: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tab, TabKey) or not self.page_url or not self.document_id:
+            raise ValueError("inline login audit requires page identity")
+        if type(self.matched) is not bool:
+            raise ValueError("inline login audit match must be boolean")
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitOutcomeObservation:
+    tab: TabKey
+    page_url: str
+    document_id: str
+    dialog: DialogSnapshot
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.tab, TabKey) or not self.page_url or not self.document_id
+            or not isinstance(self.dialog, DialogSnapshot)
+            or self.dialog.page_url != self.page_url
+            or self.dialog.document_id != self.document_id
+        ):
+            raise ValueError("submit outcome requires one attributed page and dialog")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptchaResetObservation:
+    tab: TabKey
+    page_url: str
+    document_id: str
+    image: CaptchaImageKey | None
+    image_data_url: str = field(repr=False)
+    field_usable: bool
+    field_empty: bool
+    refresh_usable: bool
+    dialog_visible: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tab, TabKey) or not self.page_url or not self.document_id:
+            raise ValueError("CAPTCHA reset observation requires page identity")
+        if self.image is not None and not isinstance(self.image, CaptchaImageKey):
+            raise ValueError("CAPTCHA reset image key is invalid")
+        if type(self.image_data_url) is not str or bool(self.image_data_url) != bool(self.image):
+            raise ValueError("CAPTCHA reset image data differs from its key")
+        for name in ("field_usable", "field_empty", "refresh_usable", "dialog_visible"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+
+
+class PurchaseBrowserPort(SelectionBrowserPort, Protocol):
+    async def observe_purchase_input(self, tab: TabKey) -> PurchaseInputObservation: ...
+
+    async def commit_inline_login(
+        self, intent: InlineLoginIntent, credentials: InlineLoginCredentials,
+        claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
+    async def audit_inline_login(
+        self, tab: TabKey, intent: InlineLoginIntent,
+        credentials: InlineLoginCredentials,
+    ) -> InlineLoginAudit: ...
+
+    async def dispatch_submit(
+        self, plan: SubmitPlan, claim: RunningEffect,
+        login_intent: InlineLoginIntent | None = None,
+        credentials: InlineLoginCredentials | None = None,
+    ) -> EffectReceipt: ...
+
+    async def observe_submit_outcome(self, tab: TabKey) -> SubmitOutcomeObservation: ...
+
+    async def dismiss_submit_dialog(
+        self, dialog: DialogSnapshot, claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
+    async def observe_captcha_reset(self, tab: TabKey) -> CaptchaResetObservation: ...
+
+    async def commit_captcha_reset(
+        self, observed: CaptchaResetObservation, claim: RunningEffect,
+    ) -> EffectReceipt: ...

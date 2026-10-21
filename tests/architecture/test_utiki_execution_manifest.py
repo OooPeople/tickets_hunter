@@ -368,7 +368,7 @@ def test_every_junit_binding_is_an_exact_collectable_pytest_node():
         for binding in registry["bindings"]
         if binding["node_id"] is not None
     ]
-    assert len(nodes) == 51
+    assert len(nodes) == 50
     assert len(nodes) == len(set(nodes))
 
     result = subprocess.run(

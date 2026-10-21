@@ -20,7 +20,9 @@ src/platforms/utiki/application/__init__.py
 src/platforms/utiki/application/ports.py
 src/platforms/utiki/application/quantity.py
 src/platforms/utiki/application/engine.py
+src/platforms/utiki/application/flow_settings.py
 src/platforms/utiki/adapters/__init__.py
+src/platforms/utiki/adapters/browser.py
 src/platforms/utiki/adapters/script_resources.py
 src/platforms/utiki/bootstrap.py
 src/utiki_config.py

@@ -4,8 +4,8 @@
 
 ## 1. 原則
 
-- 日常驗證節奏、CI 重跑、checkpoint、覆核與停止判斷以根目錄
-  [`AGENTS.md`](../../AGENTS.md) 為準；本文件只保存可執行命令、環境條件與結果契約。
+- 驗證原則、commit 邊界與完成判斷以根目錄 [`AGENTS.md`](../../AGENTS.md) 為準；
+  本文件保存各層級的執行時機、命令、失敗處理及結果說法。
 - 任何新測試必須實際執行；不能只建立測試檔就宣告完成。
 - 平台流程可以拆成純邏輯、DOM 契約與瀏覽器流程測試，不應一概視為「無法測試」。
 - 單元測試通過不代表真實網站流程通過；實機測試也不能取代可重複的自動測試。
@@ -16,7 +16,7 @@
 ### 1.1 uTiki 重構的驗證來源
 
 uTiki 的目標與完成條件由 [重構計畫](utiki-refactor/PLAN.md) 維護，實際接線狀態由
-[進度摘要](utiki-refactor/STATUS.md) 維護。本指南只保存驗證命令與分級；舊 gate
+[進度摘要](utiki-refactor/STATUS.md) 維護。本指南保存驗證分級、執行節奏與命令；舊 gate
 的退役條件由計畫維護。
 
 ## 2. 測試入口與環境
@@ -50,12 +50,16 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 
 | 層級 | 何時使用 | 要做的事 |
 |------|----------|----------|
-| 聚焦檢查 | 文件、一般修正及開發中的流程切片 | `git diff --check`、修改過的 Python 語法、受影響 pytest；適用時加 mypy／JS syntax |
-| 本機完整檢查 | 跨模組接線、切換正式路徑、準備上傳完整候選 | 完整 pytest、型別與語法範圍、設定／資源測試，以及環境允許的隔離瀏覽器 fixture |
-| GitHub CI | 分支推送後的實際候選 | 以 `.github/workflows/tests.yml` 和過渡中的 uTiki 隔離 job 結果為準；紅燈列原因，不把本機結果寫成 CI 通過 |
+| 聚焦檢查 | 一個有意義的修改單位完成後，以及批次修復中的重驗 | `git diff --check`、修改過的 Python 語法、受影響 pytest；適用時加 mypy／JS syntax |
+| 本機完整檢查 | 完整流程切片接通、跨模組接線、切換正式路徑或準備交付候選 | 完整 pytest、型別與語法範圍、設定／資源測試，以及環境允許的隔離瀏覽器 fixture；先收集全部失敗再批次修復 |
+| GitHub CI | 使用者下令推送候選後，由 push／PR 事件觸發 | 以 `.github/workflows/tests.yml` 和過渡中的 uTiki 隔離 job 結果為準；紅燈列原因，不把本機結果寫成 CI 通過 |
 | 真站手動驗收 | 使用者之後有可用活動時 | 由使用者以專用設定核對網站 DOM、導頁、提交邊界；單獨記錄，不由離線測試代替 |
 
 產品打包另依本文件 4.5 節與當次交付範圍驗證。
+
+目前重構分支每次推送都會自動觸發 `Tests` 與過渡中的 `uTiki P1 Gate`；PR 事件也會觸發檢查。
+開發中先完成本機批次驗證並回報結果；階段完成與測試通過不構成 commit 或推送授權，
+也不為了查找下一個失敗而反覆推送。
 
 ## 4. 常用命令
 
@@ -99,7 +103,7 @@ python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
 
 ### 4.4 完整測試
 
-本節只列完整套件命令；何時到期由 `AGENTS.md`、已採用計劃及本次變更影響決定。
+本節只列完整套件命令；何時到期由 `AGENTS.md`、已採用計劃及本次變更影響決定。完整檢查應讓可執行的測試跑到結束，不加 `-x` 或 `--maxfail=1` 只看第一個失敗；若收集或環境錯誤擋住後續測試，先排除阻礙再重新收集。
 
 ```bash
 python -m pytest --strict-config --strict-markers
@@ -124,16 +128,21 @@ Chrome、Chromium、Edge 或 Brave 等 zendriver 支援的瀏覽器。
 macOS／Linux 明確執行命令：
 
 ```bash
-TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py tests/test_utiki_engine_browser_flow.py
 ```
 
 Windows PowerShell 明確執行命令：
 
 ```powershell
 $env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES = "1"
-python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py tests/test_utiki_engine_browser_flow.py
 Remove-Item Env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
 ```
+
+兩個 runner 均只開啟 `tests/fixtures/ctbc/` 的合成 `file://` 頁面；新 owner 的案例位於
+`tests/test_utiki_engine_browser_flow.py`。Windows 上 pytest 預設的暫存
+路徑若超出 `MAX_PATH`，使用短且專用的 `--basetemp C:\utiki-pytest-run`；每次執行
+前先確認路徑不含需保留的資料，避免 pytest 清除舊 basetemp 內容。
 
 runner 每次建立暫存 browser profile，並只在 `finally` 停止該次測試自行啟動的
 browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程序。
@@ -141,7 +150,7 @@ browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程�
 #### uTiki 離線瀏覽器與效能驗證
 
 - `tests/test_ctbc_dom_fixtures.py` 使用本機 HTML，適合檢查 selector、原生事件與 production script 的瀏覽器行為；它不證明真站相容，也不證明網路硬隔離。
-- 需要 production-origin 或外部網路不可達證據時，使用隔離容器中的合成頁面與專用 browser profile。現有 `.github/workflows/utiki-p1-gate.yml`、`utiki-p2-gate.yml` 仍提供這類檢查；替代流程可執行之前不關閉隔離。後續驗收只需回報測試、隔離結果與失敗原因，不再建立每案例文件核准紀錄。
+- 需要 production-origin 或外部網路不可達證據時，使用隔離容器中的合成頁面與專用 browser profile。現有 `utiki-p1-gate.yml` 包含隔離工作；`utiki-p2-gate.yml` 仍在倉庫，但自動推送觸發只指向已刪除的舊分支，不會在目前重構分支執行。替代流程可執行之前不關閉隔離。後續驗收只需回報測試、隔離結果與失敗原因，不再建立每案例文件核准紀錄。
 - Windows 與 macOS 原始碼啟動、腳本資源路徑與設定 UI 在正式入口切換時分別驗證；Linux 容器結果不能代替兩個使用平台。
 - 效能基線和修改後數值在相同頁面、設定與執行環境比較，分開記本機決策、CDP 往返與站點等待。保留必要的即時核對與 429 節流，沒有量測收益的優化可撤回。
 - 目前舊 v1.6 gate 的失敗要明列；它們既不能冒充功能失敗，也不能在新流程完成前被靜默略過。
@@ -285,8 +294,13 @@ fixture 必須：
 
 ## 9. 失敗處理
 
-測試失敗時保留第一個完整 traceback、原命令與必要輸出，區分 production regression、
-測試耦合、fixture 過期、結果收集錯誤及環境／權限不足。先用最小重現定位根因，再修正
-受影響路徑；重跑範圍依改動影響決定，並把仍未解決的問題記在 uTiki [STATUS.md](utiki-refactor/STATUS.md)。
+完整檢查失敗時，先保留原命令與完整結果，列出所有失敗的測試及被前置錯誤阻擋的項目；
+每組共同根因保留一份代表性完整 traceback。區分 production regression、測試耦合、
+fixture 過期、結果收集錯誤及環境／權限不足，不把同一根因造成的多個失敗當成多個獨立問題。
+
+先用最小重現定位各組根因，集中修正受影響路徑；修復期間重跑該組與相鄰的受影響測試。
+若收集或環境錯誤使後續測試無法執行，排除阻礙後提早重跑完整檢查以補齊失敗清單。
+整批問題處理完畢後再跑完整檢查一次；新的失敗再按根因分組，不為了尋找下一個問題
+而每修一項就重跑全套或推送觸發 CI。仍未解決的問題記在 uTiki [STATUS.md](utiki-refactor/STATUS.md)。
 
 工程審查的嚴重度與輸出格式見 [engineering-review.md](engineering-review.md)。

@@ -312,6 +312,21 @@
                     (loginIds.length !== 1 || loginPasswords.length !== 1 ||
                         !normalize(loginIds[0].value) ||
                         !(loginPasswords[0].value || ''))) return null;
+                if (plan.expectedLogin) {
+                    const url = new URL(location.href);
+                    const accountFields = Array.from(
+                        document.querySelectorAll('#LOGIN_ID'));
+                    const passwordFields = Array.from(
+                        document.querySelectorAll('#LOGIN_PWD'));
+                    if (url.origin !== plan.expectedLogin.origin ||
+                        url.username || url.password ||
+                        accountFields.length !== 1 || passwordFields.length !== 1 ||
+                        !visible(accountFields[0]) || !visible(passwordFields[0]) ||
+                        accountFields[0].value !== plan.expectedLogin.account ||
+                        passwordFields[0].value !== plan.expectedLogin.password) {
+                        return null;
+                    }
+                }
                 const captchas = Array.from(
                     document.querySelectorAll('input#CHK')).filter(visible);
                 if (captchas.length !== 1 || captchas[0].disabled ||

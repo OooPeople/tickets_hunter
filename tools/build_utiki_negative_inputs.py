@@ -754,8 +754,8 @@ def main(argv: list[str] | None = None) -> int:
         if registry.get("registry_id") != f"utiki-{phase.lower()}-negative-probes":
             raise BuildError("negative registry identity/schema is invalid")
         probes = registry.get("probes")
-        if not isinstance(probes, list) or len(probes) != 57:
-            raise BuildError("reviewed registry must contain exactly 57 probes")
+        if not isinstance(probes, list) or len(probes) != 56:
+            raise BuildError("reviewed registry must contain exactly 56 probes")
         entry_fields = {
             "argument_contract",
             "case_id",

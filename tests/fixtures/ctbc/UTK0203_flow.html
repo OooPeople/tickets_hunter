@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><title>Synthetic quantity flow</title></head>
+<body data-addcart-clicks="0">
+  <input id="PERFORMANCE_ID" value="P16D0B8Z" hidden>
+  <input id="GROUP_ID" value="" hidden>
+  <input id="PERFORMANCE_PRICE_AREA_ID" value="PRICE_FRONT" hidden>
+  <input id="QUANTITY_LIMIT" value="4">
+  <table id="table_tickettype"><tbody>
+    <tr><td class="fill">全票</td><td><input class="numbox" key="FULL" value="1">
+      <input key="LAST_AMOUNT" value="5" hidden></td></tr>
+    <tr><td class="fill">其他票</td><td><input class="numbox" key="OTHER" value="3">
+      <input key="LAST_AMOUNT" value="5" hidden></td></tr>
+  </tbody></table>
+  <input id="CHK" value="ABCD">
+  <input id="LOGIN_ID" value="">
+  <input id="LOGIN_PWD" type="password" value="">
+  <button id="addcart" type="button"
+    onclick="document.body.dataset.addcartClicks = String(Number(document.body.dataset.addcartClicks || 0) + 1)">加入購物車</button>
+</body></html>

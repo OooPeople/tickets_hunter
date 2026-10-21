@@ -608,7 +608,7 @@ def _seat_submit_payload(plan):
     }
 
 
-async def dispatch_submit(tab, plan):
+async def dispatch_submit(tab, plan, expected_login=None):
     """重新驗證固定的購票意圖並送出加入購物車操作。"""
     if not isinstance(plan, SubmitPlan) or not submit_plan_is_valid(plan):
         return SubmitDispatchResult.REJECTED
@@ -619,6 +619,17 @@ async def dispatch_submit(tab, plan):
         payload = _seat_submit_payload(selection_plan)
     else:
         return SubmitDispatchResult.REJECTED
+    if expected_login is not None:
+        if (
+            not isinstance(expected_login, dict)
+            or set(expected_login) != {"origin", "account", "password"}
+            or any(
+                not isinstance(expected_login[key], str) or not expected_login[key]
+                for key in ("origin", "account", "password")
+            )
+        ):
+            return SubmitDispatchResult.REJECTED
+        payload["expectedLogin"] = expected_login
     plan_json = json.dumps(payload, ensure_ascii=False)
     script = assemble_script("submit", {
         "__TICKETS_HUNTER_PLAN_JSON__": plan_json,

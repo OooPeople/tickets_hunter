@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><title>Synthetic date flow</title></head>
+<body>
+  <div id="PerformanceListTable"><table><tbody><tr>
+    <td>2026/09/10（四）18:35</td><td>測試場次</td>
+    <td><button id="buy_btn" type="button"
+      onclick="selectFlowDate()">購買</button></td>
+  </tr></tbody></table></div>
+  <script>
+    function selectFlowDate() {
+      setTimeout(() => {
+        location.href = document.body.dataset.flow === 'seat'
+          ? 'UTK0204_seat_flow.html?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE'
+          : 'UTK0204_flow.html?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=P16ANF0L';
+      }, 20);
+    }
+  </script>
+</body></html>

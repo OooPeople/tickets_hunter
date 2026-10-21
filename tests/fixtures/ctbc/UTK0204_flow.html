@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><title>Synthetic area flow</title></head>
+<body>
+  <div id="SeatOptions"><button id="byServer" type="button">電腦選位</button>
+    <button id="byhend" class="active" type="button">手動選位</button></div>
+  <div class="seats"><table class="f1"><tbody><tr class="saleTr" rel="front"
+    onclick="Send('0202','P16D0B8Z','PRICE_FRONT','','45')">
+    <td data-title="票區">109區前排</td><td data-title="票價">1600</td>
+    <td data-title="空位">40</td>
+  </tr></tbody></table></div>
+  <img alt="synthetic seating map" usemap="#mapdata"
+    src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">
+  <map id="mapdata" name="mapdata"><area id="front" shape="rect" coords="0,0,10,10"
+    href="javascript:Send('0202','P16D0B8Z','PRICE_FRONT','','45')"
+    title="票區:109區前排 票價：1600 尚餘：45" alt="109區前排"></map>
+  <script>
+    window.mainMap = {front: true};
+    function Send(_page, performanceId, priceAreaId, groupId) {
+      setTimeout(() => {
+        location.href = 'UTK0203_flow.html?PERFORMANCE_ID=' + performanceId +
+          '&GROUP_ID=' + groupId + '&PERFORMANCE_PRICE_AREA_ID=' + priceAreaId;
+      }, 20);
+    }
+  </script>
+</body></html>

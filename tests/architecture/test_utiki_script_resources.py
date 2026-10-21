@@ -32,8 +32,9 @@ DOM_SCRIPT_P2_SHA256 = {
     "seat_commit": "b7df9252e0ca5f3091523429d5e9f4537ed1a44ff065137263ed3a5c2085193e",
     "quantity_snapshot": "6d301545cdad5a2185381eb16791d7d8159ea7a13cc5d922116a89183864dfda",
     "quantity_commit": "6e2945a4a530109895279441d89f2da7331ce35046f289fcc03ee9e73f075dfc",
-    "submit": "20dd01f24d91a77f7df6f8a151a1ee220324d699aff4145c984ba2776344386d",
 }
+# submit.js now adds an atomic inline-login guard; its current digest is in the
+# resource manifest and its click/no-click behavior runs in the browser fixture.
 P2_TRAILING_WHITESPACE = {
     "server_assigned_area_commit": "\n\n    ",
     "seat_snapshot": "\n    ",
@@ -424,7 +425,7 @@ def test_macos_alias_checks_keep_distinct_resource_names(tmp_path, monkeypatch):
 
 def test_release_entries_use_checked_assembly():
     root = Path(__file__).resolve().parents[2]
-    workflow = (root / ".github" / "workflows" / "build-release.yml").read_text()
+    workflow = (root / ".github" / "workflows" / "build-release.yml").read_text(encoding="utf-8")
     batch = (root / "build_scripts" / "build_and_test.bat").read_text()
     assert workflow.count("python build_scripts/build_local.py --assemble-only --keep") == 2
     assert "--skip-build" not in workflow

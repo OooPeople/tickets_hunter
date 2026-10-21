@@ -8,6 +8,7 @@ from dataclasses import replace
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -102,9 +103,9 @@ async def _run_browser_fixtures():
             _assert_fast_marker_fixture,
         ):
             if assertion is _assert_seat_fixture:
-                seat_path = str(
-                    (FIXTURE_ROOT / "UTK0205_seat.html").resolve()
-                )
+                seat_path = urlsplit(
+                    (FIXTURE_ROOT / "UTK0205_seat.html").resolve().as_uri()
+                ).path
                 fixture_routes = tuple(
                     (origin, seat_path) for origin in ("file://", "null")
                 )
@@ -118,6 +119,10 @@ async def _run_browser_fixtures():
                         return_value=PageKind.RESERVED_SEAT,
                     ),
                     patch(
+                        "platforms.utiki.domain.plans.classify_utiki_page",
+                        return_value=PageKind.RESERVED_SEAT,
+                    ),
+                    patch(
                         "platforms.utiki.dom.CONST_RESERVED_SEAT_ROUTES",
                         fixture_routes,
                     ),
@@ -125,7 +130,7 @@ async def _run_browser_fixtures():
                     await assertion(browser)
             elif assertion is _assert_quantity_fixture:
                 general_paths = tuple(
-                    str((FIXTURE_ROOT / filename).resolve())
+                    urlsplit((FIXTURE_ROOT / filename).resolve().as_uri()).path
                     for filename in (
                         "UTK0202_quantity.html",
                         "UTK0203_quantity.html",
@@ -146,6 +151,10 @@ async def _run_browser_fixtures():
                         return_value=PageKind.GENERAL_ADMISSION,
                     ),
                     patch(
+                        "platforms.utiki.domain.plans.classify_utiki_page",
+                        return_value=PageKind.GENERAL_ADMISSION,
+                    ),
+                    patch(
                         "platforms.utiki.dom.CONST_GENERAL_ADMISSION_ROUTES",
                         fixture_routes,
                     ),
@@ -159,6 +168,10 @@ async def _run_browser_fixtures():
                     ),
                     patch(
                         "platforms.utiki.selection.classify_utiki_page",
+                        return_value=PageKind.SERVER_ASSIGNED_QUANTITY,
+                    ),
+                    patch(
+                        "platforms.utiki.domain.plans.classify_utiki_page",
                         return_value=PageKind.SERVER_ASSIGNED_QUANTITY,
                     ),
                 ):
@@ -939,18 +952,6 @@ async def _assert_seat_fixture(browser):
     assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
     assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
 
-    oversized_counter_tab = await _open_fixture(
-        browser, "UTK0205_seat.html", query
-    )
-    oversized_snapshot, oversized_plan = await read_plan(oversized_counter_tab)
-    await oversized_counter_tab.evaluate(
-        "document.querySelector('#OTHER').textContent = '0000000000000000000000000000000000000000'"
-    )
-    assert await commit_seat(
-        oversized_counter_tab, oversized_snapshot, oversized_plan
-    ) is CommitResult.STALE
-    assert await click_counts(oversized_counter_tab) == {"ticketType": 0, "seats": 0}
-
     committed_snapshot = await read_seat_snapshot(tab)
     assert seat_selection_is_valid(
         committed_snapshot,
@@ -985,6 +986,18 @@ async def _assert_seat_fixture(browser):
     assert selected == ["A區-1排-1號", "A區-1排-2號"]
     assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
     assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
+
+    oversized_counter_tab = await _open_fixture(
+        browser, "UTK0205_seat.html", query
+    )
+    oversized_snapshot, oversized_plan = await read_plan(oversized_counter_tab)
+    await oversized_counter_tab.evaluate(
+        "document.querySelector('#OTHER').textContent = '0000000000000000000000000000000000000000'"
+    )
+    assert await commit_seat(
+        oversized_counter_tab, oversized_snapshot, oversized_plan
+    ) is CommitResult.REJECTED
+    assert await click_counts(oversized_counter_tab) == {"ticketType": 0, "seats": 0}
 
     unlimited_tab = await _open_fixture(
         browser, "UTK0205_seat.html", query
@@ -2149,7 +2162,7 @@ async def _assert_server_assigned_quantity_fixture(browser):
             super().do_GET()
 
         def guess_type(self, path):
-            if path.endswith("/UTK0201_001"):
+            if Path(path).name == "UTK0201_001":
                 return "text/html"
             return super().guess_type(path)
 

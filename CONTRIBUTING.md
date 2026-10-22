@@ -21,6 +21,8 @@
 
 ## 貢獻流程
 
+本節是向 upstream 提出公開 PR 的流程；修改自己的 fork 或本機工作樹，不須先等待 upstream 維護者確認方向。是否 commit／push 仍由 [AGENTS.md](AGENTS.md) 與使用者當次指令決定。
+
 ### 1. 先開 Issue（必要步驟）
 
 **每個 PR 都必須先有對應的 Issue，並在 PR 內容連結該 Issue。**
@@ -81,7 +83,7 @@ TicketPlus 2026-05 改版在 `#buyTicket` 與日期列之間插入一層容器�
 僅影響 TicketPlus，不動 `src/util.py`。
 ```
 
-開好 Issue 後，等待維護者確認方向，再進行下一步。
+向 upstream 送公開 PR 時，開好 Issue 後等待維護者確認方向，再進行下一步。
 
 ### 2. Fork 與設定
 
@@ -175,7 +177,7 @@ git push origin fix/123-ticketplus-date-list
 - **Python 版本**：3.11.9+
 - **Emoji 限制**：`.py` 檔案禁止使用 emoji，`.md` 檔案允許
 - **除錯輸出**：使用 `DebugLogger`（`debug = util.create_debug_logger(config_dict)`），禁止 `print()`
-- **函式命名**：平台函式使用 `nodriver_{platform}_{function}()` 格式，以 `tab, config_dict` 為首參數
+- **函式命名**：傳統平台公開入口使用 `nodriver_{platform}_{function}()` 與現行 `tab, config_dict` 簽章；uTiki bootstrap／application／domain／adapter 的內部函式依其 [正式責任契約](docs/02-development/utiki-refactor/PLAN.md) 命名與傳入已驗證的 typed policy，不套舊入口簽章
 
 ## 測試
 

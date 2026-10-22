@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import Enum
 from typing import TypeAlias
 
 from ..profiles import PageKind, classify_utiki_page, get_utiki_tenant_profile, unique_query
@@ -29,41 +30,77 @@ class SubmitAttemptId:
             raise ValueError("submit attempt ID must be nonempty")
 
 
+class SubmitSource(str, Enum):
+    AUTOMATIC = "automatic"
+    OBSERVED_MANUAL = "observed-manual"
+
+
+@dataclass(frozen=True, slots=True)
+class ManualSubmitEvidence:
+    """A trusted button event observed after this Run armed the source document."""
+
+    page_url: str
+    document_id: str
+    arm_token: str
+    click_token: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            type(value) is str and value.strip()
+            for value in (self.page_url, self.document_id, self.arm_token, self.click_token)
+        ):
+            raise ValueError("manual submit requires attributed click evidence")
+
+
 @dataclass(frozen=True, slots=True)
 class SubmitAttempt:
     attempt_id: SubmitAttemptId
     cycle: PurchaseCycleId
     key: PurchaseKey
-    stamp: OperationStamp
+    stamp: OperationStamp | None
     plan: SubmitPlan
     input_evidence: InputReadyEvidence
+    source: SubmitSource = SubmitSource.AUTOMATIC
+    manual_evidence: ManualSubmitEvidence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_id, SubmitAttemptId):
             raise ValueError("submit attempt requires an attempt ID")
         if not isinstance(self.cycle, PurchaseCycleId):
             raise ValueError("submit attempt requires a cycle")
-        if not isinstance(self.key, PurchaseKey) or not isinstance(self.stamp, OperationStamp):
-            raise ValueError("submit attempt requires a purchase key and stamp")
+        if not isinstance(self.key, PurchaseKey) or not isinstance(self.source, SubmitSource):
+            raise ValueError("submit attempt requires a purchase key and source")
+        if self.source is SubmitSource.AUTOMATIC:
+            if not isinstance(self.stamp, OperationStamp) or self.manual_evidence is not None:
+                raise ValueError("automatic submit requires an original operation stamp")
+        elif self.stamp is not None or not isinstance(self.manual_evidence, ManualSubmitEvidence):
+            raise ValueError("manual submit requires observed evidence without a claim")
         if not isinstance(self.plan, SubmitPlan) or not isinstance(self.input_evidence, InputReadyEvidence):
             raise ValueError("submit attempt requires a plan and ready input")
         if not submit_plan_is_valid(self.plan):
             raise ValueError("submit plan is invalid")
         context = self.input_evidence.context
         selection = self.plan.selection_plan
-        if not context.auto_submit:
+        if self.source is SubmitSource.AUTOMATIC and not context.auto_submit:
             raise ValueError("submit attempt requires enabled auto-submit policy")
         if self.cycle != context.cycle:
             raise ValueError("submit cycle differs from input context")
-        if self.key.tab != self.stamp.tab or self.key.tab != context.tab:
+        if self.key.tab != context.tab or (
+            self.stamp is not None and self.key.tab != self.stamp.tab
+        ):
             raise ValueError("submit tab differs from purchase or input context")
         if (
-            self.stamp.document != context.document
-            or self.plan.document_id != self.stamp.document.token
+            self.stamp is not None and self.stamp.document != context.document
+            or self.plan.document_id != context.document.token
             or not isinstance(selection, (QuantityPlan, SeatActionPlan))
             or selection.document_id != self.plan.document_id
         ):
             raise ValueError("submit document differs from selection or input context")
+        if self.manual_evidence is not None and (
+            self.manual_evidence.page_url != self.plan.page_url
+            or self.manual_evidence.document_id != self.plan.document_id
+        ):
+            raise ValueError("manual submit source differs from prepared document")
         if not isinstance(self.plan.page_kind, PageKind) or self.plan.page_kind is not self.key.page_mode:
             raise ValueError("submit page mode differs from purchase key")
         profile = get_utiki_tenant_profile(self.plan.page_url)
@@ -106,7 +143,11 @@ def _validate_submit_claim(attempt: SubmitAttempt, claim: ActiveEffect) -> None:
         raise ValueError("submit state requires an attempt")
     if not isinstance(claim, (ClaimedEffect, RunningEffect, AwaitingEvidenceEffect, HeldEffect)):
         raise ValueError("submit state requires a claim")
-    if claim.proposal.kind is not EffectKind.SUBMIT or claim.proposal.stamp != attempt.stamp:
+    if (
+        attempt.source is not SubmitSource.AUTOMATIC
+        or claim.proposal.kind is not EffectKind.SUBMIT
+        or claim.proposal.stamp != attempt.stamp
+    ):
         raise ValueError("submit claim differs from original attempt")
 
 

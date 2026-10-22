@@ -332,9 +332,11 @@ def _freeze_submitted_seat(raw_seat: object) -> SubmittedSeat | None:
 
     if not isinstance(raw_seat, dict):
         return None
-    if any(not isinstance(raw_seat.get(field), str) for field in ("A", "Y", "Z")):
+    if any(not isinstance(raw_seat.get(field), str) for field in ("A", "Y", "Z", "key")):
         return None
-    return SubmittedSeat(raw_seat["A"], raw_seat["Y"], raw_seat["Z"])
+    if re.fullmatch(r"[A-Za-z0-9_-]+", raw_seat["key"]) is None:
+        return None
+    return SubmittedSeat(raw_seat["A"], raw_seat["Y"], raw_seat["Z"], raw_seat["key"])
 
 
 def _freeze_seat_counter(raw_counter: object) -> SeatCounter | None:
@@ -1417,6 +1419,14 @@ def _seat_snapshot_structure_is_valid(snapshot: SeatSnapshot) -> bool:
     if not 0 < len(snapshot.ticket_types) <= 100 or len(snapshot.seats) > 5000:
         return False
     seat_fingerprints = [seat.fingerprint for seat in snapshot.seats]
+    if any(
+        (seat.available or seat.selected) and (
+            type(seat.fingerprint[-1]) is not str
+            or re.fullmatch(r"[A-Za-z0-9_-]+", seat.fingerprint[-1]) is None
+        )
+        for seat in snapshot.seats
+    ):
+        return False
     counter_ids = [counter.type_id for counter in snapshot.counters]
     if len(set(seat_fingerprints)) != len(seat_fingerprints):
         return False
@@ -1492,9 +1502,16 @@ def seat_selection_is_valid(
     selected = [seat for seat in snapshot.seats if seat.selected]
     if len(selected) != requested or snapshot.visual_selected_count != requested:
         return False
-    if len(snapshot.submitted_seats) != requested or any(
-        payload != SubmittedSeat("S", ticket_type_id, ticket_type_name)
-        for payload in snapshot.submitted_seats
+    selected_keys = [seat.fingerprint[-1] for seat in selected]
+    if (
+        len(snapshot.submitted_seats) != requested
+        or any(type(key) is not str or not key for key in selected_keys)
+        or len(set(selected_keys)) != requested
+        or {payload.key for payload in snapshot.submitted_seats} != set(selected_keys)
+        or any(
+            (payload.a, payload.y, payload.z) != ("S", ticket_type_id, ticket_type_name)
+            for payload in snapshot.submitted_seats
+        )
     ):
         return False
     counts = [
@@ -1584,6 +1601,9 @@ def _make_seat_plan(
         selected_seat_fingerprints=tuple(selected),
         target_seat_fingerprints=tuple(targets),
         require_physical_adjacency=require_adjacency,
+        expected_payload_keys=tuple(cast(str, fingerprint[-1]) for fingerprint in (
+            targets if action == "select" else selected
+        )),
     )
 
 
@@ -1697,6 +1717,11 @@ def seat_plan_matches_snapshot(snapshot: object, plan: object) -> bool:
         return False
     selected = tuple(seat.fingerprint for seat in snapshot.seats if seat.selected)
     if plan.selected_seat_fingerprints != selected:
+        return False
+    expected_keys = tuple(fingerprint[-1] for fingerprint in (
+        plan.target_seat_fingerprints if plan.action == "select" else selected
+    ))
+    if plan.expected_payload_keys != expected_keys:
         return False
     valid = seat_selection_is_valid(
         snapshot, plan.ticket_number, plan.ticket_type_id, plan.ticket_type_name
@@ -1823,7 +1848,10 @@ def _quantity_page_type_matches(page_url: str, page_type: str) -> bool:
 
     if page_type == "general_admission":
         return bool(classify_utiki_page(page_url) == PageKind.GENERAL_ADMISSION)
-    return page_type == "server_assigned_quantity"
+    return bool(
+        page_type == "server_assigned_quantity"
+        and classify_utiki_page(page_url) is PageKind.SERVER_ASSIGNED_QUANTITY
+    )
 
 
 def _quantity_snapshot_identity_is_valid(

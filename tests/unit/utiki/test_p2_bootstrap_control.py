@@ -14,7 +14,8 @@ from platforms.utiki.domain.identity import DocumentKey, OperationId, OperationS
 from platforms.utiki.domain.plans import QuantityPlan
 from platforms.utiki.domain.snapshots import QuantitySnapshot
 from platforms.utiki.selection import parse_quantity_snapshot
-from tests.ctbc_support import make_ctbc_quantity_snapshot
+from tests.ctbc_support import make_ctbc_quantity_snapshot, make_effective_policy
+from platforms.utiki.application.flow_settings import FlowSettings
 from utiki_config import CurrentPolicyState, apply_current_policy_reload
 
 
@@ -62,8 +63,8 @@ def _profile(keyword: str = "全票") -> str:
     }}, ensure_ascii=False)
 
 
-def _policy() -> CurrentPolicyState:
-    return apply_current_policy_reload(None, _profile())
+def _policy():
+    return make_effective_policy(apply_current_policy_reload(None, _profile()))
 
 
 def _stamp(
@@ -229,13 +230,14 @@ def test_u01_policy_updates_in_place_and_invalid_reload_blocks_planning() -> Non
     browser.actual_source = old_stamp
     assert asyncio.run(engine.plan_quantity(handle, old_stamp, 2)) is not None
 
-    blocked = apply_current_policy_reload(initial, '{"utiki":')
-    assert engine.update_policy(blocked)
+    initial_behavior = apply_current_policy_reload(None, _profile())
+    blocked = apply_current_policy_reload(initial_behavior, '{"utiki":')
+    assert engine.update_policy(make_effective_policy(blocked))
     assert engine.context(handle) is None
     assert asyncio.run(engine.plan_quantity(handle, old_stamp, 2)) is None
 
     changed = apply_current_policy_reload(blocked, _profile("其他票"))
-    assert engine.update_policy(changed)
+    assert engine.update_policy(make_effective_policy(changed))
     new_stamp = _stamp(engine, handle, browser.snapshot.document_id, "quantity-op-2")
     browser.actual_source = new_stamp
     assert asyncio.run(engine.plan_quantity(handle, old_stamp, 2)) is None
@@ -280,5 +282,32 @@ def test_u01_stale_control_and_invalid_factory_input_fail_closed() -> None:
     assert asyncio.run(engine.plan_quantity(handle, stamp, 2)) is None
     assert browser.observed == []
 
-    with pytest.raises(ValueError, match="validated current policy"):
+    with pytest.raises(ValueError, match="validated effective policy"):
         create_engine({"ctbc": {}}, browser, core)  # type: ignore[arg-type]
+
+
+def test_one_run_rejects_second_tab_and_wrong_bound_adapter() -> None:
+    browser = FakeBrowser(_snapshot())
+    core = FakeCore()
+    first = TabKey(1, "first")
+    second = TabKey(1, "second")
+    core.set(first, 1, CoreGate.PURCHASE_ALLOWED)
+    core.set(second, 1, CoreGate.PURCHASE_ALLOWED)
+    engine = create_engine(_policy(), browser, core)
+    engine.attach(first)
+    with pytest.raises(ValueError, match="one active tab"):
+        engine.attach(second)
+
+    browser.bound_tab = first
+    another = create_engine(_policy(), browser, core)
+    with pytest.raises(ValueError, match="another tab"):
+        another.attach(second)
+
+
+def test_missing_required_flow_port_fails_during_assembly() -> None:
+    browser = FakeBrowser(_snapshot())
+    complete_flow = FlowSettings(True, True, 2)
+    with pytest.raises(ValueError, match="browser capability missing: observe_date"):
+        create_engine(make_effective_policy(
+            apply_current_policy_reload(None, _profile()), complete_flow,
+        ), browser, FakeCore())

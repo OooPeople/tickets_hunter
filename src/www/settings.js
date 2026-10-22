@@ -115,6 +115,7 @@ const language_selector = document.querySelector('#language_selector');
 var settings = null;
 var globalSettings = null;
 var globalSettingsRevision = null;
+let utikiCurrentProfileReady = true;
 let profileLoadGeneration = 0;
 const profileSaveGenerations = new Map();
 run_button.disabled = true;
@@ -123,17 +124,15 @@ save_button.disabled = true;
 function update_settings_action_state()
 {
     const ready = !!settings && !!globalSettings && !!globalSettingsRevision;
-    run_button.disabled = !ready;
+    run_button.disabled = !ready || !utikiCurrentProfileReady;
     save_button.disabled = !ready;
 }
 
 function utiki_behavior_setting(config, key, fallback)
 {
-    for (const sectionName of ['utiki', 'ctbc']) {
-        const section = config && config[sectionName];
-        if (section && Object.prototype.hasOwnProperty.call(section, key)) {
-            return section[key];
-        }
+    const section = config && config.utiki;
+    if (section && Object.prototype.hasOwnProperty.call(section, key)) {
+        return section[key];
     }
     return fallback;
 }
@@ -865,6 +864,7 @@ function uiText(key, extra = '') {
         'global_settings_conflict': { 'zh-TW': '另一個設定頁已更新職棒共用刷新設定；目前輸入內容尚未覆寫，請確認後再儲存一次。', en: 'Another settings tab updated the shared baseball refresh settings. Your current input was not overwritten; review it and save again.' },
         'profile_save_failed_after_global': { 'zh-TW': `職棒共用刷新設定已儲存，但目前 profile 儲存失敗：${extra}`, en: `Shared baseball refresh settings were saved, but the current profile failed to save: ${extra}` },
         'profile_load_failed': { 'zh-TW': '設定檔載入失敗；儲存與啟動已停用。請重新選擇或整理頁面。', en: 'The profile failed to load. Save and Run are disabled; select it again or reload the page.' },
+        'utiki_old_profile': { 'zh-TW': 'uTiki 設定格式已過期。請重新確認職棒票種、選位模式與排序欄位後儲存；完成前不可啟動。', en: 'This uTiki profile uses an old format. Review the ticket type, seat mode and sorting fields, then save before running.' },
         'status_paused': { 'zh-TW': '已暫停', en: 'Paused' },
         'status_running': { 'zh-TW': '已啟動', en: 'Running' },
         'discord_empty': { 'zh-TW': '請先輸入 Discord Webhook URL。', en: 'Please enter the Discord webhook URL first.' },
@@ -1446,6 +1446,9 @@ function maxbot_load_api()
         //console.log(data);
         settings = data;
         load_settins_to_form(data);
+        utikiCurrentProfileReady = detectPlatform(data.homepage) !== 'ctbc'
+            || (!!data.utiki && !Object.prototype.hasOwnProperty.call(data, 'ctbc'));
+        if (!utikiCurrentProfileReady) run_message(uiText('utiki_old_profile'));
         update_settings_action_state();
     })
     .fail(function() {
@@ -1817,13 +1820,10 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.ctbc_password = ctbc_password.value;
             settings.accounts.ticket_password = ticket_password.value;
             if (!settings.utiki) settings.utiki = {};
-            if (!settings.ctbc) settings.ctbc = {};
+            delete settings.ctbc;
             settings.utiki.seat_selection_mode = ctbc_seat_selection_mode.value || 'manual';
             settings.utiki.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
             settings.utiki.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
-            settings.ctbc.seat_selection_mode = settings.utiki.seat_selection_mode;
-            settings.ctbc.ticket_type_keyword = settings.utiki.ticket_type_keyword;
-            settings.ctbc.seat_sorting = settings.utiki.seat_sorting;
             settings.accounts.udn_password = udn_password.value;
             settings.accounts.ticketplus_password = ticketplus_password.value;
             settings.advanced.discount_code = discount_code.value;
@@ -1869,6 +1869,8 @@ function maxbot_save_api(callback, targetProfile = current_profile)
             .done(function(data) {
                 if (!mayUpdateCurrentProfile()) return;
                 if (data && typeof data === 'object') settings = data;
+                utikiCurrentProfileReady = true;
+                update_settings_action_state();
                 console.log("[MaxBot] Settings saved");
                 check_unsaved_fields();
                 if(callback) callback();
@@ -1877,9 +1879,10 @@ function maxbot_save_api(callback, targetProfile = current_profile)
                 if (!mayUpdateCurrentProfile()) return;
                 console.error("[MaxBot] Profile save error:", status, error);
                 console.error("[MaxBot] Response content:", xhr.responseText);
+                const detail = xhr.responseJSON && xhr.responseJSON.error &&
+                    xhr.responseJSON.error.message || status;
                 run_message(uiText(
-                    globalWasSaved ? 'profile_save_failed_after_global' : 'save_failed',
-                    status
+                    globalWasSaved ? 'profile_save_failed_after_global' : 'save_failed', detail
                 ));
             });
         };

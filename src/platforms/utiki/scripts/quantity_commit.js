@@ -144,8 +144,21 @@
                 safeCount(input.value) && Number(input.value) ===
                     (input === state.target ? plan.ticketNumber : 0));
             if (marker) {
-                return marker === intent && auditValid(live) ?
-                    'committed' : 'stale';
+                if (marker === intent) {
+                    return auditValid(live) ? 'committed' : 'stale';
+                }
+                const previous = plan.previousIntent;
+                if (!Array.isArray(previous) || previous.length !== 2 ||
+                    typeof previous[0] !== 'string' ||
+                    !Number.isSafeInteger(previous[1]) || previous[1] <= 0 ||
+                    marker !== JSON.stringify(previous)) return 'stale';
+                const previousTargets = live.inputs.filter(input =>
+                    input.getAttribute('key') === previous[0]);
+                if (previousTargets.length !== 1 || !live.inputs.every(input =>
+                    safeCount(input.value) && Number(input.value) ===
+                        (input === previousTargets[0] ? previous[1] : 0))) {
+                    return 'stale';
+                }
             }
             document.documentElement.setAttribute(markerName, intent);
             for (const input of live.inputs) {

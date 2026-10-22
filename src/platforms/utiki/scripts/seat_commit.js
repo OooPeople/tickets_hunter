@@ -147,9 +147,10 @@
                     new Set(ticketKeys).size !== ticketKeys.length) {
                     return {status: 'stale'};
                 }
-                const submitted = Object.values(window.seats)
-                    .filter(seat => seat && String(seat.A || '') !== '')
-                    .map(seat => ({
+                const submitted = Object.entries(window.seats)
+                    .filter(([, seat]) => seat && String(seat.A || '') !== '')
+                    .map(([key, seat]) => ({
+                        key,
                         A: String(seat.A || ''),
                         Y: String(seat.Y || ''),
                         Z: String(seat.Z || '')
@@ -205,21 +206,27 @@
                 return exactSet(
                     selected.map(seat => seat.fingerprint), fingerprints);
             };
-            const payloadValid = (live, expected) =>
-                live.submitted.length === expected &&
+            const payloadValid = (live, fingerprints) =>
+                live.submitted.length === fingerprints.length &&
+                exactSet(live.submitted.map(seat => seat.key),
+                    fingerprints.map(seat => seat[seat.length - 1])) &&
                 live.submitted.every(seat => seat.A === 'S' &&
                     seat.Y === plan.ticketTypeId &&
                     seat.Z === plan.ticketTypeName);
             const selectionValid = (live, fingerprints) =>
                 live.status === 'ok' && targetTicket(live).length === 1 &&
                 selectedValid(live, fingerprints) && targetsAdjacent(live) &&
-                payloadValid(live, fingerprints.length) &&
+                payloadValid(live, fingerprints) &&
                 countersValid(live, fingerprints.length);
             const cleanValid = live => live.status === 'ok' &&
                 !live.seats.some(seat => seat.selected) &&
                 live.submitted.length === 0 && countersValid(live, 0);
             const expectedFingerprints = plan.action === 'select' ?
                 plan.targetSeatFingerprints : plan.selectedSeatFingerprints;
+            if (!exactSet(expectedFingerprints.map(
+                seat => seat[seat.length - 1]), plan.expectedPayloadKeys)) {
+                return 'rejected';
+            }
             const intent = JSON.stringify([
                 plan.action === 'clear' ? 'clear' : 'selection',
                 plan.ticketTypeFingerprint, plan.ticketTypeId,

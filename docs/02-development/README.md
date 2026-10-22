@@ -10,8 +10,10 @@
 | [程式碼邊界](code-boundaries.md) | 穩定模組職責、依賴方向與禁止模式 | 任務進度、舊計畫版本差異 |
 | [結構索引](structure.md) | 目前模組與入口的位置；以程式碼為準 | 目標設計與驗收宣告 |
 | [工程審查指南](engineering-review.md) | 審查範圍、嚴重度與輸出格式 | 產品規格、最近驗證 |
-| [12 階段標準](ticket_automation_standard.md) | 跨平台流程語意 | uTiki 暫時狀態 |
+| [12 階段標準](ticket_automation_standard.md) | 跨平台功能分類與傳統平台入口參考 | uTiki 新 owner 的架構、批次驗收 |
 
 平台機制見 [機制章節](../03-mechanisms/)；瀏覽器能力見 [API 指南](../06-api-reference/)；PR 與提交見 [CONTRIBUTING.md](../../CONTRIBUTING.md)。原作者的範本及其他平台文件按需要查閱。
 
-歷史計畫與逐次驗證留在 Git 歷史。[catalog 核准紀錄](utiki-refactor/catalog-approval-v1.6.md) 和 [核心接合盤點](utiki-refactor/core-integration-inventory.md) 僅供尚未退役的舊 CI 使用；移除條件見現行計畫，不從這兩份文件決定新工作。
+uTiki 新 owner 以正式 PLAN 的單 Run controller、typed effective policy、操作回執與唯一刷新接縫為準。[開發指南](development_guide.md)及[程式碼範本](coding_templates.md)中的舊函式骨架、模組 `_state`、通用 retry、逐函式 pause 返回與直接 reload，仍可供適用的傳統平台參考，不是 uTiki 的實作或完成標準。
+
+舊 v1.6 catalog、核心接合盤點及 P1／P2 gate 已依正式計畫第 11.2 節在批次 6 從目前 source 退役；歷史基準與當時的驗證紀錄仍可由 Git 歷史查閱。目前可執行的替代命令只在[測試指南](testing_execution_guide.md)維護。

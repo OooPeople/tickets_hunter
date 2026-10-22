@@ -1,10 +1,6 @@
-# uTiki typed scope — active P2 development manifest
-# Issue: OooPeople/tickets_hunter#17
-# Branch: refactor/17-utiki-root-v1-5
-# Baseline: f307f7caba054fb40aab807a4629c891e69fb200
-#
-# Active entries define the current typed scope, including the new P2 planning
-# bootstrap. A local PASS does not establish later adapters or production wiring.
+# Current uTiki typed source scope, used by .github/workflows/tests.yml.
+# This list measures the modules below; formal caller and browser behavior
+# are validated by separate tests and source startup checks.
 src/platforms/utiki/auth.py
 src/platforms/utiki/profiles.py
 src/platforms/utiki/selection.py
@@ -18,11 +14,16 @@ src/platforms/utiki/domain/effects.py
 src/platforms/utiki/domain/inputs.py
 src/platforms/utiki/application/__init__.py
 src/platforms/utiki/application/ports.py
+src/platforms/utiki/application/refresh_contract.py
+src/platforms/utiki/application/refresh_host.py
+src/platforms/utiki/adapters/refresh.py
 src/platforms/utiki/application/quantity.py
 src/platforms/utiki/application/engine.py
 src/platforms/utiki/application/flow_settings.py
 src/platforms/utiki/adapters/__init__.py
 src/platforms/utiki/adapters/browser.py
+src/platforms/utiki/adapters/notification.py
+src/platforms/utiki/adapters/session.py
 src/platforms/utiki/adapters/script_resources.py
 src/platforms/utiki/bootstrap.py
 src/utiki_config.py
@@ -47,7 +48,6 @@ tools/migrations/convert_utiki_config.py
 # fail when a required existing file is omitted; a comment or non-existent path
 # must never be counted as a typed file.
 #
-# Existing legacy/browser-heavy modules such as workflow.py, refresh.py and
-# dom.py are not represented here as already typed. If they are rewritten or
-# replaced by the new architecture, their new/revised paths enter the scope
-# under the rules above.
+# The retired workflow.py and root refresh.py have no typed scope entry.
+# Browser-heavy dom.py remains outside this narrow strict typed scope; any
+# replacement enters the scope under the rules above.

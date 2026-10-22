@@ -59,6 +59,7 @@ class InputBlockReason(str, Enum):
     MISSING_FIELD = "missing-field"
     IMAGE_TIMEOUT = "image-timeout"
     PROVIDER_UNAVAILABLE = "provider-unavailable"
+    PROVIDER_RESTART_REQUIRED = "provider-restart-required"
     UNKNOWN_EFFECT = "unknown-effect"
     MANUAL_REVIEW = "manual-review"
 
@@ -183,12 +184,15 @@ class InputReadyEvidence:
     image: CaptchaImageKey | None
     attempt_id: InputAttemptId | None
     field_audit_passed: bool
+    manual_revision: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.context, InputContext) or not isinstance(self.source, InputSource):
             raise ValueError("input readiness requires context and source")
         if type(self.field_audit_passed) is not bool or not self.field_audit_passed:
             raise ValueError("input readiness requires a passing field audit")
+        if type(self.manual_revision) is not int or self.manual_revision < 0:
+            raise ValueError("input readiness requires a valid manual revision")
         if self.image is not None and not isinstance(self.image, CaptchaImageKey):
             raise ValueError("input readiness image must be observed evidence")
         if self.source is InputSource.RECOGNITION:

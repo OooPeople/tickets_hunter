@@ -247,7 +247,7 @@ def _build_seat_fixture(seat_count: int) -> dict[str, Any]:
         seat_number = index % seats_per_row + 1
         title = f"A-{row_number}排-{seat_number}號"
         seats.append({
-            "fingerprint": ["seat", index, title],
+            "fingerprint": ["seat", index, f"SEAT_{index}"],
             "title": title,
             "row_index": row_number,
             "cell_index": seat_number,

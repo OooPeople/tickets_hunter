@@ -71,8 +71,7 @@
 - **platforms/ibon.py** - iBon + Tour iBon 平台（25 函式）
 - **platforms/kham.py** - KHAM + ticket.com.tw + UDN 平台（21 函式）
 - **platforms/hkticketing.py** - HKTicketing + GalaxyMacau + Ticketek 平台（30 函式）
-- **platforms/utiki/** - uTiki2 職棒售票家族；目前正式路由仍使用既有 workflow
-- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade；新流程接替且清查 caller 後移除
+- **platforms/utiki/** - uTiki2 職棒售票家族；正式路由使用 `production_run.py`
 
 ### 🌐 支援平台清單
 
@@ -387,12 +386,13 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### 現行過渡模組邊界
+#### 現行模組邊界
 
 ```text
 platforms/utiki/
-├── __init__.py   # 現行公開入口與 legacy workflow 轉接
-├── bootstrap.py  # 隔離新 engine 組裝入口；production 尚未切換
+├── __init__.py   # tenant 與頁型公開入口
+├── bootstrap.py  # 正式 Run 的 engine 組裝入口
+├── production_run.py # 正式 uTiki route 的單 Run owner
 ├── domain/       # 新流程純模型、snapshot、plan 與 effect 規則
 ├── application/  # 新流程 engine、ports、flow settings 與 quantity 協調
 ├── adapters/     # 新流程 browser 與 script resource adapters
@@ -400,16 +400,11 @@ platforms/utiki/
 ├── profiles.py   # tenant allowlist、PageKind 與 route classifier
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
-├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
-├── refresh.py    # document health、429 與跨程序刷新協調；不持有 runtime
-└── workflow.py   # 現行 module registry owner 與購票流程編排
-
-platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
+└── dom.py        # 頁面 snapshot reader 與原子 DOM commit
 ```
 
 - 現行 allowlist tenant：中信育樂、味全龍；此處只描述路由範圍，不代表已完成真站驗證。
-- `workflow.py` 持有現行 per-tab registry，並把 runtime、tab identity 與取消工作資訊傳給 `refresh.py`；兩個模組目前都會修改同一份 runtime。
-- 共用行為設定仍在過渡中；目前程式與使用者設定的實際狀態見 [STATUS.md](utiki-refactor/STATUS.md)。
+- 舊 `workflow.py`／`refresh.py` 已退役；有效行為由純規則、engine、adapter、正式 caller 與 browser 測試承接。現行 SQLite 接合在 `adapters/refresh.py`；實際驗證與限制見 [STATUS.md](utiki-refactor/STATUS.md)。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
 - 本索引只描述目前的模組；目標責任見 [uTiki 重構計畫](utiki-refactor/PLAN.md)，依賴限制見 [程式碼邊界](code-boundaries.md)。
 
@@ -696,6 +691,8 @@ with_pause_check(task_func, config_dict, *args, **kwargs)      # ✅
 ## 📊 功能完整度評分（基於標準架構）
 
 > **評分標準**：根據 [ticket_automation_standard.md](./ticket_automation_standard.md) 定義的 12 階段功能架構評分
+
+此處的傳統平台函式／階段評分不判定 [uTiki 新 owner](utiki-refactor/PLAN.md) 是否完成；uTiki 依正式 caller、操作結果及各批出口的證據驗收，現況見 [STATUS.md](utiki-refactor/STATUS.md)。
 
 ### 評分方式說明
 

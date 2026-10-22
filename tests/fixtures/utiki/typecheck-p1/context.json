@@ -1,7 +1,0 @@
-{
-  "schema_version": 1,
-  "coverage_kind": "controlled-runner-contract",
-  "purpose": "Prove that the P1 strict typecheck runner and typed-root discovery execute fail-closed.",
-  "production_scope_status": "NOT_CLAIMED",
-  "legacy_seed_scope_status": "KNOWN_FAILING_DEBT"
-}

@@ -29,18 +29,6 @@ class TenantProfile:
     fast_area_prefetch: bool
     supports_server_assignment: bool = False
 
-    def as_legacy_dict(self) -> dict[str, str | bool]:
-        """將租戶設定轉成舊版呼叫端使用的字典。"""
-
-        return {
-            "name": self.name,
-            "host": self.host,
-            "tenant_path": self.tenant_path,
-            "map_namespace": self.map_namespace,
-            "fast_area_prefetch": self.fast_area_prefetch,
-            "supports_server_assignment": self.supports_server_assignment,
-        }
-
 
 CTBC_DOMAIN = "tix.ctbcsports.com"
 CTBC_MAP_DOMAIN = "imgs2.utiki.com.tw"
@@ -53,6 +41,7 @@ _TENANTS = (
         tenant_path="/BROTHERS",
         map_namespace="CTBC_SPORTS",
         fast_area_prefetch=True,
+        supports_server_assignment=True,
     ),
     TenantProfile(
         key="wei_chuan_dragons",

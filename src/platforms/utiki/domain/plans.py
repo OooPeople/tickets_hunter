@@ -63,6 +63,7 @@ class QuantityPlan:
     price_area_hidden_present: bool = False
     quantity_limit_present: bool = False
     target_remaining_present: bool = False
+    prior_commit: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,7 @@ class SeatActionPlan:
     selected_seat_fingerprints: tuple[SeatFingerprint, ...] = ()
     target_seat_fingerprints: tuple[SeatFingerprint, ...] = ()
     require_physical_adjacency: bool = False
+    expected_payload_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +123,10 @@ def _seat_submit_payload(plan: object) -> tuple[object, ...] | None:
             for item in fingerprints
         )
         or len(set(expected)) != len(expected)
+        or len(plan.expected_payload_keys) != plan.ticket_number
+        or len(set(plan.expected_payload_keys)) != plan.ticket_number
+        or any(not isinstance(key, str) or not re.fullmatch(token, key)
+               for key in plan.expected_payload_keys)
         or any(
             not isinstance(value, str) or not re.fullmatch(token, value)
             for value in (
@@ -136,6 +142,7 @@ def _seat_submit_payload(plan: object) -> tuple[object, ...] | None:
     return (
         "seat", plan.ticket_number, plan.ticket_type_fingerprint,
         plan.ticket_type_id, plan.ticket_type_name, expected,
+        plan.expected_payload_keys,
         plan.require_physical_adjacency,
     )
 

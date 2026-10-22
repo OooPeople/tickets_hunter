@@ -30,7 +30,7 @@
                 captcha_unique: captcha.length === 1 && visible(captcha[0]),
                 captcha_enabled: captcha.length === 1 && usable(captcha[0]),
                 manual_value_ready: captcha.length === 1 &&
-                    usable(captcha[0]) && captcha[0].value.trim().length === 4,
+                    usable(captcha[0]) && /^[A-Za-z0-9]{4}$/.test(captcha[0].value),
                 login_required: loginRequired,
                 login_fields_usable: loginFieldsUsable,
                 login_account_present: loginFieldsUsable &&

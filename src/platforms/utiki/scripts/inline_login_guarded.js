@@ -7,10 +7,11 @@
             const passwordValue = __UTIKI_LOGIN_GUARD_ARG_5__;
             const writeAccount = __UTIKI_LOGIN_GUARD_ARG_6__;
             const writePassword = __UTIKI_LOGIN_GUARD_ARG_7__;
-            const result = status => JSON.stringify({
+            const result = (status, manualReady = false) => JSON.stringify({
                 page_url: location.href,
                 document_id: String(performance.timeOrigin),
-                status: status
+                status: status,
+                manual_ready: manualReady
             });
             const samePage = () => {
                 const url = new URL(location.href);
@@ -39,11 +40,39 @@
             const password = passwords[0];
             const matched = () => samePage() && usable(account) && usable(password) &&
                 account.value === accountValue && password.value === passwordValue;
-            if (mode === 'audit') return result(matched() ? 'applied' : 'rejected');
+            const markerKey = Symbol.for('utiki.inline-login.manual-audit');
+            if (mode === 'audit') {
+                if (matched()) return result('applied');
+                const marker = document.documentElement[markerKey];
+                const manualReady = marker && marker.account === account &&
+                    marker.password === password && marker.url === expectedUrl &&
+                    marker.document === expectedDocument &&
+                    (account.value === accountValue ||
+                        marker.trustedAccount === account.value) &&
+                    (password.value === passwordValue ||
+                        marker.trustedPassword === password.value) &&
+                    !!account.value.trim() && !!password.value;
+                return result('rejected', !!manualReady);
+            }
             if ((writeAccount && account.value.trim()) ||
                 (!writeAccount && account.value !== accountValue) ||
                 (writePassword && password.value) ||
                 (!writePassword && password.value !== passwordValue)) return result('rejected');
+            const marker = {
+                account, password, url: expectedUrl,
+                document: expectedDocument,
+                trustedAccount: null, trustedPassword: null
+            };
+            document.documentElement[markerKey] = marker;
+            const markTrustedEdit = event => {
+                if (event.isTrusted && document.documentElement[markerKey] === marker && samePage() &&
+                    (event.target === account || event.target === password)) {
+                    if (event.target === account) marker.trustedAccount = account.value;
+                    if (event.target === password) marker.trustedPassword = password.value;
+                }
+            };
+            account.addEventListener('input', markTrustedEdit);
+            password.addEventListener('input', markTrustedEdit);
             __UTIKI_NATIVE_INPUT_SETTER_FRAGMENT__
             let mutated = false;
             try {

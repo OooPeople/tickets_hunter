@@ -110,7 +110,7 @@ def test_small_report_records_trust_roots_and_blocked_browser_metrics():
     assert len(report["digests"]["config_sha256"]) == 64
     assert len(report["digests"]["script_sha256"]) == 64
     assert report["subject_files"]
-    assert "src/platforms/utiki/workflow.py" in report["subject_files"]
+    assert "src/platforms/utiki/selection.py" in report["subject_files"]
 
 
 def test_plan_cli_mode_and_seed_contract_is_accepted():

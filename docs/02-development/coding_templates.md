@@ -7,6 +7,8 @@
 
 > Tickets Hunter 多平台搶票系統統一程式碼範本庫
 
+**適用界線**：本頁的舊平台函式骨架、`config_dict`、模組 `_state`、逐函式 pause 返回、通用 retry 與評分表供適用的傳統平台參考；不可直接套為 [uTiki 新 owner](utiki-refactor/PLAN.md) 的實作或完成標準。uTiki 的 controller 對已可能派送操作保留原結果歸屬，重試、填值與 reload 須依效果證據及唯一 owner 授權；現況見 [STATUS.md](utiki-refactor/STATUS.md)。
+
 ## 📚 **文件參考指南**
 
 本文件專注於提供實際的程式碼範本和實作檢查清單。相關的架構和策略說明請參考：

@@ -29,16 +29,16 @@ def test_seat_records_preserve_type_geometry_payload_and_counter() -> None:
         ),
     )
     assert snapshot.seats[0] == SeatRow(
-        ("seat", 0, "A區-1排-1號"), "A區-1排-1號", 1, 0,
+        ("seat", 0, "A區-1排-1號", "S1"), "A區-1排-1號", 1, 0,
         10, 10, 20, 20, False, True,
     )
     assert snapshot.seats[1] == SeatRow(
-        ("seat", 1, "A區-1排-2號"), "A區-1排-2號", 1, 1,
+        ("seat", 1, "A區-1排-2號", "S2"), "A區-1排-2號", 1, 1,
         30, 10, 20, 20, False, True,
     )
     assert snapshot.submitted_seats == (
-        SubmittedSeat("S", "FULL", "全票"),
-        SubmittedSeat("S", "FULL", "全票"),
+        SubmittedSeat("S", "FULL", "全票", "S1"),
+        SubmittedSeat("S", "FULL", "全票", "S2"),
     )
     assert snapshot.counters == (SeatCounter("FULL", "2"), SeatCounter("OTHER", "0"))
 
@@ -76,6 +76,27 @@ def test_seat_record_constructor_and_wire_reject_invalid_values() -> None:
     changed = deepcopy(raw)
     changed["seats"][0]["selected"] = 1
     assert parse_seat_snapshot(changed) is None
+
+
+def test_same_type_and_count_with_different_payload_seat_is_not_ready() -> None:
+    raw = make_ctbc_seat_snapshot(selected=(0, 1))
+    ready = parse_seat_snapshot(raw)
+    assert ready is not None
+    plan, reason = select_seat_snapshot(ready, "全票", 2)
+    assert reason == "" and plan is not None and plan.action == "ready"
+    assert plan.expected_payload_keys == ("S1", "S2")
+
+    changed = deepcopy(raw)
+    changed["submitted_seats"][1]["key"] = "S3"
+    mismatched = parse_seat_snapshot(changed)
+    assert mismatched is not None
+    assert not seat_plan_matches_snapshot(mismatched, plan)
+    next_plan, _ = select_seat_snapshot(mismatched, "全票", 2)
+    assert next_plan is not None and next_plan.action == "clear"
+
+    malformed = deepcopy(raw)
+    del malformed["submitted_seats"][0]["key"]
+    assert parse_seat_snapshot(malformed) is None
 
 
 def test_invalid_first_seat_collection_does_not_parse_later_items(

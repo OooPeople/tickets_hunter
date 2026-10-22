@@ -144,7 +144,7 @@ from platforms.utiki.bootstrap import create_engine
 from platforms.utiki.domain.effects import EffectReceipt, RunningEffect
 from platforms.utiki.domain.identity import OperationStamp, TabKey
 from platforms.utiki.domain.plans import QuantityPlan
-from utiki_config import CurrentPolicyState
+from platforms.utiki.application.flow_settings import EffectivePolicy
 
 class Browser:
     async def observe_page(self, expected: OperationStamp) -> QuantityObservation:
@@ -157,7 +157,7 @@ class Core:
     def current_control(self, tab: TabKey) -> {result_type}:
         {result_body}
 
-def check(policy: CurrentPolicyState) -> None:
+def check(policy: EffectivePolicy) -> None:
     create_engine(policy, Browser(), Core())
 """
     command = [

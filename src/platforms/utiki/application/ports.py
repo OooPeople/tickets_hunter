@@ -8,8 +8,9 @@ from typing import Protocol
 
 from ..domain.effects import EffectReceipt, RunningEffect
 from ..domain.identity import AuthEpoch, OperationStamp, TabKey
-from ..domain.inputs import CaptchaImageKey
+from ..domain.inputs import CaptchaAttempt, CaptchaImageKey
 from ..domain.plans import AreaActionPlan, DateActionPlan, QuantityPlan, SeatActionPlan, SubmitPlan
+from ..domain.purchase import ManualSubmitEvidence, SubmitAttempt
 from ..domain.snapshots import AreaSnapshot, DateSnapshot, DialogSnapshot, QuantitySnapshot, SeatSnapshot
 
 
@@ -50,6 +51,29 @@ class PurchaseAuthority:
             raise ValueError("purchase authority requires verified auth epoch")
         if type(self.credential_revision) is not int or self.credential_revision < 0:
             raise ValueError("credential revision must be nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedLoginAcceptance:
+    """Host attestation of server acceptance, separate from a session cookie."""
+
+    tab: TabKey
+    tenant_key: str
+    page_url: str
+    document_id: str
+    rejected_attempt_id: str
+    auth_epoch: AuthEpoch
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.tab, TabKey)
+            or not all(type(value) is str and value for value in (
+                self.tenant_key, self.page_url, self.document_id,
+                self.rejected_attempt_id,
+            ))
+            or not isinstance(self.auth_epoch, AuthEpoch)
+        ):
+            raise ValueError("accepted login requires attributed host evidence")
 
 
 class PurchaseAuthorityPort(CoreControlPort, Protocol):
@@ -109,12 +133,15 @@ class PageObservation:
 
     tab: TabKey
     snapshot: DateSnapshot | AreaSnapshot | QuantitySnapshot | SeatSnapshot
+    manual_revision: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.tab, TabKey) or not isinstance(
             self.snapshot, (DateSnapshot, AreaSnapshot, QuantitySnapshot, SeatSnapshot)
         ):
             raise ValueError("page observation requires a typed tab and snapshot")
+        if type(self.manual_revision) is not int or self.manual_revision < 0:
+            raise ValueError("manual selection revision must be nonnegative")
 
 
 class SelectionBrowserPort(QuantityBrowserPort, Protocol):
@@ -130,6 +157,11 @@ class SelectionBrowserPort(QuantityBrowserPort, Protocol):
     ) -> EffectReceipt: ...
 
     async def commit_area(
+        self, snapshot: AreaSnapshot, plan: AreaActionPlan,
+        ticket_number: int, claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
+    async def commit_server_assigned_area(
         self, snapshot: AreaSnapshot, plan: AreaActionPlan,
         ticket_number: int, claim: RunningEffect,
     ) -> EffectReceipt: ...
@@ -199,12 +231,32 @@ class InlineLoginAudit:
     page_url: str
     document_id: str
     matched: bool
+    manual_ready: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.tab, TabKey) or not self.page_url or not self.document_id:
             raise ValueError("inline login audit requires page identity")
         if type(self.matched) is not bool:
             raise ValueError("inline login audit match must be boolean")
+        if type(self.manual_ready) is not bool or (self.matched and self.manual_ready):
+            raise ValueError("inline login audit source is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedLoginObservation:
+    tab: TabKey
+    page_url: str
+    document_id: str
+    token: str
+    changed_ready: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.tab, TabKey) or not self.page_url
+            or not self.document_id or not self.token
+            or type(self.changed_ready) is not bool
+        ):
+            raise ValueError("rejected login observation requires attributed evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +265,7 @@ class SubmitOutcomeObservation:
     page_url: str
     document_id: str
     dialog: DialogSnapshot
+    manual_submit: ManualSubmitEvidence | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -222,6 +275,10 @@ class SubmitOutcomeObservation:
             or self.dialog.document_id != self.document_id
         ):
             raise ValueError("submit outcome requires one attributed page and dialog")
+        if self.manual_submit is not None and not isinstance(
+            self.manual_submit, ManualSubmitEvidence
+        ):
+            raise ValueError("submit outcome requires typed manual evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,6 +292,8 @@ class CaptchaResetObservation:
     field_empty: bool
     refresh_usable: bool
     dialog_visible: bool
+    manual_value_ready: bool = False
+    manual_revision: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.tab, TabKey) or not self.page_url or not self.document_id:
@@ -243,13 +302,33 @@ class CaptchaResetObservation:
             raise ValueError("CAPTCHA reset image key is invalid")
         if type(self.image_data_url) is not str or bool(self.image_data_url) != bool(self.image):
             raise ValueError("CAPTCHA reset image data differs from its key")
-        for name in ("field_usable", "field_empty", "refresh_usable", "dialog_visible"):
+        for name in (
+            "field_usable", "field_empty", "refresh_usable", "dialog_visible",
+            "manual_value_ready",
+        ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean")
+        if type(self.manual_revision) is not int or self.manual_revision < 0:
+            raise ValueError("CAPTCHA manual revision is invalid")
+
+
+class CaptchaProviderPort(Protocol):
+    """One Run-owned OCR instance, supplied by the composition root."""
+
+    def classification(self, image: bytes) -> str: ...
 
 
 class PurchaseBrowserPort(SelectionBrowserPort, Protocol):
     async def observe_purchase_input(self, tab: TabKey) -> PurchaseInputObservation: ...
+
+    async def arm_manual_submit(
+        self, tab: TabKey, page_url: str, document_id: str,
+        prior: ManualSubmitEvidence | None = None,
+    ) -> str: ...
+
+    async def disarm_manual_submit(
+        self, tab: TabKey, page_url: str, document_id: str, arm_token: str,
+    ) -> bool: ...
 
     async def commit_inline_login(
         self, intent: InlineLoginIntent, credentials: InlineLoginCredentials,
@@ -261,10 +340,26 @@ class PurchaseBrowserPort(SelectionBrowserPort, Protocol):
         credentials: InlineLoginCredentials,
     ) -> InlineLoginAudit: ...
 
+    async def arm_rejected_login(
+        self, tab: TabKey, page_url: str, document_id: str, token: str,
+        claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
+    async def observe_rejected_login(
+        self, tab: TabKey, page_url: str, document_id: str, token: str,
+    ) -> RejectedLoginObservation: ...
+
+    async def clear_rejected_selection(
+        self, attempt: SubmitAttempt, claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
     async def dispatch_submit(
         self, plan: SubmitPlan, claim: RunningEffect,
         login_intent: InlineLoginIntent | None = None,
         credentials: InlineLoginCredentials | None = None,
+        captcha_observed: CaptchaResetObservation | None = None,
+        captcha_answer: str | None = None,
+        manual_login_token: str | None = None,
     ) -> EffectReceipt: ...
 
     async def observe_submit_outcome(self, tab: TabKey) -> SubmitOutcomeObservation: ...
@@ -278,3 +373,16 @@ class PurchaseBrowserPort(SelectionBrowserPort, Protocol):
     async def commit_captcha_reset(
         self, observed: CaptchaResetObservation, claim: RunningEffect,
     ) -> EffectReceipt: ...
+
+    async def commit_captcha_input(
+        self, observed: CaptchaResetObservation, attempt: CaptchaAttempt,
+        answer: str, claim: RunningEffect,
+    ) -> EffectReceipt: ...
+
+    async def audit_captcha_input(
+        self, observed: CaptchaResetObservation, answer: str,
+    ) -> bool: ...
+
+
+class CheckoutNotificationPort(Protocol):
+    def start_checkout_notification(self) -> None: ...

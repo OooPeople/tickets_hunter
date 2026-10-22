@@ -204,9 +204,10 @@
                     '.checkNum')).map(counter => ({
                     id: counter.id || '', raw: normalize(counter.textContent)
                 }));
-                const submitted = Object.values(window.seats)
-                    .filter(seat => seat && String(seat.A || '') !== '')
-                    .map(seat => ({
+                const submitted = Object.entries(window.seats)
+                    .filter(([, seat]) => seat && String(seat.A || '') !== '')
+                    .map(([key, seat]) => ({
+                        key,
                         A: String(seat.A || ''), Y: String(seat.Y || ''),
                         Z: String(seat.Z || '')
                     }));
@@ -277,6 +278,8 @@
                             plan.ticketNumber : 0));
                 const payloadValid =
                     live.submitted.length === plan.ticketNumber &&
+                    exactSet(live.submitted.map(seat => seat.key),
+                        plan.expectedPayloadKeys) &&
                     live.submitted.every(seat => seat.A === 'S' &&
                         seat.Y === plan.ticketTypeId &&
                         seat.Z === plan.ticketTypeName);
@@ -321,11 +324,29 @@
                     if (url.origin !== plan.expectedLogin.origin ||
                         url.username || url.password ||
                         accountFields.length !== 1 || passwordFields.length !== 1 ||
-                        !visible(accountFields[0]) || !visible(passwordFields[0]) ||
-                        accountFields[0].value !== plan.expectedLogin.account ||
-                        passwordFields[0].value !== plan.expectedLogin.password) {
+                        !visible(accountFields[0]) || !visible(passwordFields[0])) {
                         return null;
                     }
+                    if (plan.expectedLogin.manualToken) {
+                        const marker = document.documentElement[
+                            Symbol.for('utiki.rejected-login-observation')];
+                        const pair = [accountFields[0], passwordFields[0]];
+                        if (!marker || marker.token !== plan.expectedLogin.manualToken ||
+                            marker.pair[0] !== pair[0] || marker.pair[1] !== pair[1] ||
+                            marker.url !== location.href ||
+                            marker.document !== plan.expectedLogin.documentId ||
+                            !pair.every((input, index) =>
+                                input.value === marker.before[index] ||
+                                input.value === marker.trusted[index]) ||
+                            !marker.trusted.some((value, index) =>
+                                value !== null && value !== marker.before[index] &&
+                                pair[index].value === value)) {
+                            return null;
+                        }
+                    } else if (
+                        accountFields[0].value !== plan.expectedLogin.account ||
+                        passwordFields[0].value !== plan.expectedLogin.password
+                    ) return null;
                 }
                 const captchas = Array.from(
                     document.querySelectorAll('input#CHK')).filter(visible);
@@ -333,6 +354,30 @@
                     captchas[0].getAttribute('aria-disabled') === 'true' ||
                     captchas[0].readOnly ||
                     normalize(captchas[0].value).length !== 4) return null;
+                if (plan.expectedCaptcha) {
+                    const guard = plan.expectedCaptcha;
+                    const revision = document.documentElement[
+                        Symbol.for('ticketsHunterUtikiCaptchaManualRevision')];
+                    const images = Array.from(document.querySelectorAll('img#chk_pic'));
+                    if (!revision || revision.field !== captchas[0] ||
+                        revision.revision !== guard.manualRevision ||
+                        images.length !== 1 || !visible(images[0]) ||
+                        !images[0].complete || images[0].naturalWidth <= 0 ||
+                        images[0].naturalHeight <= 0 ||
+                        (images[0].currentSrc || images[0].src) !== guard.imageSource ||
+                        (guard.answer !== null && captchas[0].value !== guard.answer)) {
+                        return null;
+                    }
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = images[0].naturalWidth;
+                        canvas.height = images[0].naturalHeight;
+                        const context = canvas.getContext('2d');
+                        if (!context) return null;
+                        context.drawImage(images[0], 0, 0);
+                        if (canvas.toDataURL('image/png') !== guard.imageDataUrl) return null;
+                    } catch (_) { return null; }
+                }
                 const buttons = Array.from(
                     document.querySelectorAll('button#addcart')).filter(visible);
                 if (buttons.length !== 1 || buttons[0].disabled ||

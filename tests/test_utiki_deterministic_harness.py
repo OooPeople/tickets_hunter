@@ -1,26 +1,12 @@
 import asyncio
 import unittest
-from unittest.mock import patch
 
-from tests.ctbc_support import (
-    CTBC_TEST_DATE_URL,
-    CtbcStateIsolationMixin,
-    config,
-    make_ctbc_date_snapshot,
-)
 from tests.support.utiki_deterministic import (
-    BrowserEffectSentinel,
     ControlledPendingIO,
     FakeClock,
     TaskLeakGuard,
 )
 
-from platforms.utiki.dom import CommitResult
-from platforms.utiki.selection import parse_date_snapshot
-from platforms.utiki.workflow import (
-    _state,
-    nodriver_ctbc_date_auto_select,
-)
 
 
 class DeterministicHarnessTest(unittest.IsolatedAsyncioTestCase):
@@ -81,88 +67,3 @@ class DeterministicHarnessTest(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertTrue(leaked.cancelled())
-
-
-class UtikiDeterministicCharacterizationTest(
-    CtbcStateIsolationMixin,
-    unittest.IsolatedAsyncioTestCase,
-):
-    ctbc_state = _state
-
-    async def test_inspect_then_commit_is_explicit_and_has_no_hidden_browser_io(self):
-        events = []
-        reader = ControlledPendingIO[object]("inspect_date", event_log=events)
-        committer = ControlledPendingIO[CommitResult](
-            "commit_date", event_log=events
-        )
-        tab = BrowserEffectSentinel(CTBC_TEST_DATE_URL)
-        cfg = config()
-        cfg["area_auto_select"]["enable"] = False
-        snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
-        clock = FakeClock(monotonic=50.0, wall=2_000.0)
-
-        async def source_is_current(*_args, **_kwargs):
-            events.append("reconcile_navigation")
-            return True
-
-        async def cancel_refresh(*_args, **_kwargs):
-            events.append("cancel_refresh")
-            return True
-
-        with (
-            patch(
-                "platforms.utiki.workflow._ctbc_reconcile_navigation_source",
-                side_effect=source_is_current,
-            ),
-            patch(
-                "platforms.utiki.workflow.read_date_snapshot",
-                side_effect=reader.request,
-            ),
-            patch(
-                "platforms.utiki.workflow.commit_date_action",
-                side_effect=committer.request,
-            ),
-            patch(
-                "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
-                side_effect=cancel_refresh,
-            ),
-        ):
-            async with TaskLeakGuard() as tasks:
-                workflow = tasks.create_task(
-                    nodriver_ctbc_date_auto_select(tab, cfg),
-                    name="date-workflow",
-                )
-
-                read_call = await reader.next_call()
-                self.assertEqual((tab,), read_call.args)
-                committer.assert_no_calls()
-                tab.assert_no_effects()
-
-                clock.advance_monotonic(30.0)
-                clock.advance_wall(300.0)
-                self.assertFalse(workflow.done())
-                committer.assert_no_calls()
-                tab.assert_no_effects()
-
-                read_call.resolve(snapshot)
-                commit_call = await committer.next_call()
-                self.assertIs(tab, commit_call.args[0])
-                self.assertIs(snapshot, commit_call.args[1])
-                self.assertFalse(workflow.done())
-                tab.assert_no_effects()
-
-                commit_call.resolve(CommitResult.REJECTED)
-                self.assertFalse(await workflow)
-
-        self.assertEqual(
-            [
-                "reconcile_navigation",
-                "inspect_date",
-                "cancel_refresh",
-                "commit_date",
-            ],
-            events,
-        )
-        reader.assert_all_completed()
-        committer.assert_all_completed()
-        tab.assert_no_effects()

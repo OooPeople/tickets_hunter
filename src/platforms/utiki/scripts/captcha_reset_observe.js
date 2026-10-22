@@ -12,6 +12,19 @@
     const usable = element => visible(element) && !element.disabled &&
         element.getAttribute('aria-disabled') !== 'true' && !element.readOnly;
     const fields = Array.from(document.querySelectorAll('input#CHK'));
+    const revisionKey = Symbol.for('ticketsHunterUtikiCaptchaManualRevision');
+    let revisionState = document.documentElement[revisionKey];
+    if (!revisionState) {
+        revisionState = {field: null, revision: 0};
+        document.documentElement[revisionKey] = revisionState;
+    }
+    if (fields.length === 1 && revisionState.field !== fields[0]) {
+        revisionState.field = fields[0];
+        revisionState.revision++;
+        fields[0].addEventListener('input', event => {
+            if (event.isTrusted) revisionState.revision++;
+        }, true);
+    }
     const images = Array.from(document.querySelectorAll('img#chk_pic'));
     const refreshes = Array.from(document.querySelectorAll('#chang_pic'));
     const dialogs = Array.from(document.querySelectorAll('#dialog-message'));
@@ -41,6 +54,9 @@
         image_data_url: imageDataUrl,
         field_usable: fields.length === 1 && usable(fields[0]),
         field_empty: fields.length === 1 && fields[0].value === '',
+        manual_value_ready: fields.length === 1 && usable(fields[0]) &&
+            /^[A-Za-z0-9]{4}$/.test(fields[0].value),
+        manual_revision: revisionState.revision,
         refresh_usable: refreshes.length === 1 &&
             refreshes[0] instanceof HTMLButtonElement &&
             refreshes[0].type === 'button' && usable(refreshes[0]),

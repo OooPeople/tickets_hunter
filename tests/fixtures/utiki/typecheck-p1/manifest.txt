@@ -1,3 +1,0 @@
-src/platforms/utiki/domain/model.py
-src/platforms/utiki/application/session.py
-src/platforms/utiki/adapters/browser.py

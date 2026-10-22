@@ -7,10 +7,12 @@
 
 > **目標**：確保程式碼品質一致性與最佳實踐，適用於所有 WebDriver 型別的搶票系統開發
 
+**適用界線**：本頁的傳統平台函式拆分、URL 驅動骨架、`config_dict`、通用 retry、直接 reload 與逐函式 pause 返回仍供適用平台參考；[uTiki 新 owner](utiki-refactor/PLAN.md) 以單 Run controller、typed effective policy、效果證據與唯一刷新接縫為施工及完成標準。十二階段可作功能分類，不以舊函式數量或評分替代正式流程驗收。
+
 ## 寫作風格原則
 
 **開發新功能時必須**：
-1. **遵循架構範本**：參考 `/docs/coding_templates.md` 的標準架構
+1. **遵循適用架構範本**：傳統平台參考 [程式碼範本](coding_templates.md)；uTiki 新 owner 依 [正式計畫](utiki-refactor/PLAN.md)
 2. **參考最佳實踐**：以 ZenDriver 平台實作（TixCraft、KKTIX、TicketPlus、iBon）作為開發標準
 3. **保持一致性**：函式命名、錯誤處理、debug 輸出格式統一
 
@@ -44,7 +46,7 @@
    - **技術方案**：`cdp.dom.perform_search()` + `include_user_agent_shadow_dom=True`
    - **Primary → Fallback 模式**：Pierce 失敗時回退 DOMSnapshot
    - **智慧等待**：輪詢檢查元素是否出現，找到即執行（vs 固定延遲）
-   - **參考實作**：`nodriver_ibon_date_auto_select_pierce()` (Line 6368-6700)
+   - **參考實作**：`src/platforms/ibon.py` 的 `nodriver_ibon_date_auto_select_pierce()`
    - **詳細文件**：`/docs/06-api-reference/shadow_dom_pierce_guide.md`
    - **效能對比**：
      ```

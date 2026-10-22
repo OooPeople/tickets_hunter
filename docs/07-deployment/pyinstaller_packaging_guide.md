@@ -73,14 +73,13 @@ Phase 驗收時必須保留命令結果。只看 PyInstaller exit code、只檢�
 
 ```python
 hiddenimports=[
-    'platforms.ctbc',       # 舊公開名稱相容 facade
     'platforms.utiki',
     'platforms.utiki.auth',
     'platforms.utiki.dom',
     'platforms.utiki.profiles',
     'platforms.utiki.selection',
-    'platforms.utiki.workflow',
-    'platforms.utiki.refresh',
+    'platforms.utiki.bootstrap',
+    'platforms.utiki.production_run',
 ]
 ```
 

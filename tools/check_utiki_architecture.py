@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the staged uTiki dependency boundary without importing production."""
+"""Check the current uTiki dependency boundary without importing production."""
 
 from __future__ import annotations
 
@@ -17,18 +17,6 @@ from typing import Iterable
 
 SCHEMA_VERSION = 1
 SHA_RE = re.compile(r"[0-9a-f]{40}")
-REQUIRED_INVENTORY_MARKERS = (
-    "Actual HEAD",
-    "KEEP",
-    "DIRECT",
-    "CONDITIONAL_BRIDGE",
-    "REMOVE",
-    "src/utiki_core_services.py",
-    "refresh_coordinator",
-    "global_settings",
-    "nodriver_common",
-    "util",
-)
 TARGET_ROOTS = (
     "src/platforms/utiki/domain/",
     "src/platforms/utiki/application/",
@@ -49,10 +37,15 @@ CURRENT_BOUNDARY_FILES = {
     "src/nodriver_common.py",
     "src/settings.py",
 }
+RETIRED_SIDE_EFFECT_FILES = {
+    "src/platforms/utiki/workflow.py",
+    "src/platforms/utiki/refresh.py",
+}
 TARGET_FORBIDDEN_IMPORT_FRAGMENTS = (
     "nodriver_tixcraft",
     "platforms.ctbc",
     "platforms.utiki.workflow",
+    "platforms.utiki.refresh",
     "utiki_core_services",
 )
 DOMAIN_FORBIDDEN_IMPORT_ROOTS = {
@@ -166,16 +159,6 @@ def _read_text(path: Path, reason: str) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise GateError(reason) from exc
-
-
-def _inventory_check(path: Path) -> str:
-    text = _read_text(path, "CORE_INVENTORY_UNREADABLE")
-    if any(marker not in text for marker in REQUIRED_INVENTORY_MARKERS):
-        raise GateError("CORE_INVENTORY_INCOMPLETE")
-    head_matches = re.findall(r"Actual HEAD[^\n]*`([0-9a-f]{40})`", text)
-    if len(head_matches) != 1 or not SHA_RE.fullmatch(head_matches[0]):
-        raise GateError("CORE_INVENTORY_BASELINE_INVALID")
-    return head_matches[0]
 
 
 def _python_files(root: Path) -> list[tuple[str, Path]]:
@@ -355,10 +338,6 @@ def _legacy_findings(path: str, tree: ast.AST) -> list[Finding]:
             findings.append(Finding("CROSS_PLATFORM_IMPORT", path, line))
         if "nodriver_tixcraft" in normalized.split("."):
             findings.append(Finding("PLATFORM_IMPORTS_MAIN", path, line))
-    if path == "src/platforms/utiki/refresh.py":
-        for module, line in imports:
-            if "workflow" in module.lstrip(".").split("."):
-                findings.append(Finding("REFRESH_IMPORTS_WORKFLOW", path, line))
     if path in LEGACY_LEAF_FILES:
         for module, line in imports:
             if any(
@@ -488,9 +467,8 @@ def _report(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Check the staged uTiki import DAG.")
+    parser = argparse.ArgumentParser(description="Check the current uTiki import DAG.")
     parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument("--core-inventory", type=Path, required=True)
     parser.add_argument("--candidate-sha")
     parser.add_argument("--strict", action="store_true")
     return parser
@@ -507,10 +485,11 @@ def main(argv: list[str] | None = None) -> int:
             arguments.candidate_sha
         ):
             raise GateError("CANDIDATE_SHA_INVALID")
-        baseline = _inventory_check(arguments.core_inventory)
         files = _python_files(root)
         findings: list[Finding] = []
         for relative, path in files:
+            if relative in RETIRED_SIDE_EFFECT_FILES:
+                findings.append(Finding("RETIRED_SIDE_EFFECT_MODULE", relative, 1))
             tree = _parse(root, path)
             if _is_target(relative):
                 findings.extend(_target_findings(relative, tree))
@@ -523,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         source_manifest = _source_manifest(root, files)
         report = _report(
             "FAIL" if findings else "PASS",
-            baseline,
+            None,
             relative_files,
             findings,
             repository_root=str(root),

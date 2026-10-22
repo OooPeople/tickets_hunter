@@ -7,6 +7,8 @@
 
 > **目的**：定義完整的搶票程式應包含的功能模組與函式拆分規範，作為開發新平台或評估現有實作的標準
 
+**適用界線**：十二階段仍用於描述功能與頁面流程；下列 URL 驅動函式骨架、每輪重跑、直接 reload、設定 dict 與完成度評分是傳統平台參考，不是 [uTiki 新 owner](utiki-refactor/PLAN.md) 的架構或批次完成標準。uTiki 的派送資格、原結果歸屬、typed effective policy 與刷新仲裁依正式 PLAN；目前實作程度見 [STATUS.md](utiki-refactor/STATUS.md)。
+
 ## 📋 核心設計原則
 
 ### 設定驅動 (Configuration-Driven)

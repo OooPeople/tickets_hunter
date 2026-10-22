@@ -72,16 +72,11 @@ from platforms.ibon import *
 from platforms.kham import *
 from platforms.utiki import (
     is_utk_sports_url,
-    nodriver_ctbc_inject_cookies,
-    nodriver_utiki_main,
-    nodriver_utk_sports_cancel_refresh,
-    nodriver_utk_sports_cleanup_tab,
-    nodriver_utk_sports_consume_reload_event,
-    nodriver_utk_sports_health_check,
-    nodriver_utk_sports_pause_refresh,
-    nodriver_utk_sports_reload,
-    nodriver_utk_sports_reload_wait,
 )
+from platforms.utiki.production_run import UtikiProductionRun
+from platforms.utiki.adapters.session import install_startup_cookie_set
+from platforms.utiki.application.flow_settings import load_effective_policy
+from utiki_config import ConfigError, parse_profile_json
 from platforms.hkticketing import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
@@ -108,20 +103,6 @@ def _should_inject_ctbc_cookies(homepage):
     except ValueError:
         return False
     return host == "tix.ctbcsports.com" and is_utk_sports_url(homepage)
-
-
-async def _pause_utk_refresh(tab, url, last_url):
-    if not (is_utk_sports_url(url) or is_utk_sports_url(last_url)):
-        return False
-    await nodriver_utk_sports_pause_refresh(tab, "paused")
-    return True
-
-
-async def _cleanup_utiki_if_driver_missing(driver, tab):
-    if driver is not None:
-        return False
-    await nodriver_utk_sports_cleanup_tab(tab, "driver unavailable")
-    return True
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -391,30 +372,6 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
-    if _should_inject_ctbc_cookies(homepage):
-        if await nodriver_ctbc_inject_cookies(tab, config_dict):
-            try:
-                reloaded = await nodriver_utk_sports_reload_wait(
-                    tab,
-                    config_dict,
-                    "apply CTBC cookie session",
-                    apply_local_interval=False,
-                    allow_unknown_document=True,
-                )
-                if not reloaded:
-                    debug.log("[CTBC COOKIE] Shared reload was cancelled")
-                    return tab
-                await asyncio.sleep(random.uniform(1.0, 1.5))
-                login_state = await tab.evaluate(
-                    'typeof _ul !== "undefined" ? String(_ul) : ""'
-                )
-                if login_state == "1":
-                    debug.log("[CTBC COOKIE] Logged in successfully")
-                else:
-                    debug.log("[CTBC COOKIE] Cookie set applied; session may be expired")
-            except Exception as exc:
-                debug.log(f"[CTBC COOKIE] Reload or verification failed: {exc}")
-
     return tab
 
 async def nodrver_block_urls(tab, config_dict):
@@ -649,13 +606,13 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     # Gate platform dispatching until refresh_datetime is reached.
     # Returns True if gate is active (caller should continue),
     # False if gate is cleared (proceed with dispatching).
+    current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    if is_utk_sports_url(current_url):
+        raise ValueError("uTiki scheduled refresh belongs to its Run owner")
     current_str = config_dict.get("refresh_datetime", "")
 
     # Detect config change: reset state if user changed the value
     if current_str != state["target_str"]:
-        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-        if is_utk_sports_url(current_url):
-            await nodriver_utk_sports_cancel_refresh(tab, "refresh time changed")
         state["target_str"] = current_str
         state["reached"] = False
         state["last_countdown_print"] = 0
@@ -673,16 +630,6 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     now = datetime.now()
 
     async def reload_at_target():
-        current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-        if is_utk_sports_url(current_url):
-            return await nodriver_utk_sports_reload(
-                tab,
-                config_dict,
-                "scheduled refresh time reached",
-                apply_local_interval=False,
-                allow_unknown_document=True,
-                allow_blocked_recovery=True,
-            )
         try:
             await tab.reload()
             return True
@@ -736,6 +683,41 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         return True
 
     return True
+
+async def advance_utiki_route(
+    tab, url, config_dict, raw_profile, run=None, *, paused=False,
+    refresh_adapter=None,
+):
+    """The formal route's sole owner selection and result return boundary."""
+    if not is_utk_sports_url(url):
+        raise ValueError("uTiki route requires a supported tenant origin")
+    created = run is None
+    if created:
+        run = UtikiProductionRun(tab, config_dict, raw_profile, refresh_adapter)
+    elif run.tab is not tab:
+        await run.close()
+        raise ValueError("uTiki active tab changed; reconcile this Run before restart")
+    try:
+        result = await run.tick(url, paused=paused)
+    except BaseException:
+        if created:
+            await run.close()
+        raise
+    return run, result
+
+
+def _require_utiki_current_profile(raw_text):
+    """Reject a saved legacy profile before a formal Run can navigate or act."""
+    try:
+        profile = parse_profile_json(raw_text)
+        load_effective_policy(profile)
+    except ConfigError as exc:
+        raise ValueError(
+            f"uTiki profile is not current ({exc.code}); reopen Settings, "
+            "fill the uTiki behavior fields, and save again"
+        ) from exc
+    return profile
+
 
 async def reload_config(config_dict, last_mtime, config_filepath):
     # Watch the config file this instance was actually launched with
@@ -918,7 +900,7 @@ async def _advance_cloudflare_gate(
     return True, False, cloudflare_fail_count, True, 0
 
 
-async def main(args):
+async def _main_with_utiki_owner(args, run_box):
     # Derive instance id for multi-instance isolation:
     # --instance > --input filename stem > "default".
     # A config named settings.json always maps to "default" (legacy single-run).
@@ -936,6 +918,16 @@ async def main(args):
             print(f"[INSTANCE] Invalid instance id '{instance_id}' (allowed: [A-Za-z0-9_-], max 32 chars), fallback to default")
 
     config_dict = get_config_dict(args)
+    config_filepath = args.input if args and getattr(args, "input", None) else os.path.join(
+        util.get_app_root(), CONST_MAXBOT_CONFIG_FILE,
+    )
+    if config_dict is not None and is_utk_sports_url(config_dict.get("homepage")):
+        # Validate the actual saved current profile before starting a browser.
+        # migrate_config is still used by other platforms and cannot authorize
+        # a legacy uTiki behavior section here.
+        with open(config_filepath, encoding="utf-8") as profile_file:
+            _require_utiki_current_profile(profile_file.read())
+        load_effective_policy(config_dict)
 
     # Global log prefix: override builtins.print to prepend an optional
     # [HH:MM:SS] timestamp and an always-on [instance] tag. Multi-instance runs
@@ -990,6 +982,12 @@ async def main(args):
             initial_tab = driver.main_tab
             if initial_tab:
                 await nodrver_block_urls(initial_tab, config_dict)
+            if _should_inject_ctbc_cookies(config_dict["homepage"]):
+                if initial_tab is None:
+                    raise ValueError("uTiki startup cookie tab is unavailable")
+                await install_startup_cookie_set(
+                    initial_tab, config_dict["homepage"], config_dict["accounts"],
+                )
             tab = await nodriver_goto_homepage(driver, config_dict)
             if tab is None:
                 print("[ERROR] Homepage navigation failed. Cannot continue.")
@@ -1016,7 +1014,7 @@ async def main(args):
     ocr = None
     Captcha_Browser = None
     try:
-        if config_dict["ocr_captcha"]["enable"]:
+        if config_dict["ocr_captcha"]["enable"] and not is_utk_sports_url(config_dict.get("homepage")):
             ocr = create_ocr_for_platform(config_dict)
             if ocr is None:
                 ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
@@ -1047,18 +1045,43 @@ async def main(args):
     ticketplus_purchase_done = False  # Guard: stop polling after purchase completed
 
     # Initialize config mtime (hot-reload watches the file actually loaded)
-    app_root = util.get_app_root()
-    config_filepath = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
-    if args and getattr(args, "input", None):
-        config_filepath = args.input
     config_mtime = 0
     if os.path.exists(config_filepath):
         config_mtime = os.path.getmtime(config_filepath)
+
+    utiki_run = None
+    utiki_policy_mtime = config_mtime
+    last_utiki_progress = None
 
     while True:
         await asyncio.sleep(0.05)
 
         config_dict, config_mtime = await reload_config(config_dict, config_mtime, config_filepath)
+        if utiki_run is not None:
+            observed_mtime = (
+                os.path.getmtime(config_filepath)
+                if os.path.exists(config_filepath) else -1
+            )
+            if observed_mtime != utiki_policy_mtime:
+                try:
+                    with open(config_filepath, encoding="utf-8") as profile_file:
+                        raw_saved = profile_file.read()
+                    try:
+                        load_effective_policy(parse_profile_json(raw_saved))
+                    except ConfigError:
+                        policy_text = raw_saved
+                    else:
+                        candidate = get_config_dict(args)
+                        policy_text = (
+                            json.dumps(candidate, ensure_ascii=False)
+                            if isinstance(candidate, dict) else ""
+                        )
+                except (OSError, UnicodeError):
+                    policy_text = ""
+                utiki_run.update_policy(policy_text)
+                utiki_policy_mtime = observed_mtime
+                if not utiki_run.policy.allows_new_mutation:
+                    print(f"[uTiki] New actions blocked: {utiki_run.policy.block_reason}")
 
         # Phase 3: refresh the liveness heartbeat (throttled to heartbeat_interval_sec).
         heartbeat_now = time.time()
@@ -1071,7 +1094,9 @@ async def main(args):
                 pass
 
         # pass if driver not loaded.
-        if await _cleanup_utiki_if_driver_missing(driver, tab):
+        if driver is None:
+            if utiki_run is not None:
+                await utiki_run.close()
             print("nodriver not accessible!")
             break
 
@@ -1086,7 +1111,8 @@ async def main(args):
             #print("url:", url)
 
         if is_quit_bot:
-            await nodriver_utk_sports_cleanup_tab(tab, "stopped")
+            if utiki_run is not None:
+                await utiki_run.close()
             try:
                 await driver.stop()
                 driver = None
@@ -1101,13 +1127,23 @@ async def main(args):
         is_maxbot_paused = await check_and_handle_pause(config_dict)
 
         if url is None:
+            if utiki_run is not None and (
+                getattr(tab, "closed", False) or get_url_error_count() >= 15
+            ):
+                await utiki_run.close()
             if is_maxbot_paused:
-                await _pause_utk_refresh(tab, url or "", last_url)
+                if utiki_run is not None:
+                    utiki_run.set_paused(True)
             continue
         else:
             if len(url) == 0:
+                if utiki_run is not None and (
+                    getattr(tab, "closed", False) or get_url_error_count() >= 15
+                ):
+                    await utiki_run.close()
                 if is_maxbot_paused:
-                    await _pause_utk_refresh(tab, url or "", last_url)
+                    if utiki_run is not None:
+                        utiki_run.set_paused(True)
                 # [URL DIAG] Step 0: empty url makes the loop skip all dispatch
                 # silently (this is the suspected on-sale-reload freeze point).
                 # Throttle so a sustained empty-url stretch logs ~every 2s.
@@ -1133,9 +1169,8 @@ async def main(args):
         if len(url) > 0 :
             if url != last_url:
                 if is_utk_sports_url(last_url) and not is_utk_sports_url(url):
-                    await nodriver_utk_sports_cleanup_tab(
-                        tab, "left UTK Sports"
-                    )
+                    if utiki_run is not None:
+                        await utiki_run.close()
                 print(url)
                 write_last_url_to_file(url)
                 cloudflare_checked = False
@@ -1143,17 +1178,44 @@ async def main(args):
                 cloudflare_active = False
                 cloudflare_clear_confirmations = 0
             last_url = url
-            if (
-                is_utk_sports_url(url)
-                and nodriver_utk_sports_consume_reload_event(tab)
-            ):
-                cloudflare_checked = False
-                cloudflare_fail_count = 0
-                cloudflare_active = False
-                cloudflare_clear_confirmations = 0
+
+        if utiki_run is not None and not is_utk_sports_url(url):
+            # The tab cannot fall into another platform's outer mutation path
+            # while a uTiki claim or result is being retired.
+            continue
+
+        if is_utk_sports_url(url):
+            try:
+                if utiki_run is None:
+                    with open(config_filepath, encoding="utf-8") as profile_file:
+                        raw_saved = profile_file.read()
+                    _require_utiki_current_profile(raw_saved)
+                    current_profile = get_config_dict(args)
+                    if not isinstance(current_profile, dict):
+                        raise ValueError("uTiki current profile is unavailable")
+                    load_effective_policy(current_profile)
+                    raw_profile = json.dumps(current_profile, ensure_ascii=False)
+                    utiki_policy_mtime = os.path.getmtime(config_filepath)
+                else:
+                    raw_profile = ""
+                utiki_run, result = await advance_utiki_route(
+                    tab, url, config_dict, raw_profile, utiki_run,
+                    paused=is_maxbot_paused,
+                )
+                run_box[0] = utiki_run
+            except BaseException:
+                if utiki_run is not None:
+                    await utiki_run.close()
+                raise
+            visible_progress = (result.progress, result.manual_reason)
+            if visible_progress != last_utiki_progress:
+                print(f"[uTiki] {result.progress}")
+                if result.manual_reason:
+                    print(f"[uTiki] Manual action: {result.manual_reason}")
+                last_utiki_progress = visible_progress
+            continue
 
         if is_maxbot_paused:
-            await _pause_utk_refresh(tab, url, last_url)
             if 'kktix.c' in url:
                 await nodriver_kktix_paused_main(tab, url, config_dict)
             # sleep more when paused.
@@ -1181,28 +1243,8 @@ async def main(args):
             await asyncio.sleep(0.1)
             continue
 
-        utk_health_state = None
-        if is_utk_sports_url(url):
-            # Rate-limit recovery must remain active while refresh_datetime is
-            # waiting; otherwise a pre-sale 429 would only be noticed at the
-            # target second and consume the entire cooldown after opening.
-            utk_health_state = await nodriver_utk_sports_health_check(
-                tab, url, config_dict
-            )
-
-        if utk_health_state == "unknown":
-            # A challenge can render after the URL-level one-shot check. Keep
-            # the document fail-closed, but allow a later loop to re-run CF
-            # detection instead of leaving the same-URL page unknown forever.
-            cloudflare_checked = False
-            await asyncio.sleep(0.25)
-            continue
-        if utk_health_state == "blocked":
-            await asyncio.sleep(0.1)
-            continue
-
-        # Gate platform actions until refresh_datetime, after health checks so
-        # Cloudflare and 429 recovery keep progressing before the target time.
+        # The uTiki route has already passed through its own owner above.
+        # Keep the generic schedule gate for the other platforms only.
         if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state):
             await asyncio.sleep(0.1)
             continue
@@ -1237,15 +1279,6 @@ async def main(args):
 
         if 'ibon.com' in url:
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
-
-        if is_utk_sports_url(url):
-            try:
-                tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
-            except BaseException:
-                await nodriver_utk_sports_cleanup_tab(
-                    tab, "uTiki handler failed"
-                )
-                raise
 
         kham_family = False
         if 'kham.com.tw' in url:
@@ -1307,6 +1340,16 @@ async def main(args):
         facebook_login_url = 'https://www.facebook.com/login.php?'
         if url[:len(facebook_login_url)]==facebook_login_url:
             await nodriver_facebook_main(tab, config_dict)
+
+
+async def main(args):
+    """Always return the original uTiki Run's resources on exit or exception."""
+    run_box = [None]
+    try:
+        return await _main_with_utiki_owner(args, run_box)
+    finally:
+        if run_box[0] is not None:
+            await run_box[0].close()
 
 def run_ocr_self_test():
     """Load both OCR models and read one rendered image; 0 means OCR works.

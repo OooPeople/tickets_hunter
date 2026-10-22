@@ -26,6 +26,8 @@ from settings import (  # noqa: E402
     save_profile_config,
 )
 from nodriver_tixcraft import reload_config  # noqa: E402
+from platforms.utiki.application.flow_settings import apply_effective_policy_reload  # noqa: E402
+from utiki_config import load_current_profile_policy  # noqa: E402
 
 
 class ProfileConfigPersistenceTest(unittest.TestCase):
@@ -44,10 +46,8 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
             "settings.utiki.seat_selection_mode = ctbc_seat_selection_mode.value",
             javascript,
         )
-        self.assertIn(
-            "settings.ctbc.seat_selection_mode = settings.utiki.seat_selection_mode",
-            javascript,
-        )
+        self.assertIn("delete settings.ctbc", javascript)
+        self.assertNotIn("settings.ctbc.seat_selection_mode =", javascript)
         self.assertIn(
             "ctbc_seat_selection_mode.value !== savedValue",
             javascript,
@@ -111,7 +111,7 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
         self.assertNotIn("fixture-cookie-secret", output.getvalue())
         self.assertNotIn("fixture-password", output.getvalue())
 
-    def test_utiki_behavior_migration_is_new_wins_idempotent_and_secret_safe(self):
+    def test_unrelated_migration_does_not_rewrite_utiki_behavior_or_accounts(self):
         config = {
             "utiki": {
                 "ticket_type_keyword": "",
@@ -132,9 +132,9 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
 
         migrated = migrate_config(config)
         self.assertEqual("", migrated["utiki"]["ticket_type_keyword"])
-        self.assertEqual("row_seat", migrated["utiki"]["seat_sorting"])
-        self.assertEqual("manual", migrated["utiki"]["seat_selection_mode"])
-        self.assertEqual(migrated["utiki"], migrated["ctbc"])
+        self.assertEqual("unsupported", migrated["utiki"]["seat_sorting"])
+        self.assertEqual("unsupported", migrated["utiki"]["seat_selection_mode"])
+        self.assertNotEqual(migrated["utiki"], migrated["ctbc"])
         self.assertEqual(
             {"ticket_type_keyword", "seat_sorting", "seat_selection_mode"},
             set(migrated["utiki"]),
@@ -144,7 +144,7 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
         snapshot = json.loads(json.dumps(migrated))
         self.assertEqual(snapshot, migrate_config(migrated))
 
-    def test_utiki_behavior_migration_copies_each_missing_legacy_key(self):
+    def test_utiki_behavior_migration_does_not_copy_legacy_values(self):
         migrated = migrate_config({
             "utiki": {"ticket_type_keyword": "家族票種"},
             "ctbc": {
@@ -155,9 +155,9 @@ class ProfileConfigPersistenceTest(unittest.TestCase):
         })
 
         self.assertEqual("家族票種", migrated["utiki"]["ticket_type_keyword"])
-        self.assertEqual("display", migrated["utiki"]["seat_sorting"])
-        self.assertEqual("computer", migrated["utiki"]["seat_selection_mode"])
-        self.assertEqual(migrated["utiki"], migrated["ctbc"])
+        self.assertNotIn("seat_sorting", migrated["utiki"])
+        self.assertNotIn("seat_selection_mode", migrated["utiki"])
+        self.assertEqual("display", migrated["ctbc"]["seat_sorting"])
 
 
 class ProfileConfigReloadTest(unittest.IsolatedAsyncioTestCase):
@@ -183,7 +183,7 @@ class ProfileConfigReloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(mtime, 0)
         self.assertEqual("熱更新票種", runtime["utiki"]["ticket_type_keyword"])
         self.assertEqual("computer", runtime["utiki"]["seat_selection_mode"])
-        self.assertEqual(runtime["utiki"], runtime["ctbc"])
+        self.assertNotEqual(runtime["utiki"], runtime["ctbc"])
 
 
 class ProfileConfigHandlerTest(AsyncHTTPTestCase):
@@ -241,8 +241,9 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
         self.assertEqual(500, create_response.code)
         self.assertFalse((Path(self.temp_dir.name) / "profiles" / "new-profile.json").exists())
 
-    def test_save_and_load_return_normalized_utiki_behavior(self):
+    def test_utiki_old_format_is_rejected_and_current_round_trips(self):
         old_config = get_default_config()
+        old_config["homepage"] = "https://tix.ctbcsports.com/BROTHERS/"
         old_config.pop("utiki")
         old_config["ctbc"] = {
             "ticket_type_keyword": "學生票",
@@ -255,33 +256,59 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
             method="POST",
             body=json.dumps(old_config),
         )
-        self.assertEqual(200, save_response.code)
-        saved = json.loads(save_response.body)
-        self.assertEqual(saved["utiki"], saved["ctbc"])
-        self.assertEqual("學生票", saved["utiki"]["ticket_type_keyword"])
-        self.assertEqual("computer", saved["utiki"]["seat_selection_mode"])
-        persisted = json.loads(
-            (Path(self.temp_dir.name) / "settings.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(saved["utiki"], persisted["utiki"])
-        self.assertEqual(saved["ctbc"], persisted["ctbc"])
+        self.assertEqual(400, save_response.code)
+        self.assertIn("reopen Settings", json.loads(save_response.body)["error"]["message"])
+        self.assertFalse((Path(self.temp_dir.name) / "settings.json").exists())
 
         new_only = get_default_config()
-        new_only.pop("ctbc")
+        new_only["homepage"] = old_config["homepage"]
         new_only["utiki"] = {
             "ticket_type_keyword": "家族限定票",
             "seat_sorting": "row_asc_aisle",
             "seat_selection_mode": "computer",
         }
-        (Path(self.temp_dir.name) / "settings.json").write_text(
-            json.dumps(new_only), encoding="utf-8"
+        saved_response = self.fetch(
+            "/save", method="POST", body=json.dumps(new_only),
         )
+        self.assertEqual(200, saved_response.code)
 
         load_response = self.fetch("/load")
         self.assertEqual(200, load_response.code)
         loaded = json.loads(load_response.body)
         self.assertEqual(new_only["utiki"], loaded["utiki"])
-        self.assertEqual(new_only["utiki"], loaded["ctbc"])
+        self.assertNotIn("ctbc", loaded)
+
+    def test_named_utiki_profile_create_edit_and_load_share_effective_policy(self):
+        initial = get_default_config()
+        initial["homepage"] = "https://tix.ctbcsports.com/BROTHERS/"
+        initial["utiki"]["seat_selection_mode"] = "computer"
+        initial["ticket_number"] = 1
+        initial["accounts"]["ctbc_account"] = "fixture-account"
+        created = self.fetch(
+            "/profiles", method="POST",
+            body=json.dumps({"name": "fixture-profile", "config": initial}),
+        )
+        self.assertEqual(200, created.code)
+        loaded = json.loads(self.fetch("/load?profile=fixture-profile").body)
+        self.assertEqual(load_current_profile_policy(initial),
+                         load_current_profile_policy(loaded))
+
+        loaded["ticket_number"] = 2
+        loaded["utiki"]["ticket_type_keyword"] = "合成票種"
+        saved = self.fetch(
+            "/save?profile=fixture-profile", method="POST", body=json.dumps(loaded),
+        )
+        self.assertEqual(200, saved.code)
+        reloaded = json.loads(self.fetch("/load?profile=fixture-profile").body)
+        runtime = apply_effective_policy_reload(
+            None, json.dumps(reloaded, ensure_ascii=False),
+        )
+        self.assertTrue(runtime.allows_new_mutation)
+        self.assertEqual(load_current_profile_policy(reloaded),
+                         (runtime.last_valid, runtime.flow))
+        self.assertEqual(2, runtime.flow.ticket_number)
+        self.assertEqual("fixture-account", reloaded["accounts"]["ctbc_account"])
+        self.assertNotIn("ctbc", reloaded)
 
 
 if __name__ == "__main__":

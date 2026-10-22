@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Literal, Mapping, cast
 
@@ -32,6 +33,10 @@ SEAT_SORTINGS = frozenset(
     }
 )
 SEAT_SELECTION_MODES = frozenset({"manual", "computer"})
+_SELECTION_MODES = frozenset({
+    "from top to bottom", "from bottom to top", "center", "random",
+})
+_MAX_SAFE_COUNT = 9_007_199_254_740_991
 
 
 class ConfigError(ValueError):
@@ -54,6 +59,76 @@ class UtikiBehavior:
             raise ConfigError("INVALID_BEHAVIOR", "seat_sorting")
         if self.seat_selection_mode not in SEAT_SELECTION_MODES:
             raise ConfigError("INVALID_BEHAVIOR", "seat_selection_mode")
+
+
+@dataclass(frozen=True, slots=True)
+class FlowSettings:
+    """Validated current flow values shared by Settings and the Run owner."""
+
+    date_enabled: bool
+    area_enabled: bool
+    ticket_number: int
+    date_keyword: str = ""
+    date_mode: str = "from top to bottom"
+    date_fallback: bool = False
+    area_keyword: str = ""
+    area_mode: str = "from top to bottom"
+    area_fallback: bool = False
+    keyword_exclude: str = ""
+    allow_non_adjacent: bool = False
+    ocr_enabled: bool = False
+    force_submit: bool = False
+    ocr_beta: bool = False
+    ocr_image_source: str = ""
+    ocr_use_universal: bool = False
+    ocr_path: str = ""
+    refresh_interval: int | float = 0
+    refresh_datetime: str = ""
+
+    def __post_init__(self) -> None:
+        for name in (
+            "date_enabled", "area_enabled", "date_fallback", "area_fallback",
+            "allow_non_adjacent", "ocr_enabled", "force_submit", "ocr_beta",
+            "ocr_use_universal",
+        ):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        if type(self.ticket_number) is not int or not 0 < self.ticket_number <= _MAX_SAFE_COUNT:
+            raise ValueError("ticket number must be a positive bounded integer")
+        for name in (
+            "date_keyword", "date_mode", "area_keyword", "area_mode",
+            "keyword_exclude", "ocr_image_source", "ocr_path", "refresh_datetime",
+        ):
+            if type(getattr(self, name)) is not str:
+                raise ValueError(f"{name} must be a string")
+        if self.date_mode not in _SELECTION_MODES or self.area_mode not in _SELECTION_MODES:
+            raise ValueError("selection mode must be a current supported value")
+        if type(self.refresh_interval) not in (int, float) or not 0 <= self.refresh_interval <= 3600:
+            raise ValueError("refresh interval must be a bounded nonnegative number")
+        if self.refresh_datetime.strip():
+            format_string = (
+                "%Y/%m/%d %H:%M:%S" if "/" in self.refresh_datetime
+                else "%H:%M:%S"
+            )
+            try:
+                datetime.strptime(self.refresh_datetime.strip(), format_string)
+            except ValueError as exc:
+                raise ValueError("refresh datetime must use a current supported format") from exc
+
+    @property
+    def auto_submit(self) -> bool:
+        return self.ocr_enabled and self.force_submit
+
+    def selector_values(self) -> dict[str, object]:
+        """Project only the keys consumed by the existing pure selectors."""
+        return {
+            "date_auto_select": {"date_keyword": self.date_keyword, "mode": self.date_mode},
+            "area_auto_select": {"area_keyword": self.area_keyword, "mode": self.area_mode},
+            "date_auto_fallback": self.date_fallback,
+            "area_auto_fallback": self.area_fallback,
+            "keyword_exclude": self.keyword_exclude,
+            "ticket_number": self.ticket_number,
+        }
 
 
 DEFAULT_BEHAVIOR = UtikiBehavior("全票", "row_seat", "manual")
@@ -230,6 +305,59 @@ def load_current_policy(profile: Mapping[str, object]) -> UtikiBehavior:
     if "ctbc" in profile:
         raise ConfigError("UPGRADE_REQUIRED")
     return _policy(_validated_values(profile.get("utiki"), "utiki", complete=True))
+
+
+def _section(profile: Mapping[str, object], name: str) -> Mapping[str, object]:
+    value = profile.get(name)
+    if not isinstance(value, dict):
+        raise ConfigError("INVALID_SECTION", name)
+    return value
+
+
+def _required(mapping: Mapping[str, object], key: str, kind: type, section: str) -> object:
+    value = mapping.get(key)
+    if type(value) is not kind:
+        raise ConfigError("INVALID_CONFIG", f"{section}.{key}")
+    return value
+
+
+def load_current_profile_policy(
+    profile: Mapping[str, object],
+) -> tuple[UtikiBehavior, FlowSettings]:
+    """Validate the full current profile without defaults or migration."""
+    behavior = load_current_policy(profile)
+    date = _section(profile, "date_auto_select")
+    area = _section(profile, "area_auto_select")
+    advanced = _section(profile, "advanced")
+    ocr = _section(profile, "ocr_captcha")
+    fields = {
+        "date_enabled": _required(date, "enable", bool, "date_auto_select"),
+        "area_enabled": _required(area, "enable", bool, "area_auto_select"),
+        "ticket_number": _required(profile, "ticket_number", int, "profile"),
+        "date_keyword": _required(date, "date_keyword", str, "date_auto_select"),
+        "date_mode": _required(date, "mode", str, "date_auto_select"),
+        "date_fallback": _required(profile, "date_auto_fallback", bool, "profile"),
+        "area_keyword": _required(area, "area_keyword", str, "area_auto_select"),
+        "area_mode": _required(area, "mode", str, "area_auto_select"),
+        "area_fallback": _required(profile, "area_auto_fallback", bool, "profile"),
+        "keyword_exclude": _required(profile, "keyword_exclude", str, "profile"),
+        "allow_non_adjacent": _required(advanced, "disable_adjacent_seat", bool, "advanced"),
+        "ocr_enabled": _required(ocr, "enable", bool, "ocr_captcha"),
+        "force_submit": _required(ocr, "force_submit", bool, "ocr_captcha"),
+        "ocr_beta": _required(ocr, "beta", bool, "ocr_captcha"),
+        "ocr_image_source": _required(ocr, "image_source", str, "ocr_captcha"),
+        "ocr_use_universal": _required(ocr, "use_universal", bool, "ocr_captcha"),
+        "ocr_path": _required(ocr, "path", str, "ocr_captcha"),
+        "refresh_datetime": _required(profile, "refresh_datetime", str, "profile"),
+    }
+    interval = advanced.get("auto_reload_page_interval")
+    if type(interval) not in (int, float):
+        raise ConfigError("INVALID_CONFIG", "advanced.auto_reload_page_interval")
+    fields["refresh_interval"] = interval
+    try:
+        return behavior, FlowSettings(**fields)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise ConfigError("INVALID_CONFIG", "utiki-effective-policy") from exc
 
 
 def inspect_upgrade_input(profile: Mapping[str, object]) -> UpgradeInspection:

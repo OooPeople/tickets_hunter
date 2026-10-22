@@ -40,9 +40,11 @@ from platforms.utiki.domain.purchase import (
     AwaitingSubmitOutcome,
     ClaimedSubmit,
     HeldSubmitOutcome,
+    ManualSubmitEvidence,
     PreparedSubmit,
     SubmitAttempt,
     SubmitAttemptId,
+    SubmitSource,
 )
 from platforms.utiki.profiles import PageKind
 
@@ -116,6 +118,29 @@ def test_submit_claim_cannot_use_another_operation_or_effect_kind() -> None:
     ):
         with pytest.raises(ValueError, match="claim"):
             ClaimedSubmit(attempt, claim)
+
+
+def test_observed_manual_submit_has_source_without_automatic_claim() -> None:
+    automatic = _attempt()
+    manual = replace(
+        automatic, stamp=None,
+        input_evidence=replace(
+            automatic.input_evidence,
+            context=replace(automatic.input_evidence.context, auto_submit=False),
+        ),
+        source=SubmitSource.OBSERVED_MANUAL,
+        manual_evidence=ManualSubmitEvidence(
+            automatic.plan.page_url, automatic.plan.document_id,
+            "arm-1", "click-1",
+        ),
+    )
+    assert manual.stamp is None and manual.manual_evidence is not None
+    with pytest.raises(ValueError, match="claim"):
+        ClaimedSubmit(manual, _claim(automatic))
+    with pytest.raises(ValueError, match="source"):
+        replace(manual, manual_evidence=replace(
+            manual.manual_evidence, document_id="unrelated",
+        ))
 
 
 def test_submit_attempt_rejects_mismatched_plan_and_input_context() -> None:

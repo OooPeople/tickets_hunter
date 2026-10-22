@@ -53,16 +53,16 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 - 關鍵字包含、完全符合、AND、OR、排除與 fallback 語意是否維持。
 - stable identity 與 volatile availability 是否分開；table row、map title、action status 三個來源必須各自 quantity-aware，不能要求數值相等，也不能缺一仍選取。
 - observe 與 commit 之間是否重新確認 URL、document、候選身分與可售狀態。
-- 票數、座位與 checkbox 寫入後是否 audit；submit 的同一原子 commit 是否再次核對 payload，audit 失敗是否禁止送出。
+- 票數、座位與 checkbox 寫入後是否 audit；submit 在同一授權操作的派送前是否再次核對 payload，audit 失敗是否禁止送出。CDP 與遠端網站之間不宣稱有原子交易。
 - 50 ms 重複 tick 是否仍只產生一次 click、submit 或通知。
 
 ### 3.5 狀態生命週期
 
 - 狀態是否依分頁／document 隔離，導頁、重新整理、登入切換後是否正確失效。
-- purchase identity 是否涵蓋 tenant、session/account、performance、group 及 price-area/mode，而非直接使用不穩定的完整 URL。
+- 需要購票身分的步驟是否涵蓋 tenant、可驗證的 session／auth、performance、group 及 price-area/mode，而非直接使用不穩定的完整 URL；日期／區域導覽不預先要求已登入的 auth epoch。
 - document 改變時是否先 reduce／attest fast navigation、submit awaiting、conflict 與 reload probe 等跨 document transition，再清除 source-document state。
 - `pending`、`committed`、`failed` 是否有明確轉換；失敗不應被誤標為成功。
-- CAPTCHA、送出、dialog 與刷新狀態是否可恢復，不會殘留到下一輪。
+- CAPTCHA、送出、dialog 與刷新之間的過期 readiness 是否失效；原操作、未決效果與 Run 終局是否依生命週期保留，而非在下一輪任意清空。
 - 熱重載設定後，哪些狀態保留、哪些重設是否有定義。
 
 ### 3.6 彈窗與錯誤恢復
@@ -70,16 +70,19 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 - 彈窗是否先讀取可驗證文字／角色，再分類；未知彈窗不得自動當成座位衝突。
 - 成功加入購物車、座位衝突、超出額度、登入失效、CAPTCHA 錯誤與未知錯誤是否有不同處理。
 - submit 前是否二次檢查 dialog；click 後是否進入 awaiting-result，容許延遲 dialog／導頁而不重送。
-- committer 是否只回報 dispatched；awaiting-result 是否有明確期限，無導頁、已知 dialog 或可驗證 evidence 時是否進入 sticky unknown terminal，而非永久等待或自動重送。
+- committer／adapter 是否回報可歸屬的真實效果證據，區分 `NO_EFFECT`、`LOCAL_MUTATION`、`REQUEST_DISPATCHED`、`REQUEST_POSSIBLE`；指令返回、取消或 timeout 不直接推定為未派送。
+- awaiting-result 是否有明確核對期限；期限到的 unknown 禁止新派送與破壞證據的動作，仍保留原操作。可信晚到 checkout、已知拒絕或最終派送前 `NO_EFFECT` 可結束原操作，但不得恢復過期 grant；已有可信 request-boundary 證據時，相矛盾的 `NO_EFFECT` 不得降級。
+- 提交紀錄是否區分 automatic 的原 claim 與 observed manual 的實際準備／送出證據；人工送出不能補造自動 claim，兩者的可歸屬結果使用同一套處理。
+- 首次回讀失敗後取得可信一致證據，或本地 writer 已結束且證實人工取代舊填值時，原操作是否能結束並重新核對目前值；不可因不明 mismatch 擅自解鎖。
 - blocker 是否在 dismiss 前保存；dismiss 後是否驗證彈窗真的關閉，失敗時是否仍禁止其他副作用。
-- recovery 是否依 reserved seat、general quantity、server-assigned quantity 清除正確狀態，並等待新的 document 才再次動作。
+- recovery 是否依 reserved seat、general quantity、server-assigned quantity 清除正確狀態；需要 reload 的選擇衝突須證實新 document 才重選，已知 CAPTCHA 拒絕則可在同一 document 證實空欄與新圖片後準備新 input attempt。兩者不得共用泛用重試出口。
 
 ### 3.7 刷新與限流
 
-- 所有刷新是否經過同一協調器，遵守使用者設定與跨程序節流。
+- 所有 uTiki 刷新是否由同一 owner 仲裁；共用協調啟用時經既有 coordinator，明確停用時保留原本機間隔語意，兩者都不得旁路 reload 或削弱節流。
 - 429、一般缺票與未知網路錯誤是否分開；單一分頁的未知狀態不能誤觸發全域 429。
 - 重新整理是否具備 reservation／commit 邊界，避免多個 tick 或程序同時刷新。
-- pause 是否釋放 reservation／probe lease但保留 recovery intent；resume 是否仍遵守剩餘間隔與 cooldown。
+- pause 是否依原 token 精確處理可釋放的 reservation／probe lease 並保留 recovery intent；釋放失敗或 ownership 未知不得當成成功，resume 仍遵守剩餘間隔與 cooldown。
 - same-URL reload 是否通知外層重新執行 Cloudflare／document gate；coordinator disabled 時是否仍只由 family refresh controller 刷新。
 - 測試或 fallback 不得繞過設定間隔。
 
@@ -137,7 +140,7 @@ Summary
 - 變更目的與整體判斷；沒有 finding 時，明確寫「未發現阻擋問題」。
 ```
 
-行號可用於當次 inline review；長期 Issue 與設計文件請以檔案加函式／符號名稱描述，避免日後失效。
+行號可用於當次 inline review；長期 Issue 與設計文件請以檔案加函式／符號名稱描述，避免日後失效。固定 commit SHA 的來源行錨點可用於追溯該版本。
 
 ## 6. 重構專用門檻
 

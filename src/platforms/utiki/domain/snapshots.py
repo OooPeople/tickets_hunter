@@ -222,9 +222,10 @@ class SubmittedSeat:
     a: str
     y: str
     z: str
+    key: str = ""
 
     def __post_init__(self) -> None:
-        if any(type(getattr(self, name)) is not str for name in ("a", "y", "z")):
+        if any(type(getattr(self, name)) is not str for name in ("a", "y", "z", "key")):
             raise ValueError("submitted seat values must be strings")
 
 

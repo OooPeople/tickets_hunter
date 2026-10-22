@@ -13,24 +13,6 @@ def _write(path, text):
     path.write_text(text, encoding="utf-8")
 
 
-def _inventory(root):
-    path = root / "core-inventory.md"
-    _write(
-        path,
-        """# Core inventory
-
-| Actual HEAD | `f307f7caba054fb40aab807a4629c891e69fb200` |
-
-`KEEP` `DIRECT` `CONDITIONAL_BRIDGE` `REMOVE`
-
-Conditional bridge: `src/utiki_core_services.py`.
-Approved sources: `refresh_coordinator`, `global_settings`,
-`nodriver_common`, and `util`.
-""",
-    )
-    return path
-
-
 def _base_tree(root):
     _write(root / "src" / "platforms" / "utiki" / "profiles.py", "VALUE = 1\n")
     _write(
@@ -41,30 +23,17 @@ def _base_tree(root):
         root / "src" / "platforms" / "utiki" / "selection.py",
         "import util\nfrom .profiles import VALUE\n",
     )
-    _write(
-        root / "src" / "platforms" / "utiki" / "refresh.py",
-        "import util\nfrom refresh_coordinator import VALUE\n",
-    )
-    _write(
-        root / "src" / "platforms" / "utiki" / "__init__.py",
-        "from .workflow import legacy_main\n",
-    )
-    _write(
-        root / "src" / "platforms" / "utiki" / "workflow.py",
-        "legacy_main = object()\n",
-    )
+    _write(root / "src" / "platforms" / "utiki" / "__init__.py", "")
     _write(root / "src" / "util.py", "VALUE = 1\n")
     _write(root / "src" / "refresh_coordinator.py", "VALUE = 1\n")
 
 
-def _run(root, inventory, *, strict=True):
+def _run(root, *, strict=True):
     command = [
         sys.executable,
         str(CHECKER),
         "--root",
         str(root),
-        "--core-inventory",
-        str(inventory),
         "--candidate-sha",
         "1" * 40,
     ]
@@ -73,11 +42,10 @@ def _run(root, inventory, *, strict=True):
     return subprocess.run(command, capture_output=True, text=True, check=False)
 
 
-def test_p1_legacy_tree_passes_without_planned_target_paths(tmp_path):
+def test_small_current_tree_passes_without_planned_target_paths(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
 
-    result = _run(tmp_path, inventory)
+    result = _run(tmp_path)
 
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
@@ -85,9 +53,18 @@ def test_p1_legacy_tree_passes_without_planned_target_paths(tmp_path):
     assert report["target_files"] == []
 
 
+def test_retired_side_effect_modules_cannot_reenter_the_tree(tmp_path):
+    _base_tree(tmp_path)
+    _write(tmp_path / "src" / "platforms" / "utiki" / "workflow.py", "")
+
+    result = _run(tmp_path)
+
+    assert result.returncode != 0
+    assert "RETIRED_SIDE_EFFECT_MODULE" in json.loads(result.stdout)["failure_reasons"]
+
+
 def test_application_cannot_call_raw_evaluate(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
     _write(
         tmp_path
         / "src"
@@ -98,7 +75,7 @@ def test_application_cannot_call_raw_evaluate(tmp_path):
         "async def run(tab: object) -> None:\n    await tab.evaluate('x')\n",
     )
 
-    result = _run(tmp_path, inventory)
+    result = _run(tmp_path)
 
     assert result.returncode != 0
     report = json.loads(result.stdout)
@@ -107,7 +84,6 @@ def test_application_cannot_call_raw_evaluate(tmp_path):
 
 def test_a02_application_evaluate_and_reverse_import_reach_architecture_gate(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
     application = (
         tmp_path / "src" / "platforms" / "utiki" / "application" / "engine.py"
     )
@@ -116,7 +92,7 @@ def test_a02_application_evaluate_and_reverse_import_reach_architecture_gate(tmp
         application,
         "from ..profiles import VALUE\nfrom .adapters import VALUE as LOCAL\nRESULT = VALUE + LOCAL\n",
     )
-    legal = _run(tmp_path, inventory)
+    legal = _run(tmp_path)
     assert legal.returncode == 0, legal.stderr
     assert json.loads(legal.stdout)["status"] == "PASS"
 
@@ -130,7 +106,7 @@ def test_a02_application_evaluate_and_reverse_import_reach_architecture_gate(tmp
     )
     for source, reason in injections:
         _write(application, source)
-        rejected = _run(tmp_path, inventory)
+        rejected = _run(tmp_path)
         assert rejected.returncode != 0
         report = json.loads(rejected.stdout)
         assert reason in report["failure_reasons"]
@@ -143,13 +119,12 @@ def test_a02_application_evaluate_and_reverse_import_reach_architecture_gate(tmp
 
 def test_domain_rejects_io_and_reverse_imports(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
     _write(
         tmp_path / "src" / "platforms" / "utiki" / "domain" / "state.py",
         "import os\nimport settings\nVALUE = os.getenv('X')\n",
     )
 
-    result = _run(tmp_path, inventory)
+    result = _run(tmp_path)
 
     assert result.returncode != 0
     report = json.loads(result.stdout)
@@ -157,15 +132,14 @@ def test_domain_rejects_io_and_reverse_imports(tmp_path):
     assert "DOMAIN_FORBIDDEN_CALL" in report["failure_reasons"]
 
 
-def test_conditional_bridge_only_uses_inventory_approved_core(tmp_path):
+def test_conditional_bridge_only_uses_approved_core(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
     _write(
         tmp_path / "src" / "utiki_core_services.py",
         "import settings\n",
     )
 
-    result = _run(tmp_path, inventory)
+    result = _run(tmp_path)
 
     assert result.returncode != 0
     report = json.loads(result.stdout)
@@ -174,37 +148,34 @@ def test_conditional_bridge_only_uses_inventory_approved_core(tmp_path):
 
 def test_conditional_bridge_cannot_import_whole_approved_module(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
     _write(
         tmp_path / "src" / "utiki_core_services.py",
         "import util\n",
     )
 
-    result = _run(tmp_path, inventory)
+    result = _run(tmp_path)
 
     assert result.returncode != 0
     report = json.loads(result.stdout)
     assert "CORE_BRIDGE_FORBIDDEN_IMPORT" in report["failure_reasons"]
 
 
-def test_conditional_bridge_accepts_exact_inventory_symbol(tmp_path):
+def test_conditional_bridge_accepts_exact_core_symbol(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
     _write(
         tmp_path / "src" / "utiki_core_services.py",
         "from util import create_debug_logger\n",
     )
 
-    result = _run(tmp_path, inventory)
+    result = _run(tmp_path)
 
     assert result.returncode == 0, result.stderr
 
 
 def test_strict_mode_is_required(tmp_path):
     _base_tree(tmp_path)
-    inventory = _inventory(tmp_path)
 
-    result = _run(tmp_path, inventory, strict=False)
+    result = _run(tmp_path, strict=False)
 
     assert result.returncode != 0
     assert "STRICT_REQUIRED" in result.stderr

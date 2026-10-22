@@ -58,14 +58,13 @@ a = Analysis(
         'platforms.ibon',
         'platforms.kham',
         'platforms.hkticketing',
-        'platforms.ctbc',
         'platforms.utiki',
         'platforms.utiki.auth',
         'platforms.utiki.dom',
         'platforms.utiki.profiles',
         'platforms.utiki.selection',
-        'platforms.utiki.workflow',
-        'platforms.utiki.refresh',
+        'platforms.utiki.bootstrap',
+        'platforms.utiki.production_run',
         # Chrome downloader dependencies
         'requests',
         # Image processing

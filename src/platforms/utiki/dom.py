@@ -111,13 +111,47 @@ def _valid_conflict_clear_input(page_kind, page_url, document_id, product_id):
 
 async def clear_conflict_selection(
     tab, page_kind, page_url, document_id, product_id,
+    expected_selection,
 ):
-    """以原子操作清除一筆被拒絕的座位或票數選擇。"""
+    """只按原 attempt 的選擇證據清除已知拒絕。"""
     if not _valid_conflict_clear_input(
         page_kind, page_url, document_id, product_id
     ):
         return CommitResult.REJECTED
     query = unique_query(page_url)
+    if (
+        isinstance(expected_selection, QuantityPlan)
+        and page_kind in (
+            PageKind.GENERAL_ADMISSION, PageKind.SERVER_ASSIGNED_QUANTITY,
+        )
+        and expected_selection.page_url == page_url
+        and expected_selection.document_id == document_id
+        and expected_selection.product_id == product_id
+        and expected_selection.page_type == page_kind.value
+    ):
+        expected = {
+            "kind": "quantity",
+            "targetKey": expected_selection.target_key,
+            "ticketNumber": expected_selection.ticket_number,
+        }
+    elif (
+        isinstance(expected_selection, SeatActionPlan)
+        and page_kind is PageKind.RESERVED_SEAT
+        and expected_selection.page_url == page_url
+        and expected_selection.document_id == document_id
+        and expected_selection.product_id == product_id
+        and expected_selection.action == "ready"
+    ):
+        expected = {
+            "kind": "seat",
+            "fingerprints": expected_selection.selected_seat_fingerprints,
+            "payloadKeys": expected_selection.expected_payload_keys,
+            "ticketNumber": expected_selection.ticket_number,
+            "ticketTypeId": expected_selection.ticket_type_id,
+            "ticketTypeName": expected_selection.ticket_type_name,
+        }
+    else:
+        return CommitResult.REJECTED
     intent = json.dumps({
         "pageKind": page_kind.value,
         "pageUrl": page_url,
@@ -129,10 +163,13 @@ async def clear_conflict_selection(
         "reservedRoutes": CONST_RESERVED_SEAT_ROUTES,
         "generalRoutes": CONST_GENERAL_ADMISSION_ROUTES,
         "serverPaths": CONST_SERVER_ASSIGNED_QUANTITY_PATHS,
+        "expectedSelection": expected,
     }, ensure_ascii=False)
-    script = assemble_script("conflict_clear", {
-        "__TICKETS_HUNTER_CONFLICT_CLEAR_JSON__": intent,
-    })
+    script = assemble_script(
+        "conflict_clear_recovery", {
+            "__TICKETS_HUNTER_CONFLICT_CLEAR_JSON__": intent,
+        },
+    )
     raw_result = await tab.evaluate(script)
     try:
         return CommitResult(raw_result)
@@ -423,6 +460,7 @@ async def commit_seat(tab, snapshot, plan):
         "ticketTypeName": plan.ticket_type_name,
         "selectedSeatFingerprints": plan.selected_seat_fingerprints,
         "targetSeatFingerprints": plan.target_seat_fingerprints,
+        "expectedPayloadKeys": plan.expected_payload_keys,
         "requirePhysicalAdjacency": plan.require_physical_adjacency,
         "routes": CONST_RESERVED_SEAT_ROUTES,
     }, ensure_ascii=False)
@@ -510,6 +548,16 @@ def _valid_quantity_commit_input(snapshot, plan):
         )
         and plan.ticket_number > 0
         and re.fullmatch(r"[A-Za-z0-9_-]+", plan.target_key)
+        and (
+            plan.prior_commit is None or (
+                type(plan.prior_commit) is tuple
+                and len(plan.prior_commit) == 2
+                and type(plan.prior_commit[0]) is str
+                and re.fullmatch(r"[A-Za-z0-9_-]+", plan.prior_commit[0])
+                and type(plan.prior_commit[1]) is int
+                and plan.prior_commit[1] > 0
+            )
+        )
     )
 
 
@@ -539,6 +587,7 @@ async def commit_quantity(tab, snapshot, plan):
         "priceAreaHiddenPresent": plan.price_area_hidden_present,
         "quantityLimitPresent": plan.quantity_limit_present,
         "targetRemainingPresent": plan.target_remaining_present,
+        "previousIntent": plan.prior_commit,
     }, ensure_ascii=False)
     script = assemble_script("quantity_commit", {
         "__TICKETS_HUNTER_PLAN_JSON__": plan_json,
@@ -603,12 +652,13 @@ def _seat_submit_payload(plan):
         "ticketTypeId": plan.ticket_type_id,
         "ticketTypeName": plan.ticket_type_name,
         "expectedSeatFingerprints": expected,
+        "expectedPayloadKeys": plan.expected_payload_keys,
         "requirePhysicalAdjacency": plan.require_physical_adjacency,
         "reservedRoutes": CONST_RESERVED_SEAT_ROUTES,
     }
 
 
-async def dispatch_submit(tab, plan, expected_login=None):
+async def dispatch_submit(tab, plan, expected_login=None, expected_captcha=None):
     """重新驗證固定的購票意圖並送出加入購物車操作。"""
     if not isinstance(plan, SubmitPlan) or not submit_plan_is_valid(plan):
         return SubmitDispatchResult.REJECTED
@@ -622,14 +672,34 @@ async def dispatch_submit(tab, plan, expected_login=None):
     if expected_login is not None:
         if (
             not isinstance(expected_login, dict)
-            or set(expected_login) != {"origin", "account", "password"}
+            or set(expected_login) not in (
+                {"origin", "account", "password"},
+                {"origin", "manualToken", "documentId"},
+            )
             or any(
                 not isinstance(expected_login[key], str) or not expected_login[key]
-                for key in ("origin", "account", "password")
+                for key in expected_login
             )
         ):
             return SubmitDispatchResult.REJECTED
         payload["expectedLogin"] = expected_login
+    if expected_captcha is not None:
+        if (
+            not isinstance(expected_captcha, dict)
+            or set(expected_captcha) != {
+                "imageSource", "imageDataUrl", "manualRevision", "answer"
+            }
+            or not isinstance(expected_captcha["imageSource"], str)
+            or not isinstance(expected_captcha["imageDataUrl"], str)
+            or type(expected_captcha["manualRevision"]) is not int
+            or expected_captcha["manualRevision"] < 0
+            or (
+                expected_captcha["answer"] is not None
+                and not isinstance(expected_captcha["answer"], str)
+            )
+        ):
+            return SubmitDispatchResult.REJECTED
+        payload["expectedCaptcha"] = expected_captcha
     plan_json = json.dumps(payload, ensure_ascii=False)
     script = assemble_script("submit", {
         "__TICKETS_HUNTER_PLAN_JSON__": plan_json,

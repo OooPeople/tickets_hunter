@@ -114,6 +114,7 @@ def _measure_v07(samples: int, warmup: int) -> dict[str, object]:
     from keyword_rules import parse_keyword_string_to_array
     from tools.migrations import convert_utiki_config
     from platforms.utiki.application.ports import CoreControl, CoreGate
+    from platforms.utiki.application.flow_settings import EffectivePolicy, FlowSettings
     from platforms.utiki.bootstrap import create_engine
     from platforms.utiki.domain.identity import DocumentKey, OperationId, OperationStamp, TabKey
 
@@ -121,13 +122,18 @@ def _measure_v07(samples: int, warmup: int) -> dict[str, object]:
     snapshot = selection.parse_quantity_snapshot(fixture)
     if snapshot is None:
         raise HotPathError("quantity fixture did not parse")
-    policy = config.apply_current_policy_reload(
+    current_policy = config.apply_current_policy_reload(
         None,
         json.dumps({"utiki": {
             "ticket_type_keyword": "FULL",
             "seat_sorting": "row_seat",
             "seat_selection_mode": "manual",
         }}),
+    )
+    policy = EffectivePolicy(
+        current_policy.last_valid, FlowSettings(False, False, 2),
+        current_policy.policy_revision, current_policy.control_revision,
+        current_policy.block_reason,
     )
     tab = TabKey(1, "p2-hot-path")
     browser = _Browser(snapshot)

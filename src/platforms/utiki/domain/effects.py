@@ -43,6 +43,7 @@ class HeldReason(str, Enum):
     UNCERTAIN_DISPATCH = "uncertain-dispatch"
     UNMATCHED_COMPLETION = "unmatched-completion"
     CONTROL_REVOKED = "control-revoked"
+    NO_EFFECT_CONFIRMED = "no-effect-confirmed"
 
 
 _RECEIPT_COMBINATIONS = {

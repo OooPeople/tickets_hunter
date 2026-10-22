@@ -18,7 +18,6 @@ def test_domain_import_is_pure_without_zendriver(tmp_path: Path) -> None:
         "from platforms.utiki.domain.inputs import InputAttemptId; "
         "assert 'zendriver' not in sys.modules; "
         "assert 'nodriver_common' not in sys.modules; "
-        "assert 'platforms.utiki.workflow' not in sys.modules; "
         "assert TabKey(0, 'tab').target_id == 'tab'; "
         "assert DocumentKey('doc').token == 'doc'; "
         "assert ClaimId('claim').token == 'claim'; "
@@ -80,14 +79,6 @@ def test_identity_records_reject_missing_or_invalid_components() -> None:
         OperationId("")
     with pytest.raises(ValueError):
         OperationStamp(TabKey(0, "tab"), -1, OperationId("op"), DocumentKey("doc"), 0, 0)
-
-
-def test_existing_workflow_exports_still_resolve() -> None:
-    import platforms.utiki as utiki
-    from platforms.utiki import workflow
-
-    assert utiki.nodriver_ctbc_main is workflow.nodriver_ctbc_main
-    assert utiki.nodriver_utiki_main is workflow.nodriver_ctbc_main
 
 
 def test_selection_uses_the_same_domain_snapshot_and_plan_classes() -> None:

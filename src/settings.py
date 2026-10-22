@@ -212,10 +212,6 @@ def get_default_config():
     config_dict["utiki"]["seat_sorting"] = "row_seat"
     config_dict["utiki"]["seat_selection_mode"] = "manual"
 
-    # Keep a non-sensitive compatibility mirror while older releases still
-    # read the CTBC-specific section.
-    config_dict['ctbc'] = dict(config_dict["utiki"])
-
     config_dict['cityline']={}
 
     config_dict['tixcraft']={}
@@ -356,18 +352,6 @@ def migrate_config(config_dict):
     if config_dict is None:
         return config_dict
 
-    # uTiki family behavior is canonical. Copy legacy values only when each
-    # canonical key is absent; an explicit empty value must remain authoritative.
-    legacy_utiki = config_dict.get("ctbc")
-    canonical_utiki = config_dict.get("utiki")
-    if not isinstance(canonical_utiki, dict):
-        canonical_utiki = {}
-    if isinstance(legacy_utiki, dict):
-        for key in UTIKI_BEHAVIOR_KEYS:
-            if key not in canonical_utiki and key in legacy_utiki:
-                canonical_utiki[key] = legacy_utiki[key]
-    config_dict["utiki"] = canonical_utiki
-
     # Migrate ocr_model_path from advanced to ocr_captcha.path
     if "advanced" in config_dict and "ocr_model_path" in config_dict["advanced"]:
         if "ocr_captcha" not in config_dict:
@@ -400,7 +384,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "utiki", "ctbc", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
+    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -409,20 +393,6 @@ def migrate_config(config_dict):
                     if key not in config_dict[section]:
                         config_dict[section][key] = value
 
-    if config_dict["utiki"].get("seat_sorting") not in UTIKI_SEAT_SORTINGS:
-        config_dict["utiki"]["seat_sorting"] = default["utiki"]["seat_sorting"]
-    if (
-        config_dict["utiki"].get("seat_selection_mode")
-        not in UTIKI_SEAT_SELECTION_MODES
-    ):
-        config_dict["utiki"]["seat_selection_mode"] = default["utiki"][
-            "seat_selection_mode"
-        ]
-
-    # Mirror only the compatibility allowlist; credentials stay in accounts.
-    for key in UTIKI_BEHAVIOR_KEYS:
-        config_dict["ctbc"][key] = config_dict["utiki"][key]
-
     # Top-level scalar fields (auto-fill any missing non-section keys)
     dict_sections = {k for k, v in default.items() if isinstance(v, dict)}
     for key, value in default.items():
@@ -430,6 +400,39 @@ def migrate_config(config_dict):
             config_dict[key] = value
 
     return config_dict
+
+
+def validate_utiki_current_profile(config_dict):
+    """Require an explicit current behavior section at the uTiki save boundary."""
+    from utiki_config import ConfigError, load_current_profile_policy
+    from urllib.parse import urlsplit
+
+    if not isinstance(config_dict, dict):
+        raise ValueError("profile must be a JSON object")
+    homepage = config_dict.get("homepage")
+    if not isinstance(homepage, str):
+        return
+    try:
+        parsed = urlsplit(homepage)
+        supported = (
+            parsed.scheme.lower() == "https"
+            and (parsed.hostname or "").lower() in {
+                "tix.ctbcsports.com", "tix.wdragons.com",
+            }
+            and parsed.username is None and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except ValueError:
+        supported = False
+    if not supported:
+        return
+    try:
+        load_current_profile_policy(config_dict)
+    except ConfigError as exc:
+        raise ValueError(
+            f"uTiki profile is not current ({exc.code}); reopen Settings, "
+            "fill the uTiki behavior fields, and save the profile again"
+        ) from exc
 
 def load_json(profile_name=""):
     config_filepath = get_profile_filepath(profile_name)
@@ -849,6 +852,13 @@ class SaveJsonHandler(tornado.web.RequestHandler):
         if is_pass_check:
             config_filepath = get_profile_filepath(profile_name)
             os.makedirs(os.path.dirname(config_filepath), exist_ok=True)
+            try:
+                validate_utiki_current_profile(_body)
+            except ValueError as exc:
+                self.set_status(400)
+                self.write(dict(error=dict(message=str(exc), code=1005)))
+                self.finish()
+                return
             config_dict = migrate_config(_body)
 
             if config_dict["kktix"]["max_dwell_time"] > 0:
@@ -924,6 +934,12 @@ class ProfilesHandler(tornado.web.RequestHandler):
         config_dict = _body.get("config")
         if not isinstance(config_dict, dict):
             _, config_dict = load_json()
+        try:
+            validate_utiki_current_profile(config_dict)
+        except ValueError as exc:
+            self.set_status(400)
+            self.write({"success": False, "error": str(exc)})
+            return
         config_dict = migrate_config(config_dict)
 
         try:

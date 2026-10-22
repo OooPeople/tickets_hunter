@@ -12,7 +12,7 @@ jobs:
   unit:
     name: Python 3.11 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,3 +38,66 @@ jobs:
 
       - name: Run default test suite with coverage
         run: python -m pytest --cov=src --cov-report=term-missing
+
+      - name: Check Python source syntax
+        run: python -m compileall -q src tools/check_utiki_architecture.py
+
+      - name: Verify uTiki production scripts
+        run: python src/nodriver_tixcraft.py --utiki-resource-self-test
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          for script in src/platforms/utiki/scripts/*.js src/www/settings.js; do
+            node --check "$script"
+          done
+
+  utiki-types:
+    name: uTiki current typed boundary
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Check current typed scope
+        shell: bash
+        run: |
+          mapfile -t scope < <(grep -vE '^[[:space:]]*(#|$)' ci/utiki-typed-scope.txt)
+          python -m mypy --config-file ci/mypy-utiki.ini "${scope[@]}"
+      - name: Check current dependency boundary
+        run: python tools/check_utiki_architecture.py --root . --strict > utiki-architecture-report.json
+
+  utiki-browser:
+    name: uTiki production-origin browser / isolated Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build fixed test image
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/utiki-image-input"
+          cp requirement.txt requirements-dev.txt "$RUNNER_TEMP/utiki-image-input/"
+          docker build --pull=false \
+            --build-arg BASE_IMAGE=python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8 \
+            -f ci/utiki-isolation/Dockerfile \
+            -t utiki-current-browser:local "$RUNNER_TEMP/utiki-image-input"
+      - name: Run production-origin contracts with egress disabled before browser start
+        shell: bash
+        run: |
+          docker run --rm --pull never --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --shm-size 1g \
+            --tmpfs /tmp:rw,exec,nosuid,size=512m \
+            --env HOME=/tmp --env PYTHONDONTWRITEBYTECODE=1 \
+            --env TICKETS_HUNTER_HARD_EGRESS_ACTIVE=1 \
+            --env TICKETS_HUNTER_PRODUCTION_ORIGIN_REPORT=/tmp/utiki-origin-contract.json \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --workdir /workspace utiki-current-browser:local \
+            python -m pytest -q -o addopts= -p no:cacheprovider \
+            tests/browser/utiki/test_hard_egress_os_contract.py \
+            tests/browser/utiki/test_production_origin_contract.py \
+            tests/browser/utiki/test_batch0_production_origin_flow.py \
+            tests/browser/utiki/test_batch5_settings_ui.py

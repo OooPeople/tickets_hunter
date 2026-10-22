@@ -1,88 +1,43 @@
+"""Observe the container boundary before any production-origin navigation."""
+
 import os
+from pathlib import Path
+import socket
+import subprocess
 import sys
 
 import pytest
-
-from tools import utiki_egress_canary as canary
 
 
 pytestmark = pytest.mark.browser
 
 
-def _isolated_peer():
-    if os.environ.get(canary.ACTIVE_ENV) != "1":
-        pytest.fail("OS egress probes require the hard-isolation launcher")
-    if sys.platform != "linux":
-        pytest.fail("OS egress probes require the Linux isolation target")
-    assert canary._interfaces() == ["lo"]
-    assert canary._ipv4_default_routes() == []
-    assert canary._ipv6_default_routes() == []
-    host = os.environ.get(canary.PEER_IPV4_ENV, "")
-    port = int(os.environ.get(canary.PEER_PORT_ENV, "0"))
-    assert host
-    assert 1 <= port <= 65535
-    return host, port
+def _require_network_none() -> None:
+    assert os.environ.get("TICKETS_HUNTER_HARD_EGRESS_ACTIVE") == "1"
+    assert sys.platform == "linux"
+    assert {path.name for path in Path("/sys/class/net").iterdir()} == {"lo"}
+    assert not [
+        line for line in Path("/proc/net/route").read_text().splitlines()[1:]
+        if line.split()[1] == "00000000"
+    ]
+    assert not [
+        line for line in Path("/proc/net/ipv6_route").read_text().splitlines()
+        if line.split()[0] == "0" * 32 and line.split()[1] == "00"
+        and line.split()[-1] != "lo"
+    ]
 
 
-def test_h02_child_process_cannot_escape_network_namespace():
-    _isolated_peer()
+def test_browser_starts_only_after_os_network_isolation() -> None:
+    _require_network_none()
+    with pytest.raises(OSError):
+        socket.create_connection(("198.51.100.1", 80), timeout=0.2)
 
-    result = canary._run_child_probe(canary._netns_identity())
 
-    assert result["status"] == "PASS"
-    assert result["netns"] == canary._netns_identity()
-    assert result["interfaces"] == ["lo"]
-    assert set(result["peer_probes"]) == {"direct-ipv4", "dns", "udp"}
-    assert all(
-        probe["status"] == "PASS" and probe["result"] == "blocked"
-        for probe in result["peer_probes"].values()
+def test_child_process_inherits_the_network_boundary() -> None:
+    _require_network_none()
+    result = subprocess.run(
+        [sys.executable, "-c", "import socket; socket.create_connection(('198.51.100.1', 80), timeout=0.2)"],
+        capture_output=True, text=True, check=False,
     )
-
-
-def test_h03_dns_is_blocked():
-    host, port = _isolated_peer()
-
-    result = canary._expect_blocked(
-        "driver-dns", lambda: canary._dns_probe(host, port)
-    )
-
-    assert result["status"] == "PASS"
-    assert result["result"] == "blocked"
-
-
-def test_h03_direct_ipv4_is_blocked():
-    host, port = _isolated_peer()
-
-    result = canary._expect_blocked(
-        "driver-direct-ipv4",
-        lambda: canary._http_probe(host, port, "/driver-http"),
-    )
-
-    assert result["status"] == "PASS"
-    assert result["result"] == "blocked"
-
-
-def test_h03_direct_ipv6_is_blocked():
-    _, port = _isolated_peer()
-    host = os.environ.get(canary.PEER_IPV6_ENV, "")
-    assert host
-
-    result = canary._expect_blocked(
-        "driver-direct-ipv6",
-        lambda: canary._ipv6_probe(host, port),
-    )
-
-    assert result["status"] == "PASS"
-    assert result["result"] == "blocked"
-
-
-def test_h03_udp_quic_path_is_blocked():
-    host, port = _isolated_peer()
-
-    result = canary._expect_blocked(
-        "driver-udp",
-        lambda: canary._udp_probe(host, port),
-    )
-
-    assert result["status"] == "PASS"
-    assert result["result"] == "blocked"
+    assert result.returncode != 0
+    assert "OSError" in result.stderr

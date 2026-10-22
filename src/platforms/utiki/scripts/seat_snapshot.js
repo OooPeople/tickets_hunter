@@ -134,9 +134,10 @@
                 id: counter.id || '',
                 counter_raw: normalize(counter.textContent)
             }));
-            const submitted = Object.values(window.seats)
-                .filter(seat => seat && String(seat.A || '') !== '')
-                .map(seat => ({
+            const submitted = Object.entries(window.seats)
+                .filter(([, seat]) => seat && String(seat.A || '') !== '')
+                .map(([key, seat]) => ({
+                    key,
                     A: String(seat.A || ''),
                     Y: String(seat.Y || ''),
                     Z: String(seat.Z || '')

@@ -28,9 +28,10 @@ def test_synthetic_cases_are_deterministic_and_produce_plans(monkeypatch):
 
     selection = bench_utiki._load_selection_module()
     config = bench_utiki.build_benchmark_config()
+    selector_settings = bench_utiki.build_selector_settings(selection, config)
     digests = {
         case: bench_utiki._sha256_json(bench_utiki._jsonable(
-            bench_utiki.execute_case(selection, case, first[case], config)
+            bench_utiki.execute_case(selection, case, first[case], config, selector_settings)
         ))
         for case in bench_utiki.CASES
     }

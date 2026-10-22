@@ -13,7 +13,7 @@ def test_domain_import_is_pure_without_zendriver(tmp_path: Path) -> None:
         "from platforms.utiki.domain.identity import TabKey, DocumentKey; "
         "from platforms.utiki.domain.snapshots import parse_nonnegative_count; "
         "from platforms.utiki.domain.plans import DateActionPlan; "
-        "from platforms.utiki.application.ports import QuantityBrowserPort; "
+        "from platforms.utiki.application.ports import SelectionBrowserPort; "
         "from platforms.utiki.domain.effects import ClaimId; "
         "from platforms.utiki.domain.inputs import InputAttemptId; "
         "assert 'zendriver' not in sys.modules; "

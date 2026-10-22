@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import time
-from typing import Any
+from typing import Any, Callable
 
 from zendriver import cdp
 from nodriver_common import _find_cf_iframe_in_dom
@@ -44,16 +44,25 @@ def _schedule_target(value: str) -> datetime | None:
 
 
 class _RunHost:
-    def __init__(self, tab: Any, key: TabKey, credentials: InlineLoginCredentials | None):
+    def __init__(
+        self, tab: Any, key: TabKey, credentials: InlineLoginCredentials | None,
+        control_signal: Callable[[], CoreGate | None] | None = None,
+    ):
         self.tab = tab
         self.key = key
         self.session = BrowserSessionAuthority(tab, key, credentials)
         self._control = CoreControl(1, CoreGate.PASSIVE)
+        self._control_signal = control_signal
         self._clearance: tuple[str, str] | None = None
         self._document = ""
         self.health_reason = "unverified"
 
     def set_gate(self, gate: CoreGate) -> None:
+        if self._control.gate is CoreGate.CLOSING:
+            return
+        signal = self._control_signal() if self._control_signal is not None else None
+        if gate is not CoreGate.CLOSING and signal in {CoreGate.PAUSED, CoreGate.CLOSING}:
+            gate = signal
         if self._control.gate is not gate:
             self._control = CoreControl(self._control.revision + 1, gate)
 
@@ -70,6 +79,9 @@ class _RunHost:
     def current_control(self, tab: TabKey) -> CoreControl:
         if tab != self.key:
             raise ValueError("uTiki control belongs to another tab")
+        # The main loop cannot poll while it awaits this Run's browser/OCR I/O.
+        # Read the same per-instance signal before every engine preflight.
+        self.set_gate(self._control.gate)
         return self._control
 
     def current_purchase_authority(self, tab: TabKey):
@@ -130,6 +142,7 @@ class UtikiProductionRun:
     def __init__(
         self, tab: Any, profile: dict[str, object], raw_profile: str,
         refresh_adapter: SqliteRefreshAdapter | None = None,
+        control_signal: Callable[[], CoreGate | None] | None = None,
     ):
         raw_key = getattr(getattr(tab, "target", None), "target_id", None)
         key_value = str(raw_key) if raw_key is not None else ""
@@ -153,23 +166,31 @@ class UtikiProductionRun:
             if isinstance(account, str) and account.strip()
             and isinstance(password, str) and password else None
         )
-        self.host = _RunHost(tab, self.key, credentials)
+        self.host = _RunHost(tab, self.key, credentials, control_signal)
         self.browser = ZendriverSelectionBrowser(tab, self.key)
         self.engine: UtikiEngine = create_refresh_run_engine(
             self.policy, self.browser, self.host,
             refresh_adapter if refresh_adapter is not None else SqliteRefreshAdapter(),
             CheckoutNotificationAdapter(profile),
         )
+        # The formal owner can reach quantity and submit even when date/area
+        # auto-selection is disabled; require the complete adapter here.
+        self.engine.ensure_purchase_capabilities(self.policy)
         self.handle = self.engine.attach(self.key)
         self.refresh_host = IsolatedRefreshHost(self.engine, self.host)
         self._closed = False
+        self._closing_requested = False
         self.close_status = ""
-        self._paused = False
         self._schedule_target = _schedule_target(self.policy.flow.refresh_datetime)
 
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def handoff_ready(self) -> bool:
+        """Only a fully retired Run may release this tab to another owner."""
+        return self._closed and not self.engine.retired_outcome_pending(self.handle)
 
     def update_policy(self, raw_profile: str) -> bool:
         updated = apply_effective_policy_reload(self.policy, raw_profile)
@@ -186,6 +207,8 @@ class UtikiProductionRun:
                 target = self._schedule_target
         else:
             target = self._schedule_target
+        if updated.allows_new_mutation:
+            self.engine.ensure_purchase_capabilities(updated)
         if not self.engine.update_policy(updated):
             return False
         self.policy = updated
@@ -193,13 +216,74 @@ class UtikiProductionRun:
         return updated.allows_new_mutation
 
     def set_paused(self, paused: bool) -> None:
-        self._paused = paused
         self.host.set_gate(CoreGate.PAUSED if paused else CoreGate.PASSIVE)
         self.engine.update_control(self.handle)
+
+    async def _maintain_paused_originals(self) -> RefreshProgress:
+        """Protect coordinator resources before best-effort browser readback."""
+        maintenance = await self.engine.maintain_paused_refresh(self.handle)
+        try:
+            await self.engine.advance_submit(self.handle)
+            await self.engine.reconcile_existing_recovery(self.handle)
+        except Exception:
+            # The original claim stays attached for a later readback.
+            pass
+        return maintenance
+
+    async def maintain_originals_without_url(self) -> RunResult:
+        """Maintain existing claims and tokens without authorizing a new page action."""
+        if self._closing_requested and not self._closed:
+            await self.close()
+        if self._closed:
+            try:
+                await self.engine.advance_submit(self.handle)
+                await self.engine.reconcile_closed(self.handle)
+                refresh = await self.engine.reconcile_closed_refresh(self.handle)
+            except Exception:
+                return RunResult("manual-reconciliation-required", "original Run readback unavailable")
+            terminal, rejection = self.engine.submission_state(self.handle)
+            refresh_detail = (
+                f"; original refresh remains {refresh.value}"
+                if refresh not in {RefreshProgress.BLOCKED, RefreshProgress.COMPLETE}
+                else ""
+            )
+            if terminal in {
+                SelectionProgress.SUBMIT_CONFIRMED, SelectionProgress.QUOTA_BLOCKED,
+            }:
+                return RunResult(
+                    terminal.value,
+                    "original purchase result is retained; finish this Run manually"
+                    + refresh_detail,
+                )
+            if terminal is SelectionProgress.SUBMIT_BLOCKED and rejection:
+                return RunResult(
+                    "submit-rejected",
+                    f"original {rejection} rejection is retained; finish this Run manually"
+                    + refresh_detail,
+                )
+            if self.handoff_ready:
+                return RunResult("closed")
+            return RunResult(
+                "manual-reconciliation-required",
+                refresh.value if refresh is not RefreshProgress.BLOCKED
+                else "verify the original uTiki operation before using this tab",
+            )
+        self.set_paused(True)
+        maintenance = await self._maintain_paused_originals()
+        return RunResult(
+            "observation-unavailable",
+            maintenance.value if maintenance in {
+                RefreshProgress.CLEANUP_PENDING, RefreshProgress.RELOAD_POSSIBLE,
+                RefreshProgress.AWAITING_CLEARANCE, RefreshProgress.MANUAL_RECONCILIATION,
+            } else "verify the active uTiki tab manually",
+        )
 
     async def tick(self, url: str, *, paused: bool = False) -> RunResult:
         if self._closed:
             return RunResult("closed")
+        if self._closing_requested:
+            await self.close()
+            return RunResult("closing", self.close_status)
         if str(getattr(getattr(self.tab, "target", None), "target_id", "")) != self.key.target_id:
             await self.close()
             return RunResult("tab-changed", "restart Run after original tab is reconciled")
@@ -209,11 +293,26 @@ class UtikiProductionRun:
         except Exception:
             self.host.set_gate(CoreGate.PAUSED)
             self.engine.update_control(self.handle)
+            maintenance = await self._maintain_paused_originals()
+            if maintenance in {
+                RefreshProgress.CLEANUP_PENDING,
+                RefreshProgress.RELOAD_POSSIBLE,
+                RefreshProgress.AWAITING_CLEARANCE,
+                RefreshProgress.MANUAL_RECONCILIATION,
+            }:
+                return RunResult(maintenance.value, "verify the active uTiki tab manually")
             return RunResult("observation-unavailable", "verify the active uTiki tab manually")
         if paused:
             self.set_paused(True)
-            await self.engine.advance_submit(self.handle)
-            return RunResult("paused")
+            maintenance = await self._maintain_paused_originals()
+            return RunResult(
+                "paused", maintenance.value if maintenance in {
+                    RefreshProgress.CLEANUP_PENDING,
+                    RefreshProgress.RELOAD_POSSIBLE,
+                    RefreshProgress.AWAITING_CLEARANCE,
+                    RefreshProgress.MANUAL_RECONCILIATION,
+                } else "",
+            )
         terminal, _rejection = self.engine.submission_state(self.handle)
         if terminal in {
             SelectionProgress.SUBMIT_CONFIRMED, SelectionProgress.QUOTA_BLOCKED,
@@ -240,6 +339,12 @@ class UtikiProductionRun:
             self.handle, schedule_due=due,
             apply_local_interval=False,
         )
+        if refresh is RefreshProgress.MANUAL_RECONCILIATION:
+            await self.engine.advance_submit(self.handle)
+            return RunResult(
+                refresh.value,
+                "the original reload result remains held; inspect coordinator ownership manually",
+            )
         if self.host.health_reason == "challenge-unverified":
             await self.engine.advance_submit(self.handle)
             return RunResult(
@@ -284,6 +389,12 @@ class UtikiProductionRun:
         if terminal is SelectionProgress.SUBMIT_CONFIRMED or terminal is SelectionProgress.QUOTA_BLOCKED:
             return RunResult(terminal.value)
         if terminal is SelectionProgress.SUBMIT_BLOCKED:
+            if self.engine.recovery_policy_changed(self.handle):
+                await self.engine.reconcile_existing_recovery(self.handle)
+                return RunResult(
+                    "manual-action-required",
+                    "selection policy changed after the rejected attempt; inspect the original result",
+                )
             if rejection == "auth":
                 progress = await self.engine.advance_login_recovery(self.handle)
                 reason = (
@@ -319,6 +430,11 @@ class UtikiProductionRun:
         # Reconcile any in-flight request before planning another mutation.
         result = await self.engine.advance_submit(self.handle)
         terminal, _ = self.engine.submission_state(self.handle)
+        if result is SelectionProgress.SUBMIT_BLOCKED and terminal is None:
+            return RunResult(
+                "submit-unknown",
+                "inspect the original submission result manually; no new action is authorized",
+            )
         if terminal is not None or result is SelectionProgress.SUBMIT_DISPATCHED:
             return RunResult(result.value)
         selection = await (
@@ -338,12 +454,16 @@ class UtikiProductionRun:
     async def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
+        self._closing_requested = True
         self.host.set_gate(CoreGate.CLOSING)
         self.engine.update_control(self.handle)
         intent = self.engine.refresh_intent(self.handle)
         if not self.engine.close(self.handle):
             self.close_status = "owner-close-unconfirmed"
+            print(f"[uTiki] Original Run close needs manual reconciliation: {self.close_status}")
+            return
+        self._closed = True
+        self.close_status = ""
         try:
             await self.engine.reconcile_closed(self.handle)
             refresh = await self.engine.reconcile_closed_refresh(self.handle)
@@ -357,6 +477,7 @@ class UtikiProductionRun:
                 RefreshProgress.CLEANUP_PENDING,
                 RefreshProgress.RELOAD_POSSIBLE,
                 RefreshProgress.AWAITING_CLEARANCE,
+                RefreshProgress.MANUAL_RECONCILIATION,
             }:
                 self.close_status = refresh.value
         except Exception:

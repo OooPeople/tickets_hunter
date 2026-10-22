@@ -2,10 +2,10 @@
 
 import asyncio
 import base64
-import json
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -13,15 +13,18 @@ import pytest
 from platforms.utiki.auth import TENANT_AUTH_PROFILES
 from platforms.utiki.adapters.refresh import SqliteRefreshAdapter
 from platforms.utiki.adapters.notification import CheckoutNotificationAdapter
-from platforms.utiki.application.engine import SelectionProgress
+from platforms.utiki.application.engine import SelectionProgress, UtikiEngine
 from platforms.utiki.application.flow_settings import FlowSettings
 from platforms.utiki.application.ports import (
     CaptchaResetObservation, CoreControl, CoreGate, InlineLoginAudit, InlineLoginCredentials,
     PageObservation, PurchaseAuthority, PurchaseInputObservation, RejectedLoginObservation,
     SubmitOutcomeObservation, VerifiedLoginAcceptance,
 )
-from platforms.utiki.application.refresh_contract import RefreshDocument
+from platforms.utiki.application.refresh_contract import (
+    RefreshDocument, RefreshProgress, RefreshReason,
+)
 from platforms.utiki.bootstrap import create_engine
+from platforms.utiki.production_run import UtikiProductionRun, _RunHost
 from platforms.utiki.domain.effects import (
     ClaimId, DispatchStage, EffectEvidence, EffectReceipt, EffectStatus,
     HeldEffect, HeldReason, RunningEffect,
@@ -44,7 +47,7 @@ from tests.ctbc_support import (
     make_ctbc_area_snapshot, make_ctbc_date_snapshot,
     make_ctbc_quantity_snapshot, make_ctbc_seat_snapshot, make_effective_policy,
 )
-from utiki_config import CurrentPolicyState, apply_current_policy_reload
+from utiki_config import UtikiBehavior
 
 
 class FakeCore:
@@ -174,11 +177,16 @@ class FakeFlowBrowser:
         return RefreshDocument(tab, page.page_url, page.document_id, "normal", 1.0)
 
     async def dispatch_reload(self, claim: RunningEffect, expected_url: str) -> EffectReceipt:
-        page = self.seat if self.stage == "seat" else self.quantity
+        page = (
+            self.seat if self.stage == "seat" else
+            self.area if self.stage == "area" else self.quantity
+        )
         assert expected_url == page.page_url
         self.commits.append("reload")
         if self.stage == "seat":
             self.seat = replace(self.seat, document_id="document-after-reload")
+        elif self.stage == "area":
+            self.area = replace(self.area, document_id="document-after-reload")
         else:
             self.quantity = replace(self.quantity, document_id="document-after-reload")
         self.outcome_document = "document-after-reload"
@@ -514,10 +522,7 @@ def _engine(
     tab = TabKey(1, "offline-flow")
     core = FakeCore(tab)
     browser = FakeFlowBrowser(tab)
-    policy = apply_current_policy_reload(None, json.dumps({"utiki": {
-        "ticket_type_keyword": "全票", "seat_sorting": "row_seat",
-        "seat_selection_mode": "manual",
-    }}, ensure_ascii=False))
+    policy = UtikiBehavior("全票", "row_seat", "manual")
     settings = FlowSettings(
         True, True, 2, date_keyword='"9/10"', area_keyword='"前排"',
         ocr_enabled=auto_submit if ocr_enabled is None else ocr_enabled,
@@ -527,6 +532,16 @@ def _engine(
         make_effective_policy(policy, settings), browser, core, provider, notification,
     )
     return engine, engine.attach(tab), browser, core
+
+
+def test_one_engine_rejects_second_tab_and_wrong_browser_binding() -> None:
+    engine, handle, browser, _core = _engine()
+    assert engine.attach(handle.tab) == handle
+    with pytest.raises(ValueError, match="one active tab"):
+        engine.attach(TabKey(1, "another-tab"))
+    browser.bound_tab = TabKey(1, "another-tab")
+    with pytest.raises(ValueError, match="bound to another tab"):
+        engine.attach(handle.tab)
 
 
 class _BlockingCaptchaProvider:
@@ -583,10 +598,7 @@ def _server_engine(*, auto_submit: bool = True, provider=None):
     tab = TabKey(1, "offline-server-assigned")
     core = FakeCore(tab)
     browser = FakeServerAssignedBrowser(tab)
-    policy = apply_current_policy_reload(None, json.dumps({"utiki": {
-        "ticket_type_keyword": "全票", "seat_sorting": "row_seat",
-        "seat_selection_mode": "computer",
-    }}, ensure_ascii=False))
+    policy = UtikiBehavior("全票", "row_seat", "computer")
     settings = FlowSettings(
         True, True, 2, date_keyword='"9/10"', area_keyword='"前排"',
         ocr_enabled=auto_submit, force_submit=auto_submit,
@@ -723,6 +735,56 @@ def test_offline_flow_reaches_audited_quantity_without_duplicate_mutations() -> 
     assert browser.commits == ["date", "area", "quantity"]
 
 
+def test_date_destination_without_area_candidate_closes_navigation_then_refreshes(tmp_path) -> None:
+    original, _handle, browser, core = _engine()
+    flow = original._policy.flow
+    assert flow is not None
+    policy = replace(
+        original._policy, flow=replace(flow, area_keyword='"no-match"'),
+        policy_revision=original._policy.policy_revision + 1,
+    )
+    clock = [100.0]
+    coordinator = SharedRefreshCoordinator(
+        tmp_path / "refresh.sqlite3", clock=lambda: clock[0],
+    )
+    adapter = SqliteRefreshAdapter(coordinator, lambda _force: {
+        "enabled": True, "min_interval_seconds": 1.0,
+        "initial_cooldown_seconds": 1.0,
+        "max_cooldown_seconds": 4.0,
+    })
+    engine = UtikiEngine(policy, browser, core, refresh_coordinator=adapter)
+    handle = engine.attach(core.tab)
+
+    async def exercise() -> None:
+        date_health = await engine.observe_health(handle)
+        assert date_health is not None
+        core.clearance = (date_health.url, date_health.document_id)
+        assert await engine.advance_date(handle) is SelectionProgress.DATE_DISPATCHED
+        area_health = await engine.observe_health(handle)
+        assert area_health is not None
+        core.clearance = (area_health.url, area_health.document_id)
+        assert await engine.advance_area(handle) is SelectionProgress.BLOCKED
+        current = engine._sessions[handle.tab]
+        assert current.active is None
+        assert current.selection_source is not None
+        first = await engine.advance_refresh(
+            handle, RefreshReason.HEALTH, apply_local_interval=False,
+        )
+        if first is RefreshProgress.WAITING:
+            clock[0] += 2
+            first = await engine.advance_refresh(
+                handle, RefreshReason.HEALTH, apply_local_interval=False,
+            )
+        assert first is RefreshProgress.AWAITING_CLEARANCE
+        assert browser.commits == ["date", "reload"]
+        new_health = await engine.observe_health(handle)
+        assert new_health is not None and new_health.document_id == "document-after-reload"
+        core.clearance = (new_health.url, new_health.document_id)
+        assert await engine.advance_refresh(handle, RefreshReason.HEALTH) is RefreshProgress.COMPLETE
+
+    asyncio.run(exercise())
+
+
 def test_duplicate_tick_while_date_commit_pending_does_not_click_twice() -> None:
     engine, handle, browser, _core = _engine()
     browser.date_release = asyncio.Event()
@@ -735,6 +797,35 @@ def test_duplicate_tick_while_date_commit_pending_does_not_click_twice() -> None
         assert browser.commits == ["date"]
         browser.date_release.set()
         assert await pending is SelectionProgress.DATE_DISPATCHED
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("signal", [CoreGate.PAUSED, CoreGate.CLOSING])
+def test_live_run_control_revokes_next_mutation_during_browser_wait(signal: CoreGate) -> None:
+    original, _handle, browser, _core = _engine()
+    current_signal = None
+    tab = SimpleNamespace()
+    host = _RunHost(
+        tab, browser.tab, None, lambda: current_signal,
+    )
+    host.set_gate(CoreGate.PURCHASE_ALLOWED)
+    engine = UtikiEngine(original._policy, browser, host)
+    handle = engine.attach(browser.tab)
+    browser.date_release = asyncio.Event()
+
+    async def exercise() -> None:
+        nonlocal current_signal
+        pending = asyncio.create_task(engine.advance_date(handle))
+        await browser.date_started.wait()
+        current_signal = signal
+        browser.date_release.set()
+        await pending
+        assert host.current_control(handle.tab).gate is signal
+        assert await engine.advance_area(handle) is SelectionProgress.BLOCKED
+        host.set_gate(CoreGate.PURCHASE_ALLOWED)
+        assert host.current_control(handle.tab).gate is signal
+        assert browser.commits == ["date"]
 
     asyncio.run(exercise())
 
@@ -1177,10 +1268,20 @@ def test_closed_run_possible_request_accepts_known_late_checkout() -> None:
         assert engine.update_control(handle) and engine.close(handle)
         browser.submit_release.set()
         assert await pending is SelectionProgress.SUBMIT_BLOCKED
-        assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
+        run_owner = object.__new__(UtikiProductionRun)
+        run_owner.engine = engine
+        run_owner.handle = handle
+        run_owner._closed = True
+        run_owner._closing_requested = True
+        unknown = await run_owner.maintain_originals_without_url()
+        assert unknown.progress == "manual-reconciliation-required"
+        assert engine.submission_state(handle)[0] is None
         browser.outcome_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
         browser.outcome_document = "checkout-document"
-        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_CONFIRMED
+        known = await run_owner.maintain_originals_without_url()
+        assert known.progress == SelectionProgress.SUBMIT_CONFIRMED.value
+        assert engine.submission_state(handle)[0] is SelectionProgress.SUBMIT_CONFIRMED
+        assert not run_owner.handoff_ready
 
     asyncio.run(exercise())
     assert browser.commits == ["date", "area", "quantity", "submit"]
@@ -1877,7 +1978,7 @@ def test_dialog_dismissal_reentry_and_stop_retains_one_claim() -> None:
     assert browser.commits == ["date", "area", "quantity", "submit", "dismiss"]
 
 
-def test_dialog_dismissal_refuses_old_policy_or_control_revision() -> None:
+def test_dialog_dismissal_requires_matching_behavior_but_uses_resumed_control() -> None:
     for change in ("policy", "control"):
         engine, handle, browser, core = _engine(auto_submit=True)
 
@@ -1887,28 +1988,288 @@ def test_dialog_dismissal_refuses_old_policy_or_control_revision() -> None:
             browser.dialog_text = "驗證碼錯誤"
             assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
             if change == "policy":
-                next_policy = apply_current_policy_reload(
-                    CurrentPolicyState(
-                        engine._policy.last_valid, engine._policy.policy_revision,
-                        engine._policy.control_revision, engine._policy.block_reason,
-                    ),
-                    json.dumps({"utiki": {
-                        "ticket_type_keyword": "其他票",
-                        "seat_sorting": "row_seat",
-                        "seat_selection_mode": "manual",
-                    }}, ensure_ascii=False),
+                next_policy = replace(
+                    engine._policy,
+                    last_valid=UtikiBehavior("其他票", "row_seat", "manual"),
+                    policy_revision=engine._policy.policy_revision + 1,
                 )
-                assert engine.update_policy(make_effective_policy(next_policy, engine._flow_settings))
+                assert engine.update_policy(next_policy)
             else:
                 core.control = CoreControl(2, CoreGate.PAUSED)
                 assert engine.update_control(handle)
                 core.control = CoreControl(3, CoreGate.PURCHASE_ALLOWED)
                 assert engine.update_control(handle)
-            assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.BLOCKED
+            assert await engine.advance_dialog_dismissal(handle) is (
+                SelectionProgress.BLOCKED if change == "policy"
+                else SelectionProgress.DIALOG_DISMISSED
+            )
             assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
 
         asyncio.run(exercise())
-        assert browser.commits == ["date", "area", "quantity", "submit"]
+        assert browser.commits == [
+            "date", "area", "quantity", "submit",
+            *([] if change == "policy" else ["dismiss"]),
+        ]
+
+
+def test_known_rejection_uses_current_policy_for_new_recovery_claim() -> None:
+    engine, handle, browser, _core = _engine(auto_submit=True)
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
+        browser.dialog_text = "驗證碼錯誤"
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        original = engine._sessions[handle.tab].submission
+        assert original is not None
+        flow = engine._policy.flow
+        assert flow is not None
+        assert engine.update_policy(replace(
+            engine._policy, flow=replace(flow, refresh_interval=flow.refresh_interval + 1),
+            policy_revision=engine._policy.policy_revision + 1,
+        ))
+        assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.DIALOG_DISMISSED
+        active = engine._sessions[handle.tab].active
+        assert active is not None
+        assert active.claim.proposal.parent_recovery_id == original.attempt.attempt_id.token
+        assert active.claim.proposal.stamp.policy_revision == engine._policy.policy_revision
+        assert await engine.advance_captcha_reset(handle) is SelectionProgress.CAPTCHA_RESET_VERIFIED
+        assert engine._sessions[handle.tab].submission is original
+        assert await engine.advance_submit(handle) is SelectionProgress.BLOCKED
+        assert await engine.advance_quantity(handle) is SelectionProgress.QUANTITY_READY
+        browser.captcha_field_empty = False
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
+        assert engine._sessions[handle.tab].prior_submissions == [original]
+        assert browser.commits.count("submit") == 2
+
+    asyncio.run(exercise())
+
+
+def test_selection_policy_change_does_not_recover_rejected_area() -> None:
+    engine, handle, browser, _core = _engine(auto_submit=True)
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
+        browser.dialog_text = "驗證碼錯誤"
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        original = engine._sessions[handle.tab].submission
+        flow = engine._policy.flow
+        assert original is not None and flow is not None
+        assert engine.update_policy(replace(
+            engine._policy,
+            flow=replace(flow, area_keyword="another-area"),
+            policy_revision=engine._policy.policy_revision + 1,
+        ))
+        assert engine.recovery_policy_changed(handle)
+        assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.BLOCKED
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        assert engine._sessions[handle.tab].submission is original
+        assert browser.commits.count("submit") == 1
+        assert "dismiss" not in browser.commits
+
+    asyncio.run(exercise())
+
+
+def test_paused_recovery_reads_original_dialog_claim_without_new_click() -> None:
+    engine, handle, browser, core = _engine(auto_submit=True)
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
+        browser.dialog_text = "驗證碼錯誤"
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        original_observe = browser.observe_submit_outcome
+        visible = await original_observe(handle.tab)
+        calls = 0
+
+        async def delayed_observe(tab):
+            nonlocal calls
+            calls += 1
+            return visible if calls == 2 else await original_observe(tab)
+
+        browser.observe_submit_outcome = delayed_observe
+        assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.AWAITING_EVIDENCE
+        core.control = CoreControl(2, CoreGate.PAUSED)
+        assert engine.update_control(handle)
+        assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.DIALOG_DISMISSED
+        assert browser.commits.count("dismiss") == 1
+        assert await engine.advance_captcha_reset(handle) is SelectionProgress.BLOCKED
+        assert "captcha_reset" not in browser.commits
+
+    asyncio.run(exercise())
+
+
+def test_paused_recovery_reads_original_captcha_reset_without_new_click() -> None:
+    engine, handle, browser, core = _engine(auto_submit=True)
+    browser.captcha_refreshed_token = browser.captcha_image_token
+
+    async def exercise() -> None:
+        await _known_captcha_dialog_closed(engine, handle, browser)
+        assert await engine.advance_captcha_reset(handle) is SelectionProgress.AWAITING_EVIDENCE
+        core.control = CoreControl(2, CoreGate.PAUSED)
+        assert engine.update_control(handle)
+        browser.captcha_image_token = "fixture-image-2"
+        assert await engine.advance_captcha_reset(handle) is SelectionProgress.CAPTCHA_RESET_VERIFIED
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        assert browser.commits.count("captcha_reset") == 1
+        assert browser.commits.count("submit") == 1
+
+    asyncio.run(exercise())
+
+
+def test_formal_paused_tick_reads_original_reset_without_new_click() -> None:
+    engine, handle, browser, core = _engine(auto_submit=True)
+    browser.captcha_refreshed_token = browser.captcha_image_token
+
+    async def exercise() -> None:
+        await _known_captcha_dialog_closed(engine, handle, browser)
+        assert await engine.advance_captcha_reset(handle) is SelectionProgress.AWAITING_EVIDENCE
+        browser.captcha_image_token = "fixture-image-2"
+
+        async def observe(_url):
+            return None
+
+        def set_gate(gate):
+            core.control = CoreControl(core.control.revision + 1, gate)
+
+        core.observe = observe
+        core.set_gate = set_gate
+        run = object.__new__(UtikiProductionRun)
+        run._closed = False
+        run.tab = SimpleNamespace(target=SimpleNamespace(target_id=handle.tab.target_id))
+        run.key = handle.tab
+        run.host = core
+        run.engine = engine
+        run.handle = handle
+        run._closing_requested = False
+        result = await run.tick(CTBC_TEST_QUANTITY_URL, paused=True)
+        assert result.progress == "paused"
+        submission = engine._sessions[handle.tab].submission
+        assert submission is not None and submission.captcha_reset_verified
+        assert browser.commits.count("captcha_reset") == 1
+        assert browser.commits.count("submit") == 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("change", ["control", "policy"])
+def test_original_captcha_write_reconciles_after_change_without_reusing_old_grant(
+    change: str,
+) -> None:
+    provider = _BlockingCaptchaProvider()
+    provider.release.set()
+    engine, handle, browser, core = _engine(auto_submit=True, provider=provider)
+    browser.input_ready = False
+    browser.captcha_field_empty = True
+    browser.captcha_image_data_url = _fake_png_token(b"synthetic-captcha-one")
+    original_audit = browser.audit_captcha_input
+    reads = 0
+
+    async def lagged_audit(observed, answer):
+        nonlocal reads
+        reads += 1
+        return False if reads == 1 else await original_audit(observed, answer)
+
+    browser.audit_captcha_input = lagged_audit
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        assert await engine.advance_input(handle) is SelectionProgress.AWAITING_EVIDENCE
+        current = engine._sessions[handle.tab]
+        assert current.active is not None and current.active.stage == "captcha_input"
+        if change == "control":
+            core.control = CoreControl(2, CoreGate.PAUSED)
+            assert engine.update_control(handle)
+            core.control = CoreControl(3, CoreGate.PURCHASE_ALLOWED)
+            assert engine.update_control(handle)
+        else:
+            flow = engine._policy.flow
+            assert flow is not None
+            assert engine.update_policy(replace(
+                engine._policy,
+                flow=replace(flow, refresh_interval=flow.refresh_interval + 1),
+                policy_revision=engine._policy.policy_revision + 1,
+            ))
+        assert await engine.advance_input(handle) is SelectionProgress.BLOCKED
+        assert current.active is None
+        assert browser.captcha_written_answer == "ABCD"
+        assert browser.commits.count("captcha_input") == 1
+        assert "submit" not in browser.commits
+
+    asyncio.run(exercise())
+
+
+def test_unknown_captcha_write_is_not_retired_by_manual_revision() -> None:
+    provider = _BlockingCaptchaProvider()
+    provider.release.set()
+    engine, handle, browser, _core = _engine(auto_submit=True, provider=provider)
+    browser.input_ready = False
+    browser.captcha_field_empty = True
+    browser.captcha_image_data_url = _fake_png_token(b"synthetic-captcha-one")
+    browser.captcha_input_unknown = True
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        assert await engine.advance_input(handle) is SelectionProgress.AWAITING_EVIDENCE
+        current = engine._sessions[handle.tab]
+        active = current.active
+        assert active is not None and isinstance(active.claim, HeldEffect)
+        assert active.claim.reason is HeldReason.UNCERTAIN_DISPATCH
+        browser.captcha_manual_revision += 1
+        assert await engine.advance_input(handle) is SelectionProgress.AWAITING_EVIDENCE
+        assert current.active is active
+        assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
+        assert browser.commits.count("captcha_input") == 1
+        assert "submit" not in browser.commits
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("manual", [False, True])
+@pytest.mark.parametrize("late_result", ["checkout", "known-rejection"])
+def test_unknown_submit_dialog_retains_original_for_late_result(
+    manual: bool, late_result: str,
+) -> None:
+    class Notifier:
+        calls = 0
+
+        def start_checkout_notification(self) -> None:
+            self.calls += 1
+
+    notifier = Notifier()
+    engine, handle, browser, _core = _engine(
+        auto_submit=not manual, notification=notifier,
+    )
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        if manual:
+            assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
+            browser.manual_click_token = "trusted-click-unknown"
+        else:
+            assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
+        browser.dialog_text = "系統忙碌，請稍候"
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        submission = engine._sessions[handle.tab].submission
+        assert submission is not None and submission.terminal is None
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        if late_result == "checkout":
+            browser.outcome_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+            browser.outcome_document = "late-checkout"
+            browser.dialog_text = ""
+            assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_CONFIRMED
+            assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_CONFIRMED
+            assert notifier.calls == 1
+        else:
+            browser.dialog_text = "驗證碼錯誤"
+            assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+            assert submission.terminal is SelectionProgress.SUBMIT_BLOCKED
+            assert submission.rejection_kind == "captcha"
+            assert notifier.calls == 0
+        assert browser.commits.count("submit") == (0 if manual else 1)
+
+    asyncio.run(exercise())
 
 
 def test_dialog_dismissal_refuses_changed_trusted_authority() -> None:
@@ -2067,18 +2428,12 @@ def test_captcha_reset_refuses_changed_policy_or_trusted_authority() -> None:
         async def exercise() -> None:
             await _known_captcha_dialog_closed(engine, handle, browser)
             if change == "policy":
-                next_policy = apply_current_policy_reload(
-                    CurrentPolicyState(
-                        engine._policy.last_valid, engine._policy.policy_revision,
-                        engine._policy.control_revision, engine._policy.block_reason,
-                    ),
-                    json.dumps({"utiki": {
-                        "ticket_type_keyword": "其他票",
-                        "seat_sorting": "row_seat",
-                        "seat_selection_mode": "manual",
-                    }}, ensure_ascii=False),
+                next_policy = replace(
+                    engine._policy,
+                    last_valid=UtikiBehavior("其他票", "row_seat", "manual"),
+                    policy_revision=engine._policy.policy_revision + 1,
                 )
-                assert engine.update_policy(make_effective_policy(next_policy, engine._flow_settings))
+                assert engine.update_policy(next_policy)
             else:
                 core.authority = PurchaseAuthority(AuthEpoch(2), 1)
             assert await engine.advance_captcha_reset(handle) is SelectionProgress.BLOCKED
@@ -2431,10 +2786,7 @@ def _seat_engine(
     browser = FakeSeatFlowBrowser(
         tab, preselected=preselected, incomplete_selection=incomplete_selection,
     )
-    policy = apply_current_policy_reload(None, json.dumps({"utiki": {
-        "ticket_type_keyword": "全票", "seat_sorting": "row_seat",
-        "seat_selection_mode": "manual",
-    }}, ensure_ascii=False))
+    policy = UtikiBehavior("全票", "row_seat", "manual")
     engine = create_engine(
         make_effective_policy(
             policy, FlowSettings(
@@ -2668,6 +3020,32 @@ def test_observed_manual_submit_uses_prepared_source_without_dispatch_claim() ->
 
     asyncio.run(exercise())
     assert browser.commits == ["date", "area", "quantity"]
+
+
+def test_manual_click_after_selection_policy_change_keeps_arm_policy_for_recovery() -> None:
+    engine, handle, browser, _core = _engine()
+
+    async def exercise() -> None:
+        await _ready_quantity(engine, handle)
+        assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
+        flow = engine._policy.flow
+        assert flow is not None
+        assert engine.update_policy(replace(
+            engine._policy,
+            flow=replace(flow, area_keyword="another-area"),
+            policy_revision=engine._policy.policy_revision + 1,
+        ))
+        browser.manual_click_token = "trusted-click-after-policy-change"
+        browser.dialog_text = "驗證碼錯誤"
+        assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+        submission = engine._sessions[handle.tab].submission
+        assert submission is not None and submission.attempt.source is SubmitSource.OBSERVED_MANUAL
+        assert submission.flow_at_attempt == flow
+        assert engine.recovery_policy_changed(handle)
+        assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.BLOCKED
+        assert browser.commits == ["date", "area", "quantity"]
+
+    asyncio.run(exercise())
 
 
 def test_observed_manual_captcha_rejection_rearms_after_verified_new_image() -> None:

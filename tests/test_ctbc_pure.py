@@ -6,6 +6,7 @@ from unittest.mock import patch
 from tests.ctbc_support import (
     CTBC_TEST_PERFORMANCE_ID,
     config,
+    selector_settings,
     make_ctbc_area_snapshot,
     make_ctbc_quantity_snapshot,
 )
@@ -85,7 +86,7 @@ def _select_date_action(source_url, control, row_text="9/10 一般場"):
         source_url,
         [{"text": row_text, "controls": [control]}],
     )
-    return select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+    return select_date_snapshot(snapshot, selector_settings(date_keyword='"9/10"'))
 
 
 def _seat_snapshot(*, selected=(), submitted=None, counters=None):
@@ -424,7 +425,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
         snapshot = parse_date_snapshot(raw)
         raw["rows"][0]["text"] = "mutated"
         raw["rows"][0]["controls"][0]["onclick"] = "alert('x')"
-        plan = select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+        plan = select_date_snapshot(snapshot, selector_settings(date_keyword='"9/10"'))
         self.assertEqual("9/10 一般場", plan.text)
         self.assertEqual(onclick, plan.onclick)
 
@@ -433,7 +434,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
             "controls": [_date_control(onclick), _date_control(onclick)],
         }])
         self.assertIsNone(select_date_snapshot(
-            ambiguous, config(date_keyword='"9/10"')
+            ambiguous, selector_settings(date_keyword='"9/10"')
         ))
 
     def test_date_selection_preserves_keyword_exclude_mode_and_fallback(self):
@@ -452,18 +453,16 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 )],
             },
         ])
-        cfg = config(date_keyword='"家庭場","一般場"')
+        cfg = selector_settings(date_keyword='"家庭場","一般場"')
         self.assertEqual(1, select_date_snapshot(snapshot, cfg).row_index)
 
-        cfg["keyword_exclude"] = '"家庭場"'
+        cfg = replace(cfg, keyword_exclude='"家庭場"')
         self.assertEqual(0, select_date_snapshot(snapshot, cfg).row_index)
-        cfg["date_auto_select"]["date_keyword"] = '"不存在"'
+        cfg = replace(cfg, date_keyword='"不存在"')
         self.assertIsNone(select_date_snapshot(snapshot, cfg))
-        cfg["date_auto_fallback"] = True
+        cfg = replace(cfg, date_fallback=True)
         self.assertEqual(0, select_date_snapshot(snapshot, cfg).row_index)
-        cfg["date_auto_select"]["date_keyword"] = ""
-        cfg["date_auto_select"]["mode"] = "from bottom to top"
-        cfg["keyword_exclude"] = ""
+        cfg = replace(cfg, date_keyword="", date_mode="from bottom to top", keyword_exclude="")
         self.assertEqual(1, select_date_snapshot(snapshot, cfg).row_index)
 
     def test_date_target_parser_only_accepts_the_same_tenant_and_product(self):
@@ -580,17 +579,17 @@ class CtbcPureSelectionTest(unittest.TestCase):
             ],
         }
         target = _select_ctbc_area_snapshot(
-            snapshot, config(), "P16D0B8Z", require_direct_destination=True
+            snapshot, selector_settings(), "P16D0B8Z", require_direct_destination=True
         )
         self.assertEqual("a35", target.rel)
         snapshot["areas"][0]["href"] = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','0')"
         self.assertIsNone(_select_ctbc_area_snapshot(
-            snapshot, config(), "P16D0B8Z", require_direct_destination=True
+            snapshot, selector_settings(), "P16D0B8Z", require_direct_destination=True
         ))
         snapshot["areas"][0]["href"] = "javascript:Send('0205','P16D0B8Z','P16D12YO','35','熱賣中')"
         snapshot["areas"][0]["title"] = "票區:內野南B區下層 票價：400 尚餘：熱賣中"
         self.assertIsNone(_select_ctbc_area_snapshot(
-            snapshot, config(), "P16D0B8Z", require_direct_destination=True
+            snapshot, selector_settings(), "P16D0B8Z", require_direct_destination=True
         ))
 
     def test_available_status_skew_keeps_exact_and_broad_keyword_priority(self):
@@ -603,7 +602,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 ):
                     target = _select_ctbc_area_snapshot(
                         snapshot,
-                        config(area_keyword=keyword),
+                        selector_settings(area_keyword=keyword),
                         CTBC_TEST_PERFORMANCE_ID,
                         require_direct_destination=require_direct_destination,
                     )
@@ -621,7 +620,7 @@ class CtbcPureSelectionTest(unittest.TestCase):
         }
         self.assertIsNotNone(_select_ctbc_area_snapshot(
             make_ctbc_area_snapshot(include_back=False, **baseline),
-            config(area_keyword='"109區前排"'),
+            selector_settings(area_keyword='"109區前排"'),
             CTBC_TEST_PERFORMANCE_ID,
             require_direct_destination=True,
         ))
@@ -638,13 +637,13 @@ class CtbcPureSelectionTest(unittest.TestCase):
                 statuses = {**baseline, argument: unavailable}
                 self.assertIsNone(_select_ctbc_area_snapshot(
                     make_ctbc_area_snapshot(include_back=False, **statuses),
-                    config(area_keyword='"109區前排"'),
+                    selector_settings(area_keyword='"109區前排"'),
                     CTBC_TEST_PERFORMANCE_ID,
                     require_direct_destination=True,
                 ))
 
     def test_direct_and_native_area_safety_boundaries(self):
-        cfg = config(area_keyword='"109區前排"')
+        cfg = selector_settings(area_keyword='"109區前排"')
         wrong_price = make_ctbc_area_snapshot(
             front_title_status="40",
             front_action_status="40",

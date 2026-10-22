@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import traceback
+from utiki_config import is_supported_utiki_sports_url
 
 from zendriver import cdp
 from zendriver.core.config import Config
@@ -143,7 +144,7 @@ def create_ocr_for_platform(config_dict):
 
     # Auto-select based on homepage
     homepage = config_dict.get("homepage", "")
-    if any(domain in homepage.lower() for domain in ("ctbcsports.com", "tix.wdragons.com")):
+    if is_supported_utiki_sports_url(homepage):
         try:
             ocr = ddddocr.DdddOcr(
                 show_ad=False,
@@ -177,7 +178,7 @@ def create_ocr_for_platform(config_dict):
 
 # ===== Config Loading =====
 
-def get_config_dict(args):
+def get_config_dict(args, *, apply_tixcraft_headless_ocr=True):
     app_root = util.get_app_root()
     config_filepath = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
 
@@ -226,9 +227,14 @@ def get_config_dict(args):
                 if len(config_dict["accounts"]["tixcraft_sid"]) > 1:
                     is_headless_enable_ocr = True
 
-            if is_headless_enable_ocr:
-                config_dict["ocr_captcha"]["enable"] = True
-                config_dict["ocr_captcha"]["force_submit"] = True
+            if is_headless_enable_ocr and apply_tixcraft_headless_ocr:
+                # Shared config must not import a platform. The formal uTiki
+                # caller also passes False explicitly; this protects generic
+                # startup reads of the two existing sports homepages.
+                sports_origin = is_supported_utiki_sports_url(config_dict.get("homepage"))
+                if not sports_origin:
+                    config_dict["ocr_captcha"]["enable"] = True
+                    config_dict["ocr_captcha"]["force_submit"] = True
 
     return config_dict
 

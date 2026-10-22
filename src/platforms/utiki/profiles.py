@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 from urllib.parse import SplitResult, parse_qsl, urlsplit
+from utiki_config import is_supported_utiki_sports_url
 
 
 class PageKind(str, Enum):
@@ -31,7 +32,6 @@ class TenantProfile:
 
 
 CTBC_DOMAIN = "tix.ctbcsports.com"
-CTBC_MAP_DOMAIN = "imgs2.utiki.com.tw"
 
 _TENANTS = (
     TenantProfile(
@@ -61,12 +61,7 @@ def get_utiki_tenant_profile(url: str | None) -> TenantProfile | None:
     try:
         parsed = urlsplit(str(url or ""))
         host = (parsed.hostname or "").lower()
-        if (
-            parsed.scheme.lower() != "https"
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in (None, 443)
-        ):
+        if not is_supported_utiki_sports_url(url):
             return None
     except ValueError:
         return None

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import builtins
+from contextlib import nullcontext
 import io
 import json
 import os
@@ -34,7 +35,7 @@ from platforms.utiki.application.flow_settings import apply_effective_policy_rel
 from platforms.utiki.application.ports import (
     CoreControl, CoreGate, InlineLoginCredentials, PurchaseAuthority,
 )
-from platforms.utiki.bootstrap import create_engine, create_run_engine, create_refresh_run_engine
+from platforms.utiki.bootstrap import build_run_captcha_provider, create_engine, create_refresh_run_engine
 from platforms.utiki.domain.identity import AuthEpoch, TabKey
 from platforms.utiki.profiles import PageKind, classify_utiki_page
 from refresh_coordinator import SharedRefreshCoordinator, UTK_SPORTS_SCOPE
@@ -431,11 +432,10 @@ async def _exercise(*, captcha_rejection: bool = False,
             )
             harness = IsolatedRefreshHost(engine, host)
         else:
-            engine = (
-                create_run_engine(initial_policy, adapter, host, notifier)
-                if captcha_rejection else create_engine(
-                    initial_policy, adapter, host, checkout_notification=notifier,
-                )
+            engine = create_engine(
+                initial_policy, adapter, host,
+                build_run_captcha_provider(initial_policy.flow) if captcha_rejection else None,
+                notifier,
             )
         if captcha_rejection and not manual_submit:
             assert engine._captcha_provider is not None
@@ -495,7 +495,7 @@ async def _exercise(*, captcha_rejection: bool = False,
         assert host.current_purchase_authority(tab_key) == PurchaseAuthority(AuthEpoch(3), 1)
         assert await engine.advance_login(handle) is SelectionProgress.LOGIN_READY
         if manual_submit:
-            assert captcha_rejection and computer
+            assert (captcha_rejection and computer) or conflict_rejection
             assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
             position = await tab.evaluate("""(() => {
                 const r = document.querySelector('#addcart').getBoundingClientRect();
@@ -515,20 +515,21 @@ async def _exercise(*, captcha_rejection: bool = False,
 
             await click_submit()
             assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
-            assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.DIALOG_DISMISSED
-            for _ in range(120):
-                reset_progress = await engine.advance_captcha_reset(handle)
-                if reset_progress is SelectionProgress.CAPTCHA_RESET_VERIFIED:
-                    break
-                assert reset_progress is SelectionProgress.AWAITING_EVIDENCE
-                await asyncio.sleep(0.03)
-            else:
-                raise AssertionError("new synthetic CAPTCHA image was not verified")
-            assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
-            await tab.evaluate("document.querySelector('#CHK').focus()")
-            await tab.send(cdp.input_.insert_text(text="ABCD"))
-            assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
-            await click_submit()
+            if captcha_rejection:
+                assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.DIALOG_DISMISSED
+                for _ in range(120):
+                    reset_progress = await engine.advance_captcha_reset(handle)
+                    if reset_progress is SelectionProgress.CAPTCHA_RESET_VERIFIED:
+                        break
+                    assert reset_progress is SelectionProgress.AWAITING_EVIDENCE
+                    await asyncio.sleep(0.03)
+                else:
+                    raise AssertionError("new synthetic CAPTCHA image was not verified")
+                assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
+                await tab.evaluate("document.querySelector('#CHK').focus()")
+                await tab.send(cdp.input_.insert_text(text="ABCD"))
+                assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
+                await click_submit()
         else:
             assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
         if auth_rejection:
@@ -589,7 +590,11 @@ async def _exercise(*, captcha_rejection: bool = False,
             else:
                 raise AssertionError("fresh source did not reselect after conflict")
             assert await engine.advance_login(handle) is SelectionProgress.LOGIN_READY
-            assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
+            if manual_submit:
+                assert await engine.advance_submit(handle) is SelectionProgress.AWAITING_EVIDENCE
+                await click_submit()
+            else:
+                assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_DISPATCHED
         if captcha_rejection and not manual_submit:
             assert await engine.advance_submit(handle) is SelectionProgress.SUBMIT_BLOCKED
             assert await engine.advance_dialog_dismissal(handle) is SelectionProgress.DIALOG_DISMISSED
@@ -720,6 +725,17 @@ def test_batch4_reserved_conflict_clears_and_reloads_on_isolated_origin() -> Non
     } != {"lo"}:
         pytest.fail("production-origin flow lacks independent network isolation")
     asyncio.run(_exercise(conflict_rejection=True, seat=True))
+
+
+def test_batch4_manual_conflict_rearms_on_new_isolated_document() -> None:
+    if os.environ.get("TICKETS_HUNTER_HARD_EGRESS_ACTIVE") != "1":
+        pytest.skip("requires the hard-egress browser launcher")
+    interfaces = Path("/sys/class/net")
+    if os.name != "posix" or not interfaces.exists() or {
+        item.name for item in interfaces.iterdir()
+    } != {"lo"}:
+        pytest.fail("production-origin flow lacks independent network isolation")
+    asyncio.run(_exercise(conflict_rejection=True, manual_submit=True, computer=True))
 
 
 def test_batch4_new_manual_quantity_is_not_cleared_after_rejection() -> None:
@@ -1094,7 +1110,10 @@ def test_batch5_formal_route_reaches_attributed_result(mode: str, scenario: str)
     asyncio.run(run_flow())
 
 
-def test_batch5_main_caller_uses_formal_owner_on_isolated_origin() -> None:
+@pytest.mark.parametrize("control_mode", [None, "pause", "stop", "handoff", "missing_url"])
+def test_batch5_main_caller_uses_formal_owner_on_isolated_origin(
+    control_mode: str | None,
+) -> None:
     if os.environ.get("TICKETS_HUNTER_HARD_EGRESS_ACTIVE") != "1":
         pytest.skip("requires the hard-egress browser launcher")
     interfaces = Path("/sys/class/net")
@@ -1142,10 +1161,38 @@ def test_batch5_main_caller_uses_formal_owner_on_isolated_origin() -> None:
             "document.querySelector('input.numbox[key=\"FULL\"]').value);",
             1,
         )
+        if control_mode in {"pause", "stop"}:
+            pages[QUANTITY] = pages[QUANTITY].replace(
+                '<input id="CHK" value="ABCD">', '<input id="CHK" value="">',
+            )
+        foreign_url = "https://fixture.other.invalid/"
+        if control_mode in {"handoff", "missing_url"}:
+            profile["date_auto_select"]["enable"] = False
+            profile["area_auto_select"]["enable"] = False
+            config_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+            if control_mode == "handoff":
+                pages[foreign_url] = "<!doctype html><title>Other synthetic route</title>"
         rejected = []
         checkout_checks = 0
         submit_count_at_quit = None
         selected_count = None
+        captcha_at_quit = None
+        control_file = Path(sandbox.name) / (
+            "MAXBOT_INT28_IDLE.txt" if control_mode == "pause" else "MAXBOT_INT28_QUIT.txt"
+        )
+        classification_calls = []
+        handoff_phase = [0]
+        handoff_owners = []
+        current_run_box = [None]
+        missing_url_reads = [0]
+        missing_url_maintenance = [0]
+
+        class ControlledProvider:
+            def classification(self, _image: bytes) -> str:
+                classification_calls.append(1)
+                control_file.write_text("1", encoding="ascii")
+                return "WXYZ"
+
         original_print = builtins.print
         printed = []
         shared = SqliteRefreshAdapter(
@@ -1198,7 +1245,41 @@ def test_batch5_main_caller_uses_formal_owner_on_isolated_origin() -> None:
                 return current_tab
 
             async def quit_after_result(_config):
-                nonlocal checkout_checks, submit_count_at_quit, selected_count
+                nonlocal checkout_checks, submit_count_at_quit, selected_count, captcha_at_quit
+                if control_mode == "handoff":
+                    owner = current_run_box[0][0] if current_run_box[0] is not None else None
+                    if handoff_phase[0] == 0 and owner is not None:
+                        handoff_owners.append(owner)
+                        await tab.get(foreign_url)
+                        await _wait_page(tab, foreign_url)
+                        handoff_phase[0] = 1
+                    elif handoff_phase[0] == 1 and owner is None:
+                        await tab.get(DATE)
+                        await _wait_page(tab, DATE)
+                        handoff_phase[0] = 2
+                    elif handoff_phase[0] == 2 and owner is not None:
+                        handoff_owners.append(owner)
+                        return True
+                    return False
+                if control_mode == "missing_url":
+                    owner = current_run_box[0][0] if current_run_box[0] is not None else None
+                    if owner is not None and missing_url_reads[0] == 0:
+                        original_maintenance = owner.maintain_originals_without_url
+
+                        async def record_maintenance():
+                            missing_url_maintenance[0] += 1
+                            return await original_maintenance()
+
+                        owner.maintain_originals_without_url = record_maintenance
+                    return missing_url_reads[0] >= 3
+                if control_mode in {"pause", "stop"} and control_file.exists():
+                    submit_count_at_quit = await tab.evaluate(
+                        "sessionStorage.getItem('syntheticSubmitCount')"
+                    )
+                    captcha_at_quit = await tab.evaluate(
+                        "document.querySelector('#CHK').value"
+                    )
+                    return True
                 current_url = await tab.evaluate("location.href")
                 if current_url == CHECKOUT:
                     checkout_checks += 1
@@ -1213,6 +1294,20 @@ def test_batch5_main_caller_uses_formal_owner_on_isolated_origin() -> None:
             def capture_print(*parts, **_kwargs):
                 printed.append(" ".join(str(part) for part in parts))
 
+            from nodriver_tixcraft import _main_with_utiki_owner as real_main_owner
+            from nodriver_tixcraft import nodriver_current_url as real_current_url
+
+            async def capture_main_owner(main_args, run_box):
+                current_run_box[0] = run_box
+                return await real_main_owner(main_args, run_box)
+
+            async def capture_current_url(current_tab, current_config):
+                owner = current_run_box[0][0] if current_run_box[0] is not None else None
+                if control_mode == "missing_url" and owner is not None and missing_url_reads[0] < 3:
+                    missing_url_reads[0] += 1
+                    return None, False
+                return await real_current_url(current_tab, current_config)
+
             with (
                 patch("nodriver_tixcraft.uc.start", return_value=browser),
                 patch("nodriver_tixcraft.get_extension_config", return_value=SimpleNamespace()),
@@ -1221,8 +1316,13 @@ def test_batch5_main_caller_uses_formal_owner_on_isolated_origin() -> None:
                 patch("nodriver_tixcraft.nodrver_block_urls", side_effect=keep_tab),
                 patch("nodriver_tixcraft.check_and_handle_quit", side_effect=quit_after_result),
                 patch("nodriver_tixcraft.check_and_handle_pause", return_value=False),
+                patch("nodriver_tixcraft._main_with_utiki_owner", side_effect=capture_main_owner),
+                patch("nodriver_tixcraft.nodriver_current_url", side_effect=capture_current_url),
                 patch("nodriver_tixcraft.write_last_url_to_file"),
                 patch("platforms.utiki.production_run.SqliteRefreshAdapter", return_value=shared),
+                (patch("platforms.utiki.bootstrap.build_run_captcha_provider",
+                       return_value=ControlledProvider())
+                 if control_mode in {"pause", "stop"} else nullcontext()),
                 patch("nodriver_tixcraft.util.get_instance_state_path",
                       side_effect=lambda name: str(Path(sandbox.name) / name)),
                 patch("builtins.print", side_effect=capture_print),
@@ -1236,10 +1336,28 @@ def test_batch5_main_caller_uses_formal_owner_on_isolated_origin() -> None:
                         f"progress={printed[-25:]}, rejected={rejected}"
                     ) from exc
 
-            assert submit_count_at_quit == "1"
-            assert selected_count == "2"
-            assert any("[uTiki] submit-confirmed" in line for line in printed)
-            assert not rejected
+            if control_mode is None:
+                assert submit_count_at_quit == "1"
+                assert selected_count == "2"
+                assert any("[uTiki] submit-confirmed" in line for line in printed)
+            elif control_mode in {"pause", "stop"}:
+                assert classification_calls == [1]
+                assert submit_count_at_quit is None
+                assert captcha_at_quit == ""
+                assert not any("[uTiki] submit-confirmed" in line for line in printed)
+            elif control_mode == "handoff":
+                assert handoff_phase == [2]
+                assert len(handoff_owners) == 2
+                assert handoff_owners[0] is not handoff_owners[1]
+                assert handoff_owners[0].closed
+            else:
+                assert missing_url_reads == [3]
+                assert missing_url_maintenance == [3]
+                assert not any("[uTiki] submit-confirmed" in line for line in printed)
+            if control_mode == "handoff":
+                assert set(rejected) <= {foreign_url + "favicon.ico"}
+            else:
+                assert not rejected
         finally:
             builtins.print = original_print
             if browser is not None:

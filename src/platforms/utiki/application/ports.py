@@ -102,32 +102,6 @@ class InlineLoginCredentialPort(PurchaseAuthorityPort, Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class QuantityObservation:
-    """A browser observation attributed to its actual source context."""
-
-    source: OperationStamp
-    snapshot: QuantitySnapshot
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.source, OperationStamp) or not isinstance(self.snapshot, QuantitySnapshot):
-            raise ValueError("quantity observation requires typed source and snapshot")
-
-
-class QuantityBrowserPort(Protocol):
-    """One observation and one already-granted quantity mutation capability."""
-
-    async def observe_page(self, expected_context: OperationStamp) -> QuantityObservation:
-        """Return typed data with the actual tab, generation, and document source."""
-        ...
-
-    async def commit_quantity(
-        self, plan: QuantityPlan, claim: RunningEffect
-    ) -> EffectReceipt:
-        """Perform the guarded mutation and report the original claim's result."""
-        ...
-
-
-@dataclass(frozen=True, slots=True)
 class PageObservation:
     """An observed page attributed to the browser tab that produced it."""
 
@@ -144,7 +118,7 @@ class PageObservation:
             raise ValueError("manual selection revision must be nonnegative")
 
 
-class SelectionBrowserPort(QuantityBrowserPort, Protocol):
+class SelectionBrowserPort(Protocol):
     async def observe_date(self, tab: TabKey) -> PageObservation: ...
 
     async def observe_area(self, tab: TabKey) -> PageObservation: ...

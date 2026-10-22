@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 import zendriver as uc
+from zendriver.core.connection import ProtocolException
 from tornado.httpserver import HTTPServer
 from tornado.web import Application, StaticFileHandler
 
@@ -110,16 +111,30 @@ def test_batch5_settings_ui_reenters_legacy_profile_and_loads_current_policy() -
                 assert await tab.evaluate(
                     "document.querySelector('#run_btn').disabled"
                 ) is False
+                prior_document = await tab.evaluate("String(performance.timeOrigin)")
                 await tab.reload()
-                for _ in range(120):
-                    value = await tab.evaluate(
-                        "document.querySelector('#ctbc_ticket_type_keyword').value"
-                    )
-                    if value == "合成新票種":
+                deadline = asyncio.get_running_loop().time() + 6.0
+                while asyncio.get_running_loop().time() < deadline:
+                    try:
+                        loaded = await tab.evaluate("""(() => ({
+                            document: String(performance.timeOrigin),
+                            ready: document.readyState !== 'loading' &&
+                                typeof settings !== 'undefined' && !!settings &&
+                                !!document.querySelector('#ctbc_ticket_type_keyword') &&
+                                !document.querySelector('#save_btn').disabled,
+                            value: document.querySelector('#ctbc_ticket_type_keyword')?.value
+                        }))()""")
+                    except ProtocolException as exc:
+                        if "Inspected target navigated or closed" not in str(exc):
+                            raise
+                        await asyncio.sleep(0.05)
+                        continue
+                    if (loaded["document"] != prior_document and loaded["ready"]
+                        and loaded["value"] == "合成新票種"):
                         break
                     await asyncio.sleep(0.05)
                 else:
-                    raise AssertionError("Saved uTiki behavior did not reload in the form")
+                    raise AssertionError("Saved uTiki behavior did not load in a new document")
         finally:
             if browser is not None:
                 await browser.stop()

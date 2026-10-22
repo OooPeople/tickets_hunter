@@ -1,19 +1,9 @@
-"""A submit cannot enter dispatch, awaiting, or held state without its owner."""
+"""Submit attempts preserve their purchase and input ownership."""
 
 from dataclasses import replace
 
 import pytest
 
-from platforms.utiki.domain.effects import (
-    AwaitingEvidenceEffect,
-    ClaimId,
-    ClaimedEffect,
-    EffectKind,
-    EffectProposal,
-    HeldEffect,
-    HeldReason,
-    RunningEffect,
-)
 from platforms.utiki.domain.identity import (
     AuthEpoch,
     DocumentKey,
@@ -37,14 +27,7 @@ from platforms.utiki.domain.plans import (
     build_submit_plan,
 )
 from platforms.utiki.domain.purchase import (
-    AwaitingSubmitOutcome,
-    ClaimedSubmit,
-    HeldSubmitOutcome,
-    ManualSubmitEvidence,
-    PreparedSubmit,
-    SubmitAttempt,
-    SubmitAttemptId,
-    SubmitSource,
+    ManualSubmitEvidence, SubmitAttempt, SubmitAttemptId, SubmitSource,
 )
 from platforms.utiki.profiles import PageKind
 
@@ -81,45 +64,6 @@ def _attempt() -> SubmitAttempt:
     return SubmitAttempt(SubmitAttemptId("attempt-1"), cycle, key, stamp, plan, ready)
 
 
-def _claim(attempt: SubmitAttempt, kind: EffectKind = EffectKind.SUBMIT) -> ClaimedEffect:
-    return ClaimedEffect(ClaimId("claim-1"), EffectProposal(attempt.stamp, kind))
-
-
-def test_submit_states_require_original_attempt_and_matching_claim() -> None:
-    attempt = _attempt()
-    claim = _claim(attempt)
-
-    assert PreparedSubmit(attempt).attempt is attempt
-    assert ClaimedSubmit(attempt, claim).claim is claim
-    assert ClaimedSubmit(attempt, RunningEffect(claim.claim_id, claim.proposal)).attempt is attempt
-    assert AwaitingSubmitOutcome(
-        attempt, AwaitingEvidenceEffect(claim.claim_id, claim.proposal), 50.0,
-    ).attempt is attempt
-    assert HeldSubmitOutcome(
-        attempt, HeldEffect(claim.claim_id, claim.proposal, HeldReason.UNCERTAIN_DISPATCH),
-    ).attempt is attempt
-
-    with pytest.raises(ValueError, match="attempt"):
-        PreparedSubmit(None)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="claim"):
-        ClaimedSubmit(attempt, None)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="claim"):
-        AwaitingSubmitOutcome(attempt, None, 50.0)  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="claim"):
-        HeldSubmitOutcome(attempt, None)  # type: ignore[arg-type]
-
-
-def test_submit_claim_cannot_use_another_operation_or_effect_kind() -> None:
-    attempt = _attempt()
-    wrong_stamp = replace(attempt.stamp, operation=OperationId("other"))
-    for claim in (
-        ClaimedEffect(ClaimId("other"), EffectProposal(wrong_stamp, EffectKind.SUBMIT)),
-        _claim(attempt, EffectKind.SELECT),
-    ):
-        with pytest.raises(ValueError, match="claim"):
-            ClaimedSubmit(attempt, claim)
-
-
 def test_observed_manual_submit_has_source_without_automatic_claim() -> None:
     automatic = _attempt()
     manual = replace(
@@ -135,8 +79,6 @@ def test_observed_manual_submit_has_source_without_automatic_claim() -> None:
         ),
     )
     assert manual.stamp is None and manual.manual_evidence is not None
-    with pytest.raises(ValueError, match="claim"):
-        ClaimedSubmit(manual, _claim(automatic))
     with pytest.raises(ValueError, match="source"):
         replace(manual, manual_evidence=replace(
             manual.manual_evidence, document_id="unrelated",

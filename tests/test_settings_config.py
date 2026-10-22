@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from tornado.testing import AsyncHTTPTestCase
@@ -20,14 +21,65 @@ from settings import (  # noqa: E402
     LoadJsonHandler,
     ProfilesHandler,
     ResetJsonHandler,
+    RunHandler,
     SaveJsonHandler,
     get_default_config,
     migrate_config,
     save_profile_config,
 )
 from nodriver_tixcraft import reload_config  # noqa: E402
-from platforms.utiki.application.flow_settings import apply_effective_policy_reload  # noqa: E402
+from nodriver_common import get_config_dict  # noqa: E402
+from platforms.utiki.application.flow_settings import (  # noqa: E402
+    apply_effective_policy_reload, load_effective_policy,
+)
 from utiki_config import load_current_profile_policy  # noqa: E402
+
+
+def test_formal_utiki_policy_preserves_four_ocr_modes_with_headless_sid() -> None:
+    with tempfile.TemporaryDirectory(prefix="utiki-current-settings-") as folder:
+        source = Path(folder) / "profile.json"
+        args = SimpleNamespace(
+            input=str(source), headless=None, homepage=None, ticket_number=2,
+            browser=None, proxy_server=None, window_size=None,
+            date_auto_select_mode=None, date_keyword=None,
+            area_auto_select_mode=None, area_keyword=None,
+        )
+        profile = get_default_config()
+        profile["homepage"] = "https://tix.ctbcsports.com/BROTHERS/"
+        profile["advanced"]["headless"] = True
+        profile["accounts"]["tixcraft_sid"] = "synthetic-sid"
+        for enable in (False, True):
+            for force_submit in (False, True):
+                profile["ocr_captcha"].update({
+                    "enable": enable, "force_submit": force_submit,
+                })
+                source.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+                effective = get_config_dict(args, apply_tixcraft_headless_ocr=False)
+                assert effective is not None
+                assert get_config_dict(args) == effective  # Formal startup uses this default call.
+                _behavior, flow = load_effective_policy(effective)
+                assert (flow.ocr_enabled, flow.force_submit) == (enable, force_submit)
+                assert flow.ticket_number == 2  # CLI override remains effective.
+        profile["homepage"] = "https://tixcraft.com/"
+        profile["ocr_captcha"].update({"enable": False, "force_submit": False})
+        source.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+        legacy = get_config_dict(args)
+        assert legacy is not None
+        assert legacy["ocr_captcha"]["enable"] is True
+        assert legacy["ocr_captcha"]["force_submit"] is True
+        for homepage in (
+            "http://tix.ctbcsports.com/BROTHERS/",
+            "//tix.ctbcsports.com/BROTHERS/",
+            "https://user@tix.ctbcsports.com/BROTHERS/",
+            "https://tix.ctbcsports.com:444/BROTHERS/",
+            "https://tix.ctbcsports.com:invalid/BROTHERS/",
+        ):
+            profile["homepage"] = homepage
+            source.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+            legacy = get_config_dict(args)
+            assert legacy is not None
+            assert legacy["ocr_captcha"]["enable"] is True
+            assert legacy["ocr_captcha"]["force_submit"] is True
 
 
 class ProfileConfigPersistenceTest(unittest.TestCase):
@@ -206,6 +258,7 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
             (r"/save", SaveJsonHandler),
             (r"/reset", ResetJsonHandler),
             (r"/profiles", ProfilesHandler),
+            (r"/run", RunHandler),
         ])
 
     def test_save_failure_returns_error_and_preserves_profile(self):
@@ -274,9 +327,26 @@ class ProfileConfigHandlerTest(AsyncHTTPTestCase):
 
         load_response = self.fetch("/load")
         self.assertEqual(200, load_response.code)
+        self.assertEqual("1", load_response.headers["X-Utiki-Current-Ready"])
         loaded = json.loads(load_response.body)
         self.assertEqual(new_only["utiki"], loaded["utiki"])
         self.assertNotIn("ctbc", loaded)
+
+    def test_loaded_utiki_profile_with_invalid_current_fields_is_not_run_ready(self):
+        invalid = get_default_config()
+        invalid["homepage"] = "https://tix.ctbcsports.com/BROTHERS/"
+        invalid["utiki"]["seat_selection_mode"] = "unsupported"
+        (Path(self.temp_dir.name) / "settings.json").write_text(
+            json.dumps(invalid, ensure_ascii=False), encoding="utf-8",
+        )
+        response = self.fetch("/load")
+        self.assertEqual(200, response.code)
+        self.assertEqual("0", response.headers["X-Utiki-Current-Ready"])
+        with patch("settings.launch_maxbot") as launch:
+            run = self.fetch("/run")
+        self.assertEqual(400, run.code)
+        self.assertFalse(json.loads(run.body)["run"])
+        launch.assert_not_called()
 
     def test_named_utiki_profile_create_edit_and_load_share_effective_policy(self):
         initial = get_default_config()

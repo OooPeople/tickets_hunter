@@ -173,7 +173,7 @@ browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程�
 `.github/workflows/tests.yml` 包含以下工作；本機執行結果與遠端 CI 結果須分開記錄：
 
 1. **原始碼 job**：Windows 與 Linux 執行預設 pytest／coverage、Python source 語法、正式入口資源自檢及 JavaScript syntax。
-2. **型別與邊界 job**：Linux 對 `ci/utiki-typed-scope.txt` 跑 strict mypy，並執行現行架構 checker。
+2. **型別與邊界 job**：Linux 對現行 uTiki domain／application／adapters 目錄及設定等邊界模組跑 strict mypy，並執行現行架構 checker。
 3. **隔離瀏覽器 job**：Linux Docker `--network none` 在 browser 啟動前生效，合成 production origin、實際 scripts 與專用 profile 跑正式 caller、三模式與控制；OS 網路邊界由獨立案例確認。
 
 效能以同 fixture、設定及工作量量測；實際數值與可比性記於 [STATUS](utiki-refactor/STATUS.md)，不以未經驗證的硬性 CI 門檻代替判讀。
@@ -181,7 +181,7 @@ browser；不得改成共用私人 profile 或廣泛終止 Chrome／Python 程�
 可在專案 Python 3.11 虛擬環境執行的 uTiki 聚焦命令如下；完整 suite 仍依 4.4 節。依當次改動縮小受影響測試，完成整個切片時再完整驗證。
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q tests/unit/utiki tests/test_ctbc_pure.py tests/architecture/test_utiki_p2_port_types.py
+.venv\Scripts\python.exe -m pytest -q tests/unit/utiki tests/test_ctbc_pure.py
 .venv\Scripts\python.exe -m pytest -q tests/unit/utiki/test_refresh_owner.py tests/test_refresh_coordinator.py tests/architecture/test_utiki_architecture_gate.py
 Get-ChildItem src/platforms/utiki/scripts -Filter *.js | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { throw "JS syntax failed: $($_.FullName)" } }
 $env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES='1'
@@ -208,6 +208,8 @@ docker run @limits --env TICKETS_HUNTER_HARD_EGRESS_ACTIVE=1 --env TICKETS_HUNTE
 
 前置檢查須只有 `lo` 且沒有非 loopback 的預設路由；若不符便不要執行第二條命令。售票流程案例由 CDP 在第一次 production-origin 導航前啟用 Request 階段攔截，未知請求實測拒絕；設定 UI 案例只連容器內的 loopback server。正式 `main` 案例使用實際 route 與組裝，隔離 browser 啟動、合成頁導航、外部控制檔及測試用 SQLite 路徑等環境接點，沒有替換新 owner 的選擇。這只能證明該 Linux 容器中的合成流程；Windows／macOS 原生啟動、CI 與真站仍按各自層級驗證。
 
+上列現行 browser 分組包含正式 `main` 在 OCR 等待期間接收 Pause／Stop、同 tab 離站後安全交接與再進站、連續 URL 不可讀時維護原 Run、人工提交衝突後經受控 reload 在新文件重新 arm，以及設定頁 reload 後以新 document 身分等待欄位載入。聚焦重驗可對相同檔案使用 pytest 的 `::test_name` 節點，但 production-origin 節點仍須在上述 `--network none` 容器內執行。實際通過數與受測 HEAD／未提交差異記於 [STATUS](utiki-refactor/STATUS.md)。
+
 目標 OS 的原生原始碼與 `file://` browser 檢查另行執行。請先安裝 Python 3.11、專案開發相依套件及 Chrome／Chromium；`test_native_source_startup.py` 會以專用暫存 profile 和本地合成首頁啟動正式 `main`，下一個 tick 走停止路徑，並不導航售票 origin。這與上面的 production-origin 硬隔離是不同證據。
 
 ```powershell
@@ -227,7 +229,7 @@ TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 .venv/bin/python -m pytest -q -o addopts= 
 .venv/bin/python -m pytest --cov=src --cov-report=term -q --tb=short
 ```
 
-Mac 驗證須固定含批次 0–6 完整內容的提交 SHA；只 checkout 基準 `9e1b202` 會缺少重構成果。提交前另有工作樹旁的一次性 `utiki-b6-mac-source-20261023.zip`，其中 `SOURCE_VERSION.json` 含 base HEAD、檔案雜湊與刪除清單，並附同名 `.sha256`。若使用 ZIP，Mac 上先用 `shasum -a 256 utiki-b6-mac-source-20261023.zip` 比對，再 `unzip -q utiki-b6-mac-source-20261023.zip -d utiki-b6-mac-source-20261023`，切換到解壓目錄執行上列命令。快照不含 Windows `.venv`、私人設定、profile、cookies 或 session；它不是產品或 CI 依賴。
+Mac 驗證須固定含本輪修正的完整提交 SHA，並於 macOS 以該 SHA checkout；先前一次性 Mac ZIP 不含綜合內審修正，不是同版本候選來源。若交接未提交的工作樹，須另產生包含新增、修改與刪除檔案的一次性來源快照及雜湊，排除 Windows `.venv`、私人設定、profile、cookies 與 session；它不是產品或 CI 依賴。
 
 預期資源自檢回報 PASS，原生 smoke 建立並關閉 browser，`file://` fixture 完成正常日期／區域／票數與人工出口相關案例；完整一般 pytest 另記 passed／failed／skipped／deselected 與 coverage。macOS 未執行前維持待驗；如要在目標 OS 驗 production-origin，仍須先提供導航前生效的硬隔離與 CDP 預設拒絕，不以本地頁或環境旗標取代。
 

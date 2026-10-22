@@ -1439,15 +1439,14 @@ function maxbot_load_api()
     $.get( api_url, function() {
         //alert( "success" );
     })
-    .done(function(data) {
+    .done(function(data, _textStatus, response) {
         if (current_profile !== requestedProfile
             || loadGeneration !== profileLoadGeneration) return;
         //alert( "second success" );
         //console.log(data);
         settings = data;
         load_settins_to_form(data);
-        utikiCurrentProfileReady = detectPlatform(data.homepage) !== 'ctbc'
-            || (!!data.utiki && !Object.prototype.hasOwnProperty.call(data, 'ctbc'));
+        utikiCurrentProfileReady = response.getResponseHeader('X-Utiki-Current-Ready') === '1';
         if (!utikiCurrentProfileReady) run_message(uiText('utiki_old_profile'));
         update_settings_action_state();
     })

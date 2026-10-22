@@ -1,17 +1,19 @@
 """Batch 3 owner uses the real SQLite coordinator and exact browser claims."""
 
 import asyncio
-import json
+import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 from platforms.utiki.adapters.refresh import SqliteRefreshAdapter
 from platforms.utiki.application.engine import UtikiEngine
 from platforms.utiki.application.engine import PlanningContext, _Readiness
 from platforms.utiki.application.ports import CoreControl, CoreGate
 from platforms.utiki.application.refresh_contract import (
-    RefreshDocument, RefreshPhase, RefreshProgress, RefreshReason,
+    CompletedProbe, RefreshDocument, RefreshPhase, RefreshProgress, RefreshReason,
 )
 from platforms.utiki.application.refresh_host import IsolatedRefreshHost
+from platforms.utiki.production_run import UtikiProductionRun, _RunHost
 from platforms.utiki.domain.effects import (
     DispatchStage, EffectEvidence, EffectReceipt, EffectStatus,
 )
@@ -20,7 +22,7 @@ from refresh_coordinator import SharedRefreshCoordinator, UTK_SPORTS_SCOPE
 from tests.ctbc_support import make_effective_policy
 from tests.ctbc_support import make_ctbc_quantity_snapshot
 from platforms.utiki.selection import select_quantity_snapshot
-from utiki_config import apply_current_policy_reload
+from utiki_config import UtikiBehavior
 
 
 URL = (
@@ -143,15 +145,146 @@ def setup(tmp_path, *, enabled=True, clock=None):
         "initial_cooldown_seconds": 1.0, "max_cooldown_seconds": 4.0,
     }
     adapter = InterleavingAdapter(coordinator, settings)
-    profile = json.dumps({"utiki": {
-        "ticket_type_keyword": "全票", "seat_sorting": "row_seat",
-        "seat_selection_mode": "manual",
-    }}, ensure_ascii=False)
-    policy = make_effective_policy(apply_current_policy_reload(None, profile))
+    policy = make_effective_policy(UtikiBehavior("全票", "row_seat", "manual"))
     engine = UtikiEngine(policy, browser, host, refresh_coordinator=adapter)
     handle = engine.attach(tab)
     harness = IsolatedRefreshHost(engine, host)
     return engine, handle, browser, host, adapter, settings, coordinator, now, harness
+
+
+def paused_run_owner(engine, handle, host):
+    def set_gate(gate):
+        host.control = CoreControl(host.control.revision + 1, gate)
+
+    async def observe(_url):
+        return None
+
+    host.set_gate = set_gate
+    host.observe = observe
+    run_owner = object.__new__(UtikiProductionRun)
+    run_owner.tab = SimpleNamespace(target=SimpleNamespace(target_id=handle.tab.target_id))
+    run_owner.key = handle.tab
+    run_owner.host = host
+    run_owner.engine = engine
+    run_owner.handle = handle
+    run_owner._closed = False
+    run_owner._closing_requested = False
+    run_owner.close_status = ""
+    return run_owner
+
+
+def test_formal_close_overrides_pause_signal_and_retires_original_owner(tmp_path):
+    async def run():
+        previous, handle, browser, _, adapter, _, _, _, _ = setup(tmp_path)
+        tab = SimpleNamespace(target=SimpleNamespace(target_id=handle.tab.target_id))
+        host = _RunHost(tab, handle.tab, None, lambda: CoreGate.PAUSED)
+        engine = UtikiEngine(previous._policy, browser, host, refresh_coordinator=adapter)
+        bound = engine.attach(handle.tab)
+        owner = object.__new__(UtikiProductionRun)
+        owner.tab = tab
+        owner.key = handle.tab
+        owner.host = host
+        owner.engine = engine
+        owner.handle = bound
+        owner._closed = False
+        owner._closing_requested = False
+        owner.close_status = ""
+        await owner.close()
+        assert owner.closed
+        assert owner.handoff_ready
+        assert owner.close_status == ""
+        assert host.current_control(handle.tab).gate is CoreGate.CLOSING
+        assert engine.context(bound) is None
+        await owner.close()
+        assert owner.handoff_ready
+
+    asyncio.run(run())
+
+
+def test_departure_handoff_waits_for_exact_original_probe_then_releases_tab(tmp_path):
+    from nodriver_tixcraft import retire_utiki_route_owner
+
+    async def run():
+        engine, handle, browser, host, adapter, _, coordinator, clock, harness = setup(tmp_path)
+
+        async def real_renew(permit_id):
+            return await SqliteRefreshAdapter.renew(adapter, permit_id)
+
+        adapter.renew = real_renew
+        browser.document = replace(browser.document, classification="blocked")
+        browser.change_on_dispatch = False
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        clock[0] += 2
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.is_probe
+        run_owner = paused_run_owner(engine, handle, host)
+
+        ready, result = await retire_utiki_route_owner(run_owner)
+        assert not ready and result.progress == "manual-reconciliation-required"
+        assert len(browser.dispatches) == 1
+
+        before = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_expires_at"]
+        clock[0] += 5
+        intent.next_probe_renew_at = 0
+        result = await run_owner.maintain_originals_without_url()
+        after = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_expires_at"]
+        assert result.progress == "manual-reconciliation-required"
+        assert after > before
+        assert len(browser.dispatches) == 1
+
+        browser.document = replace(browser.document, document_id="2000", started_at=2.0,
+                                   classification="normal")
+        ready, result = await retire_utiki_route_owner(run_owner)
+        assert ready and result.progress == "closed"
+        assert not coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_owner"]
+        assert len(browser.dispatches) == 1
+
+    asyncio.run(run())
+
+
+def test_missing_url_cleans_original_queue_without_dispatch(tmp_path):
+    async def run():
+        engine, handle, browser, host, _, _, coordinator, _, harness = setup(tmp_path)
+        browser.document = replace(browser.document, classification="blocked")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.request_id
+        run_owner = paused_run_owner(engine, handle, host)
+        result = await run_owner.maintain_originals_without_url()
+        assert result.progress == "observation-unavailable"
+        assert intent.phase is RefreshPhase.ABANDONED
+        assert not coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["queue"]
+        assert browser.dispatches == []
+
+    asyncio.run(run())
+
+
+def test_unconfirmed_close_blocks_new_work_and_can_retry_original_handle(tmp_path):
+    async def run():
+        engine, handle, browser, host, _, _, _, _, _ = setup(tmp_path)
+        run_owner = paused_run_owner(engine, handle, host)
+        original_close = engine.close
+        calls = [0]
+
+        def uncertain_close(bound):
+            calls[0] += 1
+            if calls[0] == 1:
+                return False
+            return original_close(bound)
+
+        engine.close = uncertain_close
+        await run_owner.close()
+        assert not run_owner.closed
+        assert not run_owner.handoff_ready
+        assert run_owner.close_status == "owner-close-unconfirmed"
+        result = await run_owner.tick(URL)
+        assert result.progress == "closing"
+        assert run_owner.closed and run_owner.handoff_ready
+        assert calls == [2]
+        assert browser.dispatches == []
+
+    asyncio.run(run())
 
 
 def test_real_sqlite_refresh_one_reload_then_new_document_clearance(tmp_path):
@@ -216,6 +349,24 @@ def test_release_false_is_visible_and_never_local_fallback(tmp_path):
     asyncio.run(run())
 
 
+def test_cleanup_failure_has_bounded_manual_outlet(tmp_path):
+    async def run():
+        engine, handle, browser, _host, adapter, settings, _, _, harness = setup(tmp_path)
+        adapter.after_reserve = lambda: settings.__setitem__("enabled", False)
+        adapter.release_fails = True
+        assert await harness.tick(handle, schedule_due=True) is RefreshProgress.CLEANUP_PENDING
+        intent = engine.refresh_intent(handle)
+        assert intent is not None
+        for _ in range(2):
+            intent.next_retry_at = 0
+            assert await harness.tick(handle, schedule_due=True) is RefreshProgress.CLEANUP_PENDING
+        assert await harness.tick(handle, schedule_due=True) is RefreshProgress.MANUAL_RECONCILIATION
+        assert intent.phase is RefreshPhase.RECONCILIATION_REQUIRED
+        assert browser.dispatches == []
+
+    asyncio.run(run())
+
+
 def test_reload_possible_and_probe_renew_none_are_not_second_dispatch(tmp_path):
     async def run():
         engine, handle, browser, host, adapter, _, coordinator, clock, harness = setup(tmp_path)
@@ -233,11 +384,228 @@ def test_reload_possible_and_probe_renew_none_are_not_second_dispatch(tmp_path):
         assert intent.probe_unknown is True
         adapter.renew_result = False
         intent.next_probe_renew_at = 0
-        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.MANUAL_RECONCILIATION
         assert intent.probe_lost is True
         assert intent.probe_unknown is False
+        assert intent.phase is RefreshPhase.OWNERSHIP_LOST
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.MANUAL_RECONCILIATION
         assert len(browser.dispatches) == 1
         assert coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["sequence"] == 1
+    asyncio.run(run())
+
+
+def test_real_sqlite_probe_renews_through_new_document_clearance(tmp_path):
+    async def run():
+        engine, handle, browser, _host, adapter, _, coordinator, clock, harness = setup(tmp_path)
+
+        async def real_renew(permit_id):
+            return await SqliteRefreshAdapter.renew(adapter, permit_id)
+
+        adapter.renew = real_renew
+        browser.document = replace(browser.document, classification="blocked")
+        browser.change_on_dispatch = False
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        clock[0] += 2
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        browser.document = replace(browser.document, document_id="2000", classification="unverified")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.AWAITING_CLEARANCE
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.is_probe
+        for _ in range(7):
+            clock[0] += 5
+            intent.next_probe_renew_at = 0
+            assert await harness.tick(handle, schedule_due=False) is RefreshProgress.AWAITING_CLEARANCE
+        assert clock[0] > 132  # Beyond the original 30-second SQLite lease.
+        browser.document = replace(browser.document, classification="normal")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.COMPLETE
+        assert len(browser.dispatches) == 1
+        assert coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["sequence"] == 1
+
+    asyncio.run(run())
+
+
+def test_expired_real_sqlite_probe_has_bounded_manual_outlet(tmp_path):
+    async def run():
+        engine, handle, browser, _host, adapter, _, coordinator, clock, harness = setup(tmp_path)
+
+        async def real_renew(permit_id):
+            return await SqliteRefreshAdapter.renew(adapter, permit_id)
+
+        adapter.renew = real_renew
+        browser.document = replace(browser.document, classification="blocked")
+        browser.change_on_dispatch = False
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        clock[0] += 2
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.is_probe
+        clock[0] = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_expires_at"] + 1
+        intent.next_probe_renew_at = 0
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.MANUAL_RECONCILIATION
+        assert intent.phase is RefreshPhase.OWNERSHIP_LOST
+        browser.document = replace(browser.document, document_id="2000", classification="normal")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.MANUAL_RECONCILIATION
+        assert len(browser.dispatches) == 1
+
+    asyncio.run(run())
+
+
+def test_probe_completion_database_error_preserves_owned_lease(tmp_path):
+    async def run():
+        engine, handle, browser, _host, adapter, _, _coordinator, clock, harness = setup(tmp_path)
+
+        async def real_renew(permit_id):
+            return await SqliteRefreshAdapter.renew(adapter, permit_id)
+
+        adapter.renew = real_renew
+        browser.document = replace(browser.document, classification="blocked")
+        browser.change_on_dispatch = False
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        clock[0] += 2
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        browser.document = replace(browser.document, document_id="2000", classification="normal")
+        original_complete = adapter.complete_probe
+        calls = 0
+
+        async def failed_once(instance_id, permit_id, success):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return CompletedProbe(False, True, "database unavailable")
+            return await original_complete(instance_id, permit_id, success)
+
+        adapter.complete_probe = failed_once
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.AWAITING_CLEARANCE
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.phase is RefreshPhase.AWAITING_CLEARANCE
+        assert not intent.probe_lost
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.COMPLETE
+        assert calls == 2 and len(browser.dispatches) == 1
+
+    asyncio.run(run())
+
+
+def test_probe_timeout_completes_exact_lease_then_requires_manual_reconciliation(tmp_path):
+    async def run():
+        engine, handle, browser, _host, adapter, _, coordinator, clock, harness = setup(tmp_path)
+        browser.document = replace(browser.document, classification="blocked")
+        browser.change_on_dispatch = False
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        clock[0] += 2
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.is_probe
+        intent.probe_started_at = time.monotonic() - 121
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.MANUAL_RECONCILIATION
+        assert intent.phase is RefreshPhase.RECONCILIATION_REQUIRED
+        assert not coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_owner"]
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.MANUAL_RECONCILIATION
+        assert len(browser.dispatches) == 1
+
+    asyncio.run(run())
+
+
+def test_formal_paused_tick_cancels_its_real_sqlite_queue(tmp_path):
+    async def run():
+        engine, handle, browser, host, _adapter, _, coordinator, _, harness = setup(tmp_path)
+        browser.document = replace(browser.document, classification="blocked")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.request_id
+        assert any(
+            row["request_id"] == intent.request_id
+            for row in coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["queue"]
+        )
+
+        run_owner = paused_run_owner(engine, handle, host)
+        result = await run_owner.tick(URL, paused=True)
+        assert result.progress == "paused"
+        assert not any(
+            row["request_id"] == intent.request_id
+            for row in coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["queue"]
+        )
+        assert browser.dispatches == []
+
+    asyncio.run(run())
+
+
+def test_observation_failure_still_cleans_original_queue_while_paused(tmp_path):
+    async def run():
+        engine, handle, browser, host, _adapter, _, coordinator, _, harness = setup(tmp_path)
+        browser.document = replace(browser.document, classification="blocked")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.request_id
+        run_owner = paused_run_owner(engine, handle, host)
+
+        async def unavailable(_url):
+            raise RuntimeError("synthetic observation failure")
+
+        async def submit_unavailable(_handle):
+            raise RuntimeError("synthetic submit readback failure")
+
+        host.observe = unavailable
+        engine.advance_submit = submit_unavailable
+        result = await run_owner.tick(URL, paused=True)
+        assert result.progress == "observation-unavailable"
+        assert intent.phase is RefreshPhase.ABANDONED
+        assert not any(
+            row["request_id"] == intent.request_id
+            for row in coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["queue"]
+        )
+        assert browser.dispatches == []
+
+    asyncio.run(run())
+
+
+def test_formal_paused_tick_releases_its_real_sqlite_reservation(tmp_path):
+    async def run():
+        engine, handle, browser, host, adapter, _, coordinator, clock, harness = setup(tmp_path)
+        browser.document = replace(browser.document, classification="blocked")
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        intent = engine.refresh_intent(handle)
+        assert intent is not None
+        clock[0] += 2
+        reservation = await adapter.reserve(intent.instance_id, intent.token, 1.0)
+        assert reservation.reserved and reservation.reservation_id
+        intent.reservation_id = reservation.reservation_id
+        intent.phase = RefreshPhase.RESERVED
+        run_owner = paused_run_owner(engine, handle, host)
+        result = await run_owner.tick(URL, paused=True)
+        assert result.progress == "paused"
+        assert intent.phase is RefreshPhase.ABANDONED
+        assert coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["reservation"] is None
+        assert browser.dispatches == []
+
+    asyncio.run(run())
+
+
+def test_formal_paused_tick_renews_existing_probe_without_reload(tmp_path):
+    async def run():
+        engine, handle, browser, host, adapter, _, coordinator, clock, harness = setup(tmp_path)
+
+        async def real_renew(permit_id):
+            return await SqliteRefreshAdapter.renew(adapter, permit_id)
+
+        adapter.renew = real_renew
+        browser.document = replace(browser.document, classification="blocked")
+        browser.change_on_dispatch = False
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.WAITING
+        clock[0] += 2
+        assert await harness.tick(handle, schedule_due=False) is RefreshProgress.RELOAD_POSSIBLE
+        intent = engine.refresh_intent(handle)
+        assert intent is not None and intent.is_probe
+        before = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_expires_at"]
+        clock[0] += 5
+        intent.next_probe_renew_at = 0
+        run_owner = paused_run_owner(engine, handle, host)
+        result = await run_owner.tick(URL, paused=True)
+        assert result.progress == "paused"
+        after = coordinator.snapshot_sync(UTK_SPORTS_SCOPE)["bucket"]["probe_expires_at"]
+        assert after > before
+        assert intent.phase is RefreshPhase.RELOAD_POSSIBLE
+        assert len(browser.dispatches) == 1
+
     asyncio.run(run())
 
 

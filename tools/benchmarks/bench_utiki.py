@@ -361,22 +361,37 @@ def _load_selection_module():
     return importlib.import_module("platforms.utiki.selection")
 
 
+def build_selector_settings(selection: Any, config: Mapping[str, Any]) -> Any:
+    """Construct the current typed selector input outside timed warm calls."""
+    return selection.FlowSettings(
+        True, True, config["ticket_number"],
+        date_keyword=config["date_auto_select"]["date_keyword"],
+        date_mode=config["date_auto_select"]["mode"],
+        date_fallback=config["date_auto_fallback"],
+        area_keyword=config["area_auto_select"]["area_keyword"],
+        area_mode=config["area_auto_select"]["mode"],
+        area_fallback=config["area_auto_fallback"],
+        keyword_exclude=config["keyword_exclude"],
+    )
+
+
 def execute_case(
     selection: Any,
     case: str,
     raw_snapshot: Mapping[str, Any],
     config: Mapping[str, Any],
+    selector_settings: Any,
 ) -> Any:
     """Run parse, select, and submit-plan construction for one case."""
 
     if case == "date":
         snapshot = selection.parse_date_snapshot(raw_snapshot)
-        plan = selection.select_date_snapshot(snapshot, dict(config))
+        plan = selection.select_date_snapshot(snapshot, selector_settings)
     elif case == "area":
         snapshot = selection.parse_area_snapshot(raw_snapshot)
         plan = selection.select_area_snapshot(
             snapshot,
-            dict(config),
+            selector_settings,
             "PERF_FIXTURE",
         )
     elif case == "seat":
@@ -655,6 +670,7 @@ def _cold_worker(case: str) -> int:
             case,
             payload["fixture"],
             payload["config"],
+            build_selector_settings(selection, payload["config"]),
         )
         operation_ns = time.perf_counter_ns() - started_operation_ns
         result = {
@@ -788,6 +804,7 @@ def run_benchmark(
     fixtures = build_synthetic_fixtures(sizes)
     config = build_benchmark_config()
     selection = _load_selection_module()
+    selector_settings = build_selector_settings(selection, config)
     subject_files = _loaded_subject_files()
     metrics: dict[str, dict[str, Any]] = {}
     case_results: dict[str, str | None] = {}
@@ -808,6 +825,7 @@ def run_benchmark(
             selected_case,
             fixtures[selected_case],
             config,
+            selector_settings,
         )
         result = operation()
         warm_result = _sha256_json(_jsonable(result))

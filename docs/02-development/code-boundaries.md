@@ -26,6 +26,7 @@ uTiki 的目標責任見 [重構計畫](utiki-refactor/PLAN.md)，目前接線�
 - **正式 uTiki 刷新接縫** — `application.refresh_contract` 保存單 Run 的 intent 與原 token，`adapters.refresh.SqliteRefreshAdapter` 只映射既有 SQLite coordinator 與全域設定，`adapters.browser` 只在原文件／URL 匹配 claim 時派送 reload。`application.refresh_host` 的 health 觀察是唯讀；challenge 未有可信授權時保持阻擋。正式 `main` 在 uTiki route 先交給新 owner，通用 health／排程與其他平台派送不碰該 tab。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
 - **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止搶票邏輯或 import `nodriver_tixcraft`；uTiki current 驗證只匯入純設定／flow validator，不匯入 engine 或 browser。
+- **`utiki_config.py`** — 純 current 設定、typed flow 與支援的 sports HTTPS origin 判斷；正式 tenant 分類、共用啟動設定及 Settings save/load 共用此判斷。設定頁 Run 可用狀態以後端完整 validator 為準。
 - **`global_settings.py`** — 跨 profile 的全域設定驗證與原子化檔案存取。僅允許 import `util`。
 - **`refresh_coordinator.py`** — 跨程序刷新節流與 429 恢復狀態。僅允許 import `util` 與 Python 標準函式庫。
 

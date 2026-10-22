@@ -18,7 +18,6 @@
             let prior = null;
             try { prior = JSON.parse(saved); } catch (_) {}
             if (!consumedPrior || !prior ||
-                prior.page_url !== pageUrl || prior.document_id !== documentId ||
                 Object.keys(consumedPrior).sort().join(',') !==
                     'arm_token,click_token,document_id,page_url' ||
                 Object.keys(prior).sort().join(',') !==

@@ -404,27 +404,14 @@ def migrate_config(config_dict):
 
 def validate_utiki_current_profile(config_dict):
     """Require an explicit current behavior section at the uTiki save boundary."""
-    from utiki_config import ConfigError, load_current_profile_policy
-    from urllib.parse import urlsplit
+    from utiki_config import ConfigError, is_supported_utiki_sports_url, load_current_profile_policy
 
     if not isinstance(config_dict, dict):
         raise ValueError("profile must be a JSON object")
     homepage = config_dict.get("homepage")
     if not isinstance(homepage, str):
         return
-    try:
-        parsed = urlsplit(homepage)
-        supported = (
-            parsed.scheme.lower() == "https"
-            and (parsed.hostname or "").lower() in {
-                "tix.ctbcsports.com", "tix.wdragons.com",
-            }
-            and parsed.username is None and parsed.password is None
-            and parsed.port in (None, 443)
-        )
-    except ValueError:
-        supported = False
-    if not supported:
+    if not is_supported_utiki_sports_url(homepage):
         return
     try:
         load_current_profile_policy(config_dict)
@@ -733,6 +720,13 @@ class RunHandler(tornado.web.RequestHandler):
             self.set_status(400)
             self.write({"run": False, "error": "invalid instance name"})
             return
+        _, profile = load_json(profile_name)
+        try:
+            validate_utiki_current_profile(profile)
+        except ValueError as exc:
+            self.set_status(400)
+            self.write({"run": False, "error": str(exc)})
+            return
         display_name = instance_override or profile_name or CONST_DEFAULT_PROFILE
         print('run button pressed. profile:', display_name)
         launch_maxbot(profile_name, instance_override)
@@ -746,6 +740,12 @@ class LoadJsonHandler(tornado.web.RequestHandler):
             self.write({"error": "invalid profile name"})
             return
         config_filepath, config_dict = load_json(profile_name)
+        try:
+            validate_utiki_current_profile(config_dict)
+        except ValueError:
+            self.set_header("X-Utiki-Current-Ready", "0")
+        else:
+            self.set_header("X-Utiki-Current-Ready", "1")
 
         # Dynamically generate remote_url based on server_port (Issue #156)
         server_port = config_dict.get("advanced", {}).get("server_port", CONST_SERVER_PORT)

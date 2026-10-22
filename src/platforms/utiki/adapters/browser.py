@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 import hashlib
 from importlib import import_module
 import json
@@ -15,7 +14,7 @@ from urllib.parse import urlsplit
 
 from ..application.ports import (
     CaptchaResetObservation, InlineLoginAudit, InlineLoginCredentials, InlineLoginIntent,
-    PageObservation, PurchaseInputObservation, QuantityObservation, RejectedLoginObservation,
+    PageObservation, PurchaseInputObservation, RejectedLoginObservation,
     SubmitOutcomeObservation,
 )
 from ..application.refresh_contract import RefreshDocument
@@ -23,7 +22,7 @@ from ..domain.effects import (
     DispatchStage, EffectEvidence, EffectKind, EffectReceipt, EffectStatus,
     RunningEffect,
 )
-from ..domain.identity import DocumentKey, OperationStamp, TabKey
+from ..domain.identity import TabKey
 from ..domain.inputs import CaptchaAttempt, CaptchaImageKey
 from ..domain.plans import AreaActionPlan, DateActionPlan, QuantityPlan, SeatActionPlan, SubmitPlan
 from ..domain.purchase import ManualSubmitEvidence, SubmitAttempt
@@ -248,14 +247,6 @@ class ZendriverSelectionBrowser:
             raise ValueError("manual selection reader returned invalid evidence")
         return value["page_url"], value["document_id"], value["revision"]
 
-    async def observe_page(self, expected: OperationStamp) -> QuantityObservation:
-        observation = await self.observe_quantity(expected.tab)
-        snapshot = observation.snapshot
-        if not isinstance(snapshot, QuantitySnapshot):
-            raise ValueError("quantity reader returned an invalid snapshot")
-        source = replace(expected, document=DocumentKey(snapshot.document_id))
-        return QuantityObservation(source, snapshot)
-
     async def commit_date(
         self, snapshot: DateSnapshot, plan: DateActionPlan, claim: RunningEffect
     ) -> EffectReceipt:
@@ -310,15 +301,6 @@ class ZendriverSelectionBrowser:
         self._check_claim(claim, snapshot.document_id)
         result = await dom.commit_seat(self._tab, snapshot, plan)
         return _receipt(claim, result, navigation=False)
-
-    async def commit_quantity(
-        self, plan: QuantityPlan, claim: RunningEffect
-    ) -> EffectReceipt:
-        observation = await self.observe_quantity(claim.proposal.stamp.tab)
-        snapshot = observation.snapshot
-        if not isinstance(snapshot, QuantitySnapshot):
-            raise ValueError("quantity reader returned an invalid snapshot")
-        return await self.commit_quantity_snapshot(snapshot, plan, claim)
 
     async def observe_purchase_input(self, tab: TabKey) -> PurchaseInputObservation:
         if tab != self._tab_key:

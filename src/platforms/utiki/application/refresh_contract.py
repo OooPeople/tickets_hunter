@@ -18,6 +18,8 @@ class RefreshPhase(str, Enum):
     PERMITTED = "permitted"
     RELOAD_POSSIBLE = "reload-possible"
     AWAITING_CLEARANCE = "awaiting-clearance"
+    OWNERSHIP_LOST = "ownership-lost"
+    RECONCILIATION_REQUIRED = "reconciliation-required"
     BLOCKED_429 = "blocked-429"
     CLEANUP_PENDING = "cleanup-pending"
     ABANDONED = "abandoned"
@@ -33,6 +35,7 @@ class RefreshProgress(str, Enum):
     CLEANUP_PENDING = "cleanup-pending"
     RELOAD_POSSIBLE = "reload-possible"
     AWAITING_CLEARANCE = "awaiting-clearance"
+    MANUAL_RECONCILIATION = "manual-reconciliation"
     COMPLETE = "complete"
 
 

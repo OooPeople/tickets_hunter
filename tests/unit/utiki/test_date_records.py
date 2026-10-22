@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.ctbc_support import config, make_ctbc_date_snapshot
+from tests.ctbc_support import make_ctbc_date_snapshot, selector_settings
 
 from platforms.utiki.domain.snapshots import DateControl, DateRow
 from platforms.utiki.selection import (
@@ -30,7 +30,7 @@ def test_date_row_control_and_plan_preserve_every_wire_field() -> None:
         for key in DATE_CONTROL_FINGERPRINT_FIELDS
     }
 
-    plan = select_date_snapshot(snapshot, config(date_keyword='"9/10"'))
+    plan = select_date_snapshot(snapshot, selector_settings(date_keyword='"9/10"'))
     assert plan is not None
     assert (plan.row_index, plan.control_index, plan.text) == (0, 0, row.text)
     assert (plan.action_kind, plan.onclick, plan.control_fingerprint) == (
@@ -60,18 +60,12 @@ def test_date_control_rejects_non_boolean_actionability() -> None:
     assert parse_date_snapshot(raw) is None
 
 
-def test_date_selection_rejects_malformed_config_without_action() -> None:
+def test_date_selection_requires_validated_typed_settings() -> None:
     snapshot = parse_date_snapshot(make_ctbc_date_snapshot())
     assert snapshot is not None
-    for key, malformed_value in (
-        ("date_auto_select", "invalid"),
-        ("date_auto_select", {"date_keyword": 1}),
-        ("date_auto_select", {"mode": 1}),
-        ("date_auto_fallback", 1),
-    ):
-        settings = config(date_keyword='"9/10"')
-        settings[key] = malformed_value
-        assert select_date_snapshot(snapshot, settings) is None
+    assert select_date_snapshot(snapshot, {"date_auto_select": {}}) is None  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        replace(selector_settings(), date_mode="invalid")
 
 
 def test_date_control_rejects_invalid_direct_fingerprint_construction() -> None:

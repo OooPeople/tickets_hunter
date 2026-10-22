@@ -71,9 +71,10 @@ from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
 from platforms.utiki import (
-    is_utk_sports_url,
+    is_utiki_sports_url,
 )
 from platforms.utiki.production_run import UtikiProductionRun
+from platforms.utiki.application.ports import CoreGate
 from platforms.utiki.adapters.session import install_startup_cookie_set
 from platforms.utiki.application.flow_settings import load_effective_policy
 from utiki_config import ConfigError, parse_profile_json
@@ -102,7 +103,7 @@ def _should_inject_ctbc_cookies(homepage):
         host = (urllib.parse.urlsplit(str(homepage or "")).hostname or "").lower()
     except ValueError:
         return False
-    return host == "tix.ctbcsports.com" and is_utk_sports_url(homepage)
+    return host == "tix.ctbcsports.com" and is_utiki_sports_url(homepage)
 
 
 async def nodriver_goto_homepage(driver, config_dict):
@@ -607,7 +608,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     # Returns True if gate is active (caller should continue),
     # False if gate is cleared (proceed with dispatching).
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-    if is_utk_sports_url(current_url):
+    if is_utiki_sports_url(current_url):
         raise ValueError("uTiki scheduled refresh belongs to its Run owner")
     current_str = config_dict.get("refresh_datetime", "")
 
@@ -686,14 +687,16 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
 
 async def advance_utiki_route(
     tab, url, config_dict, raw_profile, run=None, *, paused=False,
-    refresh_adapter=None,
+    refresh_adapter=None, control_signal=None,
 ):
     """The formal route's sole owner selection and result return boundary."""
-    if not is_utk_sports_url(url):
+    if not is_utiki_sports_url(url):
         raise ValueError("uTiki route requires a supported tenant origin")
     created = run is None
     if created:
-        run = UtikiProductionRun(tab, config_dict, raw_profile, refresh_adapter)
+        run = UtikiProductionRun(
+            tab, config_dict, raw_profile, refresh_adapter, control_signal,
+        )
     elif run.tab is not tab:
         await run.close()
         raise ValueError("uTiki active tab changed; reconcile this Run before restart")
@@ -704,6 +707,23 @@ async def advance_utiki_route(
             await run.close()
         raise
     return run, result
+
+
+async def retire_utiki_route_owner(run):
+    """Allow another platform to use the tab only after original work is retired."""
+    if not run.closed:
+        await run.close()
+    result = await run.maintain_originals_without_url()
+    return run.handoff_ready, result
+
+
+def _utiki_control_signal():
+    """Read the same per-instance Stop/Pause files during a Run's awaited I/O."""
+    if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_QUIT_FILE)):
+        return CoreGate.CLOSING
+    if os.path.exists(util.get_instance_state_path(CONST_MAXBOT_INT28_FILE)):
+        return CoreGate.PAUSED
+    return None
 
 
 def _require_utiki_current_profile(raw_text):
@@ -818,7 +838,7 @@ async def _current_cloudflare_clearance(tab, url):
         return "unknown"
     if state.get("challenge"):
         return "active"
-    if is_utk_sports_url(url) and state.get("normal_root"):
+    if is_utiki_sports_url(url) and state.get("normal_root"):
         return "normal"
     return "absent" if not present else "unknown"
 
@@ -921,7 +941,7 @@ async def _main_with_utiki_owner(args, run_box):
     config_filepath = args.input if args and getattr(args, "input", None) else os.path.join(
         util.get_app_root(), CONST_MAXBOT_CONFIG_FILE,
     )
-    if config_dict is not None and is_utk_sports_url(config_dict.get("homepage")):
+    if config_dict is not None and is_utiki_sports_url(config_dict.get("homepage")):
         # Validate the actual saved current profile before starting a browser.
         # migrate_config is still used by other platforms and cannot authorize
         # a legacy uTiki behavior section here.
@@ -1014,7 +1034,7 @@ async def _main_with_utiki_owner(args, run_box):
     ocr = None
     Captcha_Browser = None
     try:
-        if config_dict["ocr_captcha"]["enable"] and not is_utk_sports_url(config_dict.get("homepage")):
+        if config_dict["ocr_captcha"]["enable"] and not is_utiki_sports_url(config_dict.get("homepage")):
             ocr = create_ocr_for_platform(config_dict)
             if ocr is None:
                 ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
@@ -1071,7 +1091,9 @@ async def _main_with_utiki_owner(args, run_box):
                     except ConfigError:
                         policy_text = raw_saved
                     else:
-                        candidate = get_config_dict(args)
+                        candidate = get_config_dict(
+                            args, apply_tixcraft_headless_ocr=False,
+                        )
                         policy_text = (
                             json.dumps(candidate, ensure_ascii=False)
                             if isinstance(candidate, dict) else ""
@@ -1127,23 +1149,29 @@ async def _main_with_utiki_owner(args, run_box):
         is_maxbot_paused = await check_and_handle_pause(config_dict)
 
         if url is None:
-            if utiki_run is not None and (
-                getattr(tab, "closed", False) or get_url_error_count() >= 15
-            ):
-                await utiki_run.close()
-            if is_maxbot_paused:
-                if utiki_run is not None:
-                    utiki_run.set_paused(True)
+            if utiki_run is not None:
+                if getattr(tab, "closed", False) or get_url_error_count() >= 15:
+                    await utiki_run.close()
+                result = await utiki_run.maintain_originals_without_url()
+                visible_progress = (result.progress, result.manual_reason)
+                if visible_progress != last_utiki_progress:
+                    print(f"[uTiki] {result.progress}")
+                    if result.manual_reason:
+                        print(f"[uTiki] Manual action: {result.manual_reason}")
+                    last_utiki_progress = visible_progress
             continue
         else:
             if len(url) == 0:
-                if utiki_run is not None and (
-                    getattr(tab, "closed", False) or get_url_error_count() >= 15
-                ):
-                    await utiki_run.close()
-                if is_maxbot_paused:
-                    if utiki_run is not None:
-                        utiki_run.set_paused(True)
+                if utiki_run is not None:
+                    if getattr(tab, "closed", False) or get_url_error_count() >= 15:
+                        await utiki_run.close()
+                    result = await utiki_run.maintain_originals_without_url()
+                    visible_progress = (result.progress, result.manual_reason)
+                    if visible_progress != last_utiki_progress:
+                        print(f"[uTiki] {result.progress}")
+                        if result.manual_reason:
+                            print(f"[uTiki] Manual action: {result.manual_reason}")
+                        last_utiki_progress = visible_progress
                 # [URL DIAG] Step 0: empty url makes the loop skip all dispatch
                 # silently (this is the suspected on-sale-reload freeze point).
                 # Throttle so a sustained empty-url stretch logs ~every 2s.
@@ -1168,9 +1196,6 @@ async def _main_with_utiki_owner(args, run_box):
 
         if len(url) > 0 :
             if url != last_url:
-                if is_utk_sports_url(last_url) and not is_utk_sports_url(url):
-                    if utiki_run is not None:
-                        await utiki_run.close()
                 print(url)
                 write_last_url_to_file(url)
                 cloudflare_checked = False
@@ -1179,18 +1204,34 @@ async def _main_with_utiki_owner(args, run_box):
                 cloudflare_clear_confirmations = 0
             last_url = url
 
-        if utiki_run is not None and not is_utk_sports_url(url):
-            # The tab cannot fall into another platform's outer mutation path
-            # while a uTiki claim or result is being retired.
-            continue
+        if utiki_run is not None and (
+            utiki_run.closed or not is_utiki_sports_url(url)
+        ):
+            handoff_ready, result = await retire_utiki_route_owner(utiki_run)
+            if handoff_ready:
+                utiki_run = None
+                run_box[0] = None
+                last_utiki_progress = None
+            else:
+                # The old owner retains this tab until its exact original
+                # operation and refresh token are reconciled.
+                visible_progress = (result.progress, result.manual_reason)
+                if visible_progress != last_utiki_progress:
+                    print(f"[uTiki] {result.progress}")
+                    if result.manual_reason:
+                        print(f"[uTiki] Manual action: {result.manual_reason}")
+                    last_utiki_progress = visible_progress
+                continue
 
-        if is_utk_sports_url(url):
+        if is_utiki_sports_url(url):
             try:
                 if utiki_run is None:
                     with open(config_filepath, encoding="utf-8") as profile_file:
                         raw_saved = profile_file.read()
                     _require_utiki_current_profile(raw_saved)
-                    current_profile = get_config_dict(args)
+                    current_profile = get_config_dict(
+                        args, apply_tixcraft_headless_ocr=False,
+                    )
                     if not isinstance(current_profile, dict):
                         raise ValueError("uTiki current profile is unavailable")
                     load_effective_policy(current_profile)
@@ -1201,6 +1242,7 @@ async def _main_with_utiki_owner(args, run_box):
                 utiki_run, result = await advance_utiki_route(
                     tab, url, config_dict, raw_profile, utiki_run,
                     paused=is_maxbot_paused,
+                    control_signal=_utiki_control_signal,
                 )
                 run_box[0] = utiki_run
             except BaseException:

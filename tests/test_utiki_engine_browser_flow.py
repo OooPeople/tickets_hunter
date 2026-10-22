@@ -20,12 +20,12 @@ from platforms.utiki import dom
 from platforms.utiki.auth import TenantAuthProfile
 from platforms.utiki.application.engine import SelectionProgress
 from platforms.utiki.application.flow_settings import FlowSettings
-from tests.ctbc_support import config, make_effective_policy
+from tests.ctbc_support import config, make_effective_policy, selector_settings
 from platforms.utiki.application.ports import (
     CoreControl, CoreGate, InlineLoginCredentials, InlineLoginIntent,
     PurchaseAuthority,
 )
-from platforms.utiki.bootstrap import create_engine, create_run_engine
+from platforms.utiki.bootstrap import build_run_captcha_provider, create_engine
 from platforms.utiki.domain.effects import (
     ClaimId, EffectKind, EffectProposal, EffectStatus, RunningEffect,
 )
@@ -35,7 +35,7 @@ from platforms.utiki.domain.identity import (
 from platforms.utiki.domain.purchase import SubmitSource
 from platforms.utiki.profiles import PageKind, TENANT_PROFILES
 from platforms.utiki.selection import select_date_snapshot
-from utiki_config import apply_current_policy_reload
+from utiki_config import UtikiBehavior
 
 
 pytestmark = pytest.mark.browser
@@ -114,19 +114,15 @@ async def _exercise(
             tab = await browser.get(date_url + "?PRODUCT_ID=P16ANF0L")
             await _wait_url(tab, "UTK0201_flow.html")
             tab_key = TabKey(1, "synthetic-flow")
-            policy = apply_current_policy_reload(None, json.dumps({"utiki": {
-                "ticket_type_keyword": "全票", "seat_sorting": "row_seat",
-                "seat_selection_mode": "manual",
-            }}, ensure_ascii=False))
+            policy = UtikiBehavior("全票", "row_seat", "manual")
             selection_browser = ZendriverSelectionBrowser(tab, tab_key)
             effective = make_effective_policy(policy, FlowSettings(
                     True, True, 2, date_keyword='"9/10"', area_keyword='"前排"',
                     ocr_enabled=not manual_submit, force_submit=not manual_submit,
                 ))
-            engine = (
-                create_run_engine(effective, selection_browser, LocalCore())
-                if ocr_after_reset else
-                create_engine(effective, selection_browser, LocalCore())
+            engine = create_engine(
+                effective, selection_browser, LocalCore(),
+                build_run_captcha_provider(effective.flow) if ocr_after_reset else None,
             )
             if ocr_after_reset:
                 assert engine._captcha_provider is not None
@@ -466,7 +462,7 @@ def test_date_script_rejects_control_changed_after_snapshot() -> None:
                     patch("platforms.utiki.selection.classify_utiki_page", return_value=PageKind.DATE),
                 ):
                     snapshot = await dom.read_date_snapshot(tab)
-                    plan = select_date_snapshot(snapshot, config())
+                    plan = select_date_snapshot(snapshot, selector_settings())
                     assert plan is not None
                     await tab.evaluate(
                         "window.__dateClicks = 0; "
@@ -730,10 +726,7 @@ async def _exercise_reserved_seat(*, preselect_one: bool = False) -> None:
             await _wait_url(tab, "UTK0201_flow.html")
             await tab.evaluate("document.body.dataset.flow = 'seat'")
             tab_key = TabKey(2, "synthetic-seat-flow")
-            policy = apply_current_policy_reload(None, json.dumps({"utiki": {
-                "ticket_type_keyword": "全票", "seat_sorting": "row_seat",
-                "seat_selection_mode": "manual",
-            }}, ensure_ascii=False))
+            policy = UtikiBehavior("全票", "row_seat", "manual")
             engine = create_engine(
                 make_effective_policy(policy, FlowSettings(
                     True, True, 2, date_keyword='"9/10"', area_keyword='"前排"',

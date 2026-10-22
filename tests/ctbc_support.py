@@ -53,9 +53,6 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
         "seat_selection_mode": "manual",
     }
     config_dict["utiki"].update(utiki_behavior)
-    # Legacy workflow fixtures retain their own historical behavior section;
-    # current production defaults deliberately have no ctbc behavior mirror.
-    config_dict["ctbc"] = dict(utiki_behavior)
     config_dict["ocr_captcha"].update({
         "enable": False,
         "force_submit": False,
@@ -66,6 +63,17 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
         "disable_adjacent_seat": False,
     })
     return config_dict
+
+
+def selector_settings(date_keyword='"9/10"', area_keyword='"A"'):
+    """Current typed inputs for the pure date and area selectors."""
+    from utiki_config import FlowSettings
+
+    return FlowSettings(
+        True, True, 2,
+        date_keyword=date_keyword, area_keyword=area_keyword,
+        keyword_exclude='"身障","輪椅"',
+    )
 
 CTBC_TEST_PERFORMANCE_ID = "P16D0B8Z"
 
@@ -268,12 +276,12 @@ def make_ctbc_seat_snapshot(*, available=True, selected=()):
         "visual_selected_count": len(selected),
     }
 
-def make_effective_policy(current, flow=None):
-    """Test assembly from a validated behavior policy and explicit flow values."""
+def make_effective_policy(behavior, flow=None):
+    """Test assembly from one typed behavior and explicit flow values."""
     from platforms.utiki.application.flow_settings import EffectivePolicy, FlowSettings
+    from utiki_config import UtikiBehavior
 
+    if not isinstance(behavior, UtikiBehavior):
+        raise ValueError("test policy requires typed behavior")
     selection = flow or FlowSettings(False, False, 1)
-    return EffectivePolicy(
-        current.last_valid, selection if current.last_valid is not None else None,
-        current.policy_revision, current.control_revision, current.block_reason,
-    )
+    return EffectivePolicy(behavior, selection, 1, 1, None)

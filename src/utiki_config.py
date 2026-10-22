@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Literal, Mapping, cast
+from urllib.parse import urlsplit
 
 
 SeatSorting = Literal[
@@ -37,6 +38,21 @@ _SELECTION_MODES = frozenset({
     "from top to bottom", "from bottom to top", "center", "random",
 })
 _MAX_SAFE_COUNT = 9_007_199_254_740_991
+UTIKI_SPORTS_HOSTS = frozenset({"tix.ctbcsports.com", "tix.wdragons.com"})
+
+
+def is_supported_utiki_sports_url(url: str | None) -> bool:
+    """Match the supported HTTPS origins without accepting userinfo or alternate ports."""
+    try:
+        parsed = urlsplit(str(url or ""))
+        return bool(
+            parsed.scheme.lower() == "https"
+            and (parsed.hostname or "").lower() in UTIKI_SPORTS_HOSTS
+            and parsed.username is None and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except ValueError:
+        return False
 
 
 class ConfigError(ValueError):
@@ -119,92 +135,7 @@ class FlowSettings:
     def auto_submit(self) -> bool:
         return self.ocr_enabled and self.force_submit
 
-    def selector_values(self) -> dict[str, object]:
-        """Project only the keys consumed by the existing pure selectors."""
-        return {
-            "date_auto_select": {"date_keyword": self.date_keyword, "mode": self.date_mode},
-            "area_auto_select": {"area_keyword": self.area_keyword, "mode": self.area_mode},
-            "date_auto_fallback": self.date_fallback,
-            "area_auto_fallback": self.area_fallback,
-            "keyword_exclude": self.keyword_exclude,
-            "ticket_number": self.ticket_number,
-        }
-
-
 DEFAULT_BEHAVIOR = UtikiBehavior("全票", "row_seat", "manual")
-
-
-_POLICY_BLOCK_CODES = frozenset({
-    "NOT_LOADED",
-    "DUPLICATE_JSON_KEY",
-    "INVALID_JSON_NUMBER",
-    "INVALID_JSON",
-    "INVALID_ROOT",
-    "UNSUPPORTED_SCHEMA",
-    "INVALID_SECTION",
-    "UNKNOWN_BEHAVIOR_KEY",
-    "INVALID_BEHAVIOR_KEYS",
-    "INVALID_BEHAVIOR",
-    "UPGRADE_REQUIRED",
-    "INVALID_CONFIG",
-})
-
-
-@dataclass(frozen=True, slots=True, repr=False)
-class CurrentPolicyState:
-    last_valid: UtikiBehavior | None
-    policy_revision: int
-    control_revision: int
-    block_reason: str | None
-
-    def __post_init__(self) -> None:
-        if self.last_valid is not None and not isinstance(self.last_valid, UtikiBehavior):
-            raise ValueError("last valid policy must be typed")
-        for name in ("policy_revision", "control_revision"):
-            value = getattr(self, name)
-            if type(value) is not int or value < 0:
-                raise ValueError(f"{name} must be nonnegative")
-        if self.last_valid is None and self.policy_revision != 0:
-            raise ValueError("policy revision requires a valid policy")
-        if self.last_valid is not None and (
-            self.policy_revision == 0 or self.control_revision == 0
-        ):
-            raise ValueError("valid policy requires positive revisions")
-        if self.block_reason is None and self.last_valid is None:
-            raise ValueError("active policy state requires a valid policy")
-        if self.block_reason is not None and (
-            type(self.block_reason) is not str or self.block_reason not in _POLICY_BLOCK_CODES
-        ):
-            raise ValueError("block reason must be a known code")
-
-    @property
-    def allows_new_mutation(self) -> bool:
-        return self.block_reason is None
-
-
-def apply_current_policy_reload(
-    previous: CurrentPolicyState | None, raw_text: str
-) -> CurrentPolicyState:
-    """Retain attribution data after invalid reload, but revoke new effects."""
-    if previous is not None and not isinstance(previous, CurrentPolicyState):
-        raise ValueError("reload requires a current policy state")
-    state = previous or CurrentPolicyState(None, 0, 0, "NOT_LOADED")
-    try:
-        policy = load_current_policy(parse_profile_json(raw_text))
-    except ConfigError as exc:
-        reason = exc.code if exc.code in _POLICY_BLOCK_CODES else "INVALID_CONFIG"
-        return CurrentPolicyState(
-            state.last_valid,
-            state.policy_revision,
-            state.control_revision + int(state.allows_new_mutation),
-            reason,
-        )
-    return CurrentPolicyState(
-        policy,
-        state.policy_revision + int(policy != state.last_valid),
-        state.control_revision + int(not state.allows_new_mutation),
-        None,
-    )
 
 
 class UpgradeKind(str, Enum):

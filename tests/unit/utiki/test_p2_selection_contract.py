@@ -1,6 +1,7 @@
 """Focused P2 selection controls over existing production pure functions."""
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -24,7 +25,7 @@ from platforms.utiki.selection import (
 )
 from tests.ctbc_support import (
     CTBC_TEST_PERFORMANCE_ID,
-    config,
+    selector_settings,
     make_ctbc_area_snapshot,
     make_ctbc_date_snapshot,
     make_ctbc_quantity_snapshot,
@@ -48,11 +49,11 @@ def _three_dates() -> object:
 
 def test_d01_empty_and_unmatched_candidates_have_no_action_plan() -> None:
     raw = _three_dates()
-    settings = config(date_keyword='"不存在"')
+    settings = selector_settings(date_keyword='"不存在"')
     assert choose_candidate_index([], '"任何"', "from top to bottom") is None
     assert select_date_snapshot({**raw, "rows": []}, settings) is None
     assert select_date_snapshot(raw, settings) is None
-    settings["date_auto_fallback"] = True
+    settings = replace(settings, date_fallback=True)
     fallback = select_date_snapshot(raw, settings)
     assert fallback is not None and fallback.row_index == 0
 
@@ -76,8 +77,9 @@ def test_d02_and_expression_requires_all_terms() -> None:
 
 def test_d02_exclusion_removes_candidate_before_priority() -> None:
     raw = _three_dates()
-    settings = config(date_keyword='"測試場次"')
-    settings["keyword_exclude"] = '"09/10"'
+    settings = replace(
+        selector_settings(date_keyword='"測試場次"'), keyword_exclude='"09/10"',
+    )
     plan = select_date_snapshot(raw, settings)
     assert plan is not None and plan.row_index == 1
 
@@ -97,8 +99,7 @@ def test_d03_selection_mode_freezes_plan_without_resampling(
     raw = _three_dates()
     snapshot = parse_date_snapshot(raw)
     assert snapshot is not None
-    settings = config(date_keyword="")
-    settings["date_auto_select"]["mode"] = mode
+    settings = replace(selector_settings(date_keyword=""), date_mode=mode)
     if mode == "random":
         monkeypatch.setattr(util.random, "randint", lambda _lower, _upper: 1)
     plan = select_date_snapshot(snapshot, settings)
@@ -121,16 +122,16 @@ def test_d04_duplicate_row_identity_fails_closed() -> None:
 
 def test_d04_duplicate_query_fails_closed() -> None:
     raw = make_ctbc_date_snapshot()
-    assert select_date_snapshot(raw, config(date_keyword="")) is not None
+    assert select_date_snapshot(raw, selector_settings(date_keyword="")) is not None
     duplicate = raw["page_url"] + "&PRODUCT_ID=P16ANF0L"
     assert classify_utiki_page(duplicate) is PageKind.UNKNOWN
-    assert select_date_snapshot({**raw, "page_url": duplicate}, config(date_keyword="")) is None
+    assert select_date_snapshot({**raw, "page_url": duplicate}, selector_settings(date_keyword="")) is None
 
 
 def test_d04_empty_identity_fails_closed() -> None:
     raw = make_ctbc_date_snapshot()
-    assert select_date_snapshot(raw, config(date_keyword="")) is not None
-    assert select_date_snapshot({**raw, "document_id": ""}, config(date_keyword="")) is None
+    assert select_date_snapshot(raw, selector_settings(date_keyword="")) is not None
+    assert select_date_snapshot({**raw, "document_id": ""}, selector_settings(date_keyword="")) is None
 
 
 @pytest.mark.parametrize(
@@ -192,8 +193,7 @@ def test_d08_each_inventory_source_must_independently_cover_quantity(
         "front_title_status": "4",
         "front_action_status": "3",
     }
-    settings = config(area_keyword='"109區前排"')
-    settings["ticket_number"] = 2
+    settings = selector_settings(area_keyword='"109區前排"')
     valid = select_area_snapshot(
         make_ctbc_area_snapshot(include_back=False, **statuses),
         settings,

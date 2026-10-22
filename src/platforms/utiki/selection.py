@@ -7,6 +7,7 @@ from typing import Callable, TypeVar, TypedDict, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import util
+from utiki_config import FlowSettings
 from keyword_rules import (
     format_keyword_string,
     is_keyword_excluded,
@@ -531,9 +532,8 @@ def matches_keyword_group(text: object, keyword_group: object) -> bool:
     return bool(parts)
 
 
-def _keyword_excluded(config_dict: Mapping[str, object], row_text: str) -> bool:
-    raw = config_dict.get("keyword_exclude", "")
-    return not isinstance(raw, str) or is_keyword_excluded(raw, row_text)
+def _keyword_excluded(keyword_exclude: str, row_text: str) -> bool:
+    return is_keyword_excluded(keyword_exclude, row_text)
 
 
 def choose_candidate_index(
@@ -724,7 +724,7 @@ def _classify_date_control(
 
 
 def _date_candidates(
-    snapshot: DateSnapshot, config_dict: dict[str, object]
+    snapshot: DateSnapshot, keyword_exclude: str,
 ) -> list[_DateCandidate]:
     """從場次快照建立符合設定的候選清單。"""
 
@@ -737,7 +737,7 @@ def _date_candidates(
         ]
         if len(actionable) != 1 or not row.text:
             continue
-        if _keyword_excluded(config_dict, row.text):
+        if _keyword_excluded(keyword_exclude, row.text):
             continue
         control_index, fingerprint = actionable[0]
         action = _classify_date_control(fingerprint, snapshot.page_url)
@@ -753,12 +753,13 @@ def _date_candidates(
 
 
 def select_date_snapshot(
-    snapshot: object, config_dict: dict[str, object]
+    snapshot: object, settings: FlowSettings,
 ) -> DateActionPlan | None:
     """從不可變場次快照選出一個安全操作。"""
     snapshot = parse_date_snapshot(snapshot)
     if (
-        not isinstance(snapshot, DateSnapshot)
+        not isinstance(settings, FlowSettings)
+        or not isinstance(snapshot, DateSnapshot)
         or not snapshot.ok
         or not snapshot.page_url
         or not snapshot.document_id
@@ -766,22 +767,10 @@ def select_date_snapshot(
         or not 0 < len(snapshot.rows) <= 200
     ):
         return None
-    candidates = _date_candidates(snapshot, config_dict)
-    date_config = config_dict.get("date_auto_select", {})
-    if not isinstance(date_config, Mapping):
-        return None
-    keyword = date_config.get("date_keyword", "")
-    mode = date_config.get("mode", "from top to bottom")
-    allow_fallback = config_dict.get("date_auto_fallback", False)
-    if (
-        not isinstance(keyword, str)
-        or not isinstance(mode, str)
-        or not isinstance(allow_fallback, bool)
-    ):
-        return None
+    candidates = _date_candidates(snapshot, settings.keyword_exclude)
     target_index = choose_candidate_index(
         candidates,
-        keyword.strip(), mode, allow_fallback,
+        settings.date_keyword.strip(), settings.date_mode, settings.date_fallback,
     )
     if target_index is None:
         return None
@@ -1062,7 +1051,7 @@ def _area_map_options(
 def _area_candidate(
     row: AreaRow,
     indexed_areas: dict[str, list[_MapAreaTarget]],
-    config_dict: dict[str, object],
+    keyword_exclude: str,
     expected_performance_id: str,
     ticket_number: int,
     require_direct: bool,
@@ -1080,7 +1069,7 @@ def _area_candidate(
     if any(not re.fullmatch(r"[A-Za-z0-9_-]+", token) for token in rel_tokens):
         return None
     match_text = f"{area_text} {price_text}".strip()
-    if _keyword_excluded(config_dict, match_text):
+    if _keyword_excluded(keyword_exclude, match_text):
         return None
     options = _area_map_options(
         indexed_areas, rel_tokens, area_text, price_text,
@@ -1109,46 +1098,34 @@ def _area_candidate(
 
 def select_area_snapshot(
     snapshot: object,
-    config_dict: dict[str, object],
+    settings: FlowSettings,
     expected_performance_id: str,
     require_direct_destination: bool = True,
 ) -> AreaActionPlan | None:
     """從批次 DOM 與地圖快照選出一個區域。"""
     snapshot = parse_area_snapshot(snapshot)
-    if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
+    if not isinstance(settings, FlowSettings) or not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
         return None
     if not 0 < len(snapshot.rows) <= 200:
         return None
     indexed_areas = _index_map_areas(snapshot.areas)
     if indexed_areas is None:
         return None
-    requested = parse_nonnegative_count(config_dict.get("ticket_number", 1))
+    requested = parse_nonnegative_count(settings.ticket_number)
     if not isinstance(requested, PresentField) or requested.value == 0:
         return None
     ticket_number = requested.value
     candidates: list[_AreaCandidate] = []
     for row in snapshot.rows:
         candidate = _area_candidate(
-            row, indexed_areas, config_dict, expected_performance_id,
+            row, indexed_areas, settings.keyword_exclude, expected_performance_id,
             ticket_number, require_direct_destination,
         )
         if candidate:
             candidates.append(candidate)
-    area_config = config_dict.get("area_auto_select", {})
-    if not isinstance(area_config, Mapping):
-        return None
-    keyword = area_config.get("area_keyword", "")
-    mode = area_config.get("mode", "from top to bottom")
-    allow_fallback = config_dict.get("area_auto_fallback", False)
-    if (
-        not isinstance(keyword, str)
-        or not isinstance(mode, str)
-        or not isinstance(allow_fallback, bool)
-    ):
-        return None
     target_index = choose_candidate_index(
         candidates,
-        keyword.strip(), mode, allow_fallback,
+        settings.area_keyword.strip(), settings.area_mode, settings.area_fallback,
     )
     if target_index is None:
         return None

@@ -63,10 +63,14 @@ jobs:
           python-version: "3.11.9"
       - run: python -m pip install -r requirements-dev.txt
       - name: Check current typed scope
-        shell: bash
-        run: |
-          mapfile -t scope < <(grep -vE '^[[:space:]]*(#|$)' ci/utiki-typed-scope.txt)
-          python -m mypy --config-file ci/mypy-utiki.ini "${scope[@]}"
+        run: >-
+          python -m mypy --config-file ci/mypy-utiki.ini
+          src/platforms/utiki/domain src/platforms/utiki/application
+          src/platforms/utiki/adapters src/platforms/utiki/__init__.py
+          src/platforms/utiki/auth.py
+          src/platforms/utiki/profiles.py src/platforms/utiki/selection.py
+          src/platforms/utiki/bootstrap.py src/utiki_config.py
+          src/keyword_rules.py tools/migrations/convert_utiki_config.py
       - name: Check current dependency boundary
         run: python tools/check_utiki_architecture.py --root . --strict > utiki-architecture-report.json
 

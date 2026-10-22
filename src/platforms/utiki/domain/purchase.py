@@ -2,20 +2,10 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
 
 from ..profiles import PageKind, classify_utiki_page, get_utiki_tenant_profile, unique_query
-from .effects import (
-    ActiveEffect,
-    AwaitingEvidenceEffect,
-    ClaimedEffect,
-    EffectKind,
-    HeldEffect,
-    RunningEffect,
-)
 from .identity import OperationStamp, PurchaseKey
 from .inputs import InputReadyEvidence, PurchaseCycleId
 from .plans import QuantityPlan, SeatActionPlan, SubmitPlan, submit_plan_is_valid
@@ -136,68 +126,3 @@ class SubmitAttempt:
         ):
             if getattr(selection, name) != expected:
                 raise ValueError(f"submit selection {name} differs from purchase key")
-
-
-def _validate_submit_claim(attempt: SubmitAttempt, claim: ActiveEffect) -> None:
-    if not isinstance(attempt, SubmitAttempt):
-        raise ValueError("submit state requires an attempt")
-    if not isinstance(claim, (ClaimedEffect, RunningEffect, AwaitingEvidenceEffect, HeldEffect)):
-        raise ValueError("submit state requires a claim")
-    if (
-        attempt.source is not SubmitSource.AUTOMATIC
-        or claim.proposal.kind is not EffectKind.SUBMIT
-        or claim.proposal.stamp != attempt.stamp
-    ):
-        raise ValueError("submit claim differs from original attempt")
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedSubmit:
-    attempt: SubmitAttempt
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.attempt, SubmitAttempt):
-            raise ValueError("prepared submit requires an attempt")
-
-
-@dataclass(frozen=True, slots=True)
-class ClaimedSubmit:
-    attempt: SubmitAttempt
-    claim: ClaimedEffect | RunningEffect
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.claim, (ClaimedEffect, RunningEffect)):
-            raise ValueError("claimed submit requires a claim")
-        _validate_submit_claim(self.attempt, self.claim)
-
-
-@dataclass(frozen=True, slots=True)
-class AwaitingSubmitOutcome:
-    attempt: SubmitAttempt
-    claim: AwaitingEvidenceEffect
-    deadline_monotonic: float
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.claim, AwaitingEvidenceEffect):
-            raise ValueError("awaiting submit requires a claim")
-        _validate_submit_claim(self.attempt, self.claim)
-        if (
-            type(self.deadline_monotonic) not in (int, float)
-            or not math.isfinite(self.deadline_monotonic)
-            or self.deadline_monotonic <= 0
-        ):
-            raise ValueError("awaiting submit requires a finite deadline")
-
-
-@dataclass(frozen=True, slots=True)
-class HeldSubmitOutcome:
-    attempt: SubmitAttempt
-    claim: HeldEffect
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.claim, HeldEffect):
-            raise ValueError("held submit requires a claim")
-        _validate_submit_claim(self.attempt, self.claim)
-
-
-SubmitState: TypeAlias = PreparedSubmit | ClaimedSubmit | AwaitingSubmitOutcome | HeldSubmitOutcome

@@ -8,7 +8,7 @@ from typing import cast
 
 from .application.engine import UtikiEngine
 from .application.flow_settings import EffectivePolicy, FlowSettings
-from .application.ports import CaptchaProviderPort, CheckoutNotificationPort, CoreControlPort, QuantityBrowserPort
+from .application.ports import CaptchaProviderPort, CheckoutNotificationPort, CoreControlPort, SelectionBrowserPort
 from .application.refresh_contract import RefreshCoordinatorPort
 
 
@@ -41,7 +41,7 @@ def build_run_captcha_provider(flow: FlowSettings) -> CaptchaProviderPort | None
 
 
 def create_engine(
-    policy: EffectivePolicy, browser: QuantityBrowserPort, core: CoreControlPort,
+    policy: EffectivePolicy, browser: SelectionBrowserPort, core: CoreControlPort,
     captcha_provider: CaptchaProviderPort | None = None,
     checkout_notification: CheckoutNotificationPort | None = None,
 ) -> UtikiEngine:
@@ -49,20 +49,8 @@ def create_engine(
     return UtikiEngine(policy, browser, core, captcha_provider, checkout_notification=checkout_notification)
 
 
-def create_run_engine(
-    policy: EffectivePolicy, browser: QuantityBrowserPort, core: CoreControlPort,
-    checkout_notification: CheckoutNotificationPort | None = None,
-) -> UtikiEngine:
-    """Start one isolated Run with its actual startup OCR capability."""
-    provider = (
-        build_run_captcha_provider(policy.flow)
-        if isinstance(policy, EffectivePolicy) and policy.flow is not None else None
-    )
-    return create_engine(policy, browser, core, provider, checkout_notification)
-
-
 def create_refresh_run_engine(
-    policy: EffectivePolicy, browser: QuantityBrowserPort, core: CoreControlPort,
+    policy: EffectivePolicy, browser: SelectionBrowserPort, core: CoreControlPort,
     refresh_coordinator: RefreshCoordinatorPort,
     checkout_notification: CheckoutNotificationPort | None = None,
 ) -> UtikiEngine:

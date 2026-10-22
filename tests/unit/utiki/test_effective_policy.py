@@ -100,3 +100,53 @@ def test_unknown_selection_mode_blocks_policy_instead_of_defaulting_to_first_row
         assert not blocked.allows_new_mutation
         assert blocked.last_valid == valid.last_valid
         assert blocked.flow == valid.flow
+
+
+def test_invalid_reload_and_legacy_mirror_keep_original_policy_and_revisions() -> None:
+    initial = _load(None, _profile())
+    blocked = apply_effective_policy_reload(initial, '{"utiki":')
+    repeated = apply_effective_policy_reload(blocked, '{"utiki":')
+    assert blocked.block_reason == "INVALID_JSON"
+    assert not blocked.allows_new_mutation
+    assert blocked.last_valid == initial.last_valid
+    assert blocked.policy_revision == initial.policy_revision
+    assert blocked.control_revision == initial.control_revision + 1
+    assert repeated.control_revision == blocked.control_revision
+
+    mirrored = _profile()
+    mirrored["ctbc"] = dict(mirrored["utiki"])
+    legacy = _load(repeated, mirrored)
+    assert legacy.block_reason == "UPGRADE_REQUIRED"
+    assert legacy.last_valid == initial.last_valid
+
+    restored = _load(legacy, _profile())
+    assert restored.allows_new_mutation
+    assert restored.policy_revision == initial.policy_revision
+    assert restored.control_revision == blocked.control_revision + 1
+
+
+def test_new_valid_behavior_changes_revision_only_after_successful_reload() -> None:
+    initial = _load(None, _profile())
+    invalid = _load(initial, {**_profile(), "utiki": {}})
+    changed_profile = _profile()
+    behavior = changed_profile["utiki"]
+    assert isinstance(behavior, dict)
+    behavior["ticket_type_keyword"] = "半票"
+    changed = _load(invalid, changed_profile)
+    assert invalid.block_reason == "INVALID_BEHAVIOR_KEYS"
+    assert invalid.policy_revision == initial.policy_revision
+    assert changed.policy_revision == initial.policy_revision + 1
+    assert _load(changed, changed_profile) == changed
+
+
+def test_invalid_initial_policy_and_diagnostics_do_not_expose_values() -> None:
+    initial = apply_effective_policy_reload(None, '{"ctbc": {}}')
+    assert initial.block_reason == "UPGRADE_REQUIRED"
+    assert initial.policy_revision == 0
+    profile = _profile()
+    behavior = profile["utiki"]
+    assert isinstance(behavior, dict)
+    behavior["ticket_type_keyword"] = "fixture-secret-keyword"
+    active = _load(None, profile)
+    blocked = apply_effective_policy_reload(active, '{"utiki":')
+    assert "fixture-secret-keyword" not in repr(blocked)

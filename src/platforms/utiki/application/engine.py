@@ -48,7 +48,7 @@ from .ports import (
     InlineLoginCredentials, InlineLoginCredentialPort, InlineLoginIntent,
     PageObservation, PurchaseAuthority, PurchaseAuthorityPort, PurchaseBrowserPort,
     PurchaseInputObservation, RejectedLoginObservation,
-    QuantityBrowserPort, QuantityObservation, SelectionBrowserPort,
+    SelectionBrowserPort,
     SubmitOutcomeObservation, VerifiedLoginAcceptance,
 )
 from .refresh_contract import (
@@ -137,6 +137,8 @@ class _ManualPreparation:
     key: PurchaseKey
     arm_token: str
     context: PlanningContext
+    behavior_at_arm: UtikiBehavior | None
+    flow_at_arm: FlowSettings | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +152,8 @@ class _Submission:
     attempt: SubmitAttempt
     original: _ActiveSelection | None
     dispatched_at: float | None
+    behavior_at_attempt: UtikiBehavior | None = None
+    flow_at_attempt: FlowSettings | None = None
     terminal: SelectionProgress | None = None
     rejection_kind: str | None = None
     rejection_dialog: DialogSnapshot | None = None
@@ -229,7 +233,7 @@ class UtikiEngine:
     def __init__(
         self,
         policy: EffectivePolicy,
-        browser: QuantityBrowserPort,
+        browser: SelectionBrowserPort,
         core: CoreControlPort,
         captcha_provider: CaptchaProviderPort | None = None,
         refresh_coordinator: RefreshCoordinatorPort | None = None,
@@ -281,9 +285,11 @@ class UtikiEngine:
             flow.ocr_path if custom else "",
         )
 
-    def _validate_browser_capabilities(self, policy: EffectivePolicy) -> None:
+    def _validate_browser_capabilities(
+        self, policy: EffectivePolicy, *, require_purchase: bool = False,
+    ) -> None:
         flow = policy.flow
-        if flow is None or not (flow.date_enabled or flow.area_enabled):
+        if flow is None or not require_purchase and not (flow.date_enabled or flow.area_enabled):
             return
         required: tuple[str, ...] = (
             "observe_date", "observe_area", "observe_quantity",
@@ -313,6 +319,10 @@ class UtikiEngine:
         ]
         if host_missing:
             raise ValueError(f"uTiki host capability missing: {host_missing[0]}")
+
+    def ensure_purchase_capabilities(self, policy: EffectivePolicy) -> None:
+        """Require every capability reachable from the formal purchase owner."""
+        self._validate_browser_capabilities(policy, require_purchase=True)
 
     def _host_control(self, tab: TabKey) -> CoreControl:
         value = self._core.current_control(tab)
@@ -456,6 +466,26 @@ class UtikiEngine:
         self._sessions.pop(handle.tab, None)
         return True
 
+    def retired_outcome_pending(self, handle: SessionHandle) -> bool:
+        """A retired original still owns evidence or a coordinator token."""
+        retired = self._retired_runs.get(handle.tab)
+        return retired is not None and retired.handle == handle
+
+    def _finish_retired_active(
+        self, handle: SessionHandle, retired: _RetiredOutcome,
+        *, finish_submission: bool = False,
+    ) -> None:
+        if self._retired_runs.get(handle.tab) is not retired or retired.handle != handle:
+            return
+        retired.active = None
+        if finish_submission:
+            retired.submission = None
+        if (
+            retired.submission is None and retired.manual_preparation is None
+            and retired.refresh is None
+        ):
+            self._retired_runs.pop(handle.tab, None)
+
     def context(self, handle: SessionHandle) -> PlanningContext | None:
         current = self._current(handle)
         if (
@@ -482,36 +512,6 @@ class UtikiEngine:
                 return None
         return PlanningContext(
             handle.generation, self._policy.policy_revision, current.control_revision
-        )
-
-    async def plan_quantity(
-        self, handle: SessionHandle, stamp: OperationStamp, ticket_number: int
-    ) -> QuantityPlan | None:
-        """Observe once; discard a plan if its source or current authority changes."""
-        before = self.context(handle)
-        if (
-            before is None or not isinstance(stamp, OperationStamp)
-            or stamp.tab != handle.tab
-            or (
-                stamp.session_generation, stamp.policy_revision, stamp.control_revision
-            ) != (
-                before.session_generation, before.policy_revision, before.control_revision
-            )
-        ):
-            return None
-        observation = await self._browser.observe_page(stamp)
-        if (
-            self.context(handle) != before
-            or not isinstance(observation, QuantityObservation)
-            or observation.source != stamp
-            or observation.snapshot.document_id != stamp.document.token
-        ):
-            return None
-        policy = self._policy.last_valid
-        if policy is None:
-            return None
-        return select_quantity_snapshot(
-            observation.snapshot, policy.ticket_type_keyword, ticket_number
         )
 
     def _flow_context(self, handle: SessionHandle) -> PlanningContext | None:
@@ -629,7 +629,10 @@ class UtikiEngine:
         coordinator = self._refresh_coordinator
         assert coordinator is not None
         intent.phase = RefreshPhase.CLEANUP_PENDING
-        if time.monotonic() < intent.next_retry_at or intent.cleanup_attempts >= 3:
+        if intent.cleanup_attempts >= 3:
+            intent.phase = RefreshPhase.RECONCILIATION_REQUIRED
+            return RefreshProgress.MANUAL_RECONCILIATION
+        if time.monotonic() < intent.next_retry_at:
             return RefreshProgress.CLEANUP_PENDING
         try:
             cleaned = (
@@ -646,8 +649,14 @@ class UtikiEngine:
         except Exception:
             cleaned = False
         if cleaned and (current is None or current.refresh is intent):
-            intent.phase = RefreshPhase.ABANDONED
-            return RefreshProgress.BLOCKED
+            intent.phase = (
+                RefreshPhase.RECONCILIATION_REQUIRED
+                if intent.probe_timeout else RefreshPhase.ABANDONED
+            )
+            return (
+                RefreshProgress.MANUAL_RECONCILIATION
+                if intent.probe_timeout else RefreshProgress.BLOCKED
+            )
         intent.cleanup_attempts += 1
         intent.next_retry_at = time.monotonic() + min(0.5 * 2 ** intent.cleanup_attempts, 2.0)
         return RefreshProgress.CLEANUP_PENDING
@@ -679,6 +688,60 @@ class UtikiEngine:
         if current is not None and not due:
             current.scheduled_armed = True
 
+    async def maintain_paused_refresh(self, handle: SessionHandle) -> RefreshProgress:
+        """Maintain only this Run's existing refresh resources while paused."""
+        if self._refresh_busy:
+            return RefreshProgress.WAITING
+        self._refresh_busy = True
+        try:
+            current = self._current(handle)
+            intent = current.refresh if current is not None else None
+            if current is None or intent is None:
+                return RefreshProgress.BLOCKED
+            if intent.phase in {
+                RefreshPhase.QUEUED, RefreshPhase.RESERVE_UNKNOWN,
+                RefreshPhase.RESERVED, RefreshPhase.COMMIT_UNKNOWN,
+                RefreshPhase.CLEANUP_PENDING,
+            }:
+                return await self._refresh_cleanup(current, intent)
+            if intent.phase is RefreshPhase.PERMITTED:
+                return await self._refresh_abandon_permit(intent)
+            if intent.phase in {
+                RefreshPhase.RELOAD_POSSIBLE, RefreshPhase.AWAITING_CLEARANCE,
+            }:
+                await self._refresh_probe_renew(intent)
+                if intent.probe_timeout:
+                    intent.cleanup_probe = True
+                    return await self._refresh_cleanup(current, intent)
+                if intent.probe_lost:
+                    intent.phase = RefreshPhase.OWNERSHIP_LOST
+                    return RefreshProgress.MANUAL_RECONCILIATION
+                try:
+                    observed = await self._refresh_browser().observe_refresh_document(
+                        handle.tab,
+                    )
+                except Exception:
+                    return RefreshProgress.RELOAD_POSSIBLE
+                if self._current(handle) is not current or current.refresh is not intent:
+                    return RefreshProgress.RELOAD_POSSIBLE
+                if (observed.url, observed.document_id) != (
+                    intent.source_url, intent.source_document,
+                ):
+                    intent.new_document = observed.document_id
+                    intent.phase = RefreshPhase.AWAITING_CLEARANCE
+                return (
+                    RefreshProgress.AWAITING_CLEARANCE
+                    if intent.phase is RefreshPhase.AWAITING_CLEARANCE
+                    else RefreshProgress.RELOAD_POSSIBLE
+                )
+            if intent.phase in {
+                RefreshPhase.OWNERSHIP_LOST, RefreshPhase.RECONCILIATION_REQUIRED,
+            }:
+                return RefreshProgress.MANUAL_RECONCILIATION
+            return RefreshProgress.BLOCKED
+        finally:
+            self._refresh_busy = False
+
     async def reconcile_closed_refresh(self, handle: SessionHandle) -> RefreshProgress:
         """Finish only the retired Run's original token after stop or close."""
         if self._refresh_busy:
@@ -706,6 +769,12 @@ class UtikiEngine:
             RefreshPhase.RELOAD_POSSIBLE, RefreshPhase.AWAITING_CLEARANCE,
         }:
             await self._refresh_probe_renew(intent)
+            if intent.probe_timeout:
+                intent.cleanup_probe = True
+                return await self._refresh_cleanup(None, intent)
+            if intent.probe_lost:
+                intent.phase = RefreshPhase.OWNERSHIP_LOST
+                return RefreshProgress.MANUAL_RECONCILIATION
             try:
                 observed = await self._refresh_browser().observe_refresh_document(handle.tab)
             except Exception:
@@ -728,9 +797,13 @@ class UtikiEngine:
                 except Exception:
                     completed = None
                 if completed is None or not completed.accepted:
-                    return RefreshProgress.AWAITING_CLEARANCE
+                    return await self._probe_completion_unknown(intent)
             intent.phase = RefreshPhase.COMPLETE
             progress = RefreshProgress.COMPLETE
+        elif intent.phase in {
+            RefreshPhase.OWNERSHIP_LOST, RefreshPhase.RECONCILIATION_REQUIRED,
+        }:
+            return RefreshProgress.MANUAL_RECONCILIATION
         else:
             progress = RefreshProgress.COMPLETE
         if intent.phase in {
@@ -766,6 +839,22 @@ class UtikiEngine:
         # None is unknown ownership, not a lost or renewed lease.
         intent.next_probe_renew_at = time.monotonic() + (1.0 if renewed is None else 5.0)
 
+    async def _probe_completion_unknown(self, intent: RefreshIntent) -> RefreshProgress:
+        """A failed completion can be a DB error; only an exact renew proves loss."""
+        coordinator = self._refresh_coordinator
+        assert coordinator is not None
+        try:
+            renewed = await coordinator.renew(intent.permit_id)
+        except Exception:
+            renewed = None
+        if renewed is False:
+            intent.probe_lost = True
+            intent.phase = RefreshPhase.OWNERSHIP_LOST
+            return RefreshProgress.MANUAL_RECONCILIATION
+        intent.probe_unknown = renewed is None
+        intent.next_probe_renew_at = time.monotonic() + (1.0 if renewed is None else 5.0)
+        return RefreshProgress.AWAITING_CLEARANCE
+
     async def advance_refresh(
         self, handle: SessionHandle, reason: RefreshReason,
         *, schedule_due: bool = True, apply_local_interval: bool = True,
@@ -796,6 +885,10 @@ class UtikiEngine:
             return await self._refresh_reconcile_document(handle, current, intent)
         if intent is not None and intent.phase is RefreshPhase.AWAITING_CLEARANCE:
             return await self._refresh_clearance(handle, current, intent)
+        if intent is not None and intent.phase in {
+            RefreshPhase.OWNERSHIP_LOST, RefreshPhase.RECONCILIATION_REQUIRED,
+        }:
+            return RefreshProgress.MANUAL_RECONCILIATION
         if intent is not None and intent.phase is RefreshPhase.COMPLETE:
             if intent.reason is RefreshReason.KNOWN_REJECTION and reason is RefreshReason.KNOWN_REJECTION:
                 return RefreshProgress.COMPLETE
@@ -994,9 +1087,19 @@ class UtikiEngine:
         self, handle: SessionHandle, current: _Session, intent: RefreshIntent,
     ) -> RefreshProgress:
         await self._refresh_probe_renew(intent)
+        if intent.probe_timeout:
+            intent.cleanup_probe = True
+            return await self._refresh_cleanup(current, intent)
         health = await self.observe_health(handle)
         if health is None or self._current(handle) is not current:
             return RefreshProgress.RELOAD_POSSIBLE
+        if intent.probe_lost:
+            if (health.url, health.document_id) != (
+                intent.source_url, intent.source_document,
+            ):
+                intent.new_document = health.document_id
+            intent.phase = RefreshPhase.OWNERSHIP_LOST
+            return RefreshProgress.MANUAL_RECONCILIATION
         if (health.url, health.document_id) == (
             intent.source_url, intent.source_document,
         ):
@@ -1008,6 +1111,13 @@ class UtikiEngine:
     async def _refresh_clearance(
         self, handle: SessionHandle, current: _Session, intent: RefreshIntent,
     ) -> RefreshProgress:
+        await self._refresh_probe_renew(intent)
+        if intent.probe_timeout:
+            intent.cleanup_probe = True
+            return await self._refresh_cleanup(current, intent)
+        if intent.probe_lost:
+            intent.phase = RefreshPhase.OWNERSHIP_LOST
+            return RefreshProgress.MANUAL_RECONCILIATION
         health = await self.observe_health(handle)
         if health is None or self._current(handle) is not current:
             return RefreshProgress.AWAITING_CLEARANCE
@@ -1034,12 +1144,12 @@ class UtikiEngine:
             except Exception:
                 completed = None
             if completed is None or not completed.accepted:
-                return RefreshProgress.AWAITING_CLEARANCE
+                return await self._probe_completion_unknown(intent)
         intent.phase = RefreshPhase.COMPLETE
         return RefreshProgress.COMPLETE
 
     def _flow_browser(self) -> SelectionBrowserPort:
-        return cast(SelectionBrowserPort, self._browser)
+        return self._browser
 
     def _observation_valid(
         self, handle: SessionHandle, before: PlanningContext,
@@ -1161,7 +1271,9 @@ class UtikiEngine:
             if is_retired and retired is not None and (
                 active.stage == "submit" or retired.submission is None
             ):
-                self._retired_runs.pop(handle.tab, None)
+                self._finish_retired_active(
+                    handle, retired, finish_submission=active.stage == "submit",
+                )
             elif current is not None and current.active is active:
                 if active.stage == "submit" and current.submission is not None:
                     current.submission.terminal = SelectionProgress.SUBMIT_BLOCKED
@@ -1183,7 +1295,7 @@ class UtikiEngine:
             retired.submission is None
             or active.stage in {"quantity", "seat", "seat_clear", "login"}
         ) and receipt.status is EffectStatus.APPLIED:
-            self._retired_runs.pop(handle.tab, None)
+            self._finish_retired_active(handle, retired)
             return False
         active.claim = AwaitingEvidenceEffect(claim.claim_id, claim.proposal)
         return not is_retired
@@ -1254,7 +1366,7 @@ class UtikiEngine:
         except Exception:
             return False
         if resolved and self._retired_runs.get(handle.tab) is retired:
-            self._retired_runs.pop(handle.tab, None)
+            self._finish_retired_active(handle, retired)
             return True
         return False
 
@@ -1432,7 +1544,7 @@ class UtikiEngine:
             snapshot.page_url
         ):
             return SelectionProgress.BLOCKED
-        plan = select_date_snapshot(snapshot, settings.selector_values())
+        plan = select_date_snapshot(snapshot, settings)
         if plan is None:
             return SelectionProgress.BLOCKED
         claim = self._claim_selection(handle, before, "date", snapshot, plan)
@@ -1476,6 +1588,12 @@ class UtikiEngine:
         snapshot = cast(AreaSnapshot, observation.snapshot)
         if not self._date_destination_matches(prior, snapshot):
             return SelectionProgress.AWAITING_EVIDENCE
+        # The destination closes the original date navigation independently of
+        # whether this new document has a selectable area. Keep its source for
+        # a later area claim; a no-area refresh must not inherit an active date.
+        if current.active is prior:
+            current.active = None
+            current.selection_source = prior
         computer = self._computer_mode()
         if computer and not self._server_assignment_supported(snapshot.page_url):
             return SelectionProgress.BLOCKED
@@ -1483,7 +1601,7 @@ class UtikiEngine:
         if query is None:
             return SelectionProgress.AWAITING_EVIDENCE
         plan = select_area_snapshot(
-            snapshot, settings.selector_values(), query["PERFORMANCE_ID"],
+            snapshot, settings, query["PERFORMANCE_ID"],
             require_direct_destination=False,
         )
         if (
@@ -2268,14 +2386,17 @@ class UtikiEngine:
         current = self._current(handle)
         submission = current.submission if current is not None else None
         if (
-            before is None or current is None or submission is None
+            current is None or submission is None
             or submission.terminal is not SelectionProgress.SUBMIT_BLOCKED
             or submission.rejection_kind != "auth"
             or submission.rejection_dialog is None
             or not submission.request_boundary
         ):
             return SelectionProgress.BLOCKED
-        accepted = await self._verified_login_after_rejection(handle, current, submission)
+        accepted = (
+            await self._verified_login_after_rejection(handle, current, submission)
+            if before is not None else None
+        )
         if accepted is not None:
             current.prior_submissions.append(submission)
             current.submission = None
@@ -2290,6 +2411,11 @@ class UtikiEngine:
             current.ocr_attempt = None
             current.required_manual_revision = None
             return SelectionProgress.LOGIN_RECOVERY_READY
+        if (
+            current.active is not None and current.active.stage == "submit"
+            and (before is None or not self._recovery_dispatch_ready(handle, before, submission))
+        ):
+            return SelectionProgress.BLOCKED
         if not submission.dialog_dismissed:
             dismissed = await self.advance_dialog_dismissal(handle)
             if dismissed is not SelectionProgress.DIALOG_DISMISSED:
@@ -2319,7 +2445,6 @@ class UtikiEngine:
                 or not observed.changed_ready
                 or self._current(handle) is not current
                 or current.active is not active or current.submission is not submission
-                or self._flow_context(handle) != before
                 or not self._recovery_source_current(handle, before, current, active)
             ):
                 return SelectionProgress.MANUAL_ACTION_REQUIRED
@@ -2339,10 +2464,13 @@ class UtikiEngine:
             current.ocr_attempt = None
             current.required_manual_revision = None
             return SelectionProgress.LOGIN_RECOVERY_READY
+        if before is None:
+            return SelectionProgress.BLOCKED
         if (
             active is None or active.stage != "dialog_dismiss"
             or not isinstance(active.claim, AwaitingEvidenceEffect)
             or not self._recovery_source_current(handle, before, current, active)
+            or not self._recovery_dispatch_ready(handle, before, submission)
         ):
             return SelectionProgress.AWAITING_EVIDENCE
         token = uuid.uuid4().hex
@@ -2503,6 +2631,7 @@ class UtikiEngine:
                     if (
                         isinstance(current, _RetiredOutcome)
                         and current.active is None and current.submission is None
+                        and current.refresh is None
                     ):
                         self._retired_runs.pop(handle.tab, None)
                     return SelectionProgress.BLOCKED
@@ -2519,7 +2648,10 @@ class UtikiEngine:
                 )
             except ValueError:
                 return SelectionProgress.SUBMIT_BLOCKED
-            submission = _Submission(attempt, None, None)
+            submission = _Submission(
+                attempt, None, None,
+                preparation.behavior_at_arm, preparation.flow_at_arm,
+            )
             current.submission = submission
         elif attempt.manual_evidence != marker:
             return SelectionProgress.SUBMIT_BLOCKED
@@ -2546,6 +2678,10 @@ class UtikiEngine:
             ):
                 return SelectionProgress.AWAITING_EVIDENCE
             outcome = classify_submit_dialog(dialog.text) if dialog.visible_count == 1 else None
+            if outcome not in {"success", "quota", "captcha", "auth", "seat_conflict"}:
+                # An unclassified dialog blocks new work but does not close the
+                # original request. Later attributable checkout remains readable.
+                return SelectionProgress.SUBMIT_BLOCKED
             if outcome in {"captcha", "auth", "seat_conflict"}:
                 submission.rejection_kind = outcome
                 submission.rejection_dialog = dialog
@@ -2628,6 +2764,8 @@ class UtikiEngine:
             ):
                 return self._submit_pending(handle, current, active)
             outcome = classify_submit_dialog(dialog.text) if dialog.visible_count == 1 else None
+            if outcome not in {"success", "quota", "captcha", "auth", "seat_conflict"}:
+                return SelectionProgress.SUBMIT_BLOCKED
             if outcome in {"captcha", "auth", "seat_conflict"}:
                 submission.rejection_kind = outcome
                 submission.rejection_dialog = dialog
@@ -2647,7 +2785,7 @@ class UtikiEngine:
         return self._submit_pending(handle, current, active)
 
     def _recovery_source_current(
-        self, handle: SessionHandle, before: PlanningContext,
+        self, handle: SessionHandle, before: PlanningContext | None,
         current: _Session, active: _ActiveSelection,
     ) -> bool:
         submission = current.submission
@@ -2656,7 +2794,6 @@ class UtikiEngine:
         attempt = submission.attempt
         dialog = submission.rejection_dialog
         stamp = attempt.stamp
-        authority = self._purchase_authority(handle.tab)
         recovery_kinds = {
             "dialog_dismiss": EffectKind.DISMISS_DIALOG,
             "captcha_reset": EffectKind.CAPTCHA_RESET,
@@ -2671,38 +2808,21 @@ class UtikiEngine:
                 attempt.source is SubmitSource.OBSERVED_MANUAL
                 and preparation is not None and marker is not None
                 and self._manual_marker_matches(preparation, marker)
-                and preparation.context == before
                 and attempt.plan.page_url == dialog.page_url
                 and attempt.plan.document_id == dialog.document_id
-                and authority is not None
-                and authority.auth_epoch == attempt.key.auth_epoch
-                and authority.credential_revision
-                == attempt.input_evidence.context.credential_revision
                 and active.source_url == attempt.plan.page_url
                 and active.stage in recovery_kinds
                 and proposal.parent_recovery_id == attempt.attempt_id.token
                 and proposal.kind is recovery_kinds[active.stage]
                 and proposal.stamp.tab == handle.tab
                 and proposal.stamp.document.token == dialog.document_id
-                and (
-                    proposal.stamp.session_generation,
-                    proposal.stamp.policy_revision,
-                    proposal.stamp.control_revision,
-                ) == (
-                    before.session_generation, before.policy_revision,
-                    before.control_revision,
-                )
+                and proposal.stamp.session_generation == handle.generation
             )
         if (
-            (stamp.session_generation, stamp.policy_revision, stamp.control_revision)
-            != (before.session_generation, before.policy_revision, before.control_revision)
+            stamp.session_generation != handle.generation
             or stamp.tab != handle.tab
             or stamp.document.token != dialog.document_id
             or attempt.plan.page_url != dialog.page_url
-            or authority is None
-            or authority.auth_epoch != attempt.key.auth_epoch
-            or authority.credential_revision
-            != attempt.input_evidence.context.credential_revision
             or active.source_url != attempt.plan.page_url
         ):
             return False
@@ -2715,14 +2835,7 @@ class UtikiEngine:
             and proposal.parent_recovery_id == attempt.attempt_id.token
             and proposal.stamp.tab == stamp.tab
             and proposal.stamp.document == stamp.document
-            and (
-                proposal.stamp.session_generation,
-                proposal.stamp.policy_revision,
-                proposal.stamp.control_revision,
-            ) == (
-                stamp.session_generation, stamp.policy_revision,
-                stamp.control_revision,
-            )
+            and proposal.stamp.session_generation == handle.generation
             and (
                 active.stage != "captcha_reset" or (
                     submission.captcha_reset is not None
@@ -2732,8 +2845,67 @@ class UtikiEngine:
             )
         )
 
-    async def _observe_dialog_closed(
+    def _recovery_dispatch_ready(
         self, handle: SessionHandle, before: PlanningContext,
+        submission: _Submission,
+    ) -> bool:
+        """A new recovery effect needs current authority, separate from old facts."""
+        authority = self._purchase_authority(handle.tab)
+        return bool(
+            self._flow_context(handle) == before
+            and authority is not None
+            and authority.auth_epoch == submission.attempt.key.auth_epoch
+            and authority.credential_revision
+            == submission.attempt.input_evidence.context.credential_revision
+            and self._policy.last_valid == submission.behavior_at_attempt
+            and self._selection_flow_signature(self._flow_settings)
+            == self._selection_flow_signature(submission.flow_at_attempt)
+        )
+
+    @staticmethod
+    def _selection_flow_signature(settings: FlowSettings | None) -> tuple[object, ...] | None:
+        if settings is None:
+            return None
+        return (
+            settings.date_enabled, settings.area_enabled, settings.ticket_number,
+            settings.date_keyword, settings.date_mode, settings.date_fallback,
+            settings.area_keyword, settings.area_mode, settings.area_fallback,
+            settings.keyword_exclude, settings.allow_non_adjacent,
+        )
+
+    def recovery_policy_changed(self, handle: SessionHandle) -> bool:
+        current = self._current(handle)
+        submission = current.submission if current is not None else None
+        return bool(
+            submission is not None
+            and submission.terminal is SelectionProgress.SUBMIT_BLOCKED
+            and (
+                self._policy.last_valid != submission.behavior_at_attempt
+                or self._selection_flow_signature(self._flow_settings)
+                != self._selection_flow_signature(submission.flow_at_attempt)
+            )
+        )
+
+    async def reconcile_existing_recovery(
+        self, handle: SessionHandle,
+    ) -> SelectionProgress | None:
+        """Read back an already issued recovery claim; never create a new one."""
+        current = self._current(handle)
+        active = current.active if current is not None else None
+        if active is None or not isinstance(active.claim, AwaitingEvidenceEffect):
+            return None
+        if active.stage == "dialog_dismiss":
+            return await self.advance_dialog_dismissal(handle)
+        if active.stage == "captcha_reset":
+            return await self.advance_captcha_reset(handle)
+        if active.stage == "login_arm":
+            return await self.advance_login_recovery(handle)
+        if active.stage == "conflict_clear":
+            return await self.advance_conflict_recovery(handle)
+        return None
+
+    async def _observe_dialog_closed(
+        self, handle: SessionHandle, before: PlanningContext | None,
         current: _Session, active: _ActiveSelection,
     ) -> SelectionProgress:
         submission = current.submission
@@ -2753,7 +2925,6 @@ class UtikiEngine:
             or observation.page_url != expected.page_url
             or observation.document_id != expected.document_id
             or observation.dialog.visible_count != 0
-            or self._flow_context(handle) != before
             or self._current(handle) is not current
             or current.active is not active
             or submission is None or submission.rejection_dialog != expected
@@ -2769,7 +2940,7 @@ class UtikiEngine:
         current = self._current(handle)
         submission = current.submission if current is not None else None
         if (
-            before is None or current is None or submission is None
+            current is None or submission is None
             or submission.terminal is not SelectionProgress.SUBMIT_BLOCKED
             or submission.rejection_kind not in {"captcha", "auth", "seat_conflict"}
             or submission.rejection_dialog is None
@@ -2785,8 +2956,12 @@ class UtikiEngine:
             if submission.dialog_dismissed:
                 return SelectionProgress.DIALOG_DISMISSED
             return await self._observe_dialog_closed(handle, before, current, active)
+        if before is None:
+            return SelectionProgress.BLOCKED
         if active is not None and (active.stage != "submit" or isinstance(active.claim, RunningEffect)):
             return SelectionProgress.AWAITING_EVIDENCE
+        if not self._recovery_dispatch_ready(handle, before, submission):
+            return SelectionProgress.BLOCKED
         expected = submission.rejection_dialog
         assert expected is not None
         try:
@@ -2806,6 +2981,7 @@ class UtikiEngine:
             or submission.rejection_dialog != expected
             or active is not None
             and not self._recovery_source_current(handle, before, current, active)
+            or not self._recovery_dispatch_ready(handle, before, submission)
         ):
             return SelectionProgress.AWAITING_EVIDENCE
         stamp = OperationStamp(
@@ -2834,7 +3010,7 @@ class UtikiEngine:
         return await self._observe_dialog_closed(handle, before, current, active)
 
     async def _observe_captcha_refreshed(
-        self, handle: SessionHandle, before: PlanningContext,
+        self, handle: SessionHandle, before: PlanningContext | None,
         current: _Session, active: _ActiveSelection,
     ) -> SelectionProgress:
         submission = current.submission
@@ -2865,11 +3041,8 @@ class UtikiEngine:
             or observed.image.load_revision == reset.before_image.load_revision
             or not observed.field_usable or not observed.field_empty
             or not observed.refresh_usable or observed.dialog_visible
-            or self._flow_context(handle) != before
             or self._current(handle) is not current
             or current.active is not active
-            or current.ready_context != before
-            or current.ready_selection is None
             or not self._recovery_source_current(handle, before, current, active)
         ):
             return SelectionProgress.AWAITING_EVIDENCE
@@ -2884,7 +3057,7 @@ class UtikiEngine:
         current = self._current(handle)
         submission = current.submission if current is not None else None
         if (
-            before is None or current is None or submission is None
+            current is None or submission is None
             or submission.terminal is not SelectionProgress.SUBMIT_BLOCKED
             or submission.rejection_kind != "captcha"
             or submission.rejection_dialog is None
@@ -2898,10 +3071,14 @@ class UtikiEngine:
             return SelectionProgress.BLOCKED
         if active.stage == "captcha_reset":
             return await self._observe_captcha_refreshed(handle, before, current, active)
+        if before is None:
+            return SelectionProgress.BLOCKED
         if active.stage != "dialog_dismiss" or not isinstance(
             active.claim, AwaitingEvidenceEffect
         ):
             return SelectionProgress.SUBMIT_BLOCKED
+        if not self._recovery_dispatch_ready(handle, before, submission):
+            return SelectionProgress.BLOCKED
         try:
             observed = await self._purchase_browser().observe_captcha_reset(handle.tab)
         except Exception:
@@ -2918,6 +3095,7 @@ class UtikiEngine:
             or self._current(handle) is not current
             or current.active is not active
             or not self._recovery_source_current(handle, before, current, active)
+            or not self._recovery_dispatch_ready(handle, before, submission)
         ):
             return SelectionProgress.AWAITING_EVIDENCE
         reset = CaptchaResetAttempt(
@@ -2993,7 +3171,7 @@ class UtikiEngine:
             )
         submission = current.submission if current is not None else None
         if (
-            before is None or current is None or submission is None
+            current is None or submission is None
             or submission.terminal is not SelectionProgress.SUBMIT_BLOCKED
             or submission.rejection_kind != "seat_conflict"
             or submission.rejection_dialog is None
@@ -3009,8 +3187,10 @@ class UtikiEngine:
             active = current.active
             if active is None or active.stage == "dialog_dismiss":
                 if (
-                    active is None or not isinstance(active.claim, AwaitingEvidenceEffect)
+                    before is None
+                    or active is None or not isinstance(active.claim, AwaitingEvidenceEffect)
                     or not self._recovery_source_current(handle, before, current, active)
+                    or not self._recovery_dispatch_ready(handle, before, submission)
                 ):
                     return SelectionProgress.AWAITING_EVIDENCE
                 stamp = OperationStamp(
@@ -3063,7 +3243,7 @@ class UtikiEngine:
                 or not self._conflict_selection_empty(attempt, observed.snapshot)
                 or self._current(handle) is not current
                 or current.active is not active or current.submission is not submission
-                or self._flow_context(handle) != before
+                or not self._recovery_source_current(handle, before, current, active)
             ):
                 return SelectionProgress.AWAITING_EVIDENCE
             submission.conflict_cleared = True
@@ -3073,6 +3253,8 @@ class UtikiEngine:
             current.login_verified = None
             current.manual_preparation = None
             return SelectionProgress.CONFLICT_CLEARED
+        if before is None:
+            return SelectionProgress.BLOCKED
         if self._refresh_coordinator is None:
             return SelectionProgress.MANUAL_ACTION_REQUIRED
         progress = await self.advance_refresh(
@@ -3168,13 +3350,102 @@ class UtikiEngine:
         except Exception:
             return False
 
+    async def _reconcile_original_captcha_write(
+        self, handle: SessionHandle, current: _Session,
+    ) -> SelectionProgress | None:
+        """Close an existing local write before asking for today's new grant."""
+        active = current.active
+        if active is None or active.stage != "captcha_input":
+            return None
+        if not isinstance(active.plan, CaptchaAttempt) or isinstance(active.claim, RunningEffect):
+            return SelectionProgress.AWAITING_EVIDENCE
+        prior = current.input_observed
+        try:
+            observed = await self._purchase_browser().observe_captcha_reset(handle.tab)
+        except Exception:
+            return SelectionProgress.AWAITING_EVIDENCE
+        if (
+            not isinstance(observed, CaptchaResetObservation)
+            or observed.tab != handle.tab or observed.page_url != active.source_url
+            or observed.document_id != active.claim.proposal.stamp.document.token
+            or prior is None or prior.image != active.plan.image
+            or self._current(handle) is not current or current.active is not active
+        ):
+            return SelectionProgress.AWAITING_EVIDENCE
+        answer = current.input_answer
+        if (
+            isinstance(active.claim, AwaitingEvidenceEffect)
+            and answer is not None and observed.image == active.plan.image
+            and observed.manual_revision == prior.manual_revision
+            and await self._audit_captcha_answer(prior, answer)
+            and self._current(handle) is current and current.active is active
+        ):
+            current.active = None
+            before = self._flow_context(handle)
+            authority = self._purchase_authority(handle.tab)
+            original = active.claim.proposal.stamp
+            if (
+                before is not None and current.ready_context == before
+                and (before.session_generation, before.policy_revision,
+                     before.control_revision) == (
+                         original.session_generation, original.policy_revision,
+                         original.control_revision)
+                and authority is not None
+                and authority.credential_revision == active.plan.context.credential_revision
+            ):
+                current.input_state = ReadyInput(InputReadyEvidence(
+                    active.plan.context, InputSource.RECOGNITION, active.plan.image,
+                    active.plan.attempt_id, True, observed.manual_revision,
+                ))
+                return SelectionProgress.INPUT_READY
+            # The original write happened; a changed gate/policy must grant a
+            # separate input. Do not silently reuse this answer as a new one.
+            current.input_state = None
+            current.input_answer = None
+            current.required_manual_revision = observed.manual_revision
+            return SelectionProgress.BLOCKED
+        if (
+            observed.manual_revision > prior.manual_revision
+            and active.receipt is not None
+            and receipt_matches(active.claim, active.receipt)
+            and active.receipt.evidence in {
+                EffectEvidence.LOCAL_MUTATION, EffectEvidence.NO_EFFECT,
+            }
+            and (
+                isinstance(active.claim, AwaitingEvidenceEffect)
+                or isinstance(active.claim, HeldEffect)
+                and active.claim.reason is HeldReason.NO_EFFECT_CONFIRMED
+            )
+        ):
+            current.active = None
+            current.input_state = None
+            current.input_answer = None
+            current.required_manual_revision = None
+            return None
+        if (
+            active.receipt is not None
+            and active.receipt.evidence is EffectEvidence.NO_EFFECT
+            and observed.field_empty
+        ):
+            current.active = None
+            current.input_state = None
+            current.input_answer = None
+            return SelectionProgress.BLOCKED
+        return SelectionProgress.AWAITING_EVIDENCE
+
     async def advance_input(self, handle: SessionHandle) -> SelectionProgress:
         """Prepare one field value from manual evidence or the Run-owned OCR provider."""
         current = self._current(handle)
         before = self._flow_context(handle)
         settings = self._flow_settings
         if current is None or before is None or settings is None:
-            return SelectionProgress.BLOCKED
+            if current is None:
+                return SelectionProgress.BLOCKED
+            original = await self._reconcile_original_captcha_write(handle, current)
+            return original if original is not None else SelectionProgress.BLOCKED
+        original = await self._reconcile_original_captcha_write(handle, current)
+        if original is not None:
+            return original
         plan = current.ready_selection
         authority = self._purchase_authority(handle.tab)
         if plan is None or current.ready_context != before or authority is None:
@@ -3268,53 +3539,6 @@ class UtikiEngine:
                     return SelectionProgress.INPUT_READY
             current.input_state = WaitingManualInput(context)
             current.input_answer = None
-        if current.active is not None:
-            active = current.active
-            if active.stage != "captcha_input" or not isinstance(active.plan, CaptchaAttempt):
-                return SelectionProgress.AWAITING_EVIDENCE
-            if isinstance(active.claim, RunningEffect):
-                return SelectionProgress.AWAITING_EVIDENCE
-            if (
-                isinstance(active.claim, AwaitingEvidenceEffect)
-                and current.input_answer is not None and current.input_observed is not None
-                and observed is not None and observed.image == active.plan.image
-                and observed.manual_revision == current.input_observed.manual_revision
-                and await self._audit_captcha_answer(
-                    current.input_observed, current.input_answer,
-                )
-                and self._current(handle) is current
-                and current.active is active
-                and self._flow_context(handle) == before
-                and self._purchase_authority(handle.tab) == authority
-            ):
-                evidence = InputReadyEvidence(
-                    context, InputSource.RECOGNITION, active.plan.image,
-                    active.plan.attempt_id, True, observed.manual_revision,
-                )
-                current.input_state = ReadyInput(evidence)
-                current.active = None
-                return SelectionProgress.INPUT_READY
-            prior_observed = current.input_observed
-            if (
-                observed is not None and prior_observed is not None
-                and inputs.manual_value_ready
-                and observed.manual_revision > prior_observed.manual_revision
-            ):
-                current.active = None
-                current.input_state = WaitingManualInput(context)
-                current.input_answer = None
-            elif (
-                active.receipt is not None
-                and active.receipt.evidence is EffectEvidence.NO_EFFECT
-                and observed is not None and observed.field_empty
-            ):
-                current.active = None
-                current.input_state = WaitingManualInput(context)
-                current.input_answer = None
-                return SelectionProgress.BLOCKED
-            else:
-                # An uncertain local write remains owned by its original claim.
-                return SelectionProgress.AWAITING_EVIDENCE
         if inputs.manual_value_ready:
             if (
                 current.required_manual_revision is not None
@@ -3514,6 +3738,7 @@ class UtikiEngine:
                     and active.stage == "captcha_reset"
                     and isinstance(active.claim, AwaitingEvidenceEffect)
                     and self._recovery_source_current(handle, before, current, active)
+                    and self._recovery_dispatch_ready(handle, before, prior)
                 ):
                     return prior.terminal
                 # A known rejection and a proven new image close the original
@@ -3633,6 +3858,7 @@ class UtikiEngine:
                 return SelectionProgress.BLOCKED
             preparation = _ManualPreparation(
                 submit_plan, evidence, key, "", before,
+                self._policy.last_valid, self._flow_settings,
             )
             if (
                 self._current(handle) is not current
@@ -3670,7 +3896,10 @@ class UtikiEngine:
                 return SelectionProgress.BLOCKED
             if not arm_token:
                 owner.manual_preparation = None
-                if isinstance(owner, _RetiredOutcome) and owner.active is None and owner.submission is None:
+                if (
+                    isinstance(owner, _RetiredOutcome) and owner.active is None
+                    and owner.submission is None and owner.refresh is None
+                ):
                     self._retired_runs.pop(handle.tab, None)
                 return SelectionProgress.BLOCKED
             if isinstance(owner, _Session):
@@ -3722,7 +3951,10 @@ class UtikiEngine:
             ClaimId(uuid.uuid4().hex), EffectProposal(stamp, EffectKind.SUBMIT)
         )
         current.active = _ActiveSelection("submit", claim, plan.page_url, submit_plan)
-        current.submission = _Submission(attempt, current.active, time.monotonic())
+        current.submission = _Submission(
+            attempt, current.active, time.monotonic(), self._policy.last_valid,
+            self._flow_settings,
+        )
         current.input_state = ConsumedInput(evidence, claim.claim_id)
         current.input_answer = None
         current.input_observed = None

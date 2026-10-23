@@ -5,7 +5,7 @@
 ## 必守邊界
 
 - 遵守 [法律聲明](LEGAL_NOTICE.md)：僅供教育研究；不得用於非法轉售、商業牟利、惡意囤票或台灣《文化創意產業發展法》涵蓋的票券。不得新增自動付款或規避平台風控的能力；付款由使用者手動完成，保留授權與著作權聲明。
-- 不提交或輸出真實設定、密碼、Cookie、token、webhook、完整個資、browser profile 或 session dump。測試只用合成資料與專用 profile；未經使用者授權，不操作真售票網站或日常 profile。
+- 不提交或輸出真實設定、密碼、Cookie、token、webhook、完整個資、browser profile 或 session dump。自動化測試可用合成或已脫敏資料；需要瀏覽器時使用專用／暫存 profile。未經使用者授權，不操作真售票網站或日常 profile。
 - 不為加速提高站點請求頻率、放寬 429 保護或省略送出前核對。停止、取消、逾時及指令返回都不證明遠端請求未發生；結果未知時不得自動重送。
 - 保留其他平台、帳號資料與共用刷新資料的既有語意。uTiki 本次只按 [正式重構計畫](docs/02-development/utiki-refactor/PLAN.md) 等價整理 `944e934` 的實際行為及能力邊界；一般安全守則不擴張成原流程沒有的購票資格或拒絕條件。計畫中的目標模組尚未實作，現況以 [STATUS.md](docs/02-development/utiki-refactor/STATUS.md) 為準。
 
@@ -15,7 +15,7 @@
 2. 修改功能前界定使用者可觀察的完整行為，再按流程切片修改。主入口在 `src/nodriver_tixcraft.py`，平台邏輯在 `src/platforms/`；依賴方向見 [程式碼邊界](docs/02-development/code-boundaries.md)。uTiki 的正式 caller、遷移順序與驗收以 PLAN 為準；[12 階段標準](docs/02-development/ticket_automation_standard.md) 只作通用功能分類。
 3. 同一 tab 的購票與刷新各只能有一個副作用 owner。填值須核對結果；click、reload、submit 呼叫完成不等於網站接受。保留原有重入、未知結果、暫停與清理時點，只在需求和實際 caller 支持時新增抽象。
 4. 依 [測試指南](docs/02-development/testing_execution_guide.md) 選擇驗證層級，回報實際命令、結果與未驗證項目；本機測試、browser fixture、GitHub CI、真站手動驗收分開陳述。功能須接通設定、正式入口、執行、結果及必要測試，才可稱完成。
-5. Commit 與推送由使用者決定。未經使用者明確下令，不執行 `git commit` 或 `git push`，也不自行建立 checkpoint commit；Issue／PR 亦須使用者授權，關聯及提交規範見 [CONTRIBUTING.md](CONTRIBUTING.md) 與 [GIT_COMMIT_RULES.md](GIT_COMMIT_RULES.md)。
+5. Commit 與推送由使用者決定。未經使用者明確下令，不執行 `git commit` 或 `git push`，也不自行建立 checkpoint commit；獲准提交時先核對暫存範圍，只提交本次工作。Issue／PR 亦須使用者授權，關聯及提交規範見 [CONTRIBUTING.md](CONTRIBUTING.md) 與 [GIT_COMMIT_RULES.md](GIT_COMMIT_RULES.md)。
 
 ## 代理協作與審查
 

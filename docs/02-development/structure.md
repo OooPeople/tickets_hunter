@@ -3,6 +3,8 @@
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
 **最後更新**：2026-10-16
 
+uTiki 模組索引維持 `944e934` 的現況；目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
+
 ---
 
 此文件整合了以下內容（以 ZenDriver 為主要開發目標）：
@@ -692,7 +694,7 @@ with_pause_check(task_func, config_dict, *args, **kwargs)      # ✅
 
 ## 📊 功能完整度評分（基於標準架構）
 
-> **評分標準**：根據 [ticket_automation_standard.md](./ticket_automation_standard.md) 定義的 12 階段功能架構評分
+> **評分標準**：根據 [ticket_automation_standard.md](./ticket_automation_standard.md) 定義的 12 階段功能架構作跨平台參考評分；uTiki 本次的能力邊界與驗收依正式 PLAN 及 `944e934` 實碼。
 
 ### 評分方式說明
 

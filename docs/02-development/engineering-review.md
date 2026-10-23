@@ -4,6 +4,8 @@
 
 **最後更新**：2026-10-15
 
+協作規則見 [AGENTS.md](../../AGENTS.md)，驗證命令見 [測試指南](testing_execution_guide.md)。下列清單按實際變更與既有 caller 選用；本次 uTiki 的行為、相容與驗收依 [正式 PLAN](utiki-refactor/PLAN.md) 及 `944e934` 實碼，不從通用清單新增購票資格或完成門檻。
+
 ## 1. 審查目標
 
 工程審查的首要工作是找出會造成錯誤選票、重複送出、無限刷新、敏感資料洩漏或無法回復的具體問題。
@@ -24,10 +26,10 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 
 ## 3. 必查範圍
 
-### 3.1 需求與 12 階段語意
+### 3.1 需求與適用計畫
 
-- 修改是否對應 Issue、核准計劃與明確驗收條件。
-- 是否維持 12 階段順序，或清楚說明跨階段機制。
+- 修改是否對應當次需求、實際 caller、適用計畫與明確驗收條件；公開 PR 的 Issue 流程另見 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
+- 十二階段是否只作通用功能分類，沒有取代該平台的原流程順序與能力邊界。
 - 新功能是否只改必要階段，沒有順便改變其他平台的行為。
 - 到達 checkout 後是否只通知，不包含自動付款。
 
@@ -50,15 +52,15 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 ### 3.4 選擇、填值與送出
 
 - 關鍵字包含、完全符合、AND、OR、排除與 fallback 語意是否維持。
-- stable identity 與 volatile availability 是否分開；table row、map title、action status 三個來源必須各自 quantity-aware，不能要求數值相等，也不能缺一仍選取。
+- stable identity 與 volatile availability 是否按原頁型分開；已使用的 table row、map title、action status 來源沿原核對條件處理，不新增原流程沒有的必備來源。
 - observe 與 commit 之間是否重新確認 URL、document、候選身分與可售狀態。
-- 票數、座位與 checkbox 寫入後是否 audit；submit 的同一原子 commit 是否再次核對 payload，audit 失敗是否禁止送出。
+- 票數、座位與 checkbox 寫入後是否按原分支核對；submit 前保留既有 payload 與 document 核對，不能把指令回傳當成網站接受。
 - 50 ms 重複 tick 是否仍只產生一次 click、submit 或通知。
 
 ### 3.5 狀態生命週期
 
 - 狀態是否依分頁／document 隔離，導頁、重新整理、登入切換後是否正確失效。
-- purchase identity 是否涵蓋 tenant、session/account、performance、group 及 price-area/mode，而非直接使用不穩定的完整 URL。
+- purchase identity 與結果歸屬是否保留原 tenant、performance、group、price-area／mode 等既有欄位與時點；uTiki 不新增指定 session／Cookie 資格。
 - document 改變時是否先 reduce／attest fast navigation、submit awaiting、conflict 與 reload probe 等跨 document transition，再清除 source-document state。
 - `pending`、`committed`、`failed` 是否有明確轉換；失敗不應被誤標為成功。
 - CAPTCHA、送出、dialog 與刷新狀態是否可恢復，不會殘留到下一輪。
@@ -71,11 +73,11 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 - submit 前是否二次檢查 dialog；click 後是否進入 awaiting-result，容許延遲 dialog／導頁而不重送。
 - committer 是否只回報 dispatched；awaiting-result 是否有明確期限，無導頁、已知 dialog 或可驗證 evidence 時是否進入 sticky unknown terminal，而非永久等待或自動重送。
 - blocker 是否在 dismiss 前保存；dismiss 後是否驗證彈窗真的關閉，失敗時是否仍禁止其他副作用。
-- recovery 是否依 reserved seat、general quantity、server-assigned quantity 清除正確狀態，並等待新的 document 才再次動作。
+- recovery 是否依原頁型與拒絕種類清除正確狀態：已知 CAPTCHA 拒絕保留同頁清欄、換圖及新圖片觀察條件；原本需要 reload 的座位／票數衝突仍等待新 document 才重新準備。不得把兩者合成通用重試出口。
 
 ### 3.7 刷新與限流
 
-- 所有刷新是否經過同一協調器，遵守使用者設定與跨程序節流。
+- 同一 tab 的刷新是否由既有 owner 仲裁；共用協調器啟用時經原協調路徑，停用時保留原本地間隔，兩者都不旁路既有保護。
 - 429、一般缺票與未知網路錯誤是否分開；單一分頁的未知狀態不能誤觸發全域 429。
 - 重新整理是否具備 reservation／commit 邊界，避免多個 tick 或程序同時刷新。
 - pause 是否釋放 reservation／probe lease但保留 recovery intent；resume 是否仍遵守剩餘間隔與 cooldown。
@@ -85,7 +87,7 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 ### 3.8 登入、隱私與記錄
 
 - 登入是否使用使用者既有合法 Cookie／profile，不把秘密複製到設定以外的位置。
-- auth 狀態是否依站點與 session 判斷，不能因舊狀態誤認為已登入。
+- auth 是否沿原 tenant、登入欄位與既有 session 狀態判斷；不以通用審查文字新增購票前的 Cookie 資格。
 - debug、例外與測試 fixture 是否已脫敏。
 - Issue、PR、截圖與測試記錄是否可能暴露帳號或訂單資訊。
 
@@ -94,7 +96,7 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 - 測試是否驗證行為，而不只是檢查 production script 字串包含某個 marker。
 - fake 是否依操作語意回應，並驗證呼叫順序、參數與副作用次數。
 - 模組 `_state`、時間、亂數、檔案與網路是否隔離。
-- DOM 改動是否至少有脫敏 fixture 或真實瀏覽器煙霧測試佐證。
+- DOM 改動是否有符合頁型契約的合成／已脫敏 fixture，並依適用計畫完成必要的瀏覽器驗證。
 - 測試數量與通過宣稱是否可由命令輸出核對。
 
 ### 3.10 文件與發行
@@ -106,7 +108,7 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 
 ## 4. 建議審查順序
 
-1. 讀 Issue／計劃與驗收條件。
+1. 讀當次需求、適用計畫與驗收條件；公開 PR 再對照 Issue。
 2. 檢查 diff 範圍及既有未提交變更。
 3. 從公開入口追蹤到副作用，確認狀態與錯誤路徑。
 4. 對照測試，找出只有實作沒有覆蓋、或只有字串 fake 的區域。
@@ -139,11 +141,11 @@ Summary
 
 ## 6. 重構專用門檻
 
-大規模重構除一般審查外，還必須確認：
+大規模重構依各自正式計畫確認；本次 uTiki 以 [PLAN](utiki-refactor/PLAN.md) 的批次、等價行為與完成條件為準，不從下列通用項目另設批准或真站 gate：
 
-- 有正式計劃、階段界線、每階段驗收與回滾方式。
+- 有明確的目標、施工界線與各批次驗收。
 - characterization tests 先於行為搬移。
 - 舊、新實作不會同時執行相同副作用；需要比較時只允許 shadow decision。
-- 相容 facade、設定遷移與 legacy 移除有明確版本週期。
-- 每一階段都能獨立合併、部署與回退，不能要求一次完成全部重寫才可運作。
-- 最後移除 legacy 前，至少完成計劃中指定的實機站點與核心流程驗證。
+- 相容 facade、舊實作移除、原設定相容，以及 source／frozen 與本地打包驗證依適用計畫處理，不套用其他版本的交付決策。
+- 各批次可辨識、可驗收且可恢復；是否合併、部署或發布依使用者當次授權。
+- 真站驗證只回報實際執行範圍；未執行時照實列為未驗證，不當成本次離線重構的額外完成條件。

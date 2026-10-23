@@ -67,6 +67,8 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 | D. 建置驗證 | 驗證 import、相依套件與 PyInstaller | `python build_scripts/build_local.py` |
 | E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
 
+開發中先跑受影響的聚焦案例。完整切片接線或整合時跑必要的預設套件，讓可執行案例完成並收集失敗；按共同根因集中處理，修復期間聚焦重驗，整批處理後再做必要的完整驗證。只有收集或環境錯誤阻擋後續案例時，排除阻礙後提早重跑完整套件以補齊結果。不訂額外固定次數，也不靠反覆推送觸發 CI 尋找下一個錯誤。
+
 ## 4. 常用命令
 
 所有命令從 repository 根目錄執行。
@@ -189,8 +191,8 @@ python build_scripts/build_local.py
 |------|----------|
 | 純文件 | `git diff --check`、連結與現況核對 |
 | 純函式／選擇演算法 | 語法、相關測試、完整單元套件 |
-| 平台 DOM reader 或 selector | 上述項目、脫敏 fixture／契約測試；可用時加實機煙霧測試 |
-| 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例、實機煙霧測試 |
+| 平台 DOM reader 或 selector | 上述項目、合成／脫敏 fixture 或契約測試；真站可用且獲授權時另記煙霧測試 |
+| 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例；真站範圍依使用者授權與適用計畫 |
 | 刷新／429 協調 | 聚焦協調器測試、完整套件、多實例或時間控制測試 |
 | 設定 schema／遷移 | default、舊設定遷移、儲存回讀、UI 顯示、相關流程測試 |
 | import／相依／spec | 語法、完整套件、本地建置 |
@@ -223,7 +225,7 @@ fake 應表達操作語意，例如 `read_snapshot()`、`commit_selection()`，�
 
 ### 6.3 DOM fixture 測試
 
-fixture 應來自脫敏後的真實頁面片段，並由 production reader 在真正 DOM 環境中解析。
+fixture 可由已脫敏的真實頁面片段，或依頁型契約手工建立的合成頁面構成，並由 production reader 在真正 DOM 環境中解析。
 不得由待測程式產生 fixture 再驗證自己。
 
 目前 runner 位於 `tests/test_ctbc_dom_fixtures.py`，並依 4.4 節的環境變數與
@@ -231,8 +233,8 @@ fixture 應來自脫敏後的真實頁面片段，並由 production reader 在�
 
 fixture 必須：
 
-- 移除 Cookie、token、帳號、姓名、電話、訂單與座位識別資料。
-- 記錄來源頁型與擷取日期，不保存完整私人頁面。
+- 移除 Cookie、token、帳號、姓名、電話、訂單與私人真實座位識別值；以一致的合成商品、席位及 payload key 取代私人值，保留跨快照、選擇、回讀及提交的對應。
+- 記錄來源頁型；只有實際擷取時才記擷取日期，不保存完整私人頁面。
 - 用同一份 fixture 加 DOM mutation 覆蓋常見負例，避免大量近似檔案。
 
 ### 6.4 狀態隔離
@@ -244,13 +246,13 @@ fixture 必須：
 
 ## 7. 實機煙霧測試
 
-實機測試只在有合法活動、使用者授權且風險可控時執行。使用既有私人設定與瀏覽器 profile，不把內容複製到命令輸出或文件。
+本節不是執行授權。實機測試只在有合法活動、使用者明確授權測試範圍、設定與 profile，且風險可控時執行；使用指定的測試設定與專用 profile，不自行使用日常 profile，也不把內容複製到命令輸出或文件。本次 uTiki 真站驗證依正式 PLAN 另記，未執行就如實標示。
 
 建議流程：
 
 1. 記錄 branch、commit、平台、活動與預計走到的頁面。
 2. 確認票數、關鍵字、登入方式與「自動刷新頁面間隔」。
-3. 啟動 `python -u src/nodriver_tixcraft.py --input src/settings.json`。
+3. 使用經授權的測試設定啟動 `python -u src/nodriver_tixcraft.py --input <測試設定路徑>`。
 4. 只觀察本次修改涉及的階段；到達付款頁面前停止自動流程。
 5. 用 `Ctrl-C` 或程式自身停止機制終止本次程序，不關閉其他 Python／Chrome 工作。
 6. 記錄實際結果、彈窗文字、URL 類型、刷新間隔與未走到的分支。
@@ -287,12 +289,8 @@ fixture 必須：
 
 ## 9. 失敗處理
 
-測試失敗時：
+完整檢查失敗時，保留原命令、全部失敗案例及被前置錯誤擋住的範圍；每組共同根因至少保留一份具代表性的完整 traceback。區分 production regression、測試耦合、fixture 過期與環境問題，不把同一根因造成的多個失敗當成不同問題。
 
-1. 保留第一個完整 traceback 與執行命令。
-2. 以最小案例重跑，確認是否穩定重現。
-3. 判斷是 production regression、測試耦合、fixture 過期或環境問題。
-4. 修正後先跑失敗案例，再跑受影響模組，最後視風險跑完整套件。
-5. 若無法安全修正，停止擴張修改範圍並在交付說明未解問題。
+先以最小案例定位各組根因，集中修正受影響路徑；修復期間跑該組及相鄰的聚焦測試。整批處理後再做必要的完整驗證。若無法安全修正，保留證據與未解範圍，不為了全綠擴張行為或修改原預期。
 
 工程審查的嚴重度與輸出格式見 [engineering-review.md](engineering-review.md)。

@@ -7,6 +7,8 @@
 
 > **目的**：定義完整的搶票程式應包含的功能模組與函式拆分規範，作為開發新平台或評估現有實作的標準
 
+**適用界線**：十二階段用於跨平台功能分類；下列函式骨架、回退示例與評分不自動成為 [本次 uTiki 等價重構](utiki-refactor/PLAN.md) 的功能或驗收要求。uTiki 只保留 `944e934` 的實際行為與能力邊界，現況見 [STATUS](utiki-refactor/STATUS.md)。
+
 ## 📋 核心設計原則
 
 ### 設定驅動 (Configuration-Driven)
@@ -475,6 +477,8 @@ config_dict["ocr_captcha"]["image_source"]  # 圖片來源（canvas/img）
 2. **回退策略 1**：若 `enable=false` → 等待手動輸入
 
 3. **回退策略 2**：若 OCR 連續失敗 3 次以上 → 切換手動輸入模式
+
+以上是通用範例；`944e934` 的 uTiki 沒有「OCR 失敗三次強制切人工」的流程，本次不補做。
 
 **函式命名規範**：
 - 主處理函式：`{platform}_captcha()`, `{platform}_verify()`

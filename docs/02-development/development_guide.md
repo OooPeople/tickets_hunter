@@ -7,10 +7,12 @@
 
 > **目標**：確保程式碼品質一致性與最佳實踐，適用於所有 WebDriver 型別的搶票系統開發
 
+**適用界線**：本頁傳統平台函式骨架與通用回退示例供相應平台參考；十二階段只作功能分類。[本次 uTiki 等價重構](utiki-refactor/PLAN.md) 的操作條件、恢復與完成標準依 `944e934` 實碼及正式 PLAN，不從範本增加功能或限制。
+
 ## 寫作風格原則
 
 **開發新功能時必須**：
-1. **遵循架構範本**：參考 `/docs/coding_templates.md` 的標準架構
+1. **遵循適用架構**：傳統平台可參考 [程式碼範本](coding_templates.md)；本次 uTiki 依 [正式 PLAN](utiki-refactor/PLAN.md)
 2. **參考最佳實踐**：以 ZenDriver 平台實作（TixCraft、KKTIX、TicketPlus、iBon）作為開發標準
 3. **保持一致性**：函式命名、錯誤處理、debug 輸出格式統一
 

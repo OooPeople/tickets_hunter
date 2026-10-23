@@ -21,6 +21,8 @@
 
 ## 貢獻流程
 
+本節是向 upstream 提出公開 PR 的流程；修改自己的 fork 或本機工作樹，不須先建立 Issue 或等待 upstream 維護者確認方向。是否 commit／push 仍由 [AGENTS.md](AGENTS.md) 與使用者當次指令決定。
+
 ### 1. 先開 Issue（必要步驟）
 
 **每個 PR 都必須先有對應的 Issue，並在 PR 內容連結該 Issue。**
@@ -81,7 +83,7 @@ TicketPlus 2026-05 改版在 `#buyTicket` 與日期列之間插入一層容器�
 僅影響 TicketPlus，不動 `src/util.py`。
 ```
 
-開好 Issue 後，等待維護者確認方向，再進行下一步。
+向 upstream 送公開 PR 時，開好 Issue 後等待維護者確認方向，再進行下一步。
 
 ### 2. Fork 與設定
 
@@ -124,6 +126,8 @@ git checkout -b fix/123-ticketplus-date-list
 ```
 <type>(<scope>): <description>
 ```
+
+本節定義訊息格式，不授權 commit 或 push；獲准提交時的暫存範圍依 [AGENTS.md](AGENTS.md) 核對。
 
 `type` 與 `scope` 保留英文關鍵字或模組名稱，`description`、內文與 footer 使用
 繁體中文。完整規則見 [`GIT_COMMIT_RULES.md`](GIT_COMMIT_RULES.md)。
@@ -197,7 +201,7 @@ Python、瀏覽器流程與打包驗證的分級及完整命令見
 - 重現步驟與錯誤訊息
 - 相關螢幕截圖
 
-若你打算自己動手修，請依照上方 [先開 Issue（必要步驟）](#1-先開-issue必要步驟) 把調查過程與根因一併寫進 Issue。
+若打算向 upstream 提交修正 PR，請依照上方 [先開 Issue（必要步驟）](#1-先開-issue必要步驟) 把調查過程與根因一併寫進 Issue。
 
 ## 致謝
 

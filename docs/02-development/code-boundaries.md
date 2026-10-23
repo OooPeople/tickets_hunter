@@ -8,7 +8,7 @@
 
 > 適用於所有新程式碼。歷史遺留程式碼可能早於本規則，看到不代表可以仿效。
 
-以下 uTiki 模組與依賴反映批次 3 的正式接線；date／area／navigation 與 document-health 的後續拆分見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
+以下 uTiki 模組與依賴反映批次 4 的正式接線；document-health／rate-limit 的後續拆分見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
 
 ---
 
@@ -19,7 +19,9 @@
 - **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔；legacy facade 只可明示轉接到同一家族 package，不得持有狀態或流程邏輯。禁止：跨平台 import、import `nodriver_tixcraft`。
 - **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是模組 `_state` 與 per-tab runtime 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。離開家族 route、關閉瀏覽器或 handler 終止時，由 workflow 以 non-allocating lookup 精確移除該 tab runtime；checkout 只取消 refresh work，必須保留 runtime 的通知去重狀態。不得只因網站外觀相似就納入同一家族。
 - **`platforms/utiki/runtime.py`** — 現有 mutable document／action／transition／purchase／refresh record 的 TypedDict 與等價 constructor。`workflow.py` 用 constructor 建立唯一 tab runtime；本模組不持有 tab registry、cancel-task registry、tab identity 或 cleanup。
-- **`platforms/utiki/workflow.py`** — 唯一 tab registry／runtime lifecycle、頁面路由與既有導覽核對；保留 date／area 與 server-assigned navigation gate，將通過原前置條件的座位／票數頁交給 `purchase.py`，並交由 `submission.py` 協調送出結果與 checkout 通知。
+- **`platforms/utiki/workflow.py`** — 唯一 tab registry／runtime lifecycle、頁面路由、刷新與購票結果協調；將日期／區域選擇交給 `date_area.py`、跨頁核對交給 `navigation.py`，通過原前置條件的座位／票數頁交給 `purchase.py`，並交由 `submission.py` 協調送出結果與 checkout 通知。
+- **`platforms/utiki/date_area.py`** — 日期／區域 snapshot 與候選選擇、fast 預取後選候選及原有 native fallback 判定；選定目標後由 `navigation.py` 送出，不持有 pending。
+- **`platforms/utiki/navigation.py`** — 已選目標的 native／fast dispatch、pending lifecycle、marker、目的頁核對、return-to-native 與原有電腦配位來源紀錄；透過 workflow 傳入的 callback 修改同一份 runtime，不建立 registry 或新的購票資格。
 - **`platforms/utiki/inputs.py`** — Cookie 注入、inline login、登入 fingerprint、CAPTCHA 取圖／辨識／欄位與換圖 browser 操作；不持有 purchase outcome 或重試狀態。
 - **`platforms/utiki/submission.py`** — purchase key、submit dispatch／結果歸屬、dialog、CAPTCHA／座位衝突恢復、未知結果與 checkout 通知去重的功能寫入責任；runtime 由 workflow 傳入，不建立 registry。
 - **`platforms/utiki/purchase.py`** — 已通過 workflow 原導覽核對的座位與票數頁購票準備，組合 selection／DOM commit／submission；不建立另一份 purchase state。
@@ -39,6 +41,10 @@ platforms/*        -->  nodriver_common, global_settings, refresh_coordinator, u
 platforms/{family}/workflow
                    -->  同 package 葉節點與核准 infrastructure 模組,
                         nodriver_common, util
+platforms/utiki/date_area
+                   -->  platforms/utiki/navigation, selection, dom, util
+platforms/utiki/navigation
+                   -->  platforms/utiki/selection, dom, profiles, util
 platforms/utiki/purchase
                    -->  platforms/utiki/selection, dom, submission, util
 platforms/utiki/submission
@@ -62,7 +68,7 @@ util               -->  (無專案內部匯入)
 禁止反向依賴。不同平台／家族之間禁止互相 import；legacy facade 只能單向 import
 其 canonical family package。package 內不得 import legacy facade。`utiki/refresh.py`
 不得反向 import `utiki/workflow.py`；runtime ownership 必須維持 workflow 單向傳入
-purchase／submission／refresh。inputs 不依賴 submission／purchase；submission 不依賴 purchase。
+date_area／navigation／purchase／submission／refresh。navigation 不反向依賴 date_area／purchase／workflow；date_area 不反向依賴 workflow。inputs 不依賴 submission／purchase；submission 不依賴 purchase。
 
 ---
 

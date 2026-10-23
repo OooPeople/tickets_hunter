@@ -61,11 +61,13 @@ from platforms.utiki.inputs import (
     _normalize_ctbc_captcha_answer,
 )
 from platforms.utiki.submission import _ctbc_submit_reached_checkout
-from platforms.utiki.workflow import (
+from platforms.utiki.navigation import (
     _build_ctbc_destination_url,
     _ctbc_fast_destination_is_valid,
-    _ctbc_purchase_state_key,
     _get_ctbc_page_type,
+)
+from platforms.utiki.workflow import (
+    _ctbc_purchase_state_key,
     _get_utiki_behavior,
     is_utk_sports_url,
 )

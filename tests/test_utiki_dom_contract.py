@@ -128,11 +128,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
                 with (
                     patch(
-                        "platforms.utiki.workflow.read_date_snapshot",
+                        "platforms.utiki.date_area.read_date_snapshot",
                         side_effect=dom_port.read_date_snapshot,
                     ),
                     patch(
-                        "platforms.utiki.workflow.commit_date_action",
+                        "platforms.utiki.navigation.commit_date_action",
                         side_effect=dom_port.commit_date_action,
                     ),
                 ):
@@ -171,11 +171,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_date_snapshot",
+                "platforms.utiki.date_area.read_date_snapshot",
                 side_effect=dom_port.read_date_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_date_action",
+                "platforms.utiki.navigation.commit_date_action",
                 side_effect=dom_port.commit_date_action,
             ),
         ):
@@ -203,11 +203,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_date_snapshot",
+                "platforms.utiki.date_area.read_date_snapshot",
                 AsyncMock(return_value=snapshot),
             ) as reader,
             patch(
-                "platforms.utiki.workflow.commit_date_action", commit,
+                "platforms.utiki.navigation.commit_date_action", commit,
             ),
         ):
             self.assertFalse(await nodriver_ctbc_date_auto_select(tab, cfg))
@@ -249,11 +249,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_date_snapshot",
+                "platforms.utiki.date_area.read_date_snapshot",
                 side_effect=dom_port.read_date_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_date_action",
+                "platforms.utiki.navigation.commit_date_action",
                 side_effect=dom_port.commit_date_action,
             ),
         ):
@@ -296,11 +296,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_date_snapshot",
+                "platforms.utiki.date_area.read_date_snapshot",
                 side_effect=dom_port.read_date_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_date_action",
+                "platforms.utiki.navigation.commit_date_action",
                 AsyncMock(return_value=CommitResult.COMMITTED),
             ),
         ):
@@ -361,14 +361,14 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 }
                 with (
                     patch(
-                        "platforms.utiki.workflow._ctbc_read_fast_navigation_marker",
+                        "platforms.utiki.navigation._ctbc_read_fast_navigation_marker",
                         AsyncMock(return_value={
                             "available": True, "present": False,
                             "page_url": destination_url,
                         }),
                     ),
                     patch(
-                        "platforms.utiki.workflow._ctbc_read_destination_state",
+                        "platforms.utiki.navigation._ctbc_read_destination_state",
                         AsyncMock(return_value=destination_state),
                     ),
                 ):
@@ -433,18 +433,18 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 }
                 with (
                     patch(
-                        "platforms.utiki.workflow._ctbc_read_fast_navigation_marker",
+                        "platforms.utiki.navigation._ctbc_read_fast_navigation_marker",
                         AsyncMock(return_value={
                             "available": True, "present": False,
                             "page_url": destination_url,
                         }),
                     ),
                     patch(
-                        "platforms.utiki.workflow._ctbc_read_destination_state",
+                        "platforms.utiki.navigation._ctbc_read_destination_state",
                         AsyncMock(return_value=destination_state),
                     ),
                     patch(
-                        "platforms.utiki.workflow._ctbc_return_current_pending",
+                        "platforms.utiki.navigation._ctbc_return_current_pending",
                         AsyncMock(),
                     ) as return_to_area,
                 ):
@@ -463,17 +463,17 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow._get_utk_sports_profile",
+                "platforms.utiki.navigation._get_utk_sports_profile",
                 return_value={"supports_server_assignment": False},
             ),
             patch(
-                "platforms.utiki.workflow.read_date_snapshot", AsyncMock()
+                "platforms.utiki.date_area.read_date_snapshot", AsyncMock()
             ) as reader,
             patch(
-                "platforms.utiki.workflow.commit_date_action", AsyncMock()
+                "platforms.utiki.navigation.commit_date_action", AsyncMock()
             ) as commit,
             patch(
-                "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                "platforms.utiki.date_area._ctbc_try_fast_area_navigation",
                 AsyncMock(),
             ) as fast,
         ):
@@ -495,21 +495,21 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 )
                 tab = FakeTab("", [], url=CTBC_TEST_DATE_URL)
 
-                async def fast_effect(*_args):
+                async def fast_effect(*_args, **_kwargs):
                     dom_port.events.append("fast")
                     return fast_result
 
                 with (
                     patch(
-                        "platforms.utiki.workflow.read_date_snapshot",
+                        "platforms.utiki.date_area.read_date_snapshot",
                         side_effect=dom_port.read_date_snapshot,
                     ),
                     patch(
-                        "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                        "platforms.utiki.date_area._ctbc_try_fast_area_navigation",
                         side_effect=fast_effect,
                     ),
                     patch(
-                        "platforms.utiki.workflow.commit_date_action",
+                        "platforms.utiki.navigation.commit_date_action",
                         side_effect=dom_port.commit_date_action,
                     ),
                 ):
@@ -529,11 +529,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_area_snapshot",
+                "platforms.utiki.date_area.read_area_snapshot",
                 side_effect=dom_port.read_area_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_area",
+                "platforms.utiki.navigation.commit_area",
                 side_effect=dom_port.commit_area,
             ),
         ):
@@ -561,7 +561,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow._get_utk_sports_profile",
+                "platforms.utiki.navigation._get_utk_sports_profile",
                 return_value={
                     "supports_server_assignment": True,
                     "host": "tix.ctbcsports.com",
@@ -569,15 +569,15 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 },
             ),
             patch(
-                "platforms.utiki.workflow.read_area_snapshot",
+                "platforms.utiki.date_area.read_area_snapshot",
                 side_effect=dom_port.read_area_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_server_assigned_area",
+                "platforms.utiki.navigation.commit_server_assigned_area",
                 side_effect=dom_port.commit_server_assigned_area,
             ),
             patch(
-                "platforms.utiki.workflow.commit_area", AsyncMock()
+                "platforms.utiki.navigation.commit_area", AsyncMock()
             ) as manual_commit,
         ):
             self.assertTrue(await nodriver_ctbc_area_auto_select(tab, cfg))
@@ -611,15 +611,15 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow._get_utk_sports_profile",
+                "platforms.utiki.navigation._get_utk_sports_profile",
                 return_value={"supports_server_assignment": True},
             ),
             patch(
-                "platforms.utiki.workflow.read_area_snapshot",
+                "platforms.utiki.date_area.read_area_snapshot",
                 side_effect=dom_port.read_area_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_server_assigned_area",
+                "platforms.utiki.navigation.commit_server_assigned_area",
                 side_effect=dom_port.commit_server_assigned_area,
             ),
         ):
@@ -637,14 +637,14 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_area_snapshot", AsyncMock()
+                "platforms.utiki.date_area.read_area_snapshot", AsyncMock()
             ) as reader,
             patch(
-                "platforms.utiki.workflow.commit_server_assigned_area",
+                "platforms.utiki.navigation.commit_server_assigned_area",
                 AsyncMock(),
             ) as server_commit,
             patch(
-                "platforms.utiki.workflow.commit_area", AsyncMock()
+                "platforms.utiki.navigation.commit_area", AsyncMock()
             ) as manual_commit,
         ):
             self.assertFalse(await nodriver_ctbc_area_auto_select(tab, cfg))
@@ -662,11 +662,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_area_snapshot",
+                "platforms.utiki.date_area.read_area_snapshot",
                 side_effect=dom_port.read_area_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_area",
+                "platforms.utiki.navigation.commit_area",
                 side_effect=dom_port.commit_area,
             ),
         ):
@@ -688,11 +688,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_area_snapshot",
+                "platforms.utiki.date_area.read_area_snapshot",
                 side_effect=dom_port.read_area_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_area",
+                "platforms.utiki.navigation.commit_area",
                 side_effect=dom_port.commit_area,
             ),
         ):
@@ -1166,7 +1166,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         }
         submit_calls = 0
 
-        async def attest_effect(*_args):
+        async def attest_effect(*_args, **_kwargs):
             ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = None
             return True
 
@@ -1182,11 +1182,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow._ctbc_attest_fast_destination",
+                "platforms.utiki.navigation._ctbc_attest_fast_destination",
                 AsyncMock(side_effect=attest_effect),
             ) as attest,
             patch(
-                "platforms.utiki.workflow._get_utk_sports_profile",
+                "platforms.utiki.navigation._get_utk_sports_profile",
                 return_value={
                     "supports_server_assignment": True,
                     "host": "tix.ctbcsports.com",
@@ -1235,10 +1235,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         cfg["ctbc"] = dict(cfg["utiki"])
 
         with patch(
-            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            "platforms.utiki.navigation._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ) as attest, patch(
-            "platforms.utiki.workflow._get_utk_sports_profile",
+            "platforms.utiki.navigation._get_utk_sports_profile",
             return_value={
                 "supports_server_assignment": True,
                 "host": "tix.ctbcsports.com",
@@ -1267,15 +1267,15 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             product_id="OTHER_PRODUCT",
         ))
 
-        async def attest_effect(*_args):
+        async def attest_effect(*_args, **_kwargs):
             ctbc_tab_runtime(tab)["transition"]["pending_navigation"] = None
             return True
 
         with patch(
-            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            "platforms.utiki.navigation._ctbc_attest_fast_destination",
             AsyncMock(side_effect=attest_effect),
         ), patch(
-            "platforms.utiki.workflow._get_utk_sports_profile",
+            "platforms.utiki.navigation._get_utk_sports_profile",
             return_value={
                 "supports_server_assignment": True,
                 "host": "tix.ctbcsports.com",
@@ -1301,7 +1301,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             "product_id": "PRODUCT_FIXTURE",
         }
         with patch(
-            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            "platforms.utiki.navigation._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ) as attest, patch(
             "platforms.utiki.purchase.read_quantity_snapshot", AsyncMock()
@@ -1339,17 +1339,17 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             snapshot, CommitResult.COMMITTED
         )
 
-        async def attest_effect(*_args):
+        async def attest_effect(*_args, **_kwargs):
             ctbc_identity_runtime(identity)["transition"][
                 "pending_navigation"
             ] = None
             return True
 
         with patch(
-            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            "platforms.utiki.navigation._ctbc_attest_fast_destination",
             AsyncMock(side_effect=attest_effect),
         ) as attest, patch(
-            "platforms.utiki.workflow._get_utk_sports_profile",
+            "platforms.utiki.navigation._get_utk_sports_profile",
             return_value={
                 "supports_server_assignment": True,
                 "host": "tix.ctbcsports.com",

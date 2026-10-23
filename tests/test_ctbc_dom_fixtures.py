@@ -50,16 +50,18 @@ from platforms.utiki.selection import (
 from platforms.utiki.profiles import PageKind
 from platforms.utiki.inputs import _ctbc_login_fingerprint
 from platforms.utiki.submission import _dismiss_ctbc_dialog
+from platforms.utiki.navigation import (
+    _ctbc_delete_fast_navigation_marker,
+    _ctbc_read_destination_state,
+    _ctbc_read_fast_navigation_marker,
+)
 from platforms.utiki.refresh import (
     _utk_document_guard,
     build_refresh_identity,
 )
 from platforms.utiki.workflow import (
     CTBC_SEAT_STALE_RELOAD_REASON,
-    _ctbc_delete_fast_navigation_marker,
     _ctbc_purchase_state_key,
-    _ctbc_read_destination_state,
-    _ctbc_read_fast_navigation_marker,
     _ctbc_tab_identity,
     _state,
     nodriver_ctbc_general_admission_main,

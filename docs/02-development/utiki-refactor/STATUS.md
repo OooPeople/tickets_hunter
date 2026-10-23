@@ -1,9 +1,9 @@
 # uTiki 重構狀態
 
 - 唯一行為與程式起點：`944e934546f3dd36b1b4891a5a4fa359b8ade17f`。`a47fd07106eae598c8b44972282c6621bf7f493c` 只作文件整理參考，不沿用其功能、完成狀態或測試 PASS。
-- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 3 開始 HEAD 為 `33c168a42237dcdfcb57d95db69775ea32bcfb82`，工作樹乾淨；目前 HEAD 相同，未切換分支或合併上游。本輪修改尚未提交或推送。
-- 階段：批次 0/1/2 已完成；本輪依 [PLAN.md](PLAN.md) 完成批次 3 購票與提交責任拆分，停在批次 3，不進入 date／area／navigation 或 document-health 拆分。
-- 程式範圍：新增 `inputs.py`、`submission.py`、`purchase.py` 並接正式 workflow；既有 facade 與設定流程保持。測試僅更新內部 import／patch 的實際 lookup，未改產品預期；未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增購票資格、拒絕條件或人工出口。
+- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 4 開始 HEAD 為 `c71562da49ea58105e0e924c3905f8904d63f301`，工作樹乾淨；施工期間未切換分支或合併上游。
+- 階段：批次 0/1/2/3 已完成；本輪依 [PLAN.md](PLAN.md) 完成批次 4 日期／區域選擇與導航責任拆分，停在批次 4，不進入 document-health／rate-limit 拆分。
+- 程式範圍：新增 `date_area.py`、`navigation.py` 並接正式 workflow；既有 facade、`selection.py` 與設定流程保持。測試僅更新搬移後的內部 import／patch 與 callback 注入，未改產品預期；未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增購票資格、拒絕條件或人工出口。
 - 環境：沿用現有 Windows x64 `.venv`（CPython 3.11.9、pytest 9.0.3），本輪未重建。批次 0 建立環境時 `uv venv --python 3.11.9 .venv` 及 `uv pip install --python .\.venv\Scripts\python.exe -r requirements-dev.txt` 均退出碼 0；需求取自 944 原檔。
 
 ## 前輪使用者確認的 scope 校正
@@ -11,6 +11,18 @@
 - **交付僅限原始碼使用**：正式 source caller 最終須在 Windows x64、macOS arm64 可用；本次不要求 PyInstaller、exe／安裝包、frozen runtime、hidden-import／spec、`build_scripts/build_local.py`、release packaging 或發布。現有 build scripts／release infrastructure 保留，原始碼版本穩定使用後另行處理打包。
 - **僅維護 current uTiki 設定格式**：current 設定仍須讀取、儲存並保留 `944e934` 已支援的 hot reload 欄位及時點；完成後使用者可重新填寫 current 設定。正式切換後不維護只為舊 uTiki／CTBC 設定相容的自動升級、runtime fallback、dual read／dual write，也不新增 DB schema／serialized runtime migration、version 欄位或 persistence upgrader。其他平台及共用 migration／normalization／SQLite 機制不在本輪移除範圍；uTiki shared refresh／429 SQLite coordinator 保持正式功能。
 - 以上是前輪使用者確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；通用打包指南與歷史計畫保留，僅以正式 PLAN 限定本次施工與驗收。
+
+## 批次 4：日期／區域選擇與導航
+
+- `date_area.py` 承接日期／區域 snapshot、原選擇函式、fast 預取與候選選擇；預取不適用、失敗、逾期或無合格候選時，依原條件返回 native。`navigation.py` 承接已選目標的 native／fast dispatch、pending、marker、目的頁核對、return-to-native 與原電腦配位來源紀錄；它使用 workflow 傳入的同一 registry／runtime callback，不建立第二套狀態或擴張設定 fingerprint 的用途。
+- `workflow.py` 保留唯一 `_state`、tab identity／lifecycle、refresh、頂層頁型路由、座位／一般票數頁的既有核對入口、購票與提交協調。正式日期／區域入口直接呼叫 `date_area.py`，選定後由 `navigation.py` 送出；server-assigned 入口只接回原 provenance 判定與既有票數準備。原完整 date／area／navigation 實作已移出，保留有正式 caller 的薄入口。
+- Fast 尚未送出時的原 native fallback、確定 `REJECTED` 的 cleanup、可能已送出的 `DISPATCH_UNKNOWN` 保留 pending 而不重點、native date unknown 的重入阻止、marker 與 document／identity 核對、storage 不可用時原 native／manual 路徑、一般票數與座位頁 manual handoff 均沿原分支。server-assigned provenance 只服務原 computer mode；沒有發現需變更產品行為的 `944e934` 歧義。
+- 測試沿用原有行為斷言，將搬移函式的私有 import／patch 指到真正 lookup；測試 helper 對直接呼叫 navigation 的原案例傳入 workflow callback。未為測試保留完整舊實作或增加新購票 gate。
+- 語法：`.\.venv\Scripts\python.exe -m py_compile src/platforms/utiki/date_area.py src/platforms/utiki/navigation.py src/platforms/utiki/workflow.py`，退出碼 0；以既有全域工具對三個 touched production 模組執行 `pyflakes`，退出碼 0。
+- 聚焦：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_utiki_dom_contract.py`，退出碼 0，**210 passed、152 subtests passed**。
+- 整合：`.\.venv\Scripts\python.exe -m pytest -q`，退出碼 0，**358 passed、1 deselected、180 subtests passed**。
+- 本機 browser fixture：暫時設定 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1`，執行 `.\.venv\Scripts\python.exe -m pytest -q --tb=short -m 'browser and not live' tests/test_ctbc_dom_fixtures.py`，退出碼 0，**1 passed in 8.92s**；結束後清除環境旗標。使用合成頁面、本機 loopback 與暫存 profile。
+- 未驗證：macOS arm64 source 使用、GitHub CI、真站手動流程；本批不執行產品打包。批次 0 原始 browser fixture 失敗仍保留下方原始基準。
 
 ## 批次 3：輸入、提交與購票準備
 
@@ -55,11 +67,11 @@
 
 ## 下一步
 
-本輪停在批次 3，等待使用者審查。獲另行下令後，批次 4 可從 `workflow.py` 現存的 date／area action 與 fast destination／server-assigned navigation gate 邊界開始；本批沒有預先建立 navigation framework。
+本輪停在批次 4，等待使用者審查。獲另行下令後，批次 5 可從 `refresh.py` 現有 document inspection／health 與 429 協調邊界開始；本批沒有預先建立 `document_health.py` 或 `rate_limit.py`。
 
 | 文件或 PLAN 情境 | 原衝突／缺口 | 目前狀態 |
 | --- | --- | --- |
-| 舊計畫與文件入口 | 舊 `utiki-refactor-plan.md` 的 Phase 與 gate 容易冒充現行計畫。 | 已標示為歷史；入口指向 PLAN／STATUS，目標模組尚未宣稱實作。 |
+| 舊計畫與文件入口 | 舊 `utiki-refactor-plan.md` 的 Phase 與 gate 容易冒充現行計畫。 | 已標示為歷史；入口指向 PLAN／STATUS，批次 2–4 已接線模組按實況更新索引。 |
 | 一般安全文字與 uTiki 庫存判斷 | 通用 `fail closed` 若擴張到 944 非空庫存文字會新增拒絕條件。 | AGENTS／通用文件限定適用範圍；production 未變。 |
 | 人工四碼、OCR 關閉 | 既有案例未覆蓋 OCR 關閉＋人工四碼＋`force_submit=True`。 | 批次 1 案例已在舊 production 上通過。 |
 | 一般票數頁人工接手 | 既有案例只直接驗證劃位頁人工進入。 | 批次 1 新案例經正式 caller 及既有 attest 分支通過。 |

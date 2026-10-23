@@ -19,6 +19,7 @@ from tests.ctbc_support import (
     FakeTab,
     ctbc_identity_runtime,
     ctbc_tab_runtime,
+    ctbc_navigation_config_fingerprint as _ctbc_selection_config_fingerprint,
     ctbc_submission_captcha_and_submit as _workflow_ctbc_captcha_and_submit,
     ctbc_submission_handle_dialog as _handle_ctbc_submit_dialog,
     ctbc_submission_reset_captcha as _reset_ctbc_captcha,
@@ -35,6 +36,10 @@ from platforms.utiki.inputs import (
     _fill_ctbc_inline_login,
     _get_ctbc_captcha_image_bytes,
 )
+from platforms.utiki.navigation import (
+    _ctbc_fast_marker_matches_pending,
+    _ctbc_pending_from_fast_marker,
+)
 from platforms.utiki.selection import (
     QuantityPlan,
     build_submit_plan,
@@ -44,12 +49,9 @@ from platforms.utiki.selection import (
 from platforms.utiki.workflow import (
     CTBC_AREA_ROW_SELECTOR,
     _ctbc_attest_fast_destination,
-    _ctbc_fast_marker_matches_pending,
-    _ctbc_pending_from_fast_marker,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
     _reconcile_utiki_purchase,
-    _ctbc_selection_config_fingerprint,
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
     _state,
@@ -440,7 +442,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         with (
             patch(
-                "platforms.utiki.workflow._get_utk_sports_profile",
+                "platforms.utiki.navigation._get_utk_sports_profile",
                 return_value={
                     "name": "CTBC Sports",
                     "host": "tix.ctbcsports.com",
@@ -451,7 +453,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
                 },
             ),
             patch(
-                "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                "platforms.utiki.date_area._ctbc_try_fast_area_navigation",
                 AsyncMock(),
             ) as fast_path,
         ):
@@ -485,11 +487,11 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
         with (
             patch(
-                "platforms.utiki.workflow._ctbc_try_fast_area_navigation",
+                "platforms.utiki.date_area._ctbc_try_fast_area_navigation",
                 AsyncMock(),
             ) as fast_path,
             patch(
-                "platforms.utiki.workflow.commit_date_action",
+                "platforms.utiki.navigation.commit_date_action",
                 AsyncMock(),
             ) as native_commit,
         ):

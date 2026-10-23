@@ -1,9 +1,9 @@
 # 函式結構分析與平台索引
 
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
-**最後更新**：2026-10-16
+**最後更新**：2026-10-23
 
-uTiki 模組索引維持 `944e934` 的現況；目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
+uTiki 模組索引反映批次 2 接線後的現況；後續目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
 
 ---
 
@@ -391,7 +391,7 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### 目前模組邊界
+#### 目前模組邊界（批次 2 runtime 接線後）
 
 ```text
 platforms/utiki/
@@ -400,6 +400,7 @@ platforms/utiki/
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
 ├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
+├── runtime.py    # mutable runtime record 型別與等價 constructor；不持有 registry
 ├── refresh.py    # document health、429 與跨程序刷新協調；不持有 runtime
 └── workflow.py   # 唯一的 per-tab runtime owner 與購票流程編排
 
@@ -407,7 +408,7 @@ platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 ```
 
 - 已驗證 tenant：中信育樂、味全龍。
-- `workflow.py` 單向傳入 canonical runtime、tab identity 與 cancel-task registry 給 `refresh.py`；refresh 不得反向 import workflow 或建立 mirror state。
+- `workflow.py` 用 `runtime.py` constructor 為分頁建立 canonical mutable runtime，保留 tab identity、registry、get-or-create／existing-only lookup 與 cleanup 所有權；單向傳入同一 runtime、tab identity 與 cancel-task registry 給 `refresh.py`。refresh 不得反向 import workflow 或建立 mirror state。
 - 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
 - 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，本次待實作的架構與順序見 [uTiki 正式計畫](utiki-refactor/PLAN.md)。

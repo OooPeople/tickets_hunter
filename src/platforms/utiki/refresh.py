@@ -21,6 +21,7 @@ from nodriver_common import check_and_handle_pause, check_and_handle_quit
 from refresh_coordinator import UTK_SPORTS_SCOPE, get_shared_refresh_coordinator
 
 from .profiles import PageKind, classify_utiki_page
+from .runtime import TabRuntime
 
 
 UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
@@ -137,7 +138,7 @@ def _canonical_document_token(value):
     return token if math.isfinite(numeric) and numeric > 0 else ""
 
 
-async def _inspect_utk_document(tab, runtime, url=None, *, force=False):
+async def _inspect_utk_document(tab, runtime: TabRuntime, url=None, *, force=False):
     """判別目前文件，避免把載入中狀態誤認為 HTTP 429。"""
     current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
     document = runtime["document"]
@@ -391,7 +392,7 @@ async def _retry_abandoned_probe_cleanup(
 
 
 async def cancel_refresh(
-    tab, runtime, refresh_identity, cancel_tasks, reason="", *,
+    tab, runtime: TabRuntime, refresh_identity, cancel_tasks, reason="", *,
     wait=False, abandon_probe=False,
 ):
     """取消待處理刷新，並視需要釋放持有的復原探測。"""
@@ -443,7 +444,7 @@ async def cancel_refresh(
 
 
 async def pause_refresh(
-    tab, runtime, refresh_identity, cancel_tasks, reason="",
+    tab, runtime: TabRuntime, refresh_identity, cancel_tasks, reason="",
 ):
     """暫停刷新工作，同時保留本機意圖與進度。"""
     del tab, reason
@@ -498,7 +499,7 @@ async def pause_refresh(
     return bool(changed)
 
 
-def consume_reload_event(runtime):
+def consume_reload_event(runtime: TabRuntime):
     """消費一次需由外層路由重新偵測的同網址刷新事件。"""
 
     refresh = runtime["refresh"]
@@ -643,7 +644,7 @@ async def _finish_utk_recovery_probe(
 
 
 async def _utk_document_guard(
-    tab, runtime, refresh_identity, cancel_tasks, config_dict, url=None,
+    tab, runtime: TabRuntime, refresh_identity, cancel_tasks, config_dict, url=None,
 ):
     """在任何 uTiki 頁面操作前套用 429 斷路保護。"""
     settings = _refresh_settings()
@@ -1335,7 +1336,7 @@ async def _poll_owned_reload(
 
 
 async def reload(
-    tab, runtime, refresh_identity, cancel_tasks, config_dict, reason, *,
+    tab, runtime: TabRuntime, refresh_identity, cancel_tasks, config_dict, reason, *,
     apply_local_interval=True, allow_unknown_document=False,
     allow_blocked_recovery=False, dispatch_deadline=None,
 ):
@@ -1435,7 +1436,7 @@ async def reload(
 
 
 async def reload_wait(
-    tab, runtime, refresh_identity, cancel_tasks, config_dict, reason, *,
+    tab, runtime: TabRuntime, refresh_identity, cancel_tasks, config_dict, reason, *,
     apply_local_interval=False, allow_unknown_document=True,
     allow_blocked_recovery=True,
 ):
@@ -1505,7 +1506,7 @@ async def reload_wait(
 
 
 async def health_check(
-    tab, runtime, refresh_identity, cancel_tasks, url, config_dict,
+    tab, runtime: TabRuntime, refresh_identity, cancel_tasks, url, config_dict,
 ):
     """只執行限流復原健康檢查，不選擇任何票券控制項。"""
 

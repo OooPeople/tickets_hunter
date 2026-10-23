@@ -12,6 +12,7 @@ import json
 import re
 import time
 import uuid
+from typing import TypedDict
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from zendriver import cdp
@@ -57,6 +58,7 @@ from .profiles import (
     same_origin,
     unique_query,
 )
+from .runtime import TabRuntime, new_tab_runtime as _new_ctbc_tab_runtime
 from .selection import (
     AreaActionPlan,
     AreaSnapshot,
@@ -103,40 +105,18 @@ CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
 CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
 CTBC_SEAT_STALE_RELOAD_REASON = "requested seats are unavailable"
-_state = {
+
+
+class _WorkflowState(TypedDict):
+    tabs: dict[str, TabRuntime]
+    cancel_tasks: set[asyncio.Task]
+
+
+_state: _WorkflowState = {
     "tabs": {},
     "cancel_tasks": set(),
 }
 _UTIKI_TAB_TOKEN_ATTR = "_tickets_hunter_utiki_tab_token"
-
-
-def _new_ctbc_tab_runtime():
-    """建立由單一瀏覽器分頁持有的可變執行期。"""
-    return {
-        "document": {
-            "snapshot": None,
-            "last_document": "",  # Canonical non-zero performance time origin.
-            "unknown_document": None,
-        },
-        "action": {},
-        "transition": {
-            "pending_navigation": None,
-            "server_assignment_authorized": None,
-        },
-        "purchase": {
-            "active_submit": None,
-            "outcomes": {},
-            "last_submit": None,
-            "checkout_notified": set(),
-        },
-        "refresh": {
-            "reload_request": None,
-            "rate_limit_observation": None,
-            "rate_limit_retry": 0.0,
-            "recovery_probe": None,
-            "reload_event": False,
-        },
-    }
 
 
 def _get_utiki_behavior(config_dict, key, default):
@@ -169,7 +149,7 @@ def _ctbc_tab_identity(tab):
     return identity
 
 
-def _ctbc_runtime_for_identity(identity):
+def _ctbc_runtime_for_identity(identity: str) -> TabRuntime:
     """依分頁識別取得或建立 uTiki 執行期。"""
 
     runtime = _state["tabs"].get(identity)
@@ -179,13 +159,13 @@ def _ctbc_runtime_for_identity(identity):
     return runtime
 
 
-def _ctbc_tab_runtime(tab):
+def _ctbc_tab_runtime(tab) -> TabRuntime:
     """取得目前瀏覽器分頁的 uTiki 執行期。"""
 
     return _ctbc_runtime_for_identity(_ctbc_tab_identity(tab))
 
 
-def _existing_utiki_tab_context(tab):
+def _existing_utiki_tab_context(tab) -> tuple[str | None, TabRuntime | None]:
     """取得既有分頁執行期，且不配置或固定新識別。"""
     identity = str(getattr(tab, _UTIKI_TAB_TOKEN_ATTR, "") or "")
     if not identity:

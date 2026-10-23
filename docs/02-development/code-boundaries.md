@@ -1,6 +1,6 @@
 **文件說明**：Tickets Hunter 的程式碼邊界規範，定義模組職責、依賴方向、命名慣例與禁止模式；修改相關邊界時閱讀。
 
-**最後更新**：2026-10-16
+**最後更新**：2026-10-23
 
 ---
 
@@ -8,7 +8,7 @@
 
 > 適用於所有新程式碼。歷史遺留程式碼可能早於本規則，看到不代表可以仿效。
 
-以下 uTiki 模組與依賴反映 `944e934` 的目前接線；待實作的責任分工見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。本文件不把目標模組寫成已完成。
+以下 uTiki 模組與依賴反映目前正式接線：批次 2 已加入 runtime 資料型別與 constructor；後續待拆責任見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
 
 ---
 
@@ -18,6 +18,7 @@
 - **`nodriver_common.py`** — 共用瀏覽器基礎設施：DOM 操作、暫停機制、Cloudflare、瀏覽器初始化、OCR 工廠、通知。禁止：平台業務邏輯、import `platforms/*` 或 `nodriver_tixcraft`。
 - **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔；legacy facade 只可明示轉接到同一家族 package，不得持有狀態或流程邏輯。禁止：跨平台 import、import `nodriver_tixcraft`。
 - **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是模組 `_state` 與 per-tab runtime 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。離開家族 route、關閉瀏覽器或 handler 終止時，由 workflow 以 non-allocating lookup 精確移除該 tab runtime；checkout 只取消 refresh work，必須保留 runtime 的通知去重狀態。不得只因網站外觀相似就納入同一家族。
+- **`platforms/utiki/runtime.py`** — 現有 mutable document／action／transition／purchase／refresh record 的 TypedDict 與等價 constructor。`workflow.py` 用 constructor 建立唯一 tab runtime；本模組不持有 tab registry、cancel-task registry、tab identity 或 cleanup。
 - **`platforms/utiki/refresh.py`** — uTiki document inspection、429 circuit breaker、跨程序 refresh reservation／commit／wait／pause／cancel 與 reload event。queued／reserved pause 會以節流的 exact-token cleanup 釋放共享工作；commit 後的 request 必須保留到觀察到不同的 canonical document token，URL 漂移或 browser command 回傳不得視為完成，也不得重送。每個 request 必須有非空 reason 與唯一 token；一個 intent 的 completion 不得回傳給另一個 caller，terminal recovery probe 也必須同步停止其 lease task。logical request 仍由 workflow 的 canonical per-tab runtime 持有，resume 不得重算 eligibility、延長 deadline 或回捲 committed phase。只能由 workflow 傳入 runtime、tab identity 與 cancel-task registry；禁止 import workflow、持有 `_state`、建立 mirror runtime，或處理購票選擇／提交。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
 - **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
@@ -35,8 +36,9 @@ platforms/{family}/workflow
                    -->  同 package 葉節點與核准 infrastructure 模組,
                         nodriver_common, util
 platforms/utiki/refresh
-                   -->  platforms/utiki/profiles, nodriver_common,
+                   -->  platforms/utiki/runtime, platforms/utiki/profiles, nodriver_common,
                         global_settings, refresh_coordinator, util
+platforms/utiki/runtime --> Python 標準函式庫
 platforms/{family}/葉節點
                    -->  同 package 更底層葉節點, Python 標準函式庫
 nodriver_common    -->  util, settings

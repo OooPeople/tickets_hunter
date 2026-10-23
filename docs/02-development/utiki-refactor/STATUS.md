@@ -1,17 +1,26 @@
 # uTiki 重構狀態
 
 - 唯一行為與程式起點：`944e934546f3dd36b1b4891a5a4fa359b8ade17f`。`a47fd07106eae598c8b44972282c6621bf7f493c` 只作文件整理參考，不沿用其功能、完成狀態或測試 PASS。
-- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。本輪 scope 校正開始時 HEAD 為 `fd4e7cc67672852110246cecf1cddcdff792998b`；批次 0/1 已在 `3aad611`、`fd4e7cc` 提交並推送至 `origin` 同名分支。未切換分支或合併上游。
-- 階段：批次 0 文件收尾及批次 1 指定行為案例已完成；**批次 2 production 實作暫停**。本輪只修訂正式施工文件的交付與相容範圍；目標架構與其他原行為仍依 [PLAN.md](PLAN.md)。
-- 程式範圍：本輪未修改 production、tests、`settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI；未接入目標新模組，未新增購票資格、拒絕條件或人工出口，也未建立 Issue／PR。
+- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 2 開始 HEAD 為 `e9796354244db9e4f85114f7e0b5ba019f9f1b0b`，工作樹乾淨；未切換分支或合併上游。本輪修改尚未提交或推送。
+- 階段：批次 0/1 已完成；本輪依 [PLAN.md](PLAN.md) 進行批次 2 runtime 資料與依賴整理，停在批次 2，不進入後續流程拆分。
+- 程式範圍：新增 `src/platforms/utiki/runtime.py`，`workflow.py` 改用其等價 constructor 並標註唯一 registry 型別，`refresh.py` 僅補同一 runtime 的型別依賴；未修改 tests、`settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增購票資格、拒絕條件或人工出口。
 - 環境：沿用現有 Windows x64 `.venv`（CPython 3.11.9、pytest 9.0.3），本輪未重建。批次 0 建立環境時 `uv venv --python 3.11.9 .venv` 及 `uv pip install --python .\.venv\Scripts\python.exe -r requirements-dev.txt` 均退出碼 0；需求取自 944 原檔。
 
-## 本輪使用者確認的 scope 校正
+## 前輪使用者確認的 scope 校正
 
 - **交付僅限原始碼使用**：正式 source caller 最終須在 Windows x64、macOS arm64 可用；本次不要求 PyInstaller、exe／安裝包、frozen runtime、hidden-import／spec、`build_scripts/build_local.py`、release packaging 或發布。現有 build scripts／release infrastructure 保留，原始碼版本穩定使用後另行處理打包。
 - **僅維護 current uTiki 設定格式**：current 設定仍須讀取、儲存並保留 `944e934` 已支援的 hot reload 欄位及時點；完成後使用者可重新填寫 current 設定。正式切換後不維護只為舊 uTiki／CTBC 設定相容的自動升級、runtime fallback、dual read／dual write，也不新增 DB schema／serialized runtime migration、version 欄位或 persistence upgrader。其他平台及共用 migration／normalization／SQLite 機制不在本輪移除範圍；uTiki shared refresh／429 SQLite coordinator 保持正式功能。
-- 以上是使用者新確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；本輪是純文件校正，未執行 production 測試、雙平台 source 驗證或產品打包。批次 2 仍待使用者另行下令。
-- 本輪文件檢查：`git diff --check` 退出碼 0；五份施工 scope 文件中的 15 個本地 Markdown 直接連結均存在。通用打包指南、歷史計畫及 `944e934` 的結構現況紀錄仍保留，僅以正式 PLAN 限定本次施工與驗收。
+- 以上是前輪使用者確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；通用打包指南與歷史計畫保留，僅以正式 PLAN 限定本次施工與驗收。
+
+## 批次 2：runtime 資料與依賴
+
+- `workflow.py` 仍持有唯一 `_state["tabs"]` 與 `_state["cancel_tasks"]`；tab identity、get-or-create、existing-only 與 cleanup 路徑保留原碼。`runtime.py` 僅有目前五份 mutable child record 的 TypedDict／constructor，沒有 registry 或 manager。`refresh.py` 仍由 workflow 傳入同一 runtime 與 cancel-task set。原 await 後對 registry／record 的重查、purchase／navigation／refresh 狀態建立與清理時點未改。
+- `action` 在現有 production 尚無欄位讀寫，保留原本空 dict；document、transition、purchase、refresh 的預設值與 `944e934` 相同。既有測試已涵蓋雙 tab 隔離、同 target wrapper、晚出現 target id、未知 tab cleanup 不配置、exact cleanup、await 期間 replacement、submit／outcome／pending navigation 身分及 checkout 去重；本批未增加重複案例。
+- 靜態：`.\.venv\Scripts\python.exe -m py_compile src/platforms/utiki/runtime.py src/platforms/utiki/workflow.py src/platforms/utiki/refresh.py` 退出碼 0；`git diff --check` 退出碼 0。
+- 聚焦：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_dom.py tests/test_utiki_dom_contract.py tests/test_ctbc_refresh.py tests/test_ctbc_pure.py` 退出碼 0，**285 passed、168 subtests passed**。
+- 整合：`.\.venv\Scripts\python.exe -m pytest` 退出碼 0，**358 passed、1 deselected**（收集 359 項，8.84 秒）。
+- 本機 browser fixture：因本批更換 runtime constructor，驗證 production DOM caller 的建立路徑；暫時設定 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1` 執行 `.\.venv\Scripts\python.exe -m pytest -q --tb=short -m 'browser and not live' tests/test_ctbc_dom_fixtures.py`，退出碼 0，**1 passed in 8.91s**，執行後清除環境旗標。
+- 未驗證：macOS arm64 source 使用、GitHub CI、真站手動流程；本批不執行產品打包。沒有發現需選擇新產品語意的 944 runtime 欄位歧義。
 
 ## 原始基準（production 與 tests 尚未修改時）
 
@@ -35,7 +44,7 @@
 
 ## 下一步
 
-依使用者指令暫停批次 2。待另行下令才進入 production 架構拆分；屆時依 PLAN 將目標模組逐步接入正式 source caller，並隨實際接線更新 code-boundaries、structure 與驗證紀錄。
+本輪停在批次 2，等待使用者審查。獲另行下令後，批次 3 可從 `workflow.py` 的購票與提交邊界開始；現有 `runtime.py` 只提供資料契約，不預先搬動該流程。
 
 | 文件或 PLAN 情境 | 原衝突／缺口 | 目前狀態 |
 | --- | --- | --- |

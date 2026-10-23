@@ -4,15 +4,19 @@
 
 以 `944e934546f3dd36b1b4891a5a4fa359b8ade17f` 的實際行為作為基準，重新整理 uTiki 家族的責任、狀態存取與呼叫關係。架構改善的交付條件是：**原本能完成的操作繼續能完成，原本可人工介入後接手的情況繼續可接手，程式更容易定位、理解與修改。**
 
-日期、區域、票種、張數、座位、登入、驗證碼、錯誤恢復、暫停、設定更新、刷新、通知及舊設定相容，都屬於保留範圍。使用者已允許大幅調整內部架構；這不包含新增指定 Cookie/session 資格、設定版本相等、來源導航證明或其他原本沒有的操作門檻。
+日期、區域、票種、張數、座位、登入、驗證碼、錯誤恢復、暫停、設定熱更新、刷新及通知，都屬於保留範圍。使用者已允許大幅調整內部架構；這不包含新增指定 Cookie/session 資格、設定版本相等、來源導航證明或其他原本沒有的操作門檻。
 
 **本次僅重整架構並等價重現 `944e934` 的既有功能，不擴充功能範圍。** 原本未支援的功能不列為本次待補項目、後續實作批次或完成條件；重構結束後，如有新增需求，再另行討論。
+
+**本次交付僅限原始碼使用。** 正式 source caller 須能在 Windows x64 與 macOS arm64 以原始碼執行；PyInstaller、exe、安裝包、frozen runtime、hidden-import／spec、release packaging 與發布流程均不屬本次施工或驗收。新增 module 也不因此要求 frozen resource 或產品打包驗證。既有 build scripts 與 release infrastructure 保留，待原始碼版本穩定使用後另開工作處理打包。
+
+**uTiki 只維護一份 current configuration format。** current 設定須正常讀取、儲存，並等價保留 `944e934` 已支援的 hot reload 欄位與生效時點；使用者可在重構完成後重新填寫 current 設定。正式切換後不維護只為舊版 uTiki／CTBC 設定相容的 upgrader、runtime fallback、dual read／dual write，亦不要求舊 `settings.json` 自動升級；不為本次新增 DB schema／serialized runtime migration、schema／runtime version 或 persistence upgrader。這項明確縮減只針對本次 uTiki 設定交付，不刪除其他平台或共用基礎設施仍使用的 migration／normalization／SQLite 機制；既有 uTiki shared refresh／429 SQLite coordinator 仍須保留原功能。
 
 等價保留也包含原有能力邊界。下文的摘要不能被解讀成比 `944e934` 更強的功能保證；若摘要過廣，應依原分支修正描述，不為兌現文字而補做功能。無法確定原行為，或確實需要改變使用行為時，先提出具體差異詢問使用者，未釐清前不把新行為納入實作或驗收。
 
 本計畫採用 `944e934` 的來源碼重新分工。`a47fd07` 僅提供可獨立採用的設計經驗；`facebook_monitor_py` 僅提供職責劃分與生命週期管理的參考。
 
-**交付狀態：架構方案與實作驗收規格，尚未實作或推送新版本。** Repository 的 [AGENTS.md 第 2 節][agents] 要求大規模架構重寫先有維護者同意的正式計畫；此文件讓修改範圍、行為保留及驗證方式能在動工前被具體審閱。
+**文件狀態：本次正式施工計畫；目標架構的實作進度以 [STATUS.md](STATUS.md) 為準。** 本文件記錄使用者確認的修改範圍、行為保留與驗證方式。
 
 ### 固定參考版本
 
@@ -82,7 +86,7 @@
 | 既有 `selection.py` | 快照資料與純選擇、純分類 | 本次保留既有選擇與解析行為；必要拆分仍須等價 |
 | 既有 `dom.py` | 快照讀取、原子選擇、提交及導航 primitive | 不持有 runtime；保留原 DOM 操作與核對條件 |
 | 既有 `profiles.py`、`auth.py` | 路由、租戶能力及既有登入資料解析 | 不擴張能力要求，也不把可選能力變成必要資格 |
-| 既有 package／CTBC facade | 相容的公開名稱與匯出 | 單向轉接，不保存狀態 |
+| 既有 package／CTBC facade | 正式 source caller 仍使用的公開名稱與匯出 | 有真實 caller 才單向轉接，不保存狀態；只為舊設定相容而存在、且無正式 caller 的轉接可於 cleanup 移除 |
 
 `date_area.py` 與 `navigation.py` 分開有具體原因：前者回答「這次選哪個目標」，後者追蹤「剛才選定並送出的導航現在到哪裡」。兩者的生命週期不同。這可以把目前前後散落的導航程式聚在一起，又避免把所有選擇與跨頁判斷搬成另一個大 workflow。
 
@@ -149,12 +153,12 @@ flowchart TD
 
 ## 原函式如何遷移
 
-來源均為固定版本的 [workflow.py][workflow] 與 [refresh.py][refresh]。表內函式是遷移的定位依據，最終內部命名可改善，對外 API 維持相容。
+來源均為固定版本的 [workflow.py][workflow] 與 [refresh.py][refresh]。表內函式是遷移的定位依據，最終內部命名可改善；正式 source caller 使用的對外 API 維持可用。
 
 | 944 的函式或函式群 | 新責任位置 | 保留重點 |
 | --- | --- | --- |
 | `_state`、tab identity、runtime 取得／既有查找、公開 cleanup | workflow；資料定義移 runtime | 唯一 registry；清理未知 tab 不建立新 runtime |
-| `_get_utiki_behavior` | 輕量純設定 accessor | 每個鍵仍是 utiki 優先、缺少才取 ctbc、再取 default |
+| `_get_utiki_behavior` | 輕量純 current 設定 accessor | 讀 current uTiki 鍵與原預設；`944e934` 缺鍵時讀舊 `ctbc` 的路徑只作基準對照，正式切換後不保留舊設定 runtime fallback |
 | `nodriver_ctbc_inject_cookies` | inputs；workflow 保留公開轉接 | 可選能力與原 scope，不變成所有購票的前置資格 |
 | `nodriver_ctbc_date_auto_select`、`nodriver_ctbc_area_auto_select` 的選擇部分 | date_area | 日期／區域的關鍵字、排序、fallback、原始候選 |
 | `_ctbc_try_fast_area_navigation` 的預取與候選選擇 | date_area | 預取／選候選失敗時的 native fallback；已送出而結果未知時保留 pending |
@@ -211,7 +215,7 @@ refresh 與 rate_limit 共用的 `_refresh_settings()` 放在兩者可單向使�
 
 人工預先選好的座位，經原快照與選擇分支判定符合張數、票種、計數與連座要求，就直接 ready；不因為缺少「程式親自選取」的歷史而清掉。只有原本產生 clear 計畫的情況才清除，後續迭代再重新選取；無效快照、張數或票種無法匹配等原本無計畫的分支，也維持原處理，不一律清除。
 
-票種使用現有 ticket_type_keyword／CTBC fallback 與預設全票；不繼承區域關鍵字。一般票數頁維持選定票種張數、其餘票種歸零及原提交接線。[座位選擇與人工已選座位][seat-selection]、[票數流程][quantity-flow]
+票種沿 current uTiki 設定的 ticket_type_keyword 與原預設全票選取；`944e934` 的舊 CTBC 設定 fallback 僅是基準現況，不列入切換後的設定相容義務。不繼承區域關鍵字；一般票數頁維持選定票種張數、其餘票種歸零及原提交接線。[座位選擇與人工已選座位][seat-selection]、[票數流程][quantity-flow]
 
 ### 登入與驗證碼
 
@@ -242,7 +246,7 @@ refresh 與 rate_limit 共用的 `_refresh_settings()` 放在兩者可單向使�
 
 重構要保留既有的防重複送出與結果歸屬。使用者要求不加限制，並不表示要移除 `944e934` 已有的這些行為。[恢復與對帳][recovery]、[checkout 通知][checkout]
 
-### 暫停刷新與設定相容
+### 暫停刷新與 current 設定
 
 | 項目 | 保留行為 |
 | --- | --- |
@@ -255,10 +259,12 @@ refresh 與 rate_limit 共用的 `_refresh_settings()` 放在兩者可單向使�
 | 定時開搶 | 原 health／challenge 處理仍在開搶時間等待期間運作 |
 | 外層 challenge 接線 | 保留原呼叫順序與回傳行為，不因新入口提前 return 而失去既有處理 |
 | 既有分頁隔離與清理 | 維持原 tab identity 與 runtime 隔離、精確清理自己的工作；checkout 保留通知去重狀態 |
-| 舊設定 | utiki 按鍵優先，缺少才取 ctbc；顯式空值不當成缺鍵回退。原 migrate 對 seat_sorting／seat_selection_mode 的正規化及既有鏡像照舊 |
-| 對外 API 與發行版 | CTBC facade、uTiki 公開入口及 PyInstaller 打包仍可用 |
+| current 設定 | 依正式 `--input` 讀取、儲存 current uTiki 設定；既有 hot reload 欄位與原生效時點等價。正式切換後不讀取舊 `ctbc` 設定 fallback，不維護舊格式鏡像或 upgrader |
+| 正式 source 入口 | 保留有實際 caller 的 uTiki 公開入口與必要 facade，Windows x64／macOS arm64 原始碼使用路徑可用；不要求 PyInstaller／frozen |
 
-來源：[主迴圈設定與暫停][hot-reload]、[外層順序][outer-order]、[刷新暫停][refresh-pause]、[刷新開關測試][refresh-switch]、[設定遷移][settings-migration]。
+`944e934` 的舊 `ctbc` 鍵 fallback、設定正規化與鏡像可由[原設定程式][settings-migration]查證，是行為基準中的歷史現況，不是重構完成後須維護的舊格式相容義務。正式切換後，只為舊設定相容存在且無正式 caller 的轉接，可在對應 cleanup 批次移除；不能因此移除其他平台或共用功能仍使用的設定處理。
+
+來源：[主迴圈設定與暫停][hot-reload]、[外層順序][outer-order]、[刷新暫停][refresh-pause]、[刷新開關測試][refresh-switch]。
 
 ### 原能力邊界也要寫清楚
 
@@ -408,7 +414,7 @@ STATUS 只需下列短摘要與一張必要時才出現的缺口表；不用另�
 - 程式狀態：<例如尚未修改production／tests；不可先填已完成>
 - 環境：<作業系統、Python完整版本、所用環境；未建立就寫未建立>
 - 基準驗證：<實際命令、退出碼、結果摘要；未執行就寫未執行>
-- Browser／建置／真站：<各自的已驗證範圍或未執行原因>
+- Browser／CI／真站：<各自的已驗證範圍或未執行原因；打包不屬本次驗收>
 - 已檢視範圍：<文件入口及PLAN中已對照的情境>
 - 下一步／阻礙：<具體一項或數項>
 
@@ -435,7 +441,7 @@ STATUS 只需下列短摘要與一張必要時才出現的缺口表；不用另�
 | 3 拆購票與提交 | inputs、submission、purchase接入正式頁型分派 | 人工登入／CAPTCHA、既有選座、拒絕恢復、未知結果、人工checkout均等價 |
 | 4 拆選擇與導航 | date_area與navigation；DOM primitive歸位 | 日期區域、VIP/native/fast、人工中途接手、storage不可用等價 |
 | 5 拆刷新觀察與429管理 | document_health、rate_limit；refresh保留完整request生命週期 | queued/reserved/awaiting各暫停點、429/probe、document與caller歸屬等價 |
-| 6 收斂整合 | 移除未使用轉接、同步實際模組責任／索引／驗證文件與打包設定，檢查正式入口只有一條 | 完整測試、import與本地打包結果、同情境舊新差異表、必要實機範圍；文件反映實際完成狀態 |
+| 6 收斂整合 | 移除無正式 caller 的舊設定轉接、同步實際模組責任／索引／驗證文件，檢查正式 source 入口只有一條 | 完整測試、Windows x64／macOS arm64 原始碼使用路徑、current 設定讀取／儲存／hot reload、同情境舊新差異表及 PLAN 所需驗證範圍；文件反映實際完成狀態 |
 
 每批可以回到固定基準比較，不需要在使用者操作介面加入模式選擇、旗標或遷移確認。只有外部既有呼叫端需要的 facade 才保留；私有測試 import 可以跟隨責任位置調整，不為舊私有測試建立永久轉送層。
 
@@ -474,21 +480,20 @@ UUID 等每次不同的值可以按對應操作正規化；token 的相等關係
 | 共用刷新保護開關 | 排隊時enabled開→關保留同一意圖、期限及單次reload；關→開重新遵循原協調 |
 | 外層整合 | 原challenge、429、定時開搶的相對順序 |
 | checkout與cleanup | 人工／程式抵達均比較聲音、Discord、Telegram各通道的呼叫次數與聲音開關，整組去重；分頁清理互不影響 |
-| 設定與發行 | utiki/ctbc按鍵相容、實際input檔既有欄位的熱更新與生效時點、source/frozen入口一致 |
+| current 設定與 source 入口 | current uTiki 設定讀取／儲存、實際 input 檔既有支援欄位的熱更新與生效時點、Windows x64／macOS arm64 正式 source caller；不要求舊設定升級或 frozen 入口 |
 
 ### 既有測試優先使用
 
 沿用 `test_ctbc_pure.py`、`test_ctbc_dom.py`、`test_ctbc_refresh.py`、`test_utiki_dom_contract.py` 與 `test_ctbc_dom_fixtures.py`。既有 local browser fixture 已執行正式 DOM reader／committer；不必先另造一套測試框架。[fixture runner][fixture-runner]
 
-批次0的一次原版基準及雙平台命令見後面的「批次0命令」。實作期間依 repository 的 [測試指南][testing] 選受影響層級；以下 `python` 表示已選定的虛擬環境 interpreter，不是隨手使用全域Python。聚焦測試用於對應改動，全套用於整合驗證，打包用於import／發行相關變動與最終整合；不要求純文件修改把所有命令重跑一遍：
+批次0的一次原版基準及雙平台命令見後面的「批次0命令」。實作期間依 repository 的 [測試指南][testing] 選受影響層級；以下 `python` 表示已選定的虛擬環境 interpreter，不是隨手使用全域Python。聚焦測試用於對應改動，全套用於整合驗證；新增 module 應核對正式 source caller 的 import 與執行路徑，最終在 Windows x64、macOS arm64 驗證原始碼使用。不要求純文件修改把所有命令重跑一遍，也不以打包作任何批次的完成條件：
 
 ```bash
 python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py tests/test_utiki_dom_contract.py
 python -m pytest
-python build_scripts/build_local.py
 ```
 
-另對修改的 Python 檔執行 py_compile，並檢查 diff。這些是實作時的開發驗證，不是程式使用者新增的啟動條件。單元、fixture、建置與真站實測分開記錄，不能互相替代。
+另對修改的 Python 檔執行 py_compile，並檢查 diff。這些是實作時的開發驗證，不是程式使用者新增的啟動條件。單元、fixture、雙平台 source 執行與真站實測分開記錄，不能互相替代；既有 build scripts 與發行流程不在本次驗證範圍。
 
 ## 行為變更的處理方式
 
@@ -515,8 +520,8 @@ python build_scripts/build_local.py
 2. 上述功能與操作情境的舊新對照；等價保留944既有功能與能力邊界，不新增功能或操作限制。
 3. 每一個核心狀態有明確的建立、更新與清理責任；一筆提交或刷新不跨多套模型重複表示。
 4. 修改選座、登入、提交恢復或刷新時，可以直接找到相應責任；不需要先理解通用claim、authority與policy框架。
-5. production規模及新增抽象用途的報告；保留的相容層有真實呼叫端。
-6. 實際執行的測試、fixture、建置與實機範圍；未執行的部分照實列出。
+5. production規模及新增抽象用途的報告；保留的 facade 有正式 source caller，不為舊設定相容保留無 caller 的轉接。
+6. 實際執行的測試、fixture、Windows x64／macOS arm64 source 使用及 PLAN 所需實機範圍；未執行的部分照實列出。current uTiki 設定可正常讀取、儲存並依原支援範圍 hot reload；不要求舊設定 upgrade、runtime fallback、dual read／dual write、新 DB migration 或 frozen build。
 7. 精簡的AGENTS與清楚的PLAN／STATUS／專責文件分工；舊計畫不再冒充現行施工依據，文件中的模組、命令與完成狀態符合實際結果。
 
 這次架構工作的價值，由功能保留、資料責任清楚及修改成本下降來證明。任何「為了新架構，使用者現在必須多做一步」都屬於需要重新審查的行為差異。
@@ -794,7 +799,6 @@ a47與facebook_monitor_py只供責任分工參考，不決定本次產品行為�
 
 以下連結固定到研究時的完整commit，避免分支更新使規格失去依據。
 
-[agents]: https://github.com/OooPeople/tickets_hunter/blob/944e934546f3dd36b1b4891a5a4fa359b8ade17f/AGENTS.md
 [workflow]: https://github.com/OooPeople/tickets_hunter/blob/944e934546f3dd36b1b4891a5a4fa359b8ade17f/src/platforms/utiki/workflow.py
 [selection]: https://github.com/OooPeople/tickets_hunter/blob/944e934546f3dd36b1b4891a5a4fa359b8ade17f/src/platforms/utiki/selection.py
 [dom]: https://github.com/OooPeople/tickets_hunter/blob/944e934546f3dd36b1b4891a5a4fa359b8ade17f/src/platforms/utiki/dom.py

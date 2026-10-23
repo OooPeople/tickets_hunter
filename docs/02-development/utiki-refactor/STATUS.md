@@ -1,10 +1,17 @@
 # uTiki 重構狀態
 
 - 唯一行為與程式起點：`944e934546f3dd36b1b4891a5a4fa359b8ade17f`。`a47fd07106eae598c8b44972282c6621bf7f493c` 只作文件整理參考，不沿用其功能、完成狀態或測試 PASS。
-- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。本輪開始時 HEAD 為已知準備提交 `09d1fcff6498eae2ff22ee9e15d9d722defde981`；本輪只有未提交的文件與測試修改，未切換分支或合併上游。
-- 階段：批次 0 的直接相關文件收尾及批次 1 的指定行為案例已完成本機修改與驗證；**停在批次 1**。批次 2 production 架構拆分尚未開始。目標設計與功能範圍仍由 [PLAN.md](PLAN.md) 定義。
-- 程式範圍：production、`requirement.txt`、`requirements-dev.txt`、`pytest.ini` 均未修改；未接入目標新模組，未新增購票資格、拒絕條件或人工出口。未 commit、push、建立 Issue／PR。
+- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。本輪 scope 校正開始時 HEAD 為 `fd4e7cc67672852110246cecf1cddcdff792998b`；批次 0/1 已在 `3aad611`、`fd4e7cc` 提交並推送至 `origin` 同名分支。未切換分支或合併上游。
+- 階段：批次 0 文件收尾及批次 1 指定行為案例已完成；**批次 2 production 實作暫停**。本輪只修訂正式施工文件的交付與相容範圍；目標架構與其他原行為仍依 [PLAN.md](PLAN.md)。
+- 程式範圍：本輪未修改 production、tests、`settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI；未接入目標新模組，未新增購票資格、拒絕條件或人工出口，也未建立 Issue／PR。
 - 環境：沿用現有 Windows x64 `.venv`（CPython 3.11.9、pytest 9.0.3），本輪未重建。批次 0 建立環境時 `uv venv --python 3.11.9 .venv` 及 `uv pip install --python .\.venv\Scripts\python.exe -r requirements-dev.txt` 均退出碼 0；需求取自 944 原檔。
+
+## 本輪使用者確認的 scope 校正
+
+- **交付僅限原始碼使用**：正式 source caller 最終須在 Windows x64、macOS arm64 可用；本次不要求 PyInstaller、exe／安裝包、frozen runtime、hidden-import／spec、`build_scripts/build_local.py`、release packaging 或發布。現有 build scripts／release infrastructure 保留，原始碼版本穩定使用後另行處理打包。
+- **僅維護 current uTiki 設定格式**：current 設定仍須讀取、儲存並保留 `944e934` 已支援的 hot reload 欄位及時點；完成後使用者可重新填寫 current 設定。正式切換後不維護只為舊 uTiki／CTBC 設定相容的自動升級、runtime fallback、dual read／dual write，也不新增 DB schema／serialized runtime migration、version 欄位或 persistence upgrader。其他平台及共用 migration／normalization／SQLite 機制不在本輪移除範圍；uTiki shared refresh／429 SQLite coordinator 保持正式功能。
+- 以上是使用者新確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；本輪是純文件校正，未執行 production 測試、雙平台 source 驗證或產品打包。批次 2 仍待使用者另行下令。
+- 本輪文件檢查：`git diff --check` 退出碼 0；五份施工 scope 文件中的 15 個本地 Markdown 直接連結均存在。通用打包指南、歷史計畫及 `944e934` 的結構現況紀錄仍保留，僅以正式 PLAN 限定本次施工與驗收。
 
 ## 原始基準（production 與 tests 尚未修改時）
 
@@ -12,9 +19,9 @@
 - 本機 browser fixture：暫時設定 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1` 後執行 `.\.venv\Scripts\python.exe -m pytest -m 'browser and not live' tests/test_ctbc_dom_fixtures.py`，退出碼 1；收集 1 項、1 failed。`test_production_dom_contracts_in_local_browser` 的 seat 情境中，`commit_seat` 回傳 `CommitResult.REJECTED`，原預期 `COMMITTED`。斷言在 `_assert_seat_fixture` 中止，後續 quantity、server-assigned quantity、dialog、fast-marker 情境**當時未執行**。原版 production 與測試預期未為此更改。
 - GitHub CI／打包／真站手動驗收未執行；不以本機 pytest 代稱其他驗證層級。
 
-## 本輪文件與批次 1
+## 已完成的批次 0 文件與批次 1
 
-- 選擇性比較 a47 與目前文件後，收斂 [CONTRIBUTING](../../../CONTRIBUTING.md) 的 upstream 公開 PR 適用範圍；本機／fork 工作不以 Issue 或維護者確認為前置條件，commit／push 仍須使用者明確下令。開發導航、通用十二階段、範本、工程審查與測試指南只標示各自職責與適用範圍，不把 a47 的單 Run、typed policy、authority／claim、舊 gate、歷史 PASS 或 source-only 決策帶回來。
+- 選擇性比較 a47 與當時文件後，收斂 [CONTRIBUTING](../../../CONTRIBUTING.md) 的 upstream 公開 PR 適用範圍；本機／fork 工作不以 Issue 或維護者確認為前置條件，commit／push 仍須使用者明確下令。開發導航、通用十二階段、範本、工程審查與測試指南只標示各自職責與適用範圍，不帶回 a47 的單 Run、typed policy、authority／claim、舊 gate 或歷史 PASS；本輪 source-only 決策另由使用者明確確認。
 - [AGENTS.md](../../../AGENTS.md) 與測試指南允許合成或已脫敏 fixture，保留一致的合成席位／商品／payload 關聯；需要瀏覽器時使用專用／暫存 profile。實際擷取才記錄擷取日期。真站與日常 profile 仍須授權，秘密不得輸出。測試指南集中開發聚焦驗證、整合收集失敗、按共同根因處理、聚焦重驗及必要完整驗證的節奏。
 - 在原有 production 尚未重構時，`tests/test_ctbc_dom.py` 補足：OCR 關閉且原讀取時點已有人工四碼，即使 `force_submit=True` 仍 ready、不呼叫 OCR、不自動送出；一般票數頁 manual 模式、無 pending／marker 時沿正式 caller 與真實 `_ctbc_attest_fast_destination` 分支接手；checkout 聲音開／關採獨立 runtime/key，Discord／Telegram 與聲音呼叫均 mock，重複 tick 整組去重，處理後才開聲音不補播或重發。
 - 聚焦案例：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_dom.py::CtbcDomFlowTest::test_manual_four_character_captcha_with_ocr_off_stays_ready tests/test_ctbc_dom.py::CtbcDomFlowTest::test_manual_general_admission_without_navigation_records_reaches_quantity tests/test_ctbc_dom.py::CtbcDomFlowTest::test_checkout_two_ticks_notifies_once_and_retains_runtime tests/test_ctbc_dom.py::CtbcDomFlowTest::test_checkout_sound_on_notifies_once_across_two_ticks`，**4 passed**。受影響檔：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_dom.py`，**107 passed、52 subtests passed**。預設整合套件：`.\.venv\Scripts\python.exe -m pytest`，退出碼 0；收集 359 項，**358 passed、1 deselected**，耗時 9.34 秒。
@@ -28,7 +35,7 @@
 
 ## 下一步
 
-依使用者本輪指令停在批次 1，保留未提交變更。待另行下令才進入批次 2；屆時依 PLAN 將目標模組逐步接入正式 caller，並隨實際接線更新 code-boundaries、structure 與驗證紀錄。
+依使用者指令暫停批次 2。待另行下令才進入 production 架構拆分；屆時依 PLAN 將目標模組逐步接入正式 source caller，並隨實際接線更新 code-boundaries、structure 與驗證紀錄。
 
 | 文件或 PLAN 情境 | 原衝突／缺口 | 目前狀態 |
 | --- | --- | --- |

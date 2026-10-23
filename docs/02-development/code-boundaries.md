@@ -131,7 +131,7 @@ async def nodriver_xxx_main(tab, url, config_dict):
 ## 7. 新增設定欄位流程
 
 1. `settings.py` 的 `get_default_config()` 加入欄位 + 安全預設值
-2. 若取代舊欄位，在 `migrate_config()` 加遷移邏輯
+2. 只有適用工作要求舊設定相容時，才依該平台既有機制處理遷移；本次 uTiki 只維護 current 設定，不新增舊設定 upgrader／fallback／dual write（見 [正式 PLAN](utiki-refactor/PLAN.md)）
 3. 業務邏輯透過 `config_dict.get(...)` 讀取
 4. 在面向使用者的訊息中使用設定項的 UI 名稱，不用內部鍵名
 

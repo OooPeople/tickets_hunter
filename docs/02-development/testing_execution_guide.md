@@ -67,6 +67,8 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 | D. 建置驗證 | 驗證 import、相依套件與 PyInstaller | `python build_scripts/build_local.py` |
 | E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
 
+此表保留全專案的打包驗證層級；[本次 uTiki 重構](utiki-refactor/PLAN.md) 僅交付原始碼，D 層級不屬任何批次的完成條件。新增 module 或 import 也只按 PLAN 驗證正式 source caller 與 Windows x64／macOS arm64 原始碼使用路徑，不要求 PyInstaller、hidden-import、spec 或 frozen build。uTiki 只驗證 current 設定讀取／儲存及原本支援的 hot reload，不把舊設定升級、runtime fallback、dual read／dual write 或新 DB migration 列為測試義務。
+
 開發中先跑受影響的聚焦案例。完整切片接線或整合時跑必要的預設套件，讓可執行案例完成並收集失敗；按共同根因集中處理，修復期間聚焦重驗，整批處理後再做必要的完整驗證。只有收集或環境錯誤阻擋後續案例時，排除阻礙後提早重跑完整套件以補齊結果。不訂額外固定次數，也不靠反覆推送觸發 CI 尋找下一個錯誤。
 
 ## 4. 常用命令
@@ -169,7 +171,7 @@ python -m pytest --cov=src --cov-report=term-missing
 
 ### 4.5 建置驗證
 
-在以下情況執行：
+本節供交付範圍包含打包的工作使用；本次 uTiki 依正式 PLAN 採 source-only，不因下列變更執行打包或把建置結果列為驗收。其他適用工作在以下情況執行：
 
 - 新增或移除 import。
 - 修改 `requirement.txt`。
@@ -195,7 +197,7 @@ python build_scripts/build_local.py
 | 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例；真站範圍依使用者授權與適用計畫 |
 | 刷新／429 協調 | 聚焦協調器測試、完整套件、多實例或時間控制測試 |
 | 設定 schema／遷移 | default、舊設定遷移、儲存回讀、UI 顯示、相關流程測試 |
-| import／相依／spec | 語法、完整套件、本地建置 |
+| import／相依／spec | 語法、完整套件；交付範圍包含打包時才做本地建置。本次 uTiki 新 module／import 另依 PLAN 驗證雙平台 source 路徑 |
 
 ## 6. 測試設計準則
 

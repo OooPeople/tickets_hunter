@@ -38,7 +38,7 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 - 平台是否保持在 `src/platforms/`，沒有反向匯入或跨平台 import。
 - 共用邏輯是否真的跨平台；平台 selector、URL 與業務規則不得塞進 `util.py`。
 - 家族平台共用必須基於已驗證的 page contract，不能只因 UI 相似就共用實作。
-- 新 module/package 是否同步處理入口路由、設定與 PyInstaller hidden imports。
+- 新 module/package 是否按實際用途接入正式 source caller；涉及設定時使用 current 格式。只有交付範圍包含打包時才檢查 PyInstaller hidden imports。
 
 ### 3.3 URL、頁面與輸入安全
 
@@ -101,9 +101,9 @@ finding 必須包含：位置、觸發條件、實際後果及建議修正方向
 
 ### 3.10 文件與發行
 
-- 設定名稱、預設值、遷移與 UI 是否同步。
+- 設定名稱、預設值、適用範圍內的遷移與 UI 是否同步。
 - 架構、測試與使用者文件是否描述目前行為，而非預定行為。
-- 新 import、資料檔或 package 是否能被 PyInstaller 收錄。
+- 新 import、資料檔或 package 是否能由正式 source caller 載入；只有打包屬交付範圍時才檢查 PyInstaller 收錄。
 - Windows cp950 下 `.py` 是否沒有 emoji 或不相容輸出。
 
 ## 4. 建議審查順序
@@ -146,6 +146,6 @@ Summary
 - 有明確的目標、施工界線與各批次驗收。
 - characterization tests 先於行為搬移。
 - 舊、新實作不會同時執行相同副作用；需要比較時只允許 shadow decision。
-- 相容 facade、舊實作移除、原設定相容，以及 source／frozen 與本地打包驗證依適用計畫處理，不套用其他版本的交付決策。
+- facade 與舊實作移除、設定及交付範圍依適用計畫處理；本次 uTiki 只維護 current 設定與 Windows x64／macOS arm64 source 使用，不要求舊設定升級、新 DB migration 或 frozen／本地打包驗證。
 - 各批次可辨識、可驗收且可恢復；是否合併、部署或發布依使用者當次授權。
 - 真站驗證只回報實際執行範圍；未執行時照實列為未驗證，不當成本次離線重構的額外完成條件。

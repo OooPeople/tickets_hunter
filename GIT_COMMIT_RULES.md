@@ -54,7 +54,20 @@
 
 ```text
 docs(readme): 補充 uv 初始化指令
-chore(config): 新增 Python 版本固定檔
-feat(phase0): 新增 headless worker probe
-fix(worker): 修正 profile 不存在時的錯誤訊息
+
+chore(project): 建立 Python 版監視工具骨架
+- 建立 Python 套件、uv 專案設定、基礎目錄與測試入口。
+- 放入 FastAPI、Playwright、SQLite、本機 runtime path 等後續主軸需要的骨架。
+- 保留從 userscript 遷移到 Python 版時需要的文件與參考資料，讓歷史來源能被追溯但不成為正式產品主路徑。
+
+feat(webapp): 收合新增 target 進階設定並修正預設值文案
+- 將新增 target 的掃描、刷新、通知設定收進進階設定區塊，並沿用共用欄位 partial
+- 抽出共用收合動畫 helper，讓 target 卡片與新增頁面共用平滑動畫行為
+- 修正設定頁排除關鍵字預設值標題、儲存按鈕與成功訊息文案
+- 補上 route、static contract 與 browser smoke 測試覆蓋收合互動
+
+fix(worker): 強化 Facebook 頁面錯誤判斷
+- 以 marker context、可見 feed 與 bounded permalink 容器區分整頁錯誤和貼文引用
+- 保留內容不可見三次、每次間隔 30 秒與新 page 確認，並拆分 scheduler due 決策
+- 新增 diagnostics v2 相容層、最終日誌敏感資料遮罩與真實 Chromium 回歸測試
 ```

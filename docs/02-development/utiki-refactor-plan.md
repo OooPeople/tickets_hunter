@@ -1,6 +1,6 @@
 # uTiki2 職棒售票引擎重構計劃
 
-**文件狀態**：已核准，依 Phase 執行中
+**文件狀態**：歷史計畫；已由 [本次正式計畫](utiki-refactor/PLAN.md) 取代，不再作本次施工指令。下文保留當時的核准與 Phase 紀錄。
 
 **建立日期**：2026-10-15
 
@@ -8,7 +8,7 @@
 
 **相關功能 Issue**：[OooPeople/tickets_hunter#3](https://github.com/OooPeople/tickets_hunter/issues/3)
 
-> 本文件是重構的執行契約，不是用完成結果回填計畫的日誌。每個 Phase 仍須通過其驗收與審查 gate 才能繼續。
+> 以下為舊計畫的歷史內容；其功能待辦、Phase、gate 與每 Phase 同步上游要求不繼承到本次等價重構。
 
 ## 1. 決策摘要
 

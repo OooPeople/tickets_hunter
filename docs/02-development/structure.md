@@ -408,7 +408,7 @@ platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 - `workflow.py` 單向傳入 canonical runtime、tab identity 與 cancel-task registry 給 `refresh.py`；refresh 不得反向 import workflow 或建立 mirror state。
 - 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
-- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，分階段拆分見 [uTiki2 重構計劃](utiki-refactor-plan.md)。
+- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，本次待實作的架構與順序見 [uTiki 正式計畫](utiki-refactor/PLAN.md)。
 
 ### 🎪 **Fansigo** (platforms/fansigo.py)
 

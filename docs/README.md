@@ -31,7 +31,8 @@ docs/
 │   ├── code-boundaries.md                             <- 程式碼邊界（模組職責、依賴 DAG、命名）
 │   ├── engineering-review.md                          <- 工程審查嚴重度、範圍與輸出格式
 │   ├── ticket_automation_standard.md                  <- 標準功能定義 (12 階段)
-│   ├── utiki-refactor-plan.md                         <- uTiki2 家族重構提案（待核准）
+│   ├── utiki-refactor/                                 <- 本次 uTiki 重構 PLAN／STATUS
+│   ├── utiki-refactor-plan.md                         <- 已取代的 uTiki 歷史計畫
 │   ├── structure.md                                   <- 程式架構與函數索引
 │   ├── development_guide.md                           <- 開發規範與檢查清單
 │   ├── coding_templates.md                            <- 程式寫法範本
@@ -125,7 +126,9 @@ ticket_automation_standard.md -> structure.md -> development_guide.md -> API 指
 | [code-boundaries.md](02-development/code-boundaries.md) | 模組責任與依賴邊界 | 開發者／審查者 |
 | [testing_execution_guide.md](02-development/testing_execution_guide.md) | 實際驗證命令與結果陳述 | 開發者／審查者 |
 | [engineering-review.md](02-development/engineering-review.md) | findings-first 工程審查 | 審查者 |
-| [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | uTiki2 家族分階段重構提案 | 維護者 |
+| [utiki-refactor/PLAN.md](02-development/utiki-refactor/PLAN.md) | 本次 uTiki 等價重構正式計畫 | 維護者／開發者 |
+| [utiki-refactor/STATUS.md](02-development/utiki-refactor/STATUS.md) | 本次實際進度與基準 | 維護者／開發者 |
+| [utiki-refactor-plan.md](02-development/utiki-refactor-plan.md) | 已取代的歷史計畫 | 歷史參考 |
 | [structure.md](02-development/structure.md) | 程式架構索引與完成度評分 | 所有人 |
 | [zendriver_api_guide.md](06-api-reference/zendriver_api_guide.md) | Zendriver API 指南（主要參考） | 開發者 |
 | [cdp_protocol_reference.md](06-api-reference/cdp_protocol_reference.md) | CDP 協定完整參考 | Zendriver 開發者 |

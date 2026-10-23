@@ -30,6 +30,8 @@ tests/
   test_ibon_date_selection.py
   test_refresh_coordinator.py
   test_runtime_output.py
+  test_settings_config.py
+  test_utiki_dom_contract.py
 ```
 
 Phase 1 導入時的基線是 pytest 收集並通過 155 個測試（其中 CTBC 94 個）；這是用來偵測遷移差異的起始快照，不是永久數量門檻。`pytest.ini` 定義預設收集與 marker，`requirements-dev.txt` 固定直接使用的測試工具版本。
@@ -121,7 +123,7 @@ python -m unittest discover -s tests -p 'test_*.py'
 pytest 可以執行現有 `unittest.TestCase`。日後若新增 pytest 原生函式或 fixture 測試，unittest 不會收集它們；屆時兩個 runner 的測試數不同是預期結果，不得把 unittest 當成完整 suite。
 
 CTBC 的脫敏瀏覽器 fixture 位於 `tests/fixtures/ctbc/`，runner 是
-`tests/test_ctbc_dom_fixtures.py`。它只開啟本機 `file://` HTML，不連線真實售票網站，
+`tests/test_ctbc_dom_fixtures.py`。它使用本機 `file://` HTML 與 `127.0.0.1` loopback server，不連線真實售票網站，
 並同時受 `browser` marker 與 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1` 環境變數保護；
 因此預設 pytest 會 deselect；unittest discover 不會收集 pytest-only runner，也不會
 啟動瀏覽器。執行前需在本機安裝

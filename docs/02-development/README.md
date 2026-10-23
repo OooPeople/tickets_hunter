@@ -23,7 +23,7 @@
 4. 維護者核准計劃後才開始 production code。
 5. 每個階段獨立驗證與審查，不把多個高風險行為綁成一次切換。
 
-目前待審提案：[uTiki2 職棒售票引擎重構計劃](utiki-refactor-plan.md)。
+本次 uTiki 等價重構依 [正式計畫](utiki-refactor/PLAN.md) 施工；實際進度見 [STATUS](utiki-refactor/STATUS.md)。[舊計畫](utiki-refactor-plan.md) 僅供歷史參考。
 
 ## 文件責任
 
@@ -39,7 +39,9 @@
 | [logic_flowcharts.md](logic_flowcharts.md) | 常見判斷流程 | 理解既有邏輯時 |
 | [ticket_seat_selection_algorithm.md](ticket_seat_selection_algorithm.md) | 座位選擇演算法 | 手動劃位相關工作 |
 | [sound_notification_system.md](sound_notification_system.md) | 通知音效設計 | 通知相關工作 |
-| [utiki-refactor-plan.md](utiki-refactor-plan.md) | uTiki2 家族重構的提案與 gates | 計劃核准及後續執行 |
+| [utiki-refactor/PLAN.md](utiki-refactor/PLAN.md) | 本次 uTiki 等價重構的目標與施工順序 | 本次施工與審查 |
+| [utiki-refactor/STATUS.md](utiki-refactor/STATUS.md) | 本次實際基準、進度與阻礙 | 查核目前狀態 |
+| [utiki-refactor-plan.md](utiki-refactor-plan.md) | 已取代的歷史計畫 | 查閱歷史脈絡 |
 
 ## 依工作類型導航
 

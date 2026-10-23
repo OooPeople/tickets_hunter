@@ -1,9 +1,9 @@
 # uTiki 重構狀態
 
 - 唯一行為與程式起點：`944e934546f3dd36b1b4891a5a4fa359b8ade17f`。`a47fd07106eae598c8b44972282c6621bf7f493c` 只作文件整理參考，不沿用其功能、完成狀態或測試 PASS。
-- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 2 開始 HEAD 為 `e9796354244db9e4f85114f7e0b5ba019f9f1b0b`，工作樹乾淨；未切換分支或合併上游。本輪修改尚未提交或推送。
-- 階段：批次 0/1 已完成；本輪依 [PLAN.md](PLAN.md) 進行批次 2 runtime 資料與依賴整理，停在批次 2，不進入後續流程拆分。
-- 程式範圍：新增 `src/platforms/utiki/runtime.py`，`workflow.py` 改用其等價 constructor 並標註唯一 registry 型別，`refresh.py` 僅補同一 runtime 的型別依賴；未修改 tests、`settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增購票資格、拒絕條件或人工出口。
+- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 3 開始 HEAD 為 `33c168a42237dcdfcb57d95db69775ea32bcfb82`，工作樹乾淨；目前 HEAD 相同，未切換分支或合併上游。本輪修改尚未提交或推送。
+- 階段：批次 0/1/2 已完成；本輪依 [PLAN.md](PLAN.md) 完成批次 3 購票與提交責任拆分，停在批次 3，不進入 date／area／navigation 或 document-health 拆分。
+- 程式範圍：新增 `inputs.py`、`submission.py`、`purchase.py` 並接正式 workflow；既有 facade 與設定流程保持。測試僅更新內部 import／patch 的實際 lookup，未改產品預期；未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增購票資格、拒絕條件或人工出口。
 - 環境：沿用現有 Windows x64 `.venv`（CPython 3.11.9、pytest 9.0.3），本輪未重建。批次 0 建立環境時 `uv venv --python 3.11.9 .venv` 及 `uv pip install --python .\.venv\Scripts\python.exe -r requirements-dev.txt` 均退出碼 0；需求取自 944 原檔。
 
 ## 前輪使用者確認的 scope 校正
@@ -11,6 +11,17 @@
 - **交付僅限原始碼使用**：正式 source caller 最終須在 Windows x64、macOS arm64 可用；本次不要求 PyInstaller、exe／安裝包、frozen runtime、hidden-import／spec、`build_scripts/build_local.py`、release packaging 或發布。現有 build scripts／release infrastructure 保留，原始碼版本穩定使用後另行處理打包。
 - **僅維護 current uTiki 設定格式**：current 設定仍須讀取、儲存並保留 `944e934` 已支援的 hot reload 欄位及時點；完成後使用者可重新填寫 current 設定。正式切換後不維護只為舊 uTiki／CTBC 設定相容的自動升級、runtime fallback、dual read／dual write，也不新增 DB schema／serialized runtime migration、version 欄位或 persistence upgrader。其他平台及共用 migration／normalization／SQLite 機制不在本輪移除範圍；uTiki shared refresh／429 SQLite coordinator 保持正式功能。
 - 以上是前輪使用者確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；通用打包指南與歷史計畫保留，僅以正式 PLAN 限定本次施工與驗收。
+
+## 批次 3：輸入、提交與購票準備
+
+- `workflow.py` 繼續擁有唯一 registry／tab lifecycle、頁面路由與原有 fast destination、manual mode、server-assigned pending navigation／authorization gate；座位與票數頁通過原 gate 後直接呼叫 `purchase.py`。外層結果協調與 checkout 路由直接呼叫 `submission.py`，沒有保留另一套購票／提交實作。
+- `inputs.py` 承接 Cookie 注入、inline login、fingerprint、CAPTCHA 圖片／OCR／欄位與換圖 browser 操作；`submission.py` 承接 purchase key、active submit／outcome／last submit、dialog、CAPTCHA／衝突／auth 恢復、未知結果與 checkout 去重；`purchase.py` 組合原 selection／DOM commit／submission，不建立 registry 或鏡像 purchase state。submission／purchase 透過 workflow 傳入的窄 callback 使用同一 runtime 與受控 reload。
+- 測試沿用既有行為斷言；只把被搬移私有函式的 import／patch 改到實際模組，並在測試 helper 為直接呼叫 submission 的案例注入現有 workflow callback。公開 `platforms.utiki`、`platforms.ctbc` 與主入口 API 未變。未發現必須重新選擇產品行為的 944 歧義。
+- 語法：`.\.venv\Scripts\python.exe -m py_compile src/platforms/utiki/inputs.py src/platforms/utiki/submission.py src/platforms/utiki/purchase.py src/platforms/utiki/workflow.py tests/ctbc_support.py tests/test_ctbc_dom.py tests/test_utiki_dom_contract.py tests/test_ctbc_pure.py`，退出碼 0。
+- 聚焦：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_dom.py tests/test_utiki_dom_contract.py tests/test_ctbc_pure.py tests/test_ctbc_refresh.py --tb=short -x`，退出碼 0，**285 passed、168 subtests passed**。
+- 整合：`.\.venv\Scripts\python.exe -m pytest`，退出碼 0，**358 passed、1 deselected**（收集 359 項，8.80 秒）。
+- 本機 browser fixture：暫時設定 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1`，執行 `.\.venv\Scripts\python.exe -m pytest -q --tb=short -m 'browser and not live' tests/test_ctbc_dom_fixtures.py`，退出碼 0，**1 passed in 9.54s**；同一命令結束後清除環境旗標。fixture 使用暫存 profile、合成頁面與本機 loopback。
+- 未驗證：macOS arm64 source 使用、GitHub CI、真站手動流程；本批不執行產品打包。批次 0 的原始 browser fixture 失敗紀錄仍以原始基準節為準，不由本批成功結果改寫。
 
 ## 批次 2：runtime 資料與依賴
 
@@ -44,7 +55,7 @@
 
 ## 下一步
 
-本輪停在批次 2，等待使用者審查。獲另行下令後，批次 3 可從 `workflow.py` 的購票與提交邊界開始；現有 `runtime.py` 只提供資料契約，不預先搬動該流程。
+本輪停在批次 3，等待使用者審查。獲另行下令後，批次 4 可從 `workflow.py` 現存的 date／area action 與 fast destination／server-assigned navigation gate 邊界開始；本批沒有預先建立 navigation framework。
 
 | 文件或 PLAN 情境 | 原衝突／缺口 | 目前狀態 |
 | --- | --- | --- |

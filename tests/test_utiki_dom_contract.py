@@ -17,6 +17,8 @@ from tests.ctbc_support import (
     FakeUtikiSeatDomPort,
     ctbc_identity_runtime,
     ctbc_tab_runtime,
+    ctbc_submission_captcha_and_submit as _ctbc_captcha_and_submit,
+    ctbc_submission_handle_dialog as _handle_ctbc_submit_dialog,
     config,
     make_ctbc_area_snapshot,
     make_ctbc_date_snapshot,
@@ -44,8 +46,6 @@ from platforms.utiki.selection import (
 from platforms.utiki.workflow import (
     CTBC_SEAT_STALE_RELOAD_REASON,
     _ctbc_attest_fast_destination,
-    _ctbc_captcha_and_submit,
-    _handle_ctbc_submit_dialog,
     _ctbc_purchase_state_key,
     _ctbc_reconcile_area_navigation,
     _ctbc_tab_identity,
@@ -79,10 +79,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             text="",
         )
         with patch(
-            "platforms.utiki.workflow.read_dialog_snapshot",
+            "platforms.utiki.submission.read_dialog_snapshot",
             AsyncMock(return_value=snapshot),
         ), patch(
-            "platforms.utiki.workflow.dismiss_dialog",
+            "platforms.utiki.submission.dismiss_dialog",
             AsyncMock(),
         ) as dismiss:
             self.assertEqual(
@@ -97,7 +97,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         self.assertEqual("", outcome["text"])
 
         with patch(
-            "platforms.utiki.workflow.read_dialog_snapshot",
+            "platforms.utiki.submission.read_dialog_snapshot",
             AsyncMock(return_value=DialogSnapshot(
                 page_url=str(tab.target.url),
                 document_id="document-1",
@@ -105,7 +105,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 text="",
             )),
         ), patch(
-            "platforms.utiki.workflow._dispatch_ctbc_submit",
+            "platforms.utiki.submission._dispatch_ctbc_submit",
             AsyncMock(),
         ) as dispatch:
             self.assertFalse(await _ctbc_captcha_and_submit(
@@ -741,11 +741,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                         AsyncMock(return_value=attested),
                     ) as attest,
                     patch(
-                        "platforms.utiki.workflow.read_seat_snapshot",
+                        "platforms.utiki.purchase.read_seat_snapshot",
                         AsyncMock(),
                     ) as reader,
                     patch(
-                        "platforms.utiki.workflow.commit_seat",
+                        "platforms.utiki.purchase.commit_seat",
                         AsyncMock(),
                     ) as commit,
                 ):
@@ -774,11 +774,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.read_seat_snapshot",
+                "platforms.utiki.purchase.read_seat_snapshot",
                 side_effect=dom_port.read_seat_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_seat",
+                "platforms.utiki.purchase.commit_seat",
                 side_effect=dom_port.commit_seat,
             ),
             patch(
@@ -786,11 +786,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(),
             ),
             patch(
-                "platforms.utiki.workflow.dispatch_submit",
+                "platforms.utiki.submission.dispatch_submit",
                 AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
             ) as dispatch,
             patch(
-                "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+                "platforms.utiki.submission._observe_ctbc_submit_outcome",
                 AsyncMock(return_value=False),
             ) as observe,
         ):
@@ -831,11 +831,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.read_seat_snapshot",
+                "platforms.utiki.purchase.read_seat_snapshot",
                 side_effect=dom_port.read_seat_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_seat",
+                "platforms.utiki.purchase.commit_seat",
                 side_effect=dom_port.commit_seat,
             ),
             patch(
@@ -847,7 +847,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(),
             ) as reload_page,
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(),
             ) as submit,
         ):
@@ -876,11 +876,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.read_seat_snapshot",
+                "platforms.utiki.purchase.read_seat_snapshot",
                 side_effect=dom_port.read_seat_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_seat",
+                "platforms.utiki.purchase.commit_seat",
                 AsyncMock(side_effect=RuntimeError("unknown commit")),
             ) as commit,
             patch(
@@ -892,7 +892,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=False),
             ) as reload_page,
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(),
             ) as submit,
         ):
@@ -931,11 +931,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.read_seat_snapshot",
+                "platforms.utiki.purchase.read_seat_snapshot",
                 side_effect=dom_port.read_seat_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_seat",
+                "platforms.utiki.purchase.commit_seat",
                 side_effect=dom_port.commit_seat,
             ),
             patch(
@@ -947,7 +947,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(side_effect=reload_effect),
             ) as reload_page,
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(),
             ) as submit,
         ):
@@ -992,11 +992,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.read_seat_snapshot",
+                "platforms.utiki.purchase.read_seat_snapshot",
                 side_effect=dom_port.read_seat_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_seat",
+                "platforms.utiki.purchase.commit_seat",
                 side_effect=dom_port.commit_seat,
             ) as commit,
             patch(
@@ -1004,7 +1004,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(side_effect=reload_effect),
             ) as reload_page,
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(),
             ) as submit,
         ):
@@ -1033,11 +1033,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_quantity_snapshot",
+                "platforms.utiki.purchase.read_quantity_snapshot",
                 side_effect=dom_port.read_quantity_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_quantity",
+                "platforms.utiki.purchase.commit_quantity",
                 side_effect=dom_port.commit_quantity,
             ),
             patch(
@@ -1045,7 +1045,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(side_effect=submit_effect),
             ),
         ):
@@ -1076,15 +1076,15 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                         AsyncMock(return_value=attested),
                     ) as attest,
                     patch(
-                        "platforms.utiki.workflow.read_quantity_snapshot",
+                        "platforms.utiki.purchase.read_quantity_snapshot",
                         AsyncMock(),
                     ) as reader,
                     patch(
-                        "platforms.utiki.workflow.commit_quantity",
+                        "platforms.utiki.purchase.commit_quantity",
                         AsyncMock(),
                     ) as commit,
                     patch(
-                        "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                        "platforms.utiki.submission._ctbc_captcha_and_submit",
                         AsyncMock(),
                     ) as submit,
                 ):
@@ -1111,11 +1111,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_quantity_snapshot",
+                "platforms.utiki.purchase.read_quantity_snapshot",
                 side_effect=dom_port.read_quantity_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_quantity",
+                "platforms.utiki.purchase.commit_quantity",
                 side_effect=dom_port.commit_quantity,
             ),
             patch(
@@ -1127,7 +1127,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(),
             ) as reload_page,
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(),
             ) as submit,
         ):
@@ -1194,15 +1194,15 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 },
             ),
             patch(
-                "platforms.utiki.workflow.read_quantity_snapshot",
+                "platforms.utiki.purchase.read_quantity_snapshot",
                 side_effect=dom_port.read_quantity_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_quantity",
+                "platforms.utiki.purchase.commit_quantity",
                 side_effect=dom_port.commit_quantity,
             ),
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(side_effect=submit_effect),
             ),
         ):
@@ -1245,7 +1245,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 "tenant_path": "/BROTHERS",
             },
         ), patch(
-            "platforms.utiki.workflow.read_quantity_snapshot", AsyncMock()
+            "platforms.utiki.purchase.read_quantity_snapshot", AsyncMock()
         ) as reader:
             self.assertFalse(
                 await nodriver_utiki_server_assigned_quantity_main(
@@ -1282,10 +1282,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 "tenant_path": "/BROTHERS",
             },
         ), patch(
-            "platforms.utiki.workflow.read_quantity_snapshot",
+            "platforms.utiki.purchase.read_quantity_snapshot",
             AsyncMock(return_value=mismatched),
         ), patch(
-            "platforms.utiki.workflow.commit_quantity", AsyncMock()
+            "platforms.utiki.purchase.commit_quantity", AsyncMock()
         ) as commit:
             self.assertFalse(
                 await nodriver_utiki_server_assigned_quantity_main(
@@ -1304,7 +1304,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ) as attest, patch(
-            "platforms.utiki.workflow.read_quantity_snapshot", AsyncMock()
+            "platforms.utiki.purchase.read_quantity_snapshot", AsyncMock()
         ) as reader:
             self.assertFalse(
                 await nodriver_utiki_server_assigned_quantity_main(
@@ -1356,19 +1356,19 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 "tenant_path": "/BROTHERS",
             },
         ), patch(
-            "platforms.utiki.workflow.clear_conflict_selection",
+            "platforms.utiki.submission.clear_conflict_selection",
             AsyncMock(return_value=CommitResult.REJECTED),
         ) as clear_selection, patch(
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=True),
         ) as reload_page, patch(
-            "platforms.utiki.workflow.read_quantity_snapshot",
+            "platforms.utiki.purchase.read_quantity_snapshot",
             side_effect=dom_port.read_quantity_snapshot,
         ), patch(
-            "platforms.utiki.workflow.commit_quantity",
+            "platforms.utiki.purchase.commit_quantity",
             side_effect=dom_port.commit_quantity,
         ), patch(
-            "platforms.utiki.workflow._ctbc_captcha_and_submit",
+            "platforms.utiki.submission._ctbc_captcha_and_submit",
             AsyncMock(return_value=True),
         ) as submit:
             self.assertFalse(
@@ -1419,11 +1419,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_quantity_snapshot",
+                "platforms.utiki.purchase.read_quantity_snapshot",
                 side_effect=dom_port.read_quantity_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_quantity",
+                "platforms.utiki.purchase.commit_quantity",
                 side_effect=dom_port.commit_quantity,
             ),
             patch(
@@ -1435,7 +1435,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(side_effect=reload_effect),
             ) as reload_page,
             patch(
-                "platforms.utiki.workflow._ctbc_captcha_and_submit",
+                "platforms.utiki.submission._ctbc_captcha_and_submit",
                 AsyncMock(return_value=True),
             ) as submit,
         ):
@@ -1469,11 +1469,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
 
         with (
             patch(
-                "platforms.utiki.workflow.read_quantity_snapshot",
+                "platforms.utiki.purchase.read_quantity_snapshot",
                 side_effect=dom_port.read_quantity_snapshot,
             ),
             patch(
-                "platforms.utiki.workflow.commit_quantity",
+                "platforms.utiki.purchase.commit_quantity",
                 side_effect=dom_port.commit_quantity,
             ),
             patch(
@@ -1481,11 +1481,11 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
                 AsyncMock(return_value=True),
             ),
             patch(
-                "platforms.utiki.workflow.dispatch_submit",
+                "platforms.utiki.submission.dispatch_submit",
                 AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
             ) as dispatch,
             patch(
-                "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+                "platforms.utiki.submission._observe_ctbc_submit_outcome",
                 AsyncMock(return_value=False),
             ) as observe,
         ):
@@ -1531,10 +1531,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         })
 
         with patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
         ) as dispatch, patch(
-            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            "platforms.utiki.submission._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
         ):
             self.assertFalse(await _ctbc_captcha_and_submit(
@@ -1563,10 +1563,10 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
 
         with patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
         ), patch(
-            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            "platforms.utiki.submission._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
         ):
             self.assertFalse(await _ctbc_captcha_and_submit(
@@ -1576,7 +1576,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         tab.dialog = "該位置已被選走"
         tab.dialog_visible = True
         with patch(
-            "platforms.utiki.workflow.clear_conflict_selection",
+            "platforms.utiki.submission.clear_conflict_selection",
             AsyncMock(return_value=CommitResult.COMMITTED),
         ) as clear_selection:
             self.assertEqual(
@@ -1602,7 +1602,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         submit_key = _ctbc_purchase_state_key(tab)
 
         with patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(side_effect=RuntimeError("unknown result")),
         ) as dispatch:
             self.assertFalse(await _ctbc_captcha_and_submit(
@@ -1640,7 +1640,7 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
             return SubmitDispatchResult.STALE
 
         with patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(side_effect=lose_guard),
         ), patch(
             "platforms.utiki.workflow._reload_with_interval",
@@ -1664,13 +1664,13 @@ class UtikiDomContractTest(CtbcStateIsolationMixin,
         ctbc_tab_runtime(tab)["document"]["last_document"] = "document-1"
 
         with patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(return_value=SubmitDispatchResult.DISPATCHED),
         ) as dispatch, patch(
-            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            "platforms.utiki.submission._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
         ), patch(
-            "platforms.utiki.workflow._get_ctbc_captcha_image_bytes",
+            "platforms.utiki.inputs._get_ctbc_captcha_image_bytes",
             AsyncMock(side_effect=[b"old-image", b"new-image"]),
         ):
             self.assertFalse(await _ctbc_captcha_and_submit(

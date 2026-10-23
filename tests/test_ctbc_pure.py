@@ -55,17 +55,19 @@ from platforms.utiki.selection import (
     submit_plan_is_valid,
 )
 from nodriver_common import _order_captcha_candidates, create_ocr_for_platform
+from platforms.utiki.auth import parse_ctbc_cookie_string
+from platforms.utiki.inputs import (
+    _ctbc_captcha_image_token,
+    _normalize_ctbc_captcha_answer,
+)
+from platforms.utiki.submission import _ctbc_submit_reached_checkout
 from platforms.utiki.workflow import (
     _build_ctbc_destination_url,
-    _ctbc_captcha_image_token,
     _ctbc_fast_destination_is_valid,
     _ctbc_purchase_state_key,
-    _ctbc_submit_reached_checkout,
     _get_ctbc_page_type,
     _get_utiki_behavior,
-    _normalize_ctbc_captcha_answer,
     is_utk_sports_url,
-    parse_ctbc_cookie_string,
 )
 from settings import get_default_config, migrate_config
 

@@ -95,6 +95,64 @@ def ctbc_tab_runtime(tab):
     return _ctbc_tab_runtime(tab)
 
 
+async def ctbc_submission_captcha_and_submit(*args, **kwargs):
+    """Exercise the extracted submission owner with the live workflow registry."""
+    from platforms.utiki import submission, workflow
+
+    return await submission._ctbc_captcha_and_submit(
+        *args,
+        runtime_for_tab=workflow._ctbc_tab_runtime,
+        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        reload_with_interval=workflow._reload_with_interval,
+        **kwargs,
+    )
+
+
+async def ctbc_submission_handle_dialog(*args, **kwargs):
+    from platforms.utiki import submission, workflow
+
+    return await submission._handle_ctbc_submit_dialog(
+        *args,
+        runtime_for_tab=workflow._ctbc_tab_runtime,
+        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        **kwargs,
+    )
+
+
+async def ctbc_submission_reset_captcha(*args, **kwargs):
+    from platforms.utiki import submission, workflow
+
+    return await submission._reset_ctbc_captcha(
+        *args,
+        runtime_for_tab=workflow._ctbc_tab_runtime,
+        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        **kwargs,
+    )
+
+
+async def ctbc_submission_recover_captcha(*args, **kwargs):
+    from platforms.utiki import submission, workflow
+
+    return await submission._recover_ctbc_captcha_dialog(
+        *args,
+        runtime_for_tab=workflow._ctbc_tab_runtime,
+        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        **kwargs,
+    )
+
+
+async def ctbc_submission_recover_conflict(*args, **kwargs):
+    from platforms.utiki import submission, workflow
+
+    return await submission._recover_ctbc_seat_conflict(
+        *args,
+        runtime_for_tab=workflow._ctbc_tab_runtime,
+        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        reload_with_interval=workflow._reload_with_interval,
+        **kwargs,
+    )
+
+
 def ctbc_identity_runtime(identity):
     """Return the production-owned canonical runtime for an observed identity."""
     from platforms.utiki.workflow import _ctbc_runtime_for_identity

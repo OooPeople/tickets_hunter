@@ -14,7 +14,12 @@ from urllib.parse import urlsplit
 import pytest
 import zendriver as uc
 
-from tests.ctbc_support import ctbc_identity_runtime, ctbc_tab_runtime, config
+from tests.ctbc_support import (
+    ctbc_identity_runtime,
+    ctbc_tab_runtime,
+    ctbc_submission_captcha_and_submit as _ctbc_captcha_and_submit,
+    config,
+)
 
 from platforms.utiki.dom import (
     CommitResult,
@@ -43,20 +48,19 @@ from platforms.utiki.selection import (
     select_seat_snapshot,
 )
 from platforms.utiki.profiles import PageKind
+from platforms.utiki.inputs import _ctbc_login_fingerprint
+from platforms.utiki.submission import _dismiss_ctbc_dialog
 from platforms.utiki.refresh import (
     _utk_document_guard,
     build_refresh_identity,
 )
 from platforms.utiki.workflow import (
     CTBC_SEAT_STALE_RELOAD_REASON,
-    _ctbc_captcha_and_submit,
     _ctbc_delete_fast_navigation_marker,
-    _ctbc_login_fingerprint,
     _ctbc_purchase_state_key,
     _ctbc_read_destination_state,
     _ctbc_read_fast_navigation_marker,
     _ctbc_tab_identity,
-    _dismiss_ctbc_dialog,
     _state,
     nodriver_ctbc_general_admission_main,
     nodriver_utk_sports_consume_reload_event,
@@ -1319,11 +1323,11 @@ async def _assert_seat_fixture(browser):
 
     with (
         patch(
-            "platforms.utiki.workflow._ctbc_captcha",
+            "platforms.utiki.submission._ctbc_captcha",
             AsyncMock(side_effect=mutate_seat_during_ocr),
         ) as captcha_solver,
         patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(side_effect=capture_seat_dispatch),
         ),
         patch(
@@ -1331,7 +1335,7 @@ async def _assert_seat_fixture(browser):
             return_value=("fixture-seat-wait",),
         ),
         patch(
-            "platforms.utiki.workflow._get_ctbc_page_type",
+            "platforms.utiki.submission._page_type",
             return_value="seat",
         ),
         patch(
@@ -1489,13 +1493,13 @@ async def _assert_quantity_fixture(browser):
         "platforms.utiki.workflow._ctbc_purchase_state_key",
         return_value=("fixture-purchase",),
     ), patch(
-        "platforms.utiki.workflow._get_ctbc_page_type",
+        "platforms.utiki.submission._page_type",
         return_value="general_admission",
     ), patch(
-        "platforms.utiki.workflow.dispatch_submit",
+        "platforms.utiki.submission.dispatch_submit",
         AsyncMock(side_effect=capture_flow_dispatch),
     ), patch(
-        "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+        "platforms.utiki.submission._observe_ctbc_submit_outcome",
         AsyncMock(return_value=False),
     ) as observe:
         assert not await nodriver_ctbc_general_admission_main(
@@ -1771,19 +1775,19 @@ async def _assert_quantity_fixture(browser):
             return result
 
         with patch(
-            "platforms.utiki.workflow._ctbc_captcha",
+            "platforms.utiki.submission._ctbc_captcha",
             AsyncMock(side_effect=mutate_during_ocr),
         ) as captcha_solver, patch(
-            "platforms.utiki.workflow.dispatch_submit",
+            "platforms.utiki.submission.dispatch_submit",
             AsyncMock(side_effect=capture_dispatch),
         ), patch(
             "platforms.utiki.workflow._ctbc_purchase_state_key",
             return_value=(f"fixture-wait-{mutation}",),
         ), patch(
-            "platforms.utiki.workflow._get_ctbc_page_type",
+            "platforms.utiki.submission._page_type",
             return_value="general_admission",
         ), patch(
-            "platforms.utiki.workflow._observe_ctbc_submit_outcome",
+            "platforms.utiki.submission._observe_ctbc_submit_outcome",
             AsyncMock(return_value=False),
         ) as observe, patch(
             "platforms.utiki.workflow._reload_with_interval",
@@ -1916,7 +1920,7 @@ async def _assert_quantity_fixture(browser):
         "platforms.utiki.workflow._reload_with_interval",
         AsyncMock(side_effect=recovery_reload),
     ) as reload_page, patch(
-        "platforms.utiki.workflow._ctbc_captcha_and_submit",
+        "platforms.utiki.submission._ctbc_captcha_and_submit",
         AsyncMock(return_value=True),
     ) as submit_gate:
         assert not await nodriver_ctbc_general_admission_main(

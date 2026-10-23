@@ -2,11 +2,10 @@
 """uTiki2 sports ticketing workflow.
 
 The CTBC site uses the same UTK naming convention as a few older ticketing
-sites. This module owns the single per-tab runtime and purchase workflow.
+sites. This module owns the single per-tab runtime and routes purchase work.
 """
 
 import asyncio
-import base64
 import hashlib
 import json
 import re
@@ -15,41 +14,23 @@ import uuid
 from typing import TypedDict
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
-from zendriver import cdp
-
 import util
 from nodriver_common import (
     check_and_handle_pause,
-    nodriver_get_captcha_image_from_dom_snapshot,
-    play_sound_while_ordering,
-    send_discord_notification,
-    send_telegram_notification,
 )
 from . import refresh as refresh_engine
-from .auth import (
-    cookie_domain_is_in_scope,
-    get_tenant_auth_profile,
-    parse_ctbc_cookie_string,
-)
+from . import purchase as purchase_engine
+from . import submission as submission_engine
+from .inputs import nodriver_ctbc_inject_cookies
 from .dom import (
     CommitResult,
-    SubmitDispatchResult,
-    clear_conflict_selection,
     commit_area,
     commit_date_action,
-    commit_seat,
     commit_server_assigned_area,
-    commit_quantity,
-    dismiss_dialog,
-    dispatch_submit,
     read_area_snapshot,
     read_date_snapshot,
-    read_dialog_snapshot,
-    read_quantity_snapshot,
-    read_seat_snapshot,
 )
 from .profiles import (
-    CTBC_MAP_DOMAIN,
     PageKind,
     TENANT_PROFILES,
     classify_utiki_page,
@@ -64,18 +45,8 @@ from .selection import (
     AreaSnapshot,
     DateActionPlan,
     DateSnapshot,
-    DialogSnapshot,
-    QuantityPlan,
-    QuantitySnapshot,
-    SeatSnapshot,
-    SubmitPlan,
-    build_submit_plan,
-    classify_submit_dialog as _classify_ctbc_submit_dialog,
     select_area_snapshot as _select_ctbc_area_snapshot,
     select_date_snapshot,
-    select_quantity_snapshot,
-    select_seat_snapshot,
-    submit_plan_is_valid,
 )
 
 
@@ -102,9 +73,10 @@ CTBC_FAST_PATH_TTL_SECONDS = 1.5
 CTBC_PENDING_NAVIGATION_TTL_SECONDS = 15.0
 CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
 CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
-CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
-CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
-CTBC_SEAT_STALE_RELOAD_REASON = "requested seats are unavailable"
+CTBC_QUANTITY_STALE_RELOAD_REASON = (
+    submission_engine.CTBC_QUANTITY_STALE_RELOAD_REASON
+)
+CTBC_SEAT_STALE_RELOAD_REASON = submission_engine.CTBC_SEAT_STALE_RELOAD_REASON
 
 
 class _WorkflowState(TypedDict):
@@ -215,61 +187,6 @@ def _ctbc_pending_navigation_is_current(identity, pending):
     )
 
 
-async def nodriver_ctbc_inject_cookies(tab, config_dict):
-    """注入複製的中信售票 Cookie，並保留帳號密碼備援。"""
-    debug = util.create_debug_logger(config_dict)
-    auth_profile = get_tenant_auth_profile(str(tab.target.url))
-    if not auth_profile or not auth_profile.supports_cookie_login:
-        debug.log("[CTBC COOKIE] Cookie login is unavailable for this tenant")
-        return False
-    raw_value = config_dict.get("accounts", {}).get(
-        auth_profile.cookie_config_key, ""
-    )
-    cookies = parse_ctbc_cookie_string(raw_value)
-    if not cookies:
-        if str(raw_value or "").strip():
-            debug.log("[CTBC COOKIE] No valid CTBC session cookies were found")
-        return False
-
-    try:
-        existing_cookies = await tab.browser.cookies.get_all()
-        for cookie in existing_cookies:
-            if (
-                cookie.name.startswith(auth_profile.cookie_name_prefix)
-                and cookie_domain_is_in_scope(auth_profile, cookie.domain)
-            ):
-                try:
-                    await tab.send(cdp.network.delete_cookies(
-                        name=cookie.name,
-                        domain=cookie.domain,
-                        path=cookie.path or "/",
-                    ))
-                except Exception:
-                    pass
-    except Exception as exc:
-        debug.log(f"[CTBC COOKIE] Could not clear the current CTBC cookie set: {exc}")
-
-    injected = 0
-    for name, value in cookies:
-        try:
-            result = await tab.send(cdp.network.set_cookie(
-                name=name,
-                value=value,
-                domain=auth_profile.cookie_set_host,
-                path="/",
-                secure=True,
-                http_only=True,
-            ))
-            if result is not False:
-                injected += 1
-        except Exception as exc:
-            debug.log(f"[CTBC COOKIE] Failed to inject {name}: {exc}")
-
-    if injected != len(cookies):
-        debug.log(f"[CTBC COOKIE] Injected {injected}/{len(cookies)} cookies")
-        return False
-    debug.log(f"[CTBC COOKIE] Injected {injected} session cookies")
-    return True
 
 
 def _is_ctbc_url(url):
@@ -395,72 +312,14 @@ def _ctbc_same_origin(first, second):
 
 
 def _ctbc_purchase_state_key(tab):
-    """以購票身分而非外觀網址建立送出狀態索引鍵。"""
-    identity = _ctbc_tab_identity(tab)
-    current_url = str(tab.target.url)
-    try:
-        parsed = urlsplit(current_url)
-    except ValueError:
-        return None
-
-    purchase_url = urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
-    )
-    page_type = _get_ctbc_page_type(purchase_url)
-    query = _ctbc_unique_query(purchase_url)
-    profile = _get_utk_sports_profile(purchase_url)
-    if (
-        page_type not in (
-            "seat", "general_admission", "server_assigned_quantity"
-        )
-        or query is None
-        or not profile
-    ):
-        return None
-
-    performance_id = query.get("PERFORMANCE_ID")
-    group_id = query.get("GROUP_ID")
-    price_area_id = query.get("PERFORMANCE_PRICE_AREA_ID")
-    token_pattern = re.compile(r"[A-Za-z0-9_-]+")
-    if (
-        not token_pattern.fullmatch(str(performance_id or ""))
-        or not token_pattern.fullmatch(str(price_area_id or ""))
-        or group_id is None
-        or (group_id and not token_pattern.fullmatch(str(group_id)))
-        or (page_type in {"seat", "server_assigned_quantity"} and not group_id)
-    ):
-        return None
-
-    return (
-        identity,
-        profile["host"],
-        profile["tenant_path"],
-        page_type,
-        performance_id,
-        group_id,
-        price_area_id,
-        query.get("ATYPE", ""),
+    """Use workflow's current tab identity at the original lookup point."""
+    return submission_engine._ctbc_purchase_state_key(
+        tab, identity_for_tab=_ctbc_tab_identity
     )
 
 
-def _ctbc_submit_reached_checkout(source_url, destination_url):
-    """僅接受導向來源租戶結帳路由的送出結果。"""
-    try:
-        source = urlsplit(source_url)
-        destination = urlsplit(destination_url)
-    except ValueError:
-        return False
 
-    source_without_fragment = urlunsplit(
-        (source.scheme, source.netloc, source.path, source.query, "")
-    )
-    return (
-        _get_ctbc_page_type(source_without_fragment) in (
-            "seat", "general_admission", "server_assigned_quantity"
-        )
-        and _get_ctbc_page_type(destination_url) == "checkout"
-        and _ctbc_same_origin(source, destination)
-    )
+
 
 
 def _utk_refresh_context(tab):
@@ -1352,1425 +1211,120 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict):
         return False
 
 
-async def _fill_ctbc_inline_login(tab, config_dict):
-    """在支援的租戶頁面填入並送出登入資料。"""
-
-    state_raw = await tab.evaluate('''
-        (() => {
-            const input = document.querySelector('#LOGIN_ID');
-            const password = document.querySelector('#LOGIN_PWD');
-            if (!input) return {required: false};
-            const style = getComputedStyle(input);
-            const required = style.display !== 'none' && style.visibility !== 'hidden' && input.offsetParent !== null;
-            return {
-                required: required,
-                account: input.value || '',
-                password: password ? password.value : ''
-            };
-        })()
-    ''')
-    state = util.parse_nodriver_result(state_raw)
-    if not isinstance(state, dict) or not state.get("required", False):
-        return True
-    if state.get("account") and state.get("password"):
-        return True
-
-    auth_profile = get_tenant_auth_profile(str(tab.target.url))
-    if not auth_profile or not auth_profile.supports_inline_login:
-        return False
-    accounts = config_dict.get("accounts", {})
-    account = str(
-        state.get("account") or accounts.get(auth_profile.account_key, "")
-    ).strip()
-    password = str(
-        state.get("password") or accounts.get(auth_profile.password_key, "")
-    ).strip()
-    if not account or not password:
-        return False
-
-    result = await tab.evaluate(f'''
-        (() => {{
-            const expectedOrigin = {json.dumps(auth_profile.inline_login_origin)};
-            const currentUrl = new URL(location.href);
-            if (
-                currentUrl.origin !== expectedOrigin ||
-                currentUrl.username ||
-                currentUrl.password
-            ) return false;
-            const account = document.querySelector('#LOGIN_ID');
-            const password = document.querySelector('#LOGIN_PWD');
-            if (!account || !password) return false;
-            account.value = {json.dumps(account)};
-            password.value = {json.dumps(password)};
-            account.dispatchEvent(new Event('input', {{bubbles: true}}));
-            password.dispatchEvent(new Event('input', {{bubbles: true}}));
-            return true;
-        }})()
-    ''')
-    return bool(result)
-
-
-async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
-    """建立登入對話框與目前文件的識別指紋。"""
-
-    if expected_dialog is not None and not isinstance(
-        expected_dialog, DialogSnapshot
-    ):
-        return ""
-    expected_json = "null"
-    if expected_dialog is not None:
-        expected_json = json.dumps({
-            "pageUrl": expected_dialog.page_url,
-            "documentId": expected_dialog.document_id,
-            "text": expected_dialog.text,
-        }, ensure_ascii=False)
-    raw = await tab.evaluate(f'''
-        (() => {{
-            const expectedDialog = {expected_json};
-            if (expectedDialog) {{
-                if (location.href !== expectedDialog.pageUrl ||
-                    String(performance.timeOrigin) !==
-                        expectedDialog.documentId) {{
-                    return JSON.stringify({{ok: false}});
-                }}
-                const visible = element => {{
-                    if (!element || !element.isConnected || element.hidden ||
-                        element.getAttribute('aria-hidden') === 'true') {{
-                        return false;
-                    }}
-                    const style = getComputedStyle(element);
-                    return style.display !== 'none' &&
-                        style.visibility !== 'hidden' &&
-                        element.getClientRects().length > 0;
-                }};
-                const dialogs = Array.from(
-                    document.querySelectorAll('#dialog-message'))
-                    .map(message => ({{
-                        message,
-                        wrapper: message.closest('.ui-dialog')
-                    }}))
-                    .filter(item =>
-                        visible(item.wrapper) && visible(item.message));
-                if (dialogs.length !== 1 ||
-                    (dialogs[0].message.textContent || '').trim() !==
-                        expectedDialog.text) {{
-                    return JSON.stringify({{ok: false}});
-                }}
-            }}
-            const account = document.querySelector('#LOGIN_ID');
-            const password = document.querySelector('#LOGIN_PWD');
-            return JSON.stringify({{
-                ok: true,
-                account: account ? account.value : '',
-                password: password ? password.value : ''
-            }});
-        }})()
-    ''')
-    try:
-        credentials = json.loads(raw) if isinstance(raw, str) else {}
-    except (TypeError, ValueError):
-        credentials = {}
-    if (
-        credentials.get("ok") is not True
-        or not credentials.get("account")
-        or not credentials.get("password")
-    ):
-        return ""
-    material = f"{credentials['account']}\0{credentials['password']}".encode("utf-8")
-    return hashlib.sha256(material).hexdigest()
-
-
-async def _get_ctbc_visible_dialog_text(tab):
-    """為舊呼叫端讀取目前可見對話框文字。"""
-    snapshot = await read_dialog_snapshot(tab)
-    if snapshot and snapshot.visible_count == 1:
-        return snapshot.text
-    return ""
-
-
-async def _ctbc_dialog_is_visible(tab):
-    """以保守規則判斷對話框是否仍可見。"""
-    snapshot = await read_dialog_snapshot(tab)
-    return snapshot is None or snapshot.visible_count != 0
-
-
-async def _wait_ctbc_dialog_closed(tab, snapshot):
-    """等待指定對話框關閉或文件狀態改變。"""
-
-    for _ in range(10):
-        await tab.sleep(0.1)
-        current = await read_dialog_snapshot(tab)
-        if current is None:
-            return False
-        if (
-            current.page_url != snapshot.page_url
-            or current.document_id != snapshot.document_id
-        ):
-            return False
-        if current.visible_count == 0:
-            return True
-        if current.visible_count != 1 or current.text != snapshot.text:
-            return False
-    return False
-
-
-async def _dismiss_ctbc_dialog(tab, expected_text):
-    """透過快照與提交邊界關閉指定對話框。"""
-    snapshot = await read_dialog_snapshot(tab)
-    if not (
-        snapshot
-        and snapshot.visible_count == 1
-        and snapshot.text == expected_text
-    ):
-        return False
-    if await dismiss_dialog(tab, snapshot) is not CommitResult.COMMITTED:
-        return False
-    return await _wait_ctbc_dialog_closed(tab, snapshot)
-
-
-def _ctbc_purchase_outcome(
-    kind, *, text="", reason="", source_url="", source_document_id="",
-    page_type="", nonce="", dom_document_id="", product_id="",
-):
-    """建立不含敏感資料的標準購票結果紀錄。"""
-    normalized_text = " ".join(str(text or "").split())
-    record = {
-        "kind": str(kind or "unknown"),
-        "text": normalized_text,
-        "reason": str(reason or ""),
-        "source_url": str(source_url or ""),
-        "source_document_id": str(source_document_id or ""),
-        "nonce": str(nonce or ""),
-    }
-    if dom_document_id:
-        record["dom_document_id"] = str(dom_document_id)
-    if product_id:
-        record["product_id"] = str(product_id)
-    if page_type:
-        record["page_type"] = str(page_type)
-    return record
-
-
-def _ctbc_source_document_id(context):
-    """取得流程與 DOM 共用的標準文件時間來源識別。"""
-    if "source_document_id" in context:
-        return str(context.get("source_document_id") or "")
-    return str(context.get("document_id") or "")
-
-
-def _ctbc_dialog_outcome_record(
-    outcome, text, source_url, source_document_id, page_type, nonce,
-    dom_document_id="", product_id="",
-):
-    """將已分類對話框純化為標準阻擋結果紀錄。"""
-    kind = "unknown" if outcome == "rejected" else outcome
-    reason = "dialog" if kind == "unknown" else ""
-    record = _ctbc_purchase_outcome(
-        kind,
-        text=text,
-        reason=reason,
-        source_url=source_url,
-        source_document_id=source_document_id,
-        page_type=page_type if kind == "seat_conflict" else "",
-        nonce=nonce,
-        dom_document_id=dom_document_id if kind == "seat_conflict" else "",
-        product_id=product_id if kind == "seat_conflict" else "",
-    )
-    if kind == "seat_conflict":
-        record.update({
-            "dialog_dismissed": False,
-            "clear_phase": "",
-            "clear_result": "",
-            "reload_dispatched": False,
-            "recovery_document_id": "",
-        })
-    elif kind == "auth":
-        record["fingerprint"] = ""
-    elif kind == "captcha":
-        record.update({
-            "reset_phase": "",
-            "reset_source_document_id": "",
-            "reset_before_token": "",
-        })
-    return record
-
-
-def _ctbc_recent_submit_context(purchase, fallback_key=None):
-    """在不猜測歷史結果的前提下判定對話框所屬送出操作。"""
-    active = purchase.get("active_submit")
-    if isinstance(active, dict) and active.get("purchase_key") is not None:
-        return active.get("purchase_key"), active
-    outcomes = purchase.get("outcomes", {})
-    fallback = outcomes.get(fallback_key)
-    pointer = purchase.get("last_submit")
-    pointer_key = None
-    pointer_outcome = None
-    if isinstance(pointer, dict):
-        pointer_key = pointer.get("purchase_key")
-        pointer_outcome = outcomes.get(pointer_key)
-        if (
-            not isinstance(pointer_outcome, dict)
-            or pointer_outcome.get("nonce") != pointer.get("nonce")
-        ):
-            pointer_key, pointer_outcome = None, None
-    if isinstance(fallback, dict):
-        if pointer_outcome is not None and pointer_key != fallback_key:
-            return None, None
-        return fallback_key, fallback
-    if pointer_outcome is not None:
-        return pointer_key, pointer_outcome
-    if fallback_key is not None:
-        return fallback_key, None
-    return None, None
-
-
-def _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=None):
-    """套用購票結果並安全清理相符的進行中送出狀態。"""
-    if purchase_key is None or not isinstance(record, dict):
-        return False
-    current = purchase.get("active_submit")
-    if active is not None and current is not active:
-        return False
-    if active is not None:
-        purchase["active_submit"] = None
-    purchase["outcomes"][purchase_key] = record
-    if active is not None:
-        purchase["last_submit"] = {
-            "purchase_key": purchase_key,
-            "nonce": record.get("nonce", ""),
-        }
-    pointer = purchase.get("last_submit")
-    if isinstance(pointer, dict) and pointer.get("purchase_key") == purchase_key:
-        pointer["nonce"] = record.get("nonce", "")
-    return True
-
-
-def _ctbc_captcha_image_token(image_bytes):
-    """在不保留圖片位元組下建立驗證碼圖片識別。"""
-    if not isinstance(image_bytes, (bytes, bytearray, memoryview)) or not image_bytes:
-        return ""
-    return hashlib.sha256(bytes(image_bytes)).hexdigest()
-
-
-async def _read_ctbc_captcha_image_token(tab, config_dict):
-    """讀取目前驗證碼圖片的非敏感識別。"""
-
-    try:
-        image_bytes = await _get_ctbc_captcha_image_bytes(tab, config_dict)
-    except Exception:
-        return ""
-    return _ctbc_captcha_image_token(image_bytes)
-
-
-def _ctbc_captcha_reset_is_current(
-    tab, submit_key, outcome, source_document_id,
-):
-    """判斷驗證碼重設工作是否仍屬於目前送出意圖。"""
-
-    runtime = _ctbc_tab_runtime(tab)
-    return bool(
-        source_document_id
-        and runtime["purchase"]["outcomes"].get(submit_key) is outcome
-        and _ctbc_purchase_state_key(tab) == submit_key
-        and runtime["document"]["last_document"] == source_document_id
-    )
-
-
-def _ctbc_captcha_phase_is_current(
-    tab, submit_key, outcome, source_document_id, phase,
-):
-    """判斷驗證碼工作是否仍處於指定階段。"""
-
-    return bool(
-        _ctbc_captcha_reset_is_current(
-            tab, submit_key, outcome, source_document_id
-        )
-        and outcome.get("reset_phase") == phase
-    )
-
-
-def _release_ctbc_captcha_preflight(
-    tab, submit_key, outcome,
-):
-    """釋放驗證碼重設前置檢查所持有的狀態。"""
-
-    if (
-        _ctbc_outcome_is_current(tab, submit_key, outcome)
-        and outcome.get("reset_phase") == "preflighting"
-    ):
-        outcome["reset_phase"] = ""
-    return False
-
-
-async def _observe_ctbc_captcha_refresh(
-    tab, config_dict, submit_key, outcome,
-):
-    """觀察驗證碼刷新是否已產生新的圖片。"""
-
-    current_document_id = _ctbc_tab_runtime(tab)["document"]["last_document"]
-    source_document_id = str(outcome.get("reset_source_document_id") or "")
-    if not _ctbc_outcome_is_current(tab, submit_key, outcome):
-        return False
-    if _ctbc_purchase_state_key(tab) != submit_key:
-        return False
-    if not source_document_id:
-        return False
-    if current_document_id and current_document_id != source_document_id:
-        outcome["reset_phase"] = "done"
-        return True
-    if current_document_id != source_document_id:
-        return False
-    before_token = str(outcome.get("reset_before_token") or "")
-    if not before_token:
-        return False
-    current_token = await _read_ctbc_captcha_image_token(tab, config_dict)
-    if not _ctbc_captcha_reset_is_current(
-        tab, submit_key, outcome, source_document_id
-    ):
-        return False
-    if current_token and current_token != before_token:
-        outcome["reset_phase"] = "done"
-        return True
-    return False
-
-
-async def _dispatch_ctbc_captcha_refresh(
-    tab, config_dict, submit_key, outcome, source_document_id,
-):
-    """送出驗證碼圖片刷新並登記觀察狀態。"""
-
-    before_token = await _read_ctbc_captcha_image_token(tab, config_dict)
-    if not _ctbc_captcha_phase_is_current(
-        tab, submit_key, outcome, source_document_id, "preflighting"
-    ):
-        return _release_ctbc_captcha_preflight(
-            tab, submit_key, outcome
-        )
-    if not before_token:
-        return _release_ctbc_captcha_preflight(
-            tab, submit_key, outcome
-        )
-    outcome["reset_before_token"] = before_token
-    try:
-        refresh = await tab.query_selector('#chang_pic')
-    except Exception:
-        return _release_ctbc_captcha_preflight(
-            tab, submit_key, outcome
-        )
-    if not _ctbc_captcha_phase_is_current(
-        tab, submit_key, outcome, source_document_id, "preflighting"
-    ):
-        return _release_ctbc_captcha_preflight(
-            tab, submit_key, outcome
-        )
-    if not refresh:
-        return _release_ctbc_captcha_preflight(
-            tab, submit_key, outcome
-        )
-    outcome["reset_phase"] = "dispatching"
-    try:
-        await refresh.click()
-    except Exception:
-        if not _ctbc_captcha_phase_is_current(
-            tab, submit_key, outcome, source_document_id, "dispatching"
-        ):
-            return False
-        outcome["reset_phase"] = "unknown"
-        return await _observe_ctbc_captcha_refresh(
-            tab, config_dict, submit_key, outcome
-        )
-    if not _ctbc_captcha_phase_is_current(
-        tab, submit_key, outcome, source_document_id, "dispatching"
-    ):
-        return False
-    outcome["reset_phase"] = "awaiting_change"
-    return await _observe_ctbc_captcha_refresh(
-        tab, config_dict, submit_key, outcome
-    )
-
-
-async def _reset_ctbc_captcha(tab, *, refresh_image, submit_key=None, config_dict=None):
-    """重設驗證碼輸入，並視需要刷新圖片。"""
-
-    config_dict = config_dict or {}
-    runtime = _ctbc_tab_runtime(tab)
-    purchase = runtime["purchase"]
-    outcome = purchase["outcomes"].get(submit_key)
-    if refresh_image and submit_key is not None and (
-        not isinstance(outcome, dict) or outcome.get("kind") != "captcha"
-    ):
-        return False
-    if refresh_image and submit_key is not None:
-        if not _ctbc_outcome_is_current(tab, submit_key, outcome):
-            return False
-        if _ctbc_purchase_state_key(tab) != submit_key:
-            return False
-        phase = outcome.get("reset_phase")
-        prior_source = str(outcome.get("reset_source_document_id") or "")
-        current_document_id = str(runtime["document"]["last_document"] or "")
-        if (
-            prior_source
-            and current_document_id
-            and current_document_id != prior_source
-        ):
-            outcome["reset_phase"] = "done"
-            return True
-        if phase == "done":
-            return True
-        if phase == "preflighting":
-            return False
-        if phase:
-            return await _observe_ctbc_captcha_refresh(
-                tab, config_dict, submit_key, outcome
-            )
-        source_document_id = current_document_id
-        if not source_document_id:
-            return False
-        outcome["reset_source_document_id"] = source_document_id
-        outcome["reset_before_token"] = ""
-        outcome["reset_phase"] = "preflighting"
-
-    try:
-        captcha_input = await tab.query_selector('#CHK')
-        if refresh_image and not _ctbc_captcha_phase_is_current(
-            tab, submit_key, outcome, source_document_id, "preflighting"
-        ):
-            return _release_ctbc_captcha_preflight(
-                tab, submit_key, outcome
-            )
-        if refresh_image and not captcha_input:
-            return _release_ctbc_captcha_preflight(
-                tab, submit_key, outcome
-            )
-        if captcha_input:
-            await captcha_input.apply('function(el) { el.value = ""; }')
-            if refresh_image and not _ctbc_captcha_phase_is_current(
-                tab, submit_key, outcome, source_document_id, "preflighting"
-            ):
-                return _release_ctbc_captcha_preflight(
-                    tab, submit_key, outcome
-                )
-    except Exception:
-        if refresh_image:
-            return _release_ctbc_captcha_preflight(
-                tab, submit_key, outcome
-            )
-        return False
-    if refresh_image:
-        return await _dispatch_ctbc_captcha_refresh(
-            tab, config_dict, submit_key, outcome, source_document_id
-        )
-    return True
-
-
-def _ctbc_conflict_page_kind(page_type):
-    """將頁面類型轉成衝突清理所需的選擇種類。"""
-
-    return {
-        "seat": PageKind.RESERVED_SEAT,
-        "general_admission": PageKind.GENERAL_ADMISSION,
-        "server_assigned_quantity": PageKind.SERVER_ASSIGNED_QUANTITY,
-    }.get(page_type)
-
-
-def _ctbc_outcome_is_current(tab, submit_key, record):
-    """判斷購票結果是否仍屬於目前文件與送出意圖。"""
-
-    return _ctbc_purchase_runtime(tab)["outcomes"].get(submit_key) is record
-
-
-def _ctbc_conflict_is_current(tab, submit_key, record):
-    """判斷座位或票數衝突是否仍可安全清理。"""
-
-    return bool(
-        _ctbc_outcome_is_current(tab, submit_key, record)
-        and _ctbc_purchase_state_key(tab) == submit_key
-    )
-
-
-async def _clear_ctbc_conflict_selection(
-    tab, config_dict, submit_key, record,
-):
-    """清除目前送出衝突所對應的座位或票數選擇。"""
-
-    if not _ctbc_conflict_is_current(tab, submit_key, record):
-        return False
-    clear_phase = record.get("clear_phase")
-    if clear_phase == "done":
-        return True
-    if clear_phase:
-        return False
-    record["clear_phase"] = "dispatching"
-    page_kind = _ctbc_conflict_page_kind(record.get("page_type"))
-    try:
-        result = await clear_conflict_selection(
-            tab,
-            page_kind,
-            str(record.get("source_url") or ""),
-            str(record.get("dom_document_id") or ""),
-            str(record.get("product_id") or ""),
-        )
-    except Exception as exc:
-        result = None
-        util.create_debug_logger(config_dict).log(
-            f"[CTBC] Conflict clear outcome is unknown: {exc}"
-        )
-    if not _ctbc_outcome_is_current(tab, submit_key, record):
-        return False
-    record["clear_phase"] = "done"
-    record["clear_result"] = (
-        result.value if isinstance(result, CommitResult) else "unknown"
-    )
-    return _ctbc_conflict_is_current(tab, submit_key, record)
-
-
-async def _apply_ctbc_dialog_effects(
-    tab, config_dict, submit_key, outcome, record
-):
-    """依對話框分類套用關閉、清理或重試效果。"""
-
-    debug = util.create_debug_logger(config_dict)
-    purchase = _ctbc_purchase_runtime(tab)
-    if purchase["outcomes"].get(submit_key) is not record:
-        return
-    if outcome == "auth":
-        debug.log("[CTBC LOGIN] Authentication rejected; waiting for credentials to change")
-    elif outcome == "captcha":
-        reset_complete = await _reset_ctbc_captcha(
-            tab,
-            refresh_image=True,
-            submit_key=submit_key,
-            config_dict=config_dict,
-        )
-        if reset_complete and purchase["outcomes"].get(submit_key) is record:
-            purchase["outcomes"].pop(submit_key, None)
-        debug.log(f"[CTBC CAPTCHA] Server rejected captcha: {record['text']}")
-    elif outcome == "seat_conflict":
-        if not _ctbc_conflict_is_current(tab, submit_key, record):
-            return
-        record["dialog_dismissed"] = True
-        debug.log(f"[CTBC SEAT] Selected seats were rejected: {record['text']}")
-        if not await _clear_ctbc_conflict_selection(
-            tab, config_dict, submit_key, record
-        ):
-            return
-        if record.get("clear_result") != CommitResult.COMMITTED.value:
-            debug.log("[CTBC] Local selection clear was not committed; reload remains pending")
-        if not _ctbc_conflict_is_current(tab, submit_key, record):
-            return
-        await _reset_ctbc_captcha(tab, refresh_image=False, submit_key=submit_key)
-        if not _ctbc_conflict_is_current(tab, submit_key, record):
-            return
-    elif outcome == "success":
-        debug.log("[CTBC] Cart accepted; same-page resubmit is blocked")
-    else:
-        debug.log(f"[CTBC] Submit blocked after {outcome}: {record['text']}")
-
-
-async def _handle_ctbc_submit_dialog(
-    tab, config_dict, submit_key=None, source_url=None, dialog_snapshot=None
-):
-    """分類並處理加入購物車後出現的售票對話框。"""
-
-    debug = util.create_debug_logger(config_dict)
-    runtime = _ctbc_tab_runtime(tab)
-    purchase = runtime["purchase"]
-    if dialog_snapshot is None:
-        dialog_snapshot = await read_dialog_snapshot(tab)
-    if dialog_snapshot is None:
-        debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
-        return "rejected"
-    if dialog_snapshot.visible_count == 0:
-        return None
-
-    current_key = submit_key if submit_key is not None else _ctbc_purchase_state_key(tab)
-    submit_key, context = _ctbc_recent_submit_context(purchase, current_key)
-    if submit_key is None:
-        debug.log("[CTBC] Submit dialog appeared outside a valid purchase context")
-        return "rejected"
-    active = context if context is purchase.get("active_submit") else None
-    context_source = context.get("source_url", "") if isinstance(context, dict) else ""
-    context_document = ""
-    context_dom_document = ""
-    context_product_id = ""
-    if isinstance(context, dict):
-        context_document = _ctbc_source_document_id(context)
-        context_dom_document = str(
-            context.get("dom_document_id")
-            or context.get("document_id")
-            or ""
-        )
-        context_product_id = str(context.get("product_id") or "")
-    source_url = str(source_url or context_source or tab.target.url)
-    page_type = _get_ctbc_page_type(source_url)
-    dialog_text = dialog_snapshot.text
-    outcome = (
-        _classify_ctbc_submit_dialog(dialog_text)
-        if dialog_snapshot.visible_count == 1 and dialog_text
-        else "rejected"
-    )
-    record = _ctbc_dialog_outcome_record(
-        outcome,
-        dialog_text,
-        source_url,
-        (
-            context_document
-            if isinstance(context, dict)
-            else runtime["document"]["last_document"]
-        ),
-        page_type,
-        context.get("nonce", "") if isinstance(context, dict) else "",
-        context_dom_document,
-        context_product_id,
-    )
-    if not _ctbc_store_purchase_outcome(
-        purchase, submit_key, record, active=active
-    ):
-        return "rejected"
-    if outcome == "rejected":
-        debug.log("[CTBC] Unknown or ambiguous dialog preserved; action blocked")
-        return outcome
-
-    if outcome == "auth":
-        try:
-            fingerprint = await _ctbc_login_fingerprint(
-                tab, expected_dialog=dialog_snapshot
-            )
-        except Exception as exc:
-            debug.log(
-                "[CTBC LOGIN] Credential fingerprint observation failed; "
-                f"document-scoped blocker retained: {exc}"
-            )
-        else:
-            if purchase["outcomes"].get(submit_key) is record:
-                record["fingerprint"] = fingerprint
-    dismiss_result = await dismiss_dialog(tab, dialog_snapshot)
-    if (
-        dismiss_result is not CommitResult.COMMITTED
-        or not await _wait_ctbc_dialog_closed(tab, dialog_snapshot)
-    ):
-        debug.log(
-            f"[CTBC] Visible dialog changed before it could be dismissed: {dialog_text}"
-        )
-        return "rejected" if outcome == "success" else outcome
-    await _apply_ctbc_dialog_effects(
-        tab, config_dict, submit_key, outcome, record
-    )
-    return outcome
-
-
-async def _recover_ctbc_captcha_dialog(tab, config_dict):
-    """從驗證碼錯誤對話框恢復至可再次送出的狀態。"""
-
-    submit_key = _ctbc_purchase_state_key(tab)
-    purchase = _ctbc_purchase_runtime(tab)
-    outcome = purchase["outcomes"].get(submit_key)
-    if not isinstance(outcome, dict) or outcome.get("kind") != "captcha":
-        return False
-    if await _ctbc_dialog_is_visible(tab):
-        return True
-    reset_complete = await _reset_ctbc_captcha(
-        tab,
-        refresh_image=True,
-        submit_key=submit_key,
-        config_dict=config_dict,
-    )
-    if reset_complete and purchase["outcomes"].get(submit_key) is outcome:
-        purchase["outcomes"].pop(submit_key, None)
-    debug = util.create_debug_logger(config_dict)
-    if reset_complete:
-        debug.log("[CTBC CAPTCHA] Dialog disappeared; captcha was reset before retry")
-    else:
-        debug.log("[CTBC CAPTCHA] Captcha refresh outcome is unknown; retry remains blocked")
-    return True
-
-
-async def _recover_ctbc_seat_conflict(tab, config_dict):
-    """從座位或票數衝突恢復至可重新選擇的狀態。"""
-
-    submit_key = _ctbc_purchase_state_key(tab)
-    runtime = _ctbc_tab_runtime(tab)
-    outcomes = runtime["purchase"]["outcomes"]
-    pending = outcomes.get(submit_key)
-    if not isinstance(pending, dict) or pending.get("kind") != "seat_conflict":
-        return False
-
-    current_document_id = runtime["document"]["last_document"]
-    if not pending.get("dialog_dismissed", False):
-        if await _ctbc_dialog_is_visible(tab):
-            return True
-        if not _ctbc_conflict_is_current(tab, submit_key, pending):
-            return False
-        pending["dialog_dismissed"] = True
-
-    if not await _clear_ctbc_conflict_selection(
-        tab, config_dict, submit_key, pending
-    ):
-        return False
-
-    if pending["reload_dispatched"]:
-        recovery_document = str(pending.get("recovery_document_id") or "")
-        if (
-            recovery_document
-            and current_document_id
-            and current_document_id != recovery_document
-        ):
-            outcomes.pop(submit_key, None)
-            return False
-        return True
-
-    if not _ctbc_conflict_is_current(tab, submit_key, pending):
-        return False
-    reload_reason = "selected seats were taken"
-    reload_completed = await _reload_with_interval(
-        tab, config_dict, reload_reason
-    )
-    if not _ctbc_conflict_is_current(tab, submit_key, pending):
-        return False
-    reload_request = runtime["refresh"]["reload_request"]
-    request_source_document = str(
-        reload_request.get("source_document_token")
-        if isinstance(reload_request, dict) else ""
-    )
-    request_dispatched = bool(
-        reload_request
-        and reload_request.get("reason") == reload_reason
-        and reload_request.get("phase") in {"awaiting_document", "completed"}
-        and request_source_document
-        and request_source_document == current_document_id
-    )
-    if reload_completed or request_dispatched:
-        pending["recovery_document_id"] = (
-            request_source_document if request_dispatched
-            else str(current_document_id or "")
-        )
-        pending["reload_dispatched"] = True
-    return True
-
-
-def _ctbc_submit_dispatched_at(value):
-    """將送出時間轉成可比較的時間戳。"""
-
-    if isinstance(value, dict):
-        value = value.get("dispatched_at")
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _ctbc_unknown_submit_outcome(active, reason):
-    """將已送出意圖轉成需保留的未知結果。"""
-    return _ctbc_purchase_outcome(
-        "unknown",
-        reason=reason,
-        source_url=active.get("source_url", ""),
-        source_document_id=_ctbc_source_document_id(active),
-        nonce=active.get("nonce", ""),
-        dom_document_id=active.get("document_id", ""),
-        product_id=active.get("product_id", ""),
-    )
-
-
-def _ctbc_finish_active_unknown(purchase, active, reason):
-    """以未知結果結束目前進行中的送出意圖。"""
-
-    if purchase.get("active_submit") is not active:
-        return False
-    purchase_key = active.get("purchase_key")
-    record = _ctbc_unknown_submit_outcome(active, reason)
-    if not _ctbc_store_purchase_outcome(
-        purchase, purchase_key, record, active=active
-    ):
-        return False
-    return True
-
-
-def _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
-    """判斷登入失敗是否仍屬於目前文件與送出操作。"""
-
-    runtime = _ctbc_tab_runtime(tab)
-    outcomes = runtime["purchase"]["outcomes"]
-    failure = outcomes.get(submit_key)
-    if not isinstance(failure, dict) or failure.get("kind") != "auth":
-        return False
-
-    failed_fingerprint = str(failure.get("fingerprint") or "")
-    if failed_fingerprint:
-        current_fingerprint = str(login_fingerprint or "")
-        if not current_fingerprint or failed_fingerprint == current_fingerprint:
-            return True
-        outcomes.pop(submit_key, None)
-        return False
-
-    current_document_id = runtime["document"]["last_document"]
-    source_document_id = str(failure.get("source_document_id") or "")
-    if not source_document_id:
-        return True
-    if current_document_id and current_document_id != source_document_id:
-        outcomes.pop(submit_key, None)
-        return False
-    return True
-
-
-def _normalize_ctbc_captcha_answer(answer):
-    """將 OCR 結果正規化為四個大寫 ASCII 字元。"""
-    return re.sub(r"[^A-Za-z0-9]", "", str(answer or "")).upper()
-
-
-async def _observe_ctbc_submit_outcome(tab, config_dict, source_url, submit_key):
-    """歸納加入購物車送出後第一個可觀察結果。"""
-    await tab.sleep(1.0)
-    result = await _reconcile_utiki_purchase(
-        tab, str(tab.target.url), _get_ctbc_page_type(str(tab.target.url)), config_dict
-    )
-    return result == "success"
-
-
-async def _reconcile_utiki_purchase(tab, current_url, page_type, config_dict):
-    """在執行頁面效果前協調延遲出現的送出結果。"""
-    debug = util.create_debug_logger(config_dict)
-    runtime = _ctbc_tab_runtime(tab)
-    purchase = runtime["purchase"]
-    snapshot = await read_dialog_snapshot(tab)
-    if snapshot is None:
-        debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
-        return "blocked"
-    if snapshot.visible_count:
-        current_key = _ctbc_purchase_state_key(tab)
-        submit_key, context = _ctbc_recent_submit_context(purchase, current_key)
-        source_url = context.get("source_url", "") if isinstance(context, dict) else ""
-        outcome = await _handle_ctbc_submit_dialog(
-            tab,
-            config_dict,
-            submit_key=submit_key,
-            source_url=source_url,
-            dialog_snapshot=snapshot,
-        )
-        return "success" if outcome == "success" else "blocked"
-
-    active = purchase.get("active_submit")
-    context_key = None
-    context = None
-    if isinstance(active, dict):
-        context_key, context = active.get("purchase_key"), active
-    else:
-        context_key, context = _ctbc_recent_submit_context(
-            purchase, _ctbc_purchase_state_key(tab)
-        )
-    if not isinstance(context, dict) or context_key is None:
-        return None
-    source_url = str(context.get("source_url") or "")
-    if _ctbc_submit_reached_checkout(source_url, current_url):
-        if active is None and not (
-            context.get("kind") == "unknown"
-            and context.get("reason") in {"submit_outcome", "dispatch_unknown"}
-        ):
-            return "success" if context.get("kind") == "success" else "blocked"
-        record = _ctbc_purchase_outcome(
-            "success",
-            source_url=source_url,
-            source_document_id=_ctbc_source_document_id(context),
-            nonce=context.get("nonce", ""),
-        )
-        _ctbc_store_purchase_outcome(
-            purchase, context_key, record, active=active
-        )
-        return "success"
-    destination_key = _ctbc_purchase_state_key(tab)
-    if active is None:
-        if destination_key != context_key:
-            return None
-        return (
-            None
-            if context.get("kind") in {"auth", "captcha", "seat_conflict"}
-            else "blocked"
-        )
-    dispatched_at = _ctbc_submit_dispatched_at(active)
-    if (
-        dispatched_at
-        and time.monotonic() - dispatched_at < CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS
-    ):
-        return "pending"
-    _ctbc_finish_active_unknown(purchase, active, "submit_outcome")
-    debug.log("[CTBC] Submit outcome is unknown; automatic resubmit is blocked")
-    return "blocked"
-
-
-async def _get_ctbc_captcha_image_bytes(tab, config_dict):
-    """以原始 90×25 解析度擷取同源驗證碼圖片。"""
-    debug = util.create_debug_logger(config_dict)
-    try:
-        data_url = await tab.evaluate('''
-            (() => {
-                const image = document.querySelector('img#chk_pic');
-                if (!image || !image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
-                    return '';
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = image.naturalWidth;
-                canvas.height = image.naturalHeight;
-                const context = canvas.getContext('2d');
-                if (!context) return '';
-                context.drawImage(image, 0, 0, canvas.width, canvas.height);
-                return canvas.toDataURL('image/png');
-            })()
-        ''')
-        if isinstance(data_url, str) and data_url.startswith("data:image/"):
-            _header, separator, encoded = data_url.partition(",")
-            if separator and encoded:
-                image_bytes = base64.b64decode(encoded, validate=True)
-                if image_bytes:
-                    debug.log(f"[CTBC CAPTCHA] Native image: {len(image_bytes)} bytes")
-                    return image_bytes
-    except Exception as exc:
-        debug.log(f"[CTBC CAPTCHA] Native image capture failed: {exc}")
-
-    # Keep the shared DOM screenshot path as a compatibility fallback for
-    # browsers that block canvas extraction or change the captcha origin.
-    return await nodriver_get_captcha_image_from_dom_snapshot(
-        tab, config_dict, preferred_image_id="chk_pic"
-    )
-
-
-async def _ctbc_captcha(tab, config_dict, ocr):
-    """讀取並辨識目前頁面的中信相容驗證碼。"""
-
-    debug = util.create_debug_logger(config_dict)
-    if not ocr:
-        debug.log("[CTBC CAPTCHA] OCR engine is unavailable")
-        return False
-
-    for _ in range(10):
-        image_ready = await tab.evaluate('''
-            (() => {
-                const image = document.querySelector('img#chk_pic');
-                return !!(image && image.src && image.complete && image.naturalWidth > 0);
-            })()
-        ''')
-        if image_ready:
-            break
-        await tab.sleep(0.1)
-
-    image_bytes = await _get_ctbc_captcha_image_bytes(tab, config_dict)
-    if not image_bytes:
-        debug.log("[CTBC CAPTCHA] Captcha image was not captured")
-        return False
-    try:
-        answer = _normalize_ctbc_captcha_answer(ocr.classification(image_bytes))
-    except Exception as exc:
-        debug.log(f"[CTBC CAPTCHA] OCR failed: {exc}")
-        return False
-    if len(answer) != 4:
-        debug.log(f"[CTBC CAPTCHA] OCR returned an invalid length: {len(answer)}")
-        refresh = await tab.query_selector('#chang_pic')
-        if refresh:
-            await refresh.click()
-            await tab.sleep(0.3)
-        return False
-
-    captcha_input = await tab.query_selector('#CHK')
-    if not captcha_input:
-        return False
-    await captcha_input.click()
-    await captcha_input.apply('function(el) { el.value = ""; }')
-    await captcha_input.send_keys(answer)
-    debug.log("[CTBC CAPTCHA] Four-character answer filled")
-    return True
-
-
-async def _dispatch_ctbc_submit(tab, config_dict, submit_key, submit_plan):
-    """送出一次加入購物車操作，並等待後續確認結果。"""
-    debug = util.create_debug_logger(config_dict)
-    runtime = _ctbc_tab_runtime(tab)
-    purchase = runtime["purchase"]
-    if purchase.get("active_submit") is not None:
-        return False
-    dispatched_at = time.monotonic()
-    dispatch_state = {
-        "purchase_key": submit_key,
-        "nonce": uuid.uuid4().hex,
-        "dispatched_at": dispatched_at,
-        "phase": "dispatching",
-        "source_url": str(tab.target.url),
-        "source_document_id": str(
-            runtime["document"]["last_document"] or ""
-        ),
-        "document_id": submit_plan.document_id,
-        "page_kind": submit_plan.page_kind.value,
-        "product_id": str(
-            getattr(submit_plan.selection_plan, "product_id", "") or ""
-        ),
-        "payload_fingerprint": submit_plan.payload_fingerprint,
-    }
-    purchase["active_submit"] = dispatch_state
-    try:
-        result = await dispatch_submit(tab, submit_plan)
-        if result is not SubmitDispatchResult.DISPATCHED:
-            if purchase.get("active_submit") is not dispatch_state:
-                return False
-            debug.log(
-                f"[CTBC] Submit dispatch {result.value}; click blocked"
-            )
-            if (
-                result is SubmitDispatchResult.STALE
-                and str(tab.target.url) == submit_plan.page_url
-            ):
-                reason = (
-                    CTBC_SEAT_STALE_RELOAD_REASON
-                    if submit_plan.page_kind is PageKind.RESERVED_SEAT
-                    else CTBC_QUANTITY_STALE_RELOAD_REASON
-                )
-                try:
-                    await _reload_with_interval(tab, config_dict, reason)
-                finally:
-                    if purchase.get("active_submit") is dispatch_state:
-                        purchase["active_submit"] = None
-            else:
-                if purchase.get("active_submit") is dispatch_state:
-                    purchase["active_submit"] = None
-            return False
-    except Exception as exc:
-        _ctbc_finish_active_unknown(purchase, dispatch_state, "dispatch_unknown")
-        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
-        return False
-    if purchase.get("active_submit") is not dispatch_state:
-        return False
-    purchase["last_submit"] = None
-    dispatch_state["phase"] = "awaiting_result"
-    return True
-
-
-async def _ctbc_captcha_and_submit(
-    tab, config_dict, ocr, *, submit_plan=None
-):
-    """完成驗證碼辨識後送出已驗證的購票計畫。"""
-
-    debug = util.create_debug_logger(config_dict)
-    purchase = _ctbc_purchase_runtime(tab)
-    current_url = str(tab.target.url)
-    submit_key = _ctbc_purchase_state_key(tab)
-    page_type = _get_ctbc_page_type(current_url)
-    if (
-        submit_key is None
-        or page_type not in (
-            "seat", "general_admission", "server_assigned_quantity"
-        )
-    ):
-        debug.log("[CTBC] Purchase identity is incomplete; automatic submit is blocked")
-        return False
-    if (
-        not isinstance(submit_plan, SubmitPlan)
-        or not submit_plan_is_valid(submit_plan)
-        or submit_plan.page_kind.value != page_type
-    ):
-        debug.log("[CTBC] Submit plan does not match the purchase page")
-        return False
-
-    dialog_outcome = await _handle_ctbc_submit_dialog(
-        tab, config_dict, submit_key=submit_key
-    )
-    if dialog_outcome is not None:
-        return dialog_outcome == "success"
-    if await _recover_ctbc_captcha_dialog(tab, config_dict):
-        return False
-    active = purchase.get("active_submit")
-    if isinstance(active, dict):
-        dispatched_at = _ctbc_submit_dispatched_at(active)
-        if (
-            not dispatched_at
-            or time.monotonic() - dispatched_at >= CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS
-        ):
-            _ctbc_finish_active_unknown(purchase, active, "submit_outcome")
-            debug.log("[CTBC] Submit outcome is unknown; automatic resubmit is blocked")
-        return False
-    outcome = purchase["outcomes"].get(submit_key)
-    if isinstance(outcome, dict) and outcome.get("kind") != "auth":
-        return False
-
-    try:
-        login_ready = await _fill_ctbc_inline_login(tab, config_dict)
-        if not login_ready:
-            debug.log("[CTBC LOGIN] Waiting for login or CTBC account settings")
-            return False
-        login_fingerprint = await _ctbc_login_fingerprint(tab)
-    except Exception as exc:
-        debug.log(
-            "[CTBC LOGIN] Credential observation failed; "
-            f"previous authentication blocker retained: {exc}"
-        )
-        return False
-    if _ctbc_auth_failure_is_active(tab, submit_key, login_fingerprint):
-        debug.log("[CTBC LOGIN] Previous authentication failure; waiting for credentials to change")
-        return False
-
-    captcha_value = await tab.evaluate('''
-        (() => {
-            const input = document.querySelector('#CHK');
-            return input ? input.value.trim() : '';
-        })()
-    ''')
-    captcha_ready = isinstance(captcha_value, str) and len(captcha_value) == 4
-    if not captcha_ready and config_dict.get("ocr_captcha", {}).get("enable", False):
-        captcha_ready = await _ctbc_captcha(tab, config_dict, ocr)
-
-    # With OCR disabled, keep the selections and wait for manual input.  The
-    # next loop iteration detects the four-character value and continues.
-    if not captcha_ready:
-        return False
-
-    # Match the existing OCR setting semantics: OCR may fill the field while
-    # the final submit remains manual unless "force submit" is enabled.
-    ocr_config = config_dict.get("ocr_captcha", {})
-    if not ocr_config.get("enable", False) or not ocr_config.get("force_submit", False):
-        return True
-
-    dialog_outcome = await _handle_ctbc_submit_dialog(
-        tab, config_dict, submit_key=submit_key
-    )
-    if dialog_outcome is not None:
-        return dialog_outcome == "success"
-    if purchase.get("active_submit") is not None:
-        return False
-    outcome = purchase["outcomes"].get(submit_key)
-    if isinstance(outcome, dict):
-        return False
-
-    if not await _dispatch_ctbc_submit(
-        tab, config_dict, submit_key, submit_plan
-    ):
-        return False
-    debug.log("[CTBC] Add-to-cart submitted")
-    return await _observe_ctbc_submit_outcome(tab, config_dict, current_url, submit_key)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
-    """執行中信相容售票的劃位頁主要流程。"""
-
+    """保留原座位頁導覽核對，再交由購票模組準備與提交。"""
     if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
         return False
-    if _get_utiki_behavior(
-        config_dict, "seat_selection_mode", "manual"
-    ) != "manual":
+    if _get_utiki_behavior(config_dict, "seat_selection_mode", "manual") != "manual":
         return False
-
-    submit_key = _ctbc_purchase_state_key(tab)
-    if submit_key is None:
-        return False
-    purchase = _ctbc_purchase_runtime(tab)
-    dialog_outcome = await _handle_ctbc_submit_dialog(
-        tab, config_dict, submit_key=submit_key
+    return await purchase_engine.seat_main(
+        tab, config_dict, ocr,
+        runtime_for_tab=_ctbc_tab_runtime,
+        purchase_key_for_tab=_ctbc_purchase_state_key,
+        behavior_for_key=_get_utiki_behavior,
+        reload_with_interval=_reload_with_interval,
+        poll_seat_reload=_poll_ctbc_seat_reload,
+        cancel_refresh=nodriver_utk_sports_cancel_refresh,
     )
-    if await _recover_ctbc_captcha_dialog(tab, config_dict):
-        return False
-    if await _recover_ctbc_seat_conflict(tab, config_dict):
-        return False
-    outcome = purchase["outcomes"].get(submit_key)
-    if isinstance(outcome, dict) and outcome.get("kind") != "auth":
-        return False
-    if dialog_outcome is not None:
-        return False
-    if await _poll_ctbc_seat_reload(tab, config_dict):
-        return False
-
-    debug = util.create_debug_logger(config_dict)
-    try:
-        snapshot = await read_seat_snapshot(tab)
-    except Exception as exc:
-        debug.log(f"[CTBC SEAT] Seat snapshot failed: {exc}")
-        return False
-    if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok:
-        reason = (
-            snapshot.reason
-            if isinstance(snapshot, SeatSnapshot)
-            else "invalid-result"
-        )
-        debug.log(f"[CTBC SEAT] Reserved-seat page was not ready: {reason}")
-        return False
-
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    keyword = _get_utiki_behavior(
-        config_dict, "ticket_type_keyword", "全票"
-    )
-    plan, reason = select_seat_snapshot(
-        snapshot,
-        keyword,
-        ticket_number,
-        config_dict.get("advanced", {}).get("disable_adjacent_seat", False),
-        _get_utiki_behavior(config_dict, "seat_sorting", "row_seat"),
-    )
-    if plan is None:
-        if reason == "seats-unavailable":
-            await _reload_with_interval(
-                tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON
-            )
-        elif reason == "ticket-type-unavailable":
-            debug.log(f"[CTBC SEAT] No ticket type matched: {keyword}")
-        else:
-            debug.log(f"[CTBC SEAT] Reserved-seat snapshot rejected: {reason}")
-        return False
-
-    await nodriver_utk_sports_cancel_refresh(tab, "reserved-seat plan ready")
-    try:
-        commit_result = await commit_seat(tab, snapshot, plan)
-    except Exception as exc:
-        debug.log(f"[CTBC SEAT] Seat commit outcome is unknown: {exc}")
-        await _reload_with_interval(
-            tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON
-        )
-        return False
-    if not await _reduce_utiki_seat_commit(
-        tab, config_dict, plan, commit_result, debug
-    ):
-        return False
-    submit_plan = build_submit_plan(plan)
-    if submit_plan is None:
-        debug.log("[CTBC SEAT] Reserved-seat submit plan was rejected")
-        return False
-    return await _ctbc_captcha_and_submit(
-        tab, config_dict, ocr, submit_plan=submit_plan
-    )
-
-
-async def _reduce_utiki_seat_commit(
-    tab, config_dict, plan, commit_result, debug
-):
-    """歸納劃位提交結果，避免過早進入送出流程。"""
-    if commit_result in {CommitResult.STALE, CommitResult.REJECTED}:
-        outcome = commit_result.value
-        debug.log(
-            f"[CTBC SEAT] Seat commit {outcome}; waiting to reload"
-        )
-        await _reload_with_interval(
-            tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON
-        )
-        return False
-    if commit_result is not CommitResult.COMMITTED:
-        debug.log("[CTBC SEAT] Seat commit outcome was unknown; submit blocked")
-        return False
-    if plan.action == "clear":
-        debug.log("[CTBC SEAT] Cleared an invalid reserved-seat selection")
-        return False
-    debug.log(
-        f"[CTBC SEAT] Reserved-seat selection ready: "
-        f"{plan.ticket_number} x {plan.ticket_type_name}"
-    )
-    return True
-
-
-async def _reduce_utiki_quantity_commit(
-    tab, config_dict, plan, commit_result, debug, label
-):
-    """歸納票數提交結果，避免過早進入送出流程。"""
-    if commit_result is CommitResult.STALE:
-        debug.log(
-            f"[CTBC {label}] Quantity state changed during commit; "
-            "waiting to reload"
-        )
-        await _reload_with_interval(
-            tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
-        )
-        return False
-    if commit_result is not CommitResult.COMMITTED:
-        outcome = (
-            commit_result.value
-            if isinstance(commit_result, CommitResult)
-            else "unknown"
-        )
-        debug.log(
-            f"[CTBC {label}] Quantity commit {outcome}; submit blocked"
-        )
-        return False
-    debug.log(
-        f"[CTBC {label}] Selected {plan.ticket_number} x "
-        f"{plan.target_name}"
-    )
-    return True
 
 
 async def _nodriver_utiki_quantity_main(
     tab, config_dict, ocr, page_type, expected_product_id=""
 ):
-    """在路由驗證後執行共用票數頁流程。"""
-    debug = util.create_debug_logger(config_dict)
-    label = (
-        "SERVER ASSIGNMENT"
-        if page_type == "server_assigned_quantity"
-        else "GENERAL"
-    )
-    submit_key = _ctbc_purchase_state_key(tab)
-    if submit_key is None:
-        return False
-    purchase = _ctbc_purchase_runtime(tab)
-    dialog_outcome = await _handle_ctbc_submit_dialog(
-        tab, config_dict, submit_key=submit_key
-    )
-    if await _recover_ctbc_captcha_dialog(tab, config_dict):
-        return False
-    if await _recover_ctbc_seat_conflict(tab, config_dict):
-        return False
-    outcome = purchase["outcomes"].get(submit_key)
-    if isinstance(outcome, dict) and outcome.get("kind") != "auth":
-        return False
-    if dialog_outcome is not None:
-        return False
-    if await _poll_ctbc_quantity_reload(tab, config_dict):
-        return False
-
-    try:
-        snapshot = await read_quantity_snapshot(tab)
-    except Exception as exc:
-        debug.log(f"[CTBC {label}] Quantity snapshot failed: {exc}")
-        return False
-    if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
-        reason = (
-            snapshot.reason
-            if isinstance(snapshot, QuantitySnapshot)
-            else "invalid-result"
-        )
-        debug.log(f"[CTBC {label}] Quantity page was not ready: {reason}")
-        return False
-    if (
-        page_type == "server_assigned_quantity"
-        and snapshot.product_id != expected_product_id
-    ):
-        debug.log(
-            "[CTBC SERVER ASSIGNMENT] Product identity changed after "
-            "destination attestation"
-        )
-        return False
-
-    ticket_number = int(config_dict.get("ticket_number", 1))
-    keyword = _get_utiki_behavior(
-        config_dict, "ticket_type_keyword", "全票"
-    )
-    plan = select_quantity_snapshot(
-        snapshot, keyword, ticket_number, page_type=page_type
-    )
-    if plan is None:
-        debug.log(
-            f"[CTBC {label}] No available ticket type matched: {keyword}"
-        )
-        return False
-
-    await nodriver_utk_sports_cancel_refresh(tab, "ticket type found")
-    try:
-        commit_result = await commit_quantity(tab, snapshot, plan)
-    except Exception as exc:
-        debug.log(
-            f"[CTBC {label}] Quantity commit outcome is unknown: {exc}"
-        )
-        return False
-    if not await _reduce_utiki_quantity_commit(
-        tab, config_dict, plan, commit_result, debug, label
-    ):
-        return False
-    submit_plan = build_submit_plan(plan)
-    if submit_plan is None:
-        debug.log(f"[CTBC {label}] Quantity submit plan was rejected")
-        return False
-    return await _ctbc_captcha_and_submit(
-        tab, config_dict, ocr, submit_plan=submit_plan
+    """把已核對頁面的票數購票流程交給購票模組。"""
+    return await purchase_engine.quantity_main(
+        tab, config_dict, ocr, page_type,
+        expected_product_id=expected_product_id,
+        runtime_for_tab=_ctbc_tab_runtime,
+        purchase_key_for_tab=_ctbc_purchase_state_key,
+        behavior_for_key=_get_utiki_behavior,
+        reload_with_interval=_reload_with_interval,
+        poll_quantity_reload=_poll_ctbc_quantity_reload,
+        cancel_refresh=nodriver_utk_sports_cancel_refresh,
     )
 
 
@@ -3448,27 +2002,24 @@ async def _ctbc_reconcile_area_navigation(tab, current_url, config_dict=None):
     )
 
 
-async def _handle_ctbc_checkout(tab, config_dict):
-    """處理中信相容售票的結帳頁狀態。"""
 
-    purchase = _ctbc_purchase_runtime(tab)
-    purchase_key, context = _ctbc_recent_submit_context(purchase)
-    if (
-        purchase_key is not None
-        and isinstance(context, dict)
-        and context.get("nonce")
-    ):
-        checkout_key = ("submit", purchase_key, str(context["nonce"]))
-    else:
-        checkout_key = ("location", _ctbc_tab_state_key(tab))
-    checkout_notified = purchase["checkout_notified"]
-    if checkout_key in checkout_notified:
-        return
-    checkout_notified.add(checkout_key)
-    if config_dict.get("advanced", {}).get("play_sound", {}).get("order", False):
-        play_sound_while_ordering(config_dict)
-    send_discord_notification(config_dict, "order", "CTBC Sports")
-    send_telegram_notification(config_dict, "order", "CTBC Sports")
+
+async def _reconcile_utiki_purchase(tab, current_url, page_type, config_dict):
+    """在外層路由前核對既有提交結果。"""
+    return await submission_engine._reconcile_utiki_purchase(
+        tab, current_url, page_type, config_dict,
+        runtime_for_tab=_ctbc_tab_runtime,
+        purchase_key_for_tab=_ctbc_purchase_state_key,
+    )
+
+
+async def _handle_ctbc_checkout(tab, config_dict):
+    """由既有 checkout 路由交給提交模組處理通知。"""
+    return await submission_engine._handle_ctbc_checkout(
+        tab, config_dict,
+        runtime_for_tab=_ctbc_tab_runtime,
+        tab_state_key_for_tab=_ctbc_tab_state_key,
+    )
 
 
 async def nodriver_ctbc_main(tab, url, config_dict, ocr):

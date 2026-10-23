@@ -3,7 +3,7 @@
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
 **最後更新**：2026-10-23
 
-uTiki 模組索引反映批次 2 接線後的現況；後續目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
+uTiki 模組索引反映批次 3 接線後的現況；後續目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
 
 ---
 
@@ -75,7 +75,7 @@ uTiki 模組索引反映批次 2 接線後的現況；後續目標架構與本�
 - **platforms/ibon.py** - iBon + Tour iBon 平台（25 函式）
 - **platforms/kham.py** - KHAM + ticket.com.tw + UDN 平台（21 函式）
 - **platforms/hkticketing.py** - HKTicketing + GalaxyMacau + Ticketek 平台（30 函式）
-- **platforms/utiki/** - uTiki2 職棒售票家族（tenant profile、路由、登入、refresh infrastructure 與 workflow）
+- **platforms/utiki/** - uTiki2 職棒售票家族（tenant profile、輸入、購票、提交、refresh infrastructure 與 workflow）
 - **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade，新邏輯不得加在此檔
 
 ### 🌐 支援平台清單
@@ -391,7 +391,7 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### 目前模組邊界（批次 2 runtime 接線後）
+#### 目前模組邊界（批次 3 購票與提交接線後）
 
 ```text
 platforms/utiki/
@@ -402,13 +402,17 @@ platforms/utiki/
 ├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
 ├── runtime.py    # mutable runtime record 型別與等價 constructor；不持有 registry
 ├── refresh.py    # document health、429 與跨程序刷新協調；不持有 runtime
-└── workflow.py   # 唯一的 per-tab runtime owner 與購票流程編排
+├── inputs.py     # Cookie、inline login、CAPTCHA 輸入與 browser 操作
+├── submission.py # submit 結果、dialog、recovery 與 checkout 通知去重
+├── purchase.py   # 已通過原導覽核對的座位／票數頁準備與提交編排
+└── workflow.py   # 唯一 per-tab registry／lifecycle、頁面路由及既有導覽 gate
 
 platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 ```
 
 - 已驗證 tenant：中信育樂、味全龍。
 - `workflow.py` 用 `runtime.py` constructor 為分頁建立 canonical mutable runtime，保留 tab identity、registry、get-or-create／existing-only lookup 與 cleanup 所有權；單向傳入同一 runtime、tab identity 與 cancel-task registry 給 `refresh.py`。refresh 不得反向 import workflow 或建立 mirror state。
+- 座位與一般票數頁的原前置核對留在 workflow；server-assigned 的 pending navigation／authorization 也仍在 workflow。購票準備在 `purchase.py`，提交與恢復狀態寫入在 `submission.py`，登入及 CAPTCHA browser 輸入在 `inputs.py`；三者都不反向 import workflow。
 - 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
 - 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，本次待實作的架構與順序見 [uTiki 正式計畫](utiki-refactor/PLAN.md)。

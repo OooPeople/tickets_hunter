@@ -847,9 +847,9 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 "platforms.utiki.refresh.get_shared_refresh_coordinator",
                 return_value=coordinator,
             ), patch(
-                "platforms.utiki.workflow.send_discord_notification",
+                "platforms.utiki.submission.send_discord_notification",
             ) as discord, patch(
-                "platforms.utiki.workflow.send_telegram_notification",
+                "platforms.utiki.submission.send_telegram_notification",
             ) as telegram:
                 await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
                 await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)

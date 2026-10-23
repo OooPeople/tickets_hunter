@@ -8,7 +8,7 @@
 
 > 適用於所有新程式碼。歷史遺留程式碼可能早於本規則，看到不代表可以仿效。
 
-以下 uTiki 模組與依賴反映目前正式接線：批次 2 已加入 runtime 資料型別與 constructor；後續待拆責任見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
+以下 uTiki 模組與依賴反映批次 3 的正式接線；date／area／navigation 與 document-health 的後續拆分見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
 
 ---
 
@@ -19,6 +19,10 @@
 - **`platforms/*.py`** — 各平台 12 階段流程，一平台一檔；legacy facade 只可明示轉接到同一家族 package，不得持有狀態或流程邏輯。禁止：跨平台 import、import `nodriver_tixcraft`。
 - **`platforms/{family}/`** — 已由核准計劃定義的同引擎家族 package。package 內依賴必須單向，workflow 是模組 `_state` 與 per-tab runtime 的唯一 owner；profile、auth、selection 等葉節點不得反向 import workflow 或 legacy facade。離開家族 route、關閉瀏覽器或 handler 終止時，由 workflow 以 non-allocating lookup 精確移除該 tab runtime；checkout 只取消 refresh work，必須保留 runtime 的通知去重狀態。不得只因網站外觀相似就納入同一家族。
 - **`platforms/utiki/runtime.py`** — 現有 mutable document／action／transition／purchase／refresh record 的 TypedDict 與等價 constructor。`workflow.py` 用 constructor 建立唯一 tab runtime；本模組不持有 tab registry、cancel-task registry、tab identity 或 cleanup。
+- **`platforms/utiki/workflow.py`** — 唯一 tab registry／runtime lifecycle、頁面路由與既有導覽核對；保留 date／area 與 server-assigned navigation gate，將通過原前置條件的座位／票數頁交給 `purchase.py`，並交由 `submission.py` 協調送出結果與 checkout 通知。
+- **`platforms/utiki/inputs.py`** — Cookie 注入、inline login、登入 fingerprint、CAPTCHA 取圖／辨識／欄位與換圖 browser 操作；不持有 purchase outcome 或重試狀態。
+- **`platforms/utiki/submission.py`** — purchase key、submit dispatch／結果歸屬、dialog、CAPTCHA／座位衝突恢復、未知結果與 checkout 通知去重的功能寫入責任；runtime 由 workflow 傳入，不建立 registry。
+- **`platforms/utiki/purchase.py`** — 已通過 workflow 原導覽核對的座位與票數頁購票準備，組合 selection／DOM commit／submission；不建立另一份 purchase state。
 - **`platforms/utiki/refresh.py`** — uTiki document inspection、429 circuit breaker、跨程序 refresh reservation／commit／wait／pause／cancel 與 reload event。queued／reserved pause 會以節流的 exact-token cleanup 釋放共享工作；commit 後的 request 必須保留到觀察到不同的 canonical document token，URL 漂移或 browser command 回傳不得視為完成，也不得重送。每個 request 必須有非空 reason 與唯一 token；一個 intent 的 completion 不得回傳給另一個 caller，terminal recovery probe 也必須同步停止其 lease task。logical request 仍由 workflow 的 canonical per-tab runtime 持有，resume 不得重算 eligibility、延長 deadline 或回捲 committed phase。只能由 workflow 傳入 runtime、tab identity 與 cancel-task registry；禁止 import workflow、持有 `_state`、建立 mirror runtime，或處理購票選擇／提交。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
 - **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
@@ -35,6 +39,13 @@ platforms/*        -->  nodriver_common, global_settings, refresh_coordinator, u
 platforms/{family}/workflow
                    -->  同 package 葉節點與核准 infrastructure 模組,
                         nodriver_common, util
+platforms/utiki/purchase
+                   -->  platforms/utiki/selection, dom, submission, util
+platforms/utiki/submission
+                   -->  platforms/utiki/inputs, dom, selection, profiles,
+                        nodriver_common, util
+platforms/utiki/inputs
+                   -->  platforms/utiki/auth, selection, nodriver_common, util
 platforms/utiki/refresh
                    -->  platforms/utiki/runtime, platforms/utiki/profiles, nodriver_common,
                         global_settings, refresh_coordinator, util
@@ -50,8 +61,8 @@ util               -->  (無專案內部匯入)
 
 禁止反向依賴。不同平台／家族之間禁止互相 import；legacy facade 只能單向 import
 其 canonical family package。package 內不得 import legacy facade。`utiki/refresh.py`
-不得反向 import `utiki/workflow.py`；runtime ownership 必須維持 workflow → refresh
-單向傳入。
+不得反向 import `utiki/workflow.py`；runtime ownership 必須維持 workflow 單向傳入
+purchase／submission／refresh。inputs 不依賴 submission／purchase；submission 不依賴 purchase。
 
 ---
 

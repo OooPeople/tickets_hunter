@@ -121,11 +121,14 @@ async def _ctbc_try_fast_area_navigation(
     date_snapshot,
     date_plan,
     *,
-    access,
+    identity_for_tab,
+    runtime_for_identity,
+    behavior_for_key,
 ):
     """預取區域候選，未送出時沿原條件回到 native 流程。"""
     debug = util.create_debug_logger(config_dict)
-    identity, transition = navigation._ctbc_transition_for_tab(tab, access=access)
+    identity = identity_for_tab(tab)
+    transition = runtime_for_identity(identity)["transition"]
     if transition["pending_navigation"]:
         return True
     date_target = navigation._ctbc_date_target_payload(date_plan)
@@ -169,22 +172,31 @@ async def _ctbc_try_fast_area_navigation(
         debug,
         identity,
         transition,
-        access=access,
+        runtime_for_identity=runtime_for_identity,
+        behavior_for_key=behavior_for_key,
     )
 
 
-async def nodriver_ctbc_date_auto_select(tab, config_dict, *, access, cancel_refresh):
+async def nodriver_ctbc_date_auto_select(
+    tab, config_dict, *, identity_for_tab, runtime_for_identity,
+    behavior_for_key, reload_with_interval, cancel_refresh,
+):
     """依設定自動選擇中信相容售票場次。"""
 
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
     if navigation._get_ctbc_page_type(current_url) != "date":
         return False
+    identity = identity_for_tab(tab)
+    runtime = runtime_for_identity(identity)
     if not await navigation._ctbc_reconcile_navigation_source(
-        tab, current_url, "date", config_dict, access=access
+        tab, current_url, "date", config_dict,
+        identity=identity, runtime=runtime,
+        runtime_for_identity=runtime_for_identity,
+        reload_with_interval=reload_with_interval,
     ):
         return False
-    seat_selection_mode = access["behavior_for_key"](
+    seat_selection_mode = behavior_for_key(
         config_dict, "seat_selection_mode", "manual"
     )
     if seat_selection_mode == "computer":
@@ -215,7 +227,7 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict, *, access, cancel_ref
             != "date"
         ):
             return False
-        await access["reload_with_interval"](
+        await reload_with_interval(
             tab, config_dict, f"date table was not ready ({reason})"
         )
         return False
@@ -227,7 +239,7 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict, *, access, cancel_ref
 
     plan = select_date_snapshot(snapshot, config_dict)
     if plan is None:
-        await access["reload_with_interval"](
+        await reload_with_interval(
             tab, config_dict, "no purchasable date matched"
         )
         return False
@@ -240,27 +252,40 @@ async def nodriver_ctbc_date_auto_select(tab, config_dict, *, access, cancel_ref
             and config_dict.get("area_auto_select", {}).get("enable", False)
         ):
             if await _ctbc_try_fast_area_navigation(
-                tab, config_dict, snapshot, plan, access=access
+                tab, config_dict, snapshot, plan,
+                identity_for_tab=identity_for_tab,
+                runtime_for_identity=runtime_for_identity,
+                behavior_for_key=behavior_for_key,
             ):
                 return True
+        identity = identity_for_tab(tab)
         return await navigation._ctbc_commit_native_date(
-            tab, snapshot, plan, debug, access=access
+            tab, snapshot, plan, debug, identity=identity,
+            transition=runtime_for_identity(identity)["transition"],
+            runtime_for_identity=runtime_for_identity,
         )
     except Exception as exc:
         debug.log(f"[CTBC DATE] Click failed: {exc}")
         return False
 
 
-async def nodriver_ctbc_area_auto_select(tab, config_dict, *, access, cancel_refresh):
+async def nodriver_ctbc_area_auto_select(
+    tab, config_dict, *, identity_for_tab, runtime_for_identity,
+    behavior_for_key, reload_with_interval, cancel_refresh,
+):
     """依設定自動選擇中信相容售票區域。"""
 
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
+    identity = identity_for_tab(tab)
+    runtime = runtime_for_identity(identity)
     if not await navigation._ctbc_reconcile_area_navigation(
-        tab, current_url, config_dict, access=access
+        tab, current_url, config_dict, identity=identity, runtime=runtime,
+        runtime_for_identity=runtime_for_identity,
+        reload_with_interval=reload_with_interval,
     ):
         return False
-    seat_selection_mode = access["behavior_for_key"](
+    seat_selection_mode = behavior_for_key(
         config_dict, "seat_selection_mode", "manual"
     )
     if seat_selection_mode == "computer":
@@ -280,7 +305,7 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict, *, access, cancel_ref
         reason = (
             snapshot.reason if isinstance(snapshot, AreaSnapshot) else "invalid-result"
         )
-        await access["reload_with_interval"](
+        await reload_with_interval(
             tab, config_dict, f"area map was not ready ({reason})"
         )
         return False
@@ -294,12 +319,17 @@ async def nodriver_ctbc_area_auto_select(tab, config_dict, *, access, cancel_ref
         snapshot, config_dict, performance_id, require_direct_destination=False
     )
     if target is None:
-        await access["reload_with_interval"](
+        await reload_with_interval(
             tab, config_dict, "no available area matched"
         )
         return False
 
     await cancel_refresh(tab, "available area found")
+    identity = identity_for_tab(tab)
     return await navigation._ctbc_commit_native_area(
-        tab, config_dict, snapshot, target, seat_selection_mode, debug, access=access
+        tab, config_dict, snapshot, target, seat_selection_mode, debug,
+        identity=identity,
+        transition=runtime_for_identity(identity)["transition"],
+        runtime_for_identity=runtime_for_identity,
+        behavior_for_key=behavior_for_key,
     )

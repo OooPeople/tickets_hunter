@@ -283,7 +283,6 @@ async def _utk_document_guard(
     refresh = runtime["refresh"]
     cleanup_pending, _ = await rate_limit._retry_abandoned_probe_cleanup(
         runtime, refresh_identity, cancel_tasks,
-        coordinator_factory=get_shared_refresh_coordinator,
     )
     if cleanup_pending:
         return "unknown", snapshot
@@ -305,7 +304,6 @@ async def _utk_document_guard(
                 probe["pause_cleanup_retry_at"] = 0.0
             cleanup_pending, _ = await rate_limit._retry_abandoned_probe_cleanup(
                 runtime, refresh_identity, cancel_tasks,
-                coordinator_factory=get_shared_refresh_coordinator,
             )
             if cleanup_pending:
                 return "unknown", snapshot
@@ -315,7 +313,6 @@ async def _utk_document_guard(
         return "disabled", snapshot
     probe_handled = await rate_limit._finish_utk_recovery_probe(
         tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot,
-        coordinator_factory=get_shared_refresh_coordinator,
     )
     classification = snapshot.get("classification", "unknown")
     if classification == "unknown":
@@ -350,7 +347,6 @@ async def _utk_document_guard(
                 tab, runtime, refresh_identity, config_dict,
                 snapshot.get("document_id", ""),
                 document_started_at=snapshot.get("document_started_at", 0.0),
-                coordinator_factory=get_shared_refresh_coordinator,
             )
         return "blocked", snapshot
     request = refresh["reload_request"]
@@ -715,7 +711,6 @@ async def _preflight_allows_reload(
             tab, runtime, refresh_identity, config_dict,
             preflight.get("document_id", ""),
             document_started_at=preflight.get("document_started_at", 0.0),
-            coordinator_factory=get_shared_refresh_coordinator,
         )
         return False
     return bool(
@@ -754,7 +749,6 @@ async def _commit_reserved_reload(
         ):
             rate_limit._install_recovery_probe(
                 runtime, refresh_identity, cancel_tasks, decision, preflight,
-                coordinator_factory=get_shared_refresh_coordinator,
             )
             return False
         if decision.granted and decision.is_recovery_probe:
@@ -780,7 +774,6 @@ async def _commit_reserved_reload(
             ):
                 rate_limit._install_recovery_probe(
                     runtime, refresh_identity, cancel_tasks, decision, preflight,
-                    coordinator_factory=get_shared_refresh_coordinator,
                 )
             if decision.error:
                 debug.log(
@@ -798,7 +791,6 @@ async def _commit_reserved_reload(
         return False
     rate_limit._install_recovery_probe(
         runtime, refresh_identity, cancel_tasks, decision, preflight,
-        coordinator_factory=get_shared_refresh_coordinator,
     )
     return await _invoke_browser_reload(tab, debug)
 

@@ -88,8 +88,6 @@ async def _report_utk_rate_limit(
     probe_permit_id=None,
     document_started_at=0.0,
     suspected=False,
-    *,
-    coordinator_factory=None,
 ):
     """回報 uTiki 限流狀態並建立復原探測資訊。"""
 
@@ -97,7 +95,7 @@ async def _report_utk_rate_limit(
     if not settings.get("enabled", True):
         return None
     refresh = runtime["refresh"]
-    coordinator = (coordinator_factory or get_shared_refresh_coordinator)()
+    coordinator = get_shared_refresh_coordinator()
     _mark_utk_emergency_window()
     report = await coordinator.report_rate_limited(
         UTK_SPORTS_SCOPE,
@@ -175,8 +173,6 @@ async def _retry_abandoned_probe_cleanup(
     refresh_identity,
     cancel_tasks,
     coordinator=None,
-    *,
-    coordinator_factory=None,
 ):
     """重試清理先前放棄的復原探測。"""
 
@@ -185,9 +181,7 @@ async def _retry_abandoned_probe_cleanup(
         return False, False
     if not _pause_cleanup_due(probe):
         return True, False
-    coordinator = (
-        coordinator or (coordinator_factory or get_shared_refresh_coordinator)()
-    )
+    coordinator = coordinator or get_shared_refresh_coordinator()
     accepted = await _abandon_recovery_probe(
         runtime, refresh_identity, cancel_tasks, coordinator, probe
     )
@@ -221,8 +215,6 @@ async def _finish_utk_recovery_probe(
     cancel_tasks,
     config_dict,
     snapshot,
-    *,
-    coordinator_factory=None,
 ):
     """僅在新文件變為正常或確認限流後完成復原探測。"""
     refresh = runtime["refresh"]
@@ -232,8 +224,7 @@ async def _finish_utk_recovery_probe(
     now = time.monotonic()
     probe.setdefault("started_at", now)
     probe.setdefault("next_renew_at", now + UTK_RECOVERY_PROBE_RENEW_SECONDS)
-    coordinator_factory = coordinator_factory or get_shared_refresh_coordinator
-    coordinator = coordinator_factory()
+    coordinator = get_shared_refresh_coordinator()
     if now - probe.get("started_at", now) >= UTK_RECOVERY_PROBE_MAX_SECONDS:
         await coordinator.complete_recovery_probe(
             UTK_SPORTS_SCOPE,
@@ -269,7 +260,6 @@ async def _finish_utk_recovery_probe(
             snapshot.get("document_id", ""),
             probe_permit_id=probe.get("permit_id"),
             document_started_at=snapshot.get("document_started_at", 0.0),
-            coordinator_factory=coordinator_factory,
         )
         if report and report.accepted:
             await _clear_completed_recovery_probe(runtime, cancel_tasks, probe)
@@ -300,8 +290,6 @@ async def _renew_probe_lease(
     refresh_identity,
     permit_id,
     started_at,
-    *,
-    coordinator_factory=None,
 ):
     """延長目前復原探測許可的租期。"""
 
@@ -315,7 +303,7 @@ async def _renew_probe_lease(
             or current.get("abandon_requested")
         ):
             return
-        coordinator = (coordinator_factory or get_shared_refresh_coordinator)()
+        coordinator = get_shared_refresh_coordinator()
         if time.monotonic() - started_at >= UTK_RECOVERY_PROBE_MAX_SECONDS:
             await coordinator.complete_recovery_probe(
                 UTK_SPORTS_SCOPE,
@@ -344,8 +332,6 @@ def _install_recovery_probe(
     cancel_tasks,
     decision,
     preflight,
-    *,
-    coordinator_factory=None,
 ):
     """將協調器核發的復原探測安裝至本機執行期。"""
 
@@ -365,7 +351,6 @@ def _install_recovery_probe(
             refresh_identity,
             decision.permit_id,
             started_at,
-            coordinator_factory=coordinator_factory,
         )
     )
     probe["lease_task"] = lease_task

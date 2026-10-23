@@ -1,9 +1,9 @@
 # uTiki 重構狀態
 
 - 唯一行為與程式起點：`944e934546f3dd36b1b4891a5a4fa359b8ade17f`。`a47fd07106eae598c8b44972282c6621bf7f493c` 只作文件整理參考，不沿用其功能、完成狀態或測試 PASS。
-- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 5 開始 HEAD 為 `078aedeb1a5533ce103867567da7bb1d822260c2`，工作樹乾淨；施工期間未切換分支或合併上游。
-- 階段：批次 0/1/2/3/4 已完成；本輪依 [PLAN.md](PLAN.md) 完成批次 5 刷新觀察與 429 管理責任拆分，停在批次 5，不進入設定／正式入口／cleanup 收斂。
-- 程式範圍：新增 `document_health.py`、`rate_limit.py` 並由 `refresh.py` 正式接入；workflow 的 refresh facade、reload request lifecycle 與共用 SQLite coordinator 保持。測試只更新搬移後的私有 import／patch 與虛擬時鐘位置，未改產品預期；未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增限流政策或刷新重試。
+- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。本輪批次 6 前清理開始 HEAD 為 `835433fbc9b8624535a0737d9e2710c03a292376`，工作樹乾淨；施工期間未切換分支或合併上游。
+- 階段：批次 0/1/2/3/4/5 已完成；本輪只做批次 6 前的架構清理，尚未進入 current／legacy settings、正式 source caller 或 cleanup 批次。
+- 程式範圍：移除 navigation access dict、rate-limit coordinator factory 測試接縫、無 production consumer 的空 `action` runtime record 及無正式 caller 的 workflow private surface；保留 workflow refresh facade、reload request lifecycle、共用 SQLite coordinator 與原購票／導航行為。未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI。
 - 環境：沿用現有 Windows x64 `.venv`（CPython 3.11.9、pytest 9.0.3），本輪未重建。批次 0 建立環境時 `uv venv --python 3.11.9 .venv` 及 `uv pip install --python .\.venv\Scripts\python.exe -r requirements-dev.txt` 均退出碼 0；需求取自 944 原檔。
 
 ## 前輪使用者確認的 scope 校正
@@ -11,6 +11,14 @@
 - **交付僅限原始碼使用**：正式 source caller 最終須在 Windows x64、macOS arm64 可用；本次不要求 PyInstaller、exe／安裝包、frozen runtime、hidden-import／spec、`build_scripts/build_local.py`、release packaging 或發布。現有 build scripts／release infrastructure 保留，原始碼版本穩定使用後另行處理打包。
 - **僅維護 current uTiki 設定格式**：current 設定仍須讀取、儲存並保留 `944e934` 已支援的 hot reload 欄位及時點；完成後使用者可重新填寫 current 設定。正式切換後不維護只為舊 uTiki／CTBC 設定相容的自動升級、runtime fallback、dual read／dual write，也不新增 DB schema／serialized runtime migration、version 欄位或 persistence upgrader。其他平台及共用 migration／normalization／SQLite 機制不在本輪移除範圍；uTiki shared refresh／429 SQLite coordinator 保持正式功能。
 - 以上是前輪使用者確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；通用打包指南與歷史計畫保留，僅以正式 PLAN 限定本次施工與驗收。
+
+## 批次 6 前架構清理（非產品功能批次）
+
+- `workflow.py` 移除 `_navigation_access()`；`date_area.py`／`navigation.py` 以顯式參數取得已知 identity、runtime／transition，原 await 後的正式 registry 核對保留 `runtime_for_identity`，建立 pending 時於原驗證後查詢點使用窄 `document_for_identity`。`purchase_key_for_tab`、`behavior_for_key`、`reload_with_interval` 各只傳給實際使用的流程；get-or-create、existing-only、pending／marker／`DISPATCH_UNKNOWN` 與電腦配位來源核對時點保持。
+- `rate_limit.py` 在原查詢時點直接取得共享 coordinator，移除 `coordinator_factory` 及 `refresh.py` 的固定轉送。測試同時 patch refresh／rate-limit 的真正 coordinator lookup 到同一 mock，直接 probe 與 emergency marker 案例將時鐘及 app-root patch 指向實際 owner。
+- Repository-wide Python caller 搜尋確認 `runtime["action"]` 沒有 production consumer；只由兩個 cleanup 測試當 sentinel 使用，現改以 runtime object identity 與 registry reference 驗證 replacement，並從 `TabRuntime`／constructor 移除空 record。`UTK_SPORTS_PROFILES`、`_ctbc_purchase_runtime`、`_is_ctbc_url` 無 caller；`_utk_refresh_identity` 只有一個私有測試 caller，該測試改由正式 refresh identity owner 建立，再移除 wrapper。公開 `nodriver_ctbc_*` 入口保留。
+- 驗證：`.\.venv\Scripts\python.exe -m py_compile` 對所有 touched Python 檔退出碼 0；現有 `pyflakes` 對 touched production 模組退出碼 0。refresh 聚焦 **75 passed、16 subtests passed**；日期／區域／DOM 聚焦 **210 passed、152 subtests passed**；四份相鄰整合測試 **285 passed、168 subtests passed**；預設完整 `pytest` **358 passed、1 deselected**；本機合成 browser fixture **1 passed in 9.41s**。`git diff --check` 退出碼 0。
+- 未驗證：macOS arm64 source 使用、GitHub CI、真站手動流程；本輪不做產品打包。`944e934` 仍是唯一產品行為基準，本輪沒有修改 current／legacy settings 行為或進入批次 6。
 
 ## 批次 5：刷新觀察與 429 管理
 
@@ -49,8 +57,8 @@
 
 ## 批次 2：runtime 資料與依賴
 
-- `workflow.py` 仍持有唯一 `_state["tabs"]` 與 `_state["cancel_tasks"]`；tab identity、get-or-create、existing-only 與 cleanup 路徑保留原碼。`runtime.py` 僅有目前五份 mutable child record 的 TypedDict／constructor，沒有 registry 或 manager。`refresh.py` 仍由 workflow 傳入同一 runtime 與 cancel-task set。原 await 後對 registry／record 的重查、purchase／navigation／refresh 狀態建立與清理時點未改。
-- `action` 在現有 production 尚無欄位讀寫，保留原本空 dict；document、transition、purchase、refresh 的預設值與 `944e934` 相同。既有測試已涵蓋雙 tab 隔離、同 target wrapper、晚出現 target id、未知 tab cleanup 不配置、exact cleanup、await 期間 replacement、submit／outcome／pending navigation 身分及 checkout 去重；本批未增加重複案例。
+- 批次 2 當時，`workflow.py` 仍持有唯一 `_state["tabs"]` 與 `_state["cancel_tasks"]`；tab identity、get-or-create、existing-only 與 cleanup 路徑保留原碼。`runtime.py` 當時有五份 mutable child record 的 TypedDict／constructor，沒有 registry 或 manager；無 consumer 的 `action` 已在上列批次 6 前清理移除。`refresh.py` 仍由 workflow 傳入同一 runtime 與 cancel-task set。原 await 後對 registry／record 的重查、purchase／navigation／refresh 狀態建立與清理時點未改。
+- 批次 2 當時 `action` 在 production 無欄位讀寫，因而保留原空 dict；其餘 document、transition、purchase、refresh 的預設值與 `944e934` 相同。既有測試已涵蓋雙 tab 隔離、同 target wrapper、晚出現 target id、未知 tab cleanup 不配置、exact cleanup、await 期間 replacement、submit／outcome／pending navigation 身分及 checkout 去重；本批未增加重複案例。
 - 靜態：`.\.venv\Scripts\python.exe -m py_compile src/platforms/utiki/runtime.py src/platforms/utiki/workflow.py src/platforms/utiki/refresh.py` 退出碼 0；`git diff --check` 退出碼 0。
 - 聚焦：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_dom.py tests/test_utiki_dom_contract.py tests/test_ctbc_refresh.py tests/test_ctbc_pure.py` 退出碼 0，**285 passed、168 subtests passed**。
 - 整合：`.\.venv\Scripts\python.exe -m pytest` 退出碼 0，**358 passed、1 deselected**（收集 359 項，8.84 秒）。
@@ -79,7 +87,7 @@
 
 ## 下一步
 
-本輪停在批次 5，等待使用者審查。獲另行下令後，批次 6 可從 current 設定、正式 source caller 與只為舊設定相容保留且已無正式 caller 的轉接邊界開始；本批未預先修改設定或入口。
+本輪停在批次 6 前架構清理，等待使用者審查。獲另行下令後，批次 6 可從 current 設定、正式 source caller 與只為舊設定相容保留且已無正式 caller 的轉接邊界開始；本輪未預先修改設定或入口。
 
 | 文件或 PLAN 情境 | 原衝突／缺口 | 目前狀態 |
 | --- | --- | --- |

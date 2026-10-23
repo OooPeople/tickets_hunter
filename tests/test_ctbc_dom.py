@@ -40,6 +40,7 @@ from platforms.utiki.navigation import (
     _ctbc_fast_marker_matches_pending,
     _ctbc_pending_from_fast_marker,
 )
+from platforms.utiki.refresh import build_refresh_identity
 from platforms.utiki.selection import (
     QuantityPlan,
     build_submit_plan,
@@ -55,7 +56,6 @@ from platforms.utiki.workflow import (
     _ctbc_tab_identity,
     _ctbc_tab_state_key,
     _state,
-    _utk_refresh_identity,
     nodriver_ctbc_area_auto_select,
     nodriver_ctbc_date_auto_select,
     nodriver_ctbc_general_admission_main,
@@ -187,7 +187,10 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         second.target.target_id = "shared-target"
 
         self.assertEqual(_ctbc_tab_identity(first), _ctbc_tab_identity(second))
-        self.assertEqual(_utk_refresh_identity(first), _utk_refresh_identity(second))
+        self.assertEqual(
+            build_refresh_identity(_ctbc_tab_identity(first)),
+            build_refresh_identity(_ctbc_tab_identity(second)),
+        )
         self.assertIs(ctbc_tab_runtime(first), ctbc_tab_runtime(second))
 
     async def test_inline_login_never_reuses_ctbc_credentials_for_dragons(self):

@@ -95,18 +95,12 @@ def ctbc_tab_runtime(tab):
     return _ctbc_tab_runtime(tab)
 
 
-def ctbc_navigation_access():
-    """Bind navigation tests to the current workflow-owned runtime lookups."""
-    from platforms.utiki.workflow import _navigation_access
-
-    return _navigation_access()
-
-
 def ctbc_navigation_config_fingerprint(config_dict):
     from platforms.utiki.navigation import _ctbc_selection_config_fingerprint
+    from platforms.utiki.workflow import _get_utiki_behavior
 
     return _ctbc_selection_config_fingerprint(
-        config_dict, access=ctbc_navigation_access()
+        config_dict, behavior_for_key=_get_utiki_behavior
     )
 
 

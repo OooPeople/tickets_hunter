@@ -147,10 +147,10 @@ def _ctbc_same_origin(first, second):
     return same_origin(first, second)
 
 
-def _pop_pending_navigation_if_nonce(identity, nonce, *, access):
+def _pop_pending_navigation_if_nonce(identity, nonce, *, runtime_for_identity):
     """僅在 nonce 相符時移除待處理導覽。"""
 
-    transition = access["runtime_for_identity"](identity)["transition"]
+    transition = runtime_for_identity(identity)["transition"]
     current = transition["pending_navigation"]
     if current and current.get("nonce") == nonce:
         transition["pending_navigation"] = None
@@ -158,10 +158,10 @@ def _pop_pending_navigation_if_nonce(identity, nonce, *, access):
     return None
 
 
-def _ctbc_pending_navigation_is_current(identity, pending, *, access):
+def _ctbc_pending_navigation_is_current(identity, pending, *, runtime_for_identity):
     """判斷待處理導覽是否仍屬於目前分頁狀態。"""
 
-    current = access["runtime_for_identity"](identity)["transition"][
+    current = runtime_for_identity(identity)["transition"][
         "pending_navigation"
     ]
     return bool(current and pending and current.get("nonce") == pending.get("nonce"))
@@ -178,7 +178,7 @@ def _decode_ctbc_json_result(raw_value):
     return util.parse_nodriver_result(raw_value)
 
 
-def _ctbc_selection_config_fingerprint(config_dict, *, access):
+def _ctbc_selection_config_fingerprint(config_dict, *, behavior_for_key):
     """建立影響選位結果之設定的穩定指紋。"""
 
     area_config = config_dict.get("area_auto_select", {})
@@ -189,7 +189,7 @@ def _ctbc_selection_config_fingerprint(config_dict, *, access):
         "area_enable": area_config.get("enable", False),
         "area_keyword": area_config.get("area_keyword", ""),
         "area_mode": area_config.get("mode", "from top to bottom"),
-        "seat_selection_mode": access["behavior_for_key"](
+        "seat_selection_mode": behavior_for_key(
             config_dict, "seat_selection_mode", "manual"
         ),
     }
@@ -220,7 +220,6 @@ def _ctbc_navigation_urls_match(first_url, second_url):
 
 
 def _ctbc_new_pending_navigation(
-    tab,
     kind,
     source_url,
     area_url,
@@ -228,7 +227,9 @@ def _ctbc_new_pending_navigation(
     config_dict,
     selection_mode="manual",
     *,
-    access,
+    identity,
+    document_for_identity,
+    behavior_for_key,
 ):
     """建立跨文件追蹤用的待處理導覽紀錄。"""
 
@@ -250,8 +251,7 @@ def _ctbc_new_pending_navigation(
         or not re.fullmatch(r"[A-Za-z0-9_-]+", area_query.get("PRODUCT_ID", ""))
     ):
         return None
-    identity = access["identity_for_tab"](tab)
-    document = access["runtime_for_identity"](identity)["document"]
+    document = document_for_identity(identity)
     return {
         "kind": kind,
         "phase": "PREPARED",
@@ -267,13 +267,15 @@ def _ctbc_new_pending_navigation(
         "group_id": target.get("group_id"),
         "price_area_id": target.get("price_area_id"),
         "config_fingerprint": _ctbc_selection_config_fingerprint(
-            config_dict, access=access
+            config_dict, behavior_for_key=behavior_for_key
         ),
         "created_at": time.monotonic(),
     }
 
 
-def _ctbc_new_date_native_pending(tab, snapshot, plan, *, access):
+def _ctbc_new_date_native_pending(
+    snapshot, plan, *, identity, document_for_identity,
+):
     """為已原子提交的原生場次點擊建立跨文件防護。"""
     if not isinstance(snapshot, DateSnapshot) or not isinstance(plan, DateActionPlan):
         return None
@@ -301,8 +303,7 @@ def _ctbc_new_date_native_pending(tab, snapshot, plan, *, access):
         or (_ctbc_unique_query(area_url) or {}).get("PRODUCT_ID") != product_id
     ):
         return None
-    identity = access["identity_for_tab"](tab)
-    document = access["runtime_for_identity"](identity)["document"]
+    document = document_for_identity(identity)
     return {
         "kind": "DATE_NATIVE",
         "phase": "PREPARED",
@@ -561,28 +562,37 @@ async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
         return False
 
 
-async def _ctbc_commit_native_date(tab, snapshot, plan, debug, *, access):
+async def _ctbc_commit_native_date(
+    tab, snapshot, plan, debug, *, identity, transition, runtime_for_identity,
+):
     """先安裝跨文件意圖，再送出一次原生場次點擊。"""
-    identity = access["identity_for_tab"](tab)
-    transition = access["runtime_for_identity"](identity)["transition"]
     if transition["pending_navigation"]:
         return False
-    pending = _ctbc_new_date_native_pending(tab, snapshot, plan, access=access)
+    pending = _ctbc_new_date_native_pending(
+        snapshot, plan, identity=identity,
+        document_for_identity=lambda key: runtime_for_identity(key)["document"],
+    )
     if not pending or transition["pending_navigation"]:
         return False
     transition["pending_navigation"] = pending
     try:
         committed = await commit_date_action(tab, snapshot, plan, pending["nonce"])
     except Exception as exc:
-        if _ctbc_pending_navigation_is_current(identity, pending, access=access):
+        if _ctbc_pending_navigation_is_current(
+            identity, pending, runtime_for_identity=runtime_for_identity
+        ):
             pending["phase"] = "DISPATCH_UNKNOWN"
         debug.log(f"[CTBC DATE] Click failed: {exc}")
         return False
     if committed is CommitResult.REJECTED:
-        _pop_pending_navigation_if_nonce(identity, pending["nonce"], access=access)
+        _pop_pending_navigation_if_nonce(
+            identity, pending["nonce"], runtime_for_identity=runtime_for_identity
+        )
         debug.log(f"[CTBC DATE] Native commit rejected ({plan.action_kind})")
         return False
-    if _ctbc_pending_navigation_is_current(identity, pending, access=access):
+    if _ctbc_pending_navigation_is_current(
+        identity, pending, runtime_for_identity=runtime_for_identity
+    ):
         pending["phase"] = "DISPATCH_UNKNOWN"
     if committed is CommitResult.COMMITTED:
         debug.log(f"[CTBC DATE] Selected ({plan.action_kind}): {plan.text}")
@@ -604,11 +614,12 @@ def _ctbc_server_assignment_pending_is_expected(pending):
     )
 
 
-def _ctbc_server_assignment_is_authorized(tab, *, access):
+def _ctbc_server_assignment_is_authorized(
+    tab, transition, *, purchase_key_for_tab,
+):
     """判斷目前分頁是否獲准進入電腦配位票數頁。"""
 
-    purchase_key = access["purchase_key_for_tab"](tab)
-    transition = access["runtime_for_tab"](tab)["transition"]
+    purchase_key = purchase_key_for_tab(tab)
     authorized = transition["server_assignment_authorized"]
     if (
         purchase_key is not None
@@ -783,10 +794,14 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
         return False
 
 
-async def _ctbc_return_current_pending(tab, identity, pending, source_url, *, access):
+async def _ctbc_return_current_pending(
+    tab, identity, pending, source_url, *, runtime_for_identity,
+):
     """將目前待處理導覽保留至返回來源頁後繼續。"""
 
-    if not _ctbc_pending_navigation_is_current(identity, pending, access=access):
+    if not _ctbc_pending_navigation_is_current(
+        identity, pending, runtime_for_identity=runtime_for_identity
+    ):
         return False
     pending["phase"] = "RETURNING"
     pending["return_source_url"] = source_url
@@ -868,16 +883,19 @@ async def _ctbc_read_destination_state(tab, page_type):
 
 
 async def _ctbc_clear_source_navigation(
-    tab, identity, pending, marker_present, marker_pending, *, access
+    tab, identity, pending, marker_present, marker_pending, *, runtime_for_identity
 ):
     """清除來源頁待處理導覽與相符快速標記。"""
 
-    if not _ctbc_pending_navigation_is_current(identity, pending, access=access):
+    if not _ctbc_pending_navigation_is_current(
+        identity, pending, runtime_for_identity=runtime_for_identity
+    ):
         return False
     if pending.get("kind") == "FAST" and marker_present:
         if not _ctbc_fast_marker_matches_pending(marker_pending, pending):
             _pop_pending_navigation_if_nonce(
-                identity, pending.get("nonce"), access=access
+                identity, pending.get("nonce"),
+                runtime_for_identity=runtime_for_identity,
             )
             return False
         if not await _ctbc_delete_fast_navigation_marker(tab, marker_pending["nonce"]):
@@ -886,7 +904,10 @@ async def _ctbc_clear_source_navigation(
         if not await _ctbc_delete_fast_navigation_marker(tab, marker_pending["nonce"]):
             return False
     return (
-        _pop_pending_navigation_if_nonce(identity, pending.get("nonce"), access=access)
+        _pop_pending_navigation_if_nonce(
+            identity, pending.get("nonce"),
+            runtime_for_identity=runtime_for_identity,
+        )
         is not None
     )
 
@@ -901,7 +922,7 @@ def _ctbc_reduce_date_native_navigation(
     reload_requested_at,
     marker_present,
     *,
-    access,
+    runtime_for_identity,
 ):
     """歸納原生場次來源狀態，判斷是否仍需期限內復原。"""
     if page_type == "area":
@@ -912,7 +933,8 @@ def _ctbc_reduce_date_native_navigation(
         ):
             return (
                 _pop_pending_navigation_if_nonce(
-                    identity, pending.get("nonce"), access=access
+                    identity, pending.get("nonce"),
+                    runtime_for_identity=runtime_for_identity,
                 )
                 is not None
             )
@@ -926,7 +948,8 @@ def _ctbc_reduce_date_native_navigation(
     ):
         return (
             _pop_pending_navigation_if_nonce(
-                identity, pending.get("nonce"), access=access
+                identity, pending.get("nonce"),
+                runtime_for_identity=runtime_for_identity,
             )
             is not None
         )
@@ -934,19 +957,19 @@ def _ctbc_reduce_date_native_navigation(
 
 
 async def _ctbc_reconcile_navigation_source(
-    tab, current_url, page_type, config_dict, *, access
+    tab, current_url, page_type, config_dict, *,
+    identity, runtime, runtime_for_identity, reload_with_interval,
 ):
     """協調目前網址與待處理導覽的來源狀態。"""
 
-    identity = access["identity_for_tab"](tab)
-    runtime = access["runtime_for_identity"](identity)
     transition = runtime["transition"]
     observed_pending = transition["pending_navigation"]
     marker_state = await _ctbc_read_fast_navigation_marker(tab)
     pending = transition["pending_navigation"]
     if observed_pending:
         if not _ctbc_pending_navigation_is_current(
-            identity, observed_pending, access=access
+            identity, observed_pending,
+            runtime_for_identity=runtime_for_identity,
         ):
             return False
         pending = observed_pending
@@ -998,13 +1021,14 @@ async def _ctbc_reconcile_navigation_source(
             exact_source,
             reload_requested_at,
             marker_present,
-            access=access,
+            runtime_for_identity=runtime_for_identity,
         )
         if date_result is not None or page_type == "area":
             return bool(date_result)
     elif document_changed and (exact_source or reload_requested_at):
         return await _ctbc_clear_source_navigation(
-            tab, identity, pending, marker_present, marker_pending, access=access
+            tab, identity, pending, marker_present, marker_pending,
+            runtime_for_identity=runtime_for_identity,
         )
 
     pending_expired = (
@@ -1026,25 +1050,27 @@ async def _ctbc_reconcile_navigation_source(
         )
     ):
         return False
-    if not _ctbc_pending_navigation_is_current(identity, pending, access=access):
+    if not _ctbc_pending_navigation_is_current(
+        identity, pending, runtime_for_identity=runtime_for_identity
+    ):
         return False
-    reloaded = await access["reload_with_interval"](
+    reloaded = await reload_with_interval(
         tab, config_dict, f"{page_type} navigation outcome unknown"
     )
     if reloaded and _ctbc_pending_navigation_is_current(
-        identity, pending, access=access
+        identity, pending, runtime_for_identity=runtime_for_identity
     ):
         pending["reload_requested_at"] = now
     return False
 
 
 async def _ctbc_attest_pending_destination(
-    tab, page_type, pending, debug, stale_marker_nonce="", *, access
+    tab, page_type, pending, debug, stale_marker_nonce="", *,
+    identity, runtime_for_identity,
 ):
     """驗證待處理導覽是否抵達可信任的目的地。"""
 
-    identity = access["identity_for_tab"](tab)
-    runtime = access["runtime_for_identity"](identity)
+    runtime = runtime_for_identity(identity)
     try:
         state = await _ctbc_read_destination_state(tab, page_type)
     except Exception as exc:
@@ -1076,7 +1102,8 @@ async def _ctbc_attest_pending_destination(
         ):
             return False
         removed = _pop_pending_navigation_if_nonce(
-            identity, pending["nonce"], access=access
+            identity, pending["nonce"],
+            runtime_for_identity=runtime_for_identity,
         )
         debug.log(f"[CTBC {pending.get('kind')}] Destination IDs verified")
         return removed is not None
@@ -1085,26 +1112,28 @@ async def _ctbc_attest_pending_destination(
         return False
     debug.log("[CTBC NAV] Destination mismatch; returning to native area flow")
     await _ctbc_return_current_pending(
-        tab, identity, pending, current_url, access=access
+        tab, identity, pending, current_url,
+        runtime_for_identity=runtime_for_identity,
     )
     return False
 
 
 async def _ctbc_attest_date_native_direct_destination(
-    tab, page_type, pending, debug, *, access
+    tab, page_type, pending, debug, *, identity, runtime_for_identity,
 ):
     """驗證原生場次導覽直接抵達的票券頁。"""
 
     if not _ctbc_date_native_direct_pending(pending, page_type):
         return None
-    identity = access["identity_for_tab"](tab)
-    runtime = access["runtime_for_identity"](identity)
+    runtime = runtime_for_identity(identity)
     try:
         state = await _ctbc_read_destination_state(tab, page_type)
     except Exception as exc:
         debug.log(f"[CTBC DATE] Direct destination attestation failed: {exc}")
         return False
-    if not _ctbc_pending_navigation_is_current(identity, pending, access=access):
+    if not _ctbc_pending_navigation_is_current(
+        identity, pending, runtime_for_identity=runtime_for_identity
+    ):
         return False
     current_document = str(runtime["document"]["last_document"] or "")
     source_document = str(pending.get("source_document_id") or "")
@@ -1119,7 +1148,8 @@ async def _ctbc_attest_date_native_direct_destination(
         and _ctbc_date_native_direct_state_is_valid(pending, page_type, state)
     ):
         removed = _pop_pending_navigation_if_nonce(
-            identity, pending["nonce"], access=access
+            identity, pending["nonce"],
+            runtime_for_identity=runtime_for_identity,
         )
         debug.log("[CTBC DATE] Direct destination IDs verified")
         return removed is not None
@@ -1130,10 +1160,11 @@ async def _ctbc_attest_date_native_direct_destination(
     return False
 
 
-async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
+async def _ctbc_attest_fast_destination(
+    tab, page_type, config_dict, *,
+    identity, runtime, runtime_for_identity, behavior_for_key,
+):
     """在票券頁自動化前協調快速與原生導覽來源。"""
-    identity = access["identity_for_tab"](tab)
-    runtime = access["runtime_for_identity"](identity)
     transition = runtime["transition"]
     debug = util.create_debug_logger(config_dict)
     observed_pending = transition["pending_navigation"]
@@ -1141,7 +1172,8 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
     pending = transition["pending_navigation"]
     if observed_pending:
         if not _ctbc_pending_navigation_is_current(
-            identity, observed_pending, access=access
+            identity, observed_pending,
+            runtime_for_identity=runtime_for_identity,
         ):
             return False
         pending = observed_pending
@@ -1149,7 +1181,8 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
         return False
     current_url = str(marker_state.get("page_url") or str(tab.target.url))
     direct_result = await _ctbc_attest_date_native_direct_destination(
-        tab, page_type, pending, debug, access=access
+        tab, page_type, pending, debug,
+        identity=identity, runtime_for_identity=runtime_for_identity,
     )
     if direct_result is not None:
         return direct_result
@@ -1163,15 +1196,17 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
                     identity,
                     pending,
                     pending.get("return_source_url", ""),
-                    access=access,
+                    runtime_for_identity=runtime_for_identity,
                 )
                 return False
             return await _ctbc_attest_pending_destination(
-                tab, page_type, pending, debug, access=access
+                tab, page_type, pending, debug,
+                identity=identity, runtime_for_identity=runtime_for_identity,
             )
         debug.log("[CTBC FAST] Marker storage unavailable; returning to native flow")
         await _ctbc_return_current_pending(
-            tab, identity, pending, current_url, access=access
+            tab, identity, pending, current_url,
+            runtime_for_identity=runtime_for_identity,
         )
         return False
     marker_present = bool(marker_state.get("present"))
@@ -1189,7 +1224,7 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
                 identity,
                 pending,
                 pending.get("return_source_url", ""),
-                access=access,
+                runtime_for_identity=runtime_for_identity,
             )
             return False
         marker_nonce = (
@@ -1199,7 +1234,8 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
             marker_nonce if re.fullmatch(r"[a-f0-9]{32}", marker_nonce) else ""
         )
         return await _ctbc_attest_pending_destination(
-            tab, page_type, pending, debug, stale_marker_nonce, access=access
+            tab, page_type, pending, debug, stale_marker_nonce,
+            identity=identity, runtime_for_identity=runtime_for_identity,
         )
     if not pending:
         if not marker_present:
@@ -1211,12 +1247,14 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
             return False
         transition["pending_navigation"] = marker_pending
         await _ctbc_return_current_pending(
-            tab, identity, marker_pending, current_url, access=access
+            tab, identity, marker_pending, current_url,
+            runtime_for_identity=runtime_for_identity,
         )
         return False
     if pending.get("phase") == "RETURNING":
         await _ctbc_return_current_pending(
-            tab, identity, pending, pending.get("return_source_url", ""), access=access
+            tab, identity, pending, pending.get("return_source_url", ""),
+            runtime_for_identity=runtime_for_identity,
         )
         return False
     marker_matches = bool(
@@ -1229,7 +1267,9 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
     )
     pending_valid = bool(
         pending.get("config_fingerprint")
-        == _ctbc_selection_config_fingerprint(config_dict, access=access)
+        == _ctbc_selection_config_fingerprint(
+            config_dict, behavior_for_key=behavior_for_key
+        )
         and time.monotonic() - pending.get("created_at", 0)
         <= CTBC_PENDING_NAVIGATION_TTL_SECONDS
     )
@@ -1238,27 +1278,27 @@ async def _ctbc_attest_fast_destination(tab, page_type, config_dict, *, access):
             "[CTBC FAST] Provenance mismatch or expiry; returning to native area flow"
         )
         await _ctbc_return_current_pending(
-            tab, identity, pending, current_url, access=access
+            tab, identity, pending, current_url,
+            runtime_for_identity=runtime_for_identity,
         )
         return False
     return await _ctbc_attest_pending_destination(
-        tab, page_type, pending, debug, access=access
+        tab, page_type, pending, debug,
+        identity=identity, runtime_for_identity=runtime_for_identity,
     )
 
 
 async def _ctbc_reconcile_area_navigation(
-    tab, current_url, config_dict=None, *, access
+    tab, current_url, config_dict=None, *,
+    identity, runtime, runtime_for_identity, reload_with_interval,
 ):
     """在抵達新文件前阻止重複送出區域操作。"""
     return await _ctbc_reconcile_navigation_source(
-        tab, current_url, "area", config_dict or {}, access=access
+        tab, current_url, "area", config_dict or {},
+        identity=identity, runtime=runtime,
+        runtime_for_identity=runtime_for_identity,
+        reload_with_interval=reload_with_interval,
     )
-
-
-def _ctbc_transition_for_tab(tab, *, access):
-    """取得預取前的原有 transition 物件。"""
-    identity = access["identity_for_tab"](tab)
-    return identity, access["runtime_for_identity"](identity)["transition"]
 
 
 async def _ctbc_dispatch_fast_area_navigation(
@@ -1273,18 +1313,20 @@ async def _ctbc_dispatch_fast_area_navigation(
     identity,
     transition,
     *,
-    access,
+    runtime_for_identity,
+    behavior_for_key,
 ):
     """送出已選定的 fast 目的地並追蹤結果。"""
     target_action = _ctbc_area_action_payload(target)
     pending = _ctbc_new_pending_navigation(
-        tab,
         "FAST",
         date_snapshot.page_url,
         date_target["url"],
         target_action,
         config_dict,
-        access=access,
+        identity=identity,
+        document_for_identity=lambda key: runtime_for_identity(key)["document"],
+        behavior_for_key=behavior_for_key,
     )
     if not pending:
         return False
@@ -1307,7 +1349,9 @@ async def _ctbc_dispatch_fast_area_navigation(
         return True
     if committed is CommitResult.REJECTED:
         await _ctbc_delete_fast_navigation_marker(tab, pending["nonce"])
-        _pop_pending_navigation_if_nonce(identity, pending["nonce"], access=access)
+        _pop_pending_navigation_if_nonce(
+            identity, pending["nonce"], runtime_for_identity=runtime_for_identity
+        )
         return bool(transition["pending_navigation"])
     if committed is CommitResult.STALE:
         pending["phase"] = "DISPATCH_UNKNOWN"
@@ -1331,23 +1375,25 @@ async def _ctbc_commit_native_area(
     seat_selection_mode,
     debug,
     *,
-    access,
+    identity,
+    transition,
+    runtime_for_identity,
+    behavior_for_key,
 ):
     """先安裝 pending，再提交已選定的原生區域操作。"""
     page_url = snapshot.page_url
-    identity = access["identity_for_tab"](tab)
-    transition = access["runtime_for_identity"](identity)["transition"]
     if transition["pending_navigation"]:
         return False
     pending = _ctbc_new_pending_navigation(
-        tab,
         "NATIVE",
         page_url,
         page_url,
         _ctbc_area_action_payload(target),
         config_dict,
         selection_mode=seat_selection_mode,
-        access=access,
+        identity=identity,
+        document_for_identity=lambda key: runtime_for_identity(key)["document"],
+        behavior_for_key=behavior_for_key,
     )
     if not pending:
         return False
@@ -1369,7 +1415,9 @@ async def _ctbc_commit_native_area(
         if commit_result is CommitResult.REJECTED or (
             seat_selection_mode == "manual" and commit_result is CommitResult.STALE
         ):
-            _pop_pending_navigation_if_nonce(identity, pending["nonce"], access=access)
+            _pop_pending_navigation_if_nonce(
+                identity, pending["nonce"], runtime_for_identity=runtime_for_identity
+            )
             debug.log(
                 "[CTBC AREA] Area commit "
                 f"{commit_result.value}; no navigation row click was sent"
@@ -1393,13 +1441,16 @@ async def _ctbc_commit_native_area(
         return False
 
 
-async def _ctbc_server_assigned_authorization(tab, config_dict, *, access):
+async def _ctbc_server_assigned_authorization(
+    tab, config_dict, *, identity, runtime, runtime_for_identity,
+    purchase_key_for_tab, behavior_for_key,
+):
     """只為原電腦配位票數頁維持既有來源紀錄。"""
-    transition = access["runtime_for_tab"](tab)["transition"]
+    transition = runtime["transition"]
     current_url = str(tab.target.url)
     profile = _get_utk_sports_profile(current_url)
     if (
-        access["behavior_for_key"](config_dict, "seat_selection_mode", "manual")
+        behavior_for_key(config_dict, "seat_selection_mode", "manual")
         != "computer"
         or not profile
         or not profile.get("supports_server_assignment", False)
@@ -1407,16 +1458,21 @@ async def _ctbc_server_assigned_authorization(tab, config_dict, *, access):
         transition["server_assignment_authorized"] = None
         return None
     pending = transition["pending_navigation"]
-    authorization = _ctbc_server_assignment_is_authorized(tab, access=access)
+    authorization = _ctbc_server_assignment_is_authorized(
+        tab, transition, purchase_key_for_tab=purchase_key_for_tab
+    )
     if pending:
         if not _ctbc_server_assignment_pending_is_expected(pending):
             transition["server_assignment_authorized"] = None
             return None
         if not await _ctbc_attest_fast_destination(
-            tab, "server_assigned_quantity", config_dict, access=access
+            tab, "server_assigned_quantity", config_dict,
+            identity=identity, runtime=runtime,
+            runtime_for_identity=runtime_for_identity,
+            behavior_for_key=behavior_for_key,
         ):
             return None
-        purchase_key = access["purchase_key_for_tab"](tab)
+        purchase_key = purchase_key_for_tab(tab)
         if purchase_key is None:
             return None
         authorization = {
@@ -1429,8 +1485,5 @@ async def _ctbc_server_assigned_authorization(tab, config_dict, *, access):
     return authorization
 
 
-def _ctbc_clear_server_assignment_for_other_page(tab, page_type, *, access):
-    if page_type != "server_assigned_quantity":
-        access["runtime_for_tab"](tab)["transition"][
-            "server_assignment_authorized"
-        ] = None
+def _ctbc_clear_server_assignment_for_other_page(transition):
+    transition["server_assignment_authorized"] = None

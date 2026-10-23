@@ -3,7 +3,7 @@
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
 **最後更新**：2026-10-23
 
-uTiki 模組索引反映批次 5 接線後的現況；後續目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
+uTiki 模組索引反映批次 5 接線及批次 6 前架構清理後的現況；後續目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
 
 ---
 
@@ -391,7 +391,7 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### 目前模組邊界（批次 5 刷新觀察與 429 管理接線後）
+#### 目前模組邊界（批次 5 後、批次 6 前架構清理後）
 
 ```text
 platforms/utiki/
@@ -400,7 +400,7 @@ platforms/utiki/
 ├── auth.py       # tenant-specific Cookie / credential scope
 ├── selection.py  # 無副作用的 parser、candidate selection 與 audit 規則
 ├── dom.py        # 頁面 snapshot reader 與原子 DOM commit
-├── runtime.py    # mutable runtime record 型別與等價 constructor；不持有 registry
+├── runtime.py    # 四份正式 mutable record 型別與 constructor；不持有 registry
 ├── document_health.py # document snapshot、canonical token 與分類
 ├── rate_limit.py # 429 回報、emergency marker 與 recovery probe lifecycle
 ├── refresh.py    # 完整 reload request lifecycle 與跨程序刷新協調
@@ -417,7 +417,8 @@ platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
 - 已驗證 tenant：中信育樂、味全龍。
 - `workflow.py` 用 `runtime.py` constructor 為分頁建立 canonical mutable runtime，保留 tab identity、registry、get-or-create／existing-only lookup 與 cleanup 所有權；單向傳入同一 runtime、tab identity 與 cancel-task registry 給 `refresh.py`。refresh 不得反向 import workflow 或建立 mirror state。
 - `document_health.py` 只觀察與分類文件，並依原時點快取 snapshot；`rate_limit.py` 管理原有 429 marker／回報與 probe／lease，沿用同一 runtime 及共享 coordinator，不直接 reload。`refresh.py` 保留 request 建立、預約、送出、等待新文件、暫停／恢復／取消與結果消費的完整生命週期；workflow 的正式 refresh facade 未改。
-- 日期／區域候選由 `date_area.py` 選出，native／fast dispatch、pending、marker、目的頁核對及原電腦配位來源紀錄由 `navigation.py` 管理；座位與一般票數頁仍從 workflow 原頁型入口執行導覽核對，通過後交給 `purchase.py`。`navigation.py` 使用 workflow 傳入的同一 runtime callback，不建立第二個 registry，也不反向 import workflow。
+- 日期／區域候選由 `date_area.py` 選出，native／fast dispatch、pending、marker、目的頁核對及原電腦配位來源紀錄由 `navigation.py` 管理；座位與一般票數頁仍從 workflow 原頁型入口執行導覽核對，通過後交給 `purchase.py`。正式依賴為 workflow → date_area → navigation 與 workflow → navigation；identity、runtime／transition 及真正需要的窄 callback 顯式傳入，沒有共用 access dict、第二個 registry 或反向 workflow import。
+- `runtime.py` 只建立 document、transition、purchase、refresh 四份正式 record；原空 `action` 沒有 production consumer，已於批次 6 前清理移除。`rate_limit.py` 在原查詢時點直接取得共享 coordinator，沒有 production `coordinator_factory` 測試接縫。
 - 購票準備在 `purchase.py`，提交與恢復狀態寫入在 `submission.py`，登入及 CAPTCHA browser 輸入在 `inputs.py`；三者都不反向 import workflow。
 - 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。

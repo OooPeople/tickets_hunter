@@ -151,8 +151,6 @@ class RefreshState(TypedDict):
 
 class TabRuntime(TypedDict):
     document: DocumentState
-    # Present in 944e934, with no production keys assigned in this batch.
-    action: dict[str, Any]
     transition: TransitionState
     purchase: PurchaseState
     refresh: RefreshState
@@ -187,10 +185,9 @@ def new_refresh_state() -> RefreshState:
 
 
 def new_tab_runtime() -> TabRuntime:
-    """Build the existing five child records, fresh for one workflow tab."""
+    """Build the active child records, fresh for one workflow tab."""
     return {
         "document": new_document_state(),
-        "action": {},
         "transition": new_transition_state(),
         "purchase": new_purchase_state(),
         "refresh": new_refresh_state(),

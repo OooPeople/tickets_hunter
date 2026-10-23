@@ -7,7 +7,7 @@
 - 遵守 [法律聲明](LEGAL_NOTICE.md)：僅供教育研究；不得用於非法轉售、商業牟利、惡意囤票或台灣《文化創意產業發展法》涵蓋的票券。不得新增自動付款或規避平台風控的能力；付款由使用者手動完成，保留授權與著作權聲明。
 - 不提交或輸出真實設定、密碼、Cookie、token、webhook、完整個資、browser profile 或 session dump。自動化測試可用合成或已脫敏資料；需要瀏覽器時使用專用／暫存 profile。未經使用者授權，不操作真售票網站或日常 profile。
 - 不為加速提高站點請求頻率、放寬 429 保護或省略送出前核對。停止、取消、逾時及指令返回都不證明遠端請求未發生；結果未知時不得自動重送。
-- 保留其他平台、帳號資料與共用刷新資料的既有語意。uTiki 本次只按 [正式重構計畫](docs/02-development/utiki-refactor/PLAN.md) 等價整理 `944e934` 的實際行為及能力邊界；一般安全守則不擴張成原流程沒有的購票資格或拒絕條件。計畫中的目標模組尚未實作，現況以 [STATUS.md](docs/02-development/utiki-refactor/STATUS.md) 為準。
+- 保留其他平台、帳號資料與共用刷新資料的既有語意。uTiki 本次只按 [正式重構計畫](docs/02-development/utiki-refactor/PLAN.md) 等價整理 `944e934` 的實際行為及能力邊界；一般安全守則不擴張成原流程沒有的購票資格或拒絕條件。各目標模組的實際接線進度以 [STATUS.md](docs/02-development/utiki-refactor/STATUS.md) 為準，不得只依 PLAN 目標圖假設某責任尚未或已經完成。
 
 ## 開工與完成
 

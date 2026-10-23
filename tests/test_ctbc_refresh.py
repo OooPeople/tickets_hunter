@@ -5,7 +5,7 @@ import tempfile
 import time
 import types
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
 
@@ -58,6 +58,19 @@ from platforms.utiki.workflow import (
 
 
 CTBC_DATE_ROW_SELECTOR = "#PerformanceListTable table > tbody > tr"
+
+
+@contextmanager
+def _patch_coordinator_lookups(coordinator):
+    """Give refresh and rate_limit the same coordinator at their actual lookups."""
+    with patch(
+        "platforms.utiki.refresh.get_shared_refresh_coordinator",
+        return_value=coordinator,
+    ), patch(
+        "platforms.utiki.rate_limit.get_shared_refresh_coordinator",
+        return_value=coordinator,
+    ):
+        yield
 
 
 class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
@@ -349,10 +362,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         with patch(
             "platforms.utiki.rate_limit.load_global_settings",
             return_value=self.global_settings,
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertEqual(
                 "normal",
                 await nodriver_utk_sports_health_check(tab, source, config()),
@@ -575,10 +585,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "selected seats were taken",
                 apply_local_interval=False,
@@ -619,10 +626,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "new reason", apply_local_interval=False,
             ))
@@ -659,10 +663,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         with patch(
             "platforms.utiki.refresh._guard_for_reload",
             AsyncMock(side_effect=replace_during_guard),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "reason-b", apply_local_interval=False,
             ))
@@ -712,7 +713,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator), \
+                    _patch_coordinator_lookups(coordinator), \
                     patch("platforms.utiki.workflow.nodriver_ctbc_date_auto_select", AsyncMock()) as select:
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
@@ -776,10 +777,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.workflow._ctbc_attest_fast_destination",
             AsyncMock(return_value=True),
         ):
@@ -847,10 +845,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             ), patch(
                 "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
                 cancel_facade,
-            ), patch(
-                "platforms.utiki.refresh.get_shared_refresh_coordinator",
-                return_value=coordinator,
-            ), patch(
+            ), _patch_coordinator_lookups(coordinator), patch(
                 "platforms.utiki.submission.send_discord_notification",
             ) as discord, patch(
                 "platforms.utiki.submission.send_telegram_notification",
@@ -1208,7 +1203,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
             self.assertTrue(tab.reloaded)
             self.assertEqual(
@@ -1248,7 +1243,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(
                         side_effect=[snapshot, snapshot, destination]
                     )), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 reloaded = await nodriver_utk_sports_reload(
                     tab,
                     config(),
@@ -1298,10 +1293,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=[initial, initial, initial, destination]),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "ambiguous reload", apply_local_interval=False
             ))
@@ -1348,10 +1340,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=inspect),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "cancelled browser", apply_local_interval=False
             ))
@@ -1393,10 +1382,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "commit unknown", apply_local_interval=False
             ))
@@ -1430,10 +1416,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=[initial, initial, initial, destination]),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "already committed", apply_local_interval=False
             ))
@@ -1529,10 +1512,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                     release_refresh=AsyncMock(return_value=released),
                     cancel_request=AsyncMock(return_value=False),
                 )
-                with patch(
-                    "platforms.utiki.refresh.get_shared_refresh_coordinator",
-                    return_value=coordinator,
-                ):
+                with _patch_coordinator_lookups(coordinator):
                     task = asyncio.create_task(_commit_reserved_reload(
                         tab, runtime, "identity", _state["cancel_tasks"],
                         coordinator, reservation, request,
@@ -1622,7 +1602,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(side_effect=inspect)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "ordered reload", apply_local_interval=False
                 ))
@@ -1664,8 +1644,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                         return_value=("normal", snapshot))), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(
                         return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator",
-                          return_value=coordinator), \
+                    _patch_coordinator_lookups(coordinator), \
                     patch(
                 "platforms.utiki.refresh.time",
                 types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
@@ -1721,10 +1700,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.check_and_handle_pause",
             AsyncMock(return_value=False),
         ), patch(
@@ -1820,10 +1796,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=inspect),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             reload_task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "reserved pause", apply_local_interval=False
             ))
@@ -1896,10 +1869,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "commit pause", apply_local_interval=False
             ))
@@ -1941,10 +1911,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             "classification": "normal", "document_id": "101", "url": source,
         }
 
-        with patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=types.SimpleNamespace(),
-        ):
+        with _patch_coordinator_lookups(types.SimpleNamespace()):
             self.assertTrue(await nodriver_utk_sports_pause_refresh(tab))
         with patch(
             "platforms.utiki.rate_limit.load_global_settings",
@@ -2047,10 +2014,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.time",
             types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
         ), patch(
@@ -2144,10 +2108,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "missing ordering", apply_local_interval=False
             ))
@@ -2197,10 +2158,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=blocked),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "report pause", apply_local_interval=False,
                 allow_blocked_recovery=True,
@@ -2248,10 +2206,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=stale),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "release pause", apply_local_interval=False
             ))
@@ -2289,10 +2244,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._utk_document_guard",
             AsyncMock(return_value=("normal", snapshot)),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.time",
             types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
         ), patch(
@@ -2335,10 +2287,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._utk_document_guard",
             AsyncMock(return_value=("normal", snapshot)),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.time",
             types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
         ), patch(
@@ -2394,7 +2343,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "revoked reload", apply_local_interval=False
                 ))
@@ -2439,7 +2388,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(side_effect=cancel_preflight)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 with self.assertRaises(asyncio.CancelledError):
                     await nodriver_utk_sports_reload(
                         tab, config(), "cancelled preflight", apply_local_interval=False
@@ -2485,10 +2434,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._utk_document_guard",
             AsyncMock(return_value=("normal", snapshot)),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "cancel reserve", apply_local_interval=False
             ))
@@ -2542,10 +2488,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh.check_and_handle_pause",
             AsyncMock(side_effect=cancel_pause_check),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             with self.assertRaises(asyncio.CancelledError):
                 await nodriver_utk_sports_reload(
                     tab, config(), "cancel pause check",
@@ -2608,10 +2551,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             task = asyncio.create_task(nodriver_utk_sports_reload(
                 tab, config(), "old coroutine", apply_local_interval=False
             ))
@@ -2659,10 +2599,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=inspect),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.check_and_handle_pause",
             AsyncMock(return_value=False),
         ), patch(
@@ -2816,7 +2753,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 reloaded = await nodriver_utk_sports_reload(
                     tab,
                     config(),
@@ -2880,7 +2817,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator):
+                    _patch_coordinator_lookups(coordinator):
                 await nodriver_ctbc_main(tab, source, config(), ocr=None)
             self.assertEqual(
                 "probe-1",
@@ -2924,10 +2861,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=inspect),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        ), _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "real recovery probe", apply_local_interval=False
             ))
@@ -2967,7 +2901,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             renew_recovery_probe=AsyncMock(return_value=True),
         )
         try:
-            with patch("platforms.utiki.refresh.time.monotonic", return_value=106.0), \
+            with patch("platforms.utiki.rate_limit.time.monotonic", return_value=106.0), \
                     patch("platforms.utiki.rate_limit.get_shared_refresh_coordinator", return_value=coordinator):
                 self.assertFalse(
                     await _finish_utk_recovery_probe(
@@ -3005,10 +2939,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 error="",
             )),
         )
-        with patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        with _patch_coordinator_lookups(coordinator):
             self.assertTrue(
                 await nodriver_utk_sports_cancel_refresh(
                     tab,
@@ -3037,10 +2968,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 error="temporarily unavailable",
             )),
         )
-        with patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        with _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.time",
             types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
         ), patch(
@@ -3085,10 +3013,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.time",
             types.SimpleNamespace(monotonic=lambda: clock["now"], time=time.time),
         ), patch(
@@ -3143,10 +3068,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             ), patch(
                 "platforms.utiki.refresh._inspect_utk_document",
                 AsyncMock(return_value=snapshot),
-            ), patch(
-                "platforms.utiki.refresh.get_shared_refresh_coordinator",
-                return_value=coordinator,
-            ):
+            ), _patch_coordinator_lookups(coordinator):
                 self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "probe lifecycle", apply_local_interval=False
                 ))
@@ -3200,7 +3122,6 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         second.target.target_id = "cleanup-second"
         second_identity = _ctbc_tab_identity(second)
         second_runtime = ctbc_identity_runtime(second_identity)
-        second_runtime["action"]["sentinel"] = True
 
         lease_task = asyncio.create_task(asyncio.Event().wait())
         unrelated = asyncio.create_task(asyncio.Event().wait())
@@ -3219,10 +3140,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )),
         )
         try:
-            with patch(
-                "platforms.utiki.refresh.get_shared_refresh_coordinator",
-                return_value=coordinator,
-            ):
+            with _patch_coordinator_lookups(coordinator):
                 self.assertTrue(await nodriver_utk_sports_cleanup_tab(
                     first, "terminal cleanup"
                 ))
@@ -3232,7 +3150,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
             self.assertNotIn(first_identity, _state["tabs"])
             self.assertIs(second_runtime, _state["tabs"][second_identity])
-            self.assertTrue(second_runtime["action"]["sentinel"])
+            self.assertIsNot(first_runtime, second_runtime)
             self.assertTrue(lease_task.cancelled())
             self.assertNotIn(lease_task, _state["cancel_tasks"])
             self.assertFalse(unrelated.done())
@@ -3260,7 +3178,6 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         async def replace_after_detach(*_args, **_kwargs):
             self.assertNotIn(identity, _state["tabs"])
             replacement = ctbc_tab_runtime(tab)
-            replacement["action"]["replacement"] = True
             replacements.append(replacement)
             return False
 
@@ -3274,7 +3191,6 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
         self.assertIsNot(old_runtime, replacements[0])
         self.assertIs(replacements[0], _state["tabs"][identity])
-        self.assertTrue(replacements[0]["action"]["replacement"])
 
     async def test_temporary_probe_completion_failure_can_be_retried(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
@@ -3300,10 +3216,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 ),
             ]),
         )
-        with patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ):
+        with _patch_coordinator_lookups(coordinator):
             self.assertFalse(await nodriver_utk_sports_cancel_refresh(
                 tab, "first completion", wait=True, abandon_probe=True
             ))
@@ -3427,10 +3340,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=[initial, initial, destination]),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.check_and_handle_pause",
             AsyncMock(return_value=False),
         ), patch(
@@ -3477,10 +3387,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=destination),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=types.SimpleNamespace(),
-        ):
+        ), _patch_coordinator_lookups(types.SimpleNamespace()):
             self.assertFalse(await nodriver_utk_sports_reload(
                 tab, config(), "stale disabled source",
                 apply_local_interval=False,
@@ -3523,10 +3430,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         ), patch(
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(side_effect=inspect),
-        ), patch(
-            "platforms.utiki.refresh.get_shared_refresh_coordinator",
-            return_value=coordinator,
-        ), patch(
+        ), _patch_coordinator_lookups(coordinator), patch(
             "platforms.utiki.refresh.check_and_handle_pause",
             AsyncMock(return_value=False),
         ), patch(
@@ -3635,7 +3539,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
-                    patch("platforms.utiki.refresh.get_shared_refresh_coordinator", return_value=coordinator), \
+                    _patch_coordinator_lookups(coordinator), \
                     patch("platforms.utiki.refresh.time.monotonic", side_effect=[100.0, 100.0, 111.0, 111.0, 111.0]):
                 refresh_identity = build_refresh_identity(identity)
                 first, _ = await _utk_document_guard(
@@ -3673,17 +3577,17 @@ class CtbcEmergencyMarkerTest(
 
     def test_emergency_marker_real_write_read_and_expiry(self):
         with tempfile.TemporaryDirectory() as root, patch(
-            "platforms.utiki.refresh.util.get_app_root", return_value=root
+            "platforms.utiki.rate_limit.util.get_app_root", return_value=root
         ):
-            with patch("platforms.utiki.refresh.time.time", return_value=100.0):
+            with patch("platforms.utiki.rate_limit.time.time", return_value=100.0):
                 _mark_utk_emergency_window()
             markers = list(Path(root, ".runtime").glob(
                 "utk_sports_emergency_*.until"
             ))
             self.assertEqual(1, len(markers))
-            with patch("platforms.utiki.refresh.time.time", return_value=101.0):
+            with patch("platforms.utiki.rate_limit.time.time", return_value=101.0):
                 self.assertEqual(5.0, _utk_emergency_remaining())
-            with patch("platforms.utiki.refresh.time.time", return_value=107.0):
+            with patch("platforms.utiki.rate_limit.time.time", return_value=107.0):
                 self.assertEqual(0.0, _utk_emergency_remaining())
             self.assertFalse(markers[0].exists())
 
@@ -3697,7 +3601,7 @@ class CtbcEmergencyMarkerTest(
         }
         coordinator = types.SimpleNamespace(reserve_refresh=AsyncMock())
         with tempfile.TemporaryDirectory() as root, patch(
-            "platforms.utiki.refresh.util.get_app_root", return_value=root
+            "platforms.utiki.rate_limit.util.get_app_root", return_value=root
         ):
             _mark_utk_emergency_window(60.0)
             with patch(
@@ -3706,10 +3610,7 @@ class CtbcEmergencyMarkerTest(
             ), patch(
                 "platforms.utiki.refresh._utk_document_guard",
                 AsyncMock(return_value=("normal", snapshot)),
-            ), patch(
-                "platforms.utiki.refresh.get_shared_refresh_coordinator",
-                return_value=coordinator,
-            ):
+            ), _patch_coordinator_lookups(coordinator):
                 self.assertFalse(await nodriver_utk_sports_reload(
                     tab, config(), "active emergency marker",
                     apply_local_interval=False,

@@ -9,6 +9,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlsplit
 
 import pytest
 import zendriver as uc
@@ -67,6 +68,10 @@ pytestmark = pytest.mark.browser
 FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "ctbc"
 
 
+def _fixture_pathname(filename):
+    return urlsplit((FIXTURE_ROOT / filename).resolve().as_uri()).path
+
+
 def test_production_dom_contracts_in_local_browser():
     if os.environ.get("TICKETS_HUNTER_RUN_BROWSER_FIXTURES") != "1":
         pytest.skip("set TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1")
@@ -102,9 +107,7 @@ async def _run_browser_fixtures():
             _assert_fast_marker_fixture,
         ):
             if assertion is _assert_seat_fixture:
-                seat_path = str(
-                    (FIXTURE_ROOT / "UTK0205_seat.html").resolve()
-                )
+                seat_path = _fixture_pathname("UTK0205_seat.html")
                 fixture_routes = tuple(
                     (origin, seat_path) for origin in ("file://", "null")
                 )
@@ -125,7 +128,7 @@ async def _run_browser_fixtures():
                     await assertion(browser)
             elif assertion is _assert_quantity_fixture:
                 general_paths = tuple(
-                    str((FIXTURE_ROOT / filename).resolve())
+                    _fixture_pathname(filename)
                     for filename in (
                         "UTK0202_quantity.html",
                         "UTK0203_quantity.html",
@@ -1987,7 +1990,7 @@ async def _assert_server_assigned_quantity_fixture(browser):
             super().do_GET()
 
         def guess_type(self, path):
-            if path.endswith("/UTK0201_001"):
+            if Path(path).name == "UTK0201_001":
                 return "text/html"
             return super().guess_type(path)
 

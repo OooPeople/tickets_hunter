@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from tests.ctbc_support import (
     CTBC_TEST_AREA_URL,
+    CTBC_TEST_QUANTITY_URL,
     CTBC_TEST_SEAT_URL,
     CtbcStateIsolationMixin,
     FakeElement,
@@ -1202,6 +1203,44 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         manual = FakeTab("", [], url=destination, semantic_navigation=True)
         self.assertTrue(await _ctbc_attest_fast_destination(manual, "seat", config()))
 
+    async def test_manual_general_admission_without_navigation_records_reaches_quantity(self):
+        cfg = config()
+        tab = FakeTab(
+            "", [], url=CTBC_TEST_QUANTITY_URL, semantic_navigation=True,
+        )
+        runtime = ctbc_tab_runtime(tab)
+        self.assertEqual("manual", cfg["utiki"]["seat_selection_mode"])
+        self.assertIsNone(runtime["transition"]["pending_navigation"])
+        self.assertIsNone(tab.session_marker)
+
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="unverified"),
+        ), patch(
+            "platforms.utiki.workflow._reconcile_utiki_purchase",
+            AsyncMock(return_value=None),
+        ), patch(
+            "platforms.utiki.workflow._nodriver_utiki_quantity_main",
+            AsyncMock(return_value=True),
+        ) as quantity:
+            self.assertIs(
+                tab,
+                await nodriver_ctbc_main(
+                    tab, CTBC_TEST_QUANTITY_URL, cfg, ocr=None
+                ),
+            )
+
+        quantity.assert_awaited_once_with(tab, cfg, None, "general_admission")
+        self.assertTrue(any(
+            "__ticketsHunterCtbcFastMarkerRead" in script
+            for script in tab.evaluate_scripts
+        ))
+        self.assertIsNone(runtime["transition"]["pending_navigation"])
+        self.assertIsNone(tab.session_marker)
+
     async def test_marker_destination_mismatch_fails_closed(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P16ANF0L"
         marker_destination = (
@@ -1561,6 +1600,28 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
         self.assertIsNone(self._active_submit_for(tab, submit_key))
         self.assertIsNone(self._outcome_for(tab, submit_key))
 
+    async def test_manual_four_character_captcha_with_ocr_off_stays_ready(self):
+        tab = FakeSubmitTab(captcha="ABCD", dialog="")
+        cfg = config()
+        cfg["ocr_captcha"] = {"enable": False, "force_submit": True}
+        submit_key = _ctbc_purchase_state_key(tab)
+        with patch(
+            "platforms.utiki.workflow._ctbc_captcha",
+            AsyncMock(),
+        ) as ocr, patch(
+            "platforms.utiki.workflow.dispatch_submit",
+            AsyncMock(),
+        ) as dispatch:
+            self.assertTrue(await _ctbc_captcha_and_submit(
+                tab, cfg, ocr=None
+            ))
+
+        ocr.assert_not_awaited()
+        dispatch.assert_not_awaited()
+        self.assertEqual(0, tab.button.click_count)
+        self.assertIsNone(self._active_submit_for(tab, submit_key))
+        self.assertIsNone(self._outcome_for(tab, submit_key))
+
     async def test_captcha_submits_when_force_submit_is_on(self):
         tab = FakeSubmitTab(dialog="", dialogs=["", "", "成功加入購物車"])
         cfg = config()
@@ -1687,6 +1748,7 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
 
     async def test_checkout_two_ticks_notifies_once_and_retains_runtime(self):
         cfg = config()
+        cfg["advanced"]["play_sound"]["order"] = False
         checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
         tab = FakeSubmitTab(dialog="", url=checkout_url)
         with patch(
@@ -1702,11 +1764,15 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
             AsyncMock(return_value=False),
         ), patch(
+            "platforms.utiki.workflow.play_sound_while_ordering",
+        ) as sound, patch(
             "platforms.utiki.workflow.send_discord_notification",
         ) as discord, patch(
             "platforms.utiki.workflow.send_telegram_notification",
         ) as telegram:
             await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            cfg["advanced"]["play_sound"]["order"] = True
             await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
 
         identity = _ctbc_tab_identity(tab)
@@ -1715,6 +1781,40 @@ class CtbcDomFlowTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase)
             1,
             len(ctbc_identity_runtime(identity)["purchase"]["checkout_notified"]),
         )
+        sound.assert_not_called()
+        discord.assert_called_once_with(cfg, "order", "CTBC Sports")
+        telegram.assert_called_once_with(cfg, "order", "CTBC Sports")
+
+    async def test_checkout_sound_on_notifies_once_across_two_ticks(self):
+        cfg = config()
+        cfg["advanced"]["play_sound"]["order"] = True
+        checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
+        tab = FakeSubmitTab(dialog="", url=checkout_url)
+        with patch(
+            "platforms.utiki.workflow.check_and_handle_pause",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_health_check",
+            AsyncMock(return_value="unverified"),
+        ), patch(
+            "platforms.utiki.workflow._reconcile_utiki_purchase",
+            AsyncMock(return_value="success"),
+        ), patch(
+            "platforms.utiki.workflow.nodriver_utk_sports_cancel_refresh",
+            AsyncMock(return_value=False),
+        ), patch(
+            "platforms.utiki.workflow.play_sound_while_ordering",
+        ) as sound, patch(
+            "platforms.utiki.workflow.send_discord_notification",
+        ) as discord, patch(
+            "platforms.utiki.workflow.send_telegram_notification",
+        ) as telegram:
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+            await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+
+        purchase = ctbc_tab_runtime(tab)["purchase"]
+        self.assertEqual(1, len(purchase["checkout_notified"]))
+        sound.assert_called_once_with(cfg)
         discord.assert_called_once_with(cfg, "order", "CTBC Sports")
         telegram.assert_called_once_with(cfg, "order", "CTBC Sports")
 

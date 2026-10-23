@@ -8,7 +8,7 @@
 
 > 適用於所有新程式碼。歷史遺留程式碼可能早於本規則，看到不代表可以仿效。
 
-以下 uTiki 模組與依賴反映批次 4 的正式接線；document-health／rate-limit 的後續拆分見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
+以下 uTiki 模組與依賴反映批次 5 的正式接線；設定與正式入口的後續收斂見 [正式 PLAN](utiki-refactor/PLAN.md)，進度見 [STATUS](utiki-refactor/STATUS.md)。
 
 ---
 
@@ -25,7 +25,9 @@
 - **`platforms/utiki/inputs.py`** — Cookie 注入、inline login、登入 fingerprint、CAPTCHA 取圖／辨識／欄位與換圖 browser 操作；不持有 purchase outcome 或重試狀態。
 - **`platforms/utiki/submission.py`** — purchase key、submit dispatch／結果歸屬、dialog、CAPTCHA／座位衝突恢復、未知結果與 checkout 通知去重的功能寫入責任；runtime 由 workflow 傳入，不建立 registry。
 - **`platforms/utiki/purchase.py`** — 已通過 workflow 原導覽核對的座位與票數頁購票準備，組合 selection／DOM commit／submission；不建立另一份 purchase state。
-- **`platforms/utiki/refresh.py`** — uTiki document inspection、429 circuit breaker、跨程序 refresh reservation／commit／wait／pause／cancel 與 reload event。queued／reserved pause 會以節流的 exact-token cleanup 釋放共享工作；commit 後的 request 必須保留到觀察到不同的 canonical document token，URL 漂移或 browser command 回傳不得視為完成，也不得重送。每個 request 必須有非空 reason 與唯一 token；一個 intent 的 completion 不得回傳給另一個 caller，terminal recovery probe 也必須同步停止其 lease task。logical request 仍由 workflow 的 canonical per-tab runtime 持有，resume 不得重算 eligibility、延長 deadline 或回捲 committed phase。只能由 workflow 傳入 runtime、tab identity 與 cancel-task registry；禁止 import workflow、持有 `_state`、建立 mirror runtime，或處理購票選擇／提交。
+- **`platforms/utiki/document_health.py`** — 觀察目前 document、快取 snapshot、產生 canonical token，依原 DOM 證據分類 normal／blocked／unknown／unverified；不發起刷新或管理 429 副作用。
+- **`platforms/utiki/rate_limit.py`** — 原有 429 回報與重試時間、跨程序 emergency marker、recovery probe 的建立／續期／完成／放棄及 lease task 清理；使用 workflow 傳入的同一 runtime 與 cancel-task 集合，不建立 registry，也不直接呼叫 browser reload。
+- **`platforms/utiki/refresh.py`** — 完整持有跨程序 refresh request 的建立、reservation／commit、browser reload、等待新 document、pause／resume／cancel、完成消費與 reload event；組合 `document_health.py` 觀察及 `rate_limit.py` 的既有保護。queued／reserved pause 沿原 exact-token cleanup 釋放共享工作；commit 後的 request 保留到觀察到不同的 canonical document token，URL 漂移或 browser command 回傳不等於完成。每個 request 的 reason、token、deadline 與 completion owner 沿原語意，resume 不重算 eligibility 或延長 deadline。runtime 仍由 workflow 唯一持有；禁止 import workflow、建立 mirror runtime，或處理購票選擇／提交。
 - **`util.py`** — 純跨平台工具：文字比對、關鍵字解析、字串正規化、檔案 I/O、DebugLogger、CAPTCHA 數學猜測。禁止：平台選擇器／URL、業務邏輯、import `settings` 或 `nodriver_tixcraft`。此檔為所有平台共用，修改前務必評估跨平台影響。
 - **`settings.py`** — 設定 CRUD 與 Tornado Web Server。禁止：搶票邏輯、import `nodriver_tixcraft`。專案內僅允許 import `global_settings` 與 `util`。
 - **`global_settings.py`** — 跨 profile 的全域設定驗證與原子化檔案存取。僅允許 import `util`。
@@ -53,8 +55,12 @@ platforms/utiki/submission
 platforms/utiki/inputs
                    -->  platforms/utiki/auth, selection, nodriver_common, util
 platforms/utiki/refresh
-                   -->  platforms/utiki/runtime, platforms/utiki/profiles, nodriver_common,
-                        global_settings, refresh_coordinator, util
+                   -->  platforms/utiki/document_health, rate_limit, runtime,
+                        nodriver_common, refresh_coordinator, util
+platforms/utiki/rate_limit
+                   -->  global_settings, refresh_coordinator, util
+platforms/utiki/document_health
+                   -->  platforms/utiki/runtime, profiles, util
 platforms/utiki/runtime --> Python 標準函式庫
 platforms/{family}/葉節點
                    -->  同 package 更底層葉節點, Python 標準函式庫
@@ -68,7 +74,7 @@ util               -->  (無專案內部匯入)
 禁止反向依賴。不同平台／家族之間禁止互相 import；legacy facade 只能單向 import
 其 canonical family package。package 內不得 import legacy facade。`utiki/refresh.py`
 不得反向 import `utiki/workflow.py`；runtime ownership 必須維持 workflow 單向傳入
-date_area／navigation／purchase／submission／refresh。navigation 不反向依賴 date_area／purchase／workflow；date_area 不反向依賴 workflow。inputs 不依賴 submission／purchase；submission 不依賴 purchase。
+date_area／navigation／purchase／submission／refresh。refresh 單向呼叫 document_health／rate_limit，後兩者不反向依賴 refresh／workflow。navigation 不反向依賴 date_area／purchase／workflow；date_area 不反向依賴 workflow。inputs 不依賴 submission／purchase；submission 不依賴 purchase。
 
 ---
 

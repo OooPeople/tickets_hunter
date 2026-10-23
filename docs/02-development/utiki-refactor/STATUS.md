@@ -1,9 +1,9 @@
 # uTiki 重構狀態
 
 - 唯一行為與程式起點：`944e934546f3dd36b1b4891a5a4fa359b8ade17f`。`a47fd07106eae598c8b44972282c6621bf7f493c` 只作文件整理參考，不沿用其功能、完成狀態或測試 PASS。
-- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 4 開始 HEAD 為 `c71562da49ea58105e0e924c3905f8904d63f301`，工作樹乾淨；施工期間未切換分支或合併上游。
-- 階段：批次 0/1/2/3 已完成；本輪依 [PLAN.md](PLAN.md) 完成批次 4 日期／區域選擇與導航責任拆分，停在批次 4，不進入 document-health／rate-limit 拆分。
-- 程式範圍：新增 `date_area.py`、`navigation.py` 並接正式 workflow；既有 facade、`selection.py` 與設定流程保持。測試僅更新搬移後的內部 import／patch 與 callback 注入，未改產品預期；未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增購票資格、拒絕條件或人工出口。
+- 工作目錄／分支：`E:\P3\xx\ticket\tickets_hunter_944`／`codex/utiki-architecture-944e934`。批次 5 開始 HEAD 為 `078aedeb1a5533ce103867567da7bb1d822260c2`，工作樹乾淨；施工期間未切換分支或合併上游。
+- 階段：批次 0/1/2/3/4 已完成；本輪依 [PLAN.md](PLAN.md) 完成批次 5 刷新觀察與 429 管理責任拆分，停在批次 5，不進入設定／正式入口／cleanup 收斂。
+- 程式範圍：新增 `document_health.py`、`rate_limit.py` 並由 `refresh.py` 正式接入；workflow 的 refresh facade、reload request lifecycle 與共用 SQLite coordinator 保持。測試只更新搬移後的私有 import／patch 與虛擬時鐘位置，未改產品預期；未修改 `settings.py`、依賴、`pytest.ini`、DB schema／migration、build scripts 或 CI，未新增限流政策或刷新重試。
 - 環境：沿用現有 Windows x64 `.venv`（CPython 3.11.9、pytest 9.0.3），本輪未重建。批次 0 建立環境時 `uv venv --python 3.11.9 .venv` 及 `uv pip install --python .\.venv\Scripts\python.exe -r requirements-dev.txt` 均退出碼 0；需求取自 944 原檔。
 
 ## 前輪使用者確認的 scope 校正
@@ -11,6 +11,18 @@
 - **交付僅限原始碼使用**：正式 source caller 最終須在 Windows x64、macOS arm64 可用；本次不要求 PyInstaller、exe／安裝包、frozen runtime、hidden-import／spec、`build_scripts/build_local.py`、release packaging 或發布。現有 build scripts／release infrastructure 保留，原始碼版本穩定使用後另行處理打包。
 - **僅維護 current uTiki 設定格式**：current 設定仍須讀取、儲存並保留 `944e934` 已支援的 hot reload 欄位及時點；完成後使用者可重新填寫 current 設定。正式切換後不維護只為舊 uTiki／CTBC 設定相容的自動升級、runtime fallback、dual read／dual write，也不新增 DB schema／serialized runtime migration、version 欄位或 persistence upgrader。其他平台及共用 migration／normalization／SQLite 機制不在本輪移除範圍；uTiki shared refresh／429 SQLite coordinator 保持正式功能。
 - 以上是前輪使用者確認的**交付與 compatibility scope 縮減**，不是新增產品功能。批次 0/1 的實際結果不重做；通用打包指南與歷史計畫保留，僅以正式 PLAN 限定本次施工與驗收。
+
+## 批次 5：刷新觀察與 429 管理
+
+- `document_health.py` 承接原 document inspect、快取、canonical token 與 normal／blocked／unknown／unverified 分類；沿原 DOM 證據要求判斷 429，不發起 reload。`rate_limit.py` 承接原設定讀取、跨程序 emergency marker、429 report／retry 與 probe 建立／續期／完成／放棄／lease 清理；只使用同一份 runtime、cancel-task 集合及原 coordinator，不建立新 registry 或直接呼叫 browser reload。
+- `refresh.py` 保留同一 reload request 的 token／reason／eligible_at／deadline、queued／reserved／awaiting_document／completed、reservation／preflight／commit、browser reload dispatch、pause／resume／cancel、reload event／wait 與完成消費。`_utk_document_guard` 仍在原時點組合 document 觀察、probe／429 保護與 request 對帳；workflow 的正式 refresh facade 不變。
+- 原 canonical document token 仍要求有效非零 performance time origin；history URL drift 或 browser reload 指令返回不等於新文件。blocked 仍要求 code＋message 且沒有 normal root；persistent unknown 不回報 shared cooldown。probe success 仍等待新文件及分類，舊 request／probe 與 replacement 的身分核對、lease task exact cleanup、三階段 pause／resume、不同 reason 的 completion owner 與 coordinator enabled／disabled hot switch 均沿原分支。未發現需改變產品語意的 `944e934` 歧義。
+- `test_ctbc_refresh.py` 將搬移函式 import、設定／marker patch 與模組虛擬時鐘對準真正 lookup；`test_ctbc_dom_fixtures.py` 的 document 頁型與設定 patch 亦改到新 owner。初次聚焦有 4 個測試因虛擬時鐘仍只 patch 舊模組而失敗，改到新 owner 後原斷言全過；初次 browser fixture 因舊 patch 路徑無該屬性而在 setup 失敗，修正 patch 後完整 runner 通過。
+- 語法：`.\.venv\Scripts\python.exe -m py_compile src/platforms/utiki/document_health.py src/platforms/utiki/rate_limit.py src/platforms/utiki/refresh.py tests/test_ctbc_refresh.py`，退出碼 0；現有全域工具 `pyflakes` 對三個 touched production 模組退出碼 0。
+- 聚焦：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_refresh.py`，退出碼 0，**75 passed、16 subtests passed**。鄰近回歸：`.\.venv\Scripts\python.exe -m pytest -q tests/test_ctbc_dom.py tests/test_utiki_dom_contract.py tests/test_ctbc_refresh.py`，退出碼 0，**220 passed、81 subtests passed**。
+- 整合：`.\.venv\Scripts\python.exe -m pytest`，退出碼 0，**358 passed、1 deselected**。
+- 本機 browser fixture：暫時設定 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1`，執行 `.\.venv\Scripts\python.exe -m pytest -q --tb=short -m 'browser and not live' tests/test_ctbc_dom_fixtures.py`，修正測試 lookup 後退出碼 0，**1 passed in 9.90s**；執行後還原原環境旗標。使用合成頁面、本機 loopback 與暫存 profile。
+- 未驗證：macOS arm64 source 使用、GitHub CI、真站手動流程；本批不執行產品打包。批次 0 的原始 browser fixture 失敗仍保留下方原始基準。
 
 ## 批次 4：日期／區域選擇與導航
 
@@ -67,7 +79,7 @@
 
 ## 下一步
 
-本輪停在批次 4，等待使用者審查。獲另行下令後，批次 5 可從 `refresh.py` 現有 document inspection／health 與 429 協調邊界開始；本批沒有預先建立 `document_health.py` 或 `rate_limit.py`。
+本輪停在批次 5，等待使用者審查。獲另行下令後，批次 6 可從 current 設定、正式 source caller 與只為舊設定相容保留且已無正式 caller 的轉接邊界開始；本批未預先修改設定或入口。
 
 | 文件或 PLAN 情境 | 原衝突／缺口 | 目前狀態 |
 | --- | --- | --- |

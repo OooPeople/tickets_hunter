@@ -232,11 +232,11 @@ async def _assert_refresh_document_token_fixture(browser):
 
     with (
         patch(
-            "platforms.utiki.refresh.classify_utiki_page",
+            "platforms.utiki.document_health.classify_utiki_page",
             return_value=PageKind.DATE,
         ),
         patch(
-            "platforms.utiki.refresh.load_global_settings",
+            "platforms.utiki.rate_limit.load_global_settings",
             return_value=refresh_settings,
         ),
     ):

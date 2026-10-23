@@ -1,5 +1,5 @@
 #encoding=utf-8
-"""uTiki document health, shared refresh pacing, and 429 recovery.
+"""uTiki reload request lifecycle and shared refresh coordination.
 
 Mutable state is supplied by ``workflow``.  This module owns refresh behavior,
 but deliberately owns no tab registry or parallel runtime.
@@ -7,215 +7,32 @@ but deliberately owns no tab registry or parallel runtime.
 
 import asyncio
 import contextlib
-import glob
-import json
-import math
 import os
-import re
 import time
 import uuid
 
 import util
-from global_settings import get_global_settings_path, load_global_settings
 from nodriver_common import check_and_handle_pause, check_and_handle_quit
 from refresh_coordinator import UTK_SPORTS_SCOPE, get_shared_refresh_coordinator
 
-from .profiles import PageKind, classify_utiki_page
+from .document_health import _inspect_utk_document
+from . import rate_limit
+from .rate_limit import (
+    UTK_PAUSE_CLEANUP_RETRY_SECONDS,
+    UTK_RECOVERY_PROBE_MAX_SECONDS,
+    _refresh_settings,
+    _utk_emergency_remaining,
+)
 from .runtime import TabRuntime
 
 
-UTK_RECOVERY_PROBE_RENEW_SECONDS = 5.0
-UTK_RECOVERY_PROBE_MAX_SECONDS = 120.0
 UTK_RELOAD_WAIT_MAX_SECONDS = 30.0
 UTK_RELOAD_FINAL_OBSERVATION_SECONDS = 0.25
-UTK_EMERGENCY_MARKER_SECONDS = 6.0
-UTK_PAUSE_CLEANUP_RETRY_SECONDS = 0.5
-UTK_EMERGENCY_PROCESS_TOKEN = uuid.uuid4().hex
 
 
 def build_refresh_identity(tab_identity):
     """為單一標準分頁建立程序內唯一的刷新協調識別。"""
     return f"{util.get_instance_id()}:{os.getpid()}:{tab_identity}"
-
-
-def _refresh_settings(*, force_refresh=False):
-    """依強制刷新設定建立節流參數。"""
-
-    settings_path = get_global_settings_path() if force_refresh else None
-    return load_global_settings(settings_path).get("utk_sports", {})
-
-
-def _emergency_marker_path():
-    """取得跨程序緊急限流標記的檔案路徑。"""
-
-    return os.path.join(
-        util.get_app_root(),
-        ".runtime",
-        "utk_sports_emergency_"
-        f"{os.getpid()}_{UTK_EMERGENCY_PROCESS_TOKEN}_{uuid.uuid4().hex}.until",
-    )
-
-
-def _mark_utk_emergency_window(seconds=UTK_EMERGENCY_MARKER_SECONDS):
-    """在 429 資料庫回報完成前盡力標記跨程序緊急停止區間。"""
-    marker_path = _emergency_marker_path()
-    marker_dir = os.path.dirname(marker_path)
-    temp_path = f"{marker_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    try:
-        os.makedirs(marker_dir, exist_ok=True)
-        deadline = time.time() + max(float(seconds), UTK_EMERGENCY_MARKER_SECONDS)
-        with open(temp_path, "w", encoding="utf-8") as marker_file:
-            marker_file.write(str(deadline))
-            marker_file.flush()
-            os.fsync(marker_file.fileno())
-        os.replace(temp_path, marker_path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.remove(temp_path)
-
-
-def _utk_emergency_remaining():
-    """計算跨程序緊急停止區間的剩餘秒數。"""
-
-    pattern = os.path.join(
-        util.get_app_root(), ".runtime", "utk_sports_emergency_*.until"
-    )
-    deadline = 0.0
-    now = time.time()
-    for marker_path in glob.glob(pattern):
-        try:
-            with open(marker_path, encoding="utf-8") as marker_file:
-                marker_deadline = float(marker_file.read().strip())
-        except (OSError, TypeError, ValueError):
-            with contextlib.suppress(OSError):
-                os.remove(marker_path)
-            continue
-        if marker_deadline <= now:
-            with contextlib.suppress(OSError):
-                os.remove(marker_path)
-            continue
-        deadline = max(deadline, marker_deadline)
-    return max(deadline - now, 0.0)
-
-
-def _classify_utk_document_state(snapshot):
-    """依文件快照判別正常、載入中或限流狀態。"""
-
-    if not isinstance(snapshot, dict) or not snapshot.get("ready"):
-        return "unknown"
-    body_text = str(snapshot.get("body_text") or "")
-    has_code = bool(
-        re.search(r"(^|\s|[:：])(?:HTTP\s*)?429(?:\s|[-:：]|$)", body_text, re.I)
-    )
-    has_message = bool(re.search(r"請求頻率過高|Too Many Requests", body_text, re.I))
-    if has_code and has_message and not snapshot.get("has_normal_root"):
-        return "blocked"
-    if snapshot.get("has_normal_root"):
-        return "normal"
-    if not snapshot.get("requires_normal_root", True):
-        return "unverified"
-    return "unknown"
-
-
-def _decode_json_result(raw_value):
-    """將瀏覽器回傳值解碼為 JSON 資料。"""
-
-    if isinstance(raw_value, str):
-        try:
-            return json.loads(raw_value)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None
-    return util.parse_nodriver_result(raw_value)
-
-
-def _canonical_document_token(value):
-    """取得非零的標準文件時間來源識別，無效時採保守失敗。"""
-    token = str(value or "").strip()
-    try:
-        numeric = float(token)
-    except (TypeError, ValueError):
-        return ""
-    return token if math.isfinite(numeric) and numeric > 0 else ""
-
-
-async def _inspect_utk_document(tab, runtime: TabRuntime, url=None, *, force=False):
-    """判別目前文件，避免把載入中狀態誤認為 HTTP 429。"""
-    current_url = str(url or getattr(getattr(tab, "target", None), "url", ""))
-    document = runtime["document"]
-    cached = document["snapshot"]
-    if (
-        not force
-        and cached
-        and cached.get("url") == current_url
-        and time.monotonic() - cached.get("checked_at", 0.0) < 0.2
-    ):
-        return dict(cached["snapshot"])
-    normal_selector = {
-        PageKind.DATE: "#PerformanceListTable",
-        PageKind.AREA: ".seats, #mapdata",
-        PageKind.RESERVED_SEAT: "#TBL, .ticket",
-        PageKind.GENERAL_ADMISSION: "#table_tickettype, .ticket",
-        PageKind.SERVER_ASSIGNED_QUANTITY: "#table_tickettype",
-    }.get(classify_utiki_page(current_url))
-    selector_expression = (
-        f"!!document.querySelector({json.dumps(normal_selector)})"
-        if normal_selector else "false"
-    )
-    try:
-        raw_value = await tab.evaluate(f'''
-            (() => {{
-                const ready = document.readyState === 'interactive' ||
-                    document.readyState === 'complete';
-                const bodyText = document.body
-                    ? (document.body.innerText || document.body.textContent || '')
-                        .replace(/\\s+/g, ' ').trim().slice(0, 12000)
-                    : '';
-                const normalRoot = {selector_expression};
-                const timeOrigin = Number(performance.timeOrigin ||
-                    (performance.timing && performance.timing.navigationStart) || 0);
-                const documentToken = Number.isFinite(timeOrigin) && timeOrigin > 0
-                    ? String(timeOrigin) : '';
-                return JSON.stringify({{
-                    ready,
-                    body_text: bodyText,
-                    document_id: documentToken,
-                    document_started_at: timeOrigin > 0 ? timeOrigin / 1000 : 0,
-                    url: location.href,
-                    ready_state: document.readyState,
-                    has_normal_root: normalRoot,
-                    requires_normal_root: {str(bool(normal_selector)).lower()}
-                }});
-            }})()
-        ''')
-        snapshot = _decode_json_result(raw_value)
-    except Exception:
-        snapshot = None
-    if not isinstance(snapshot, dict):
-        return {
-            "classification": "unknown", "document_id": "",
-            "document_started_at": 0.0, "url": current_url,
-            "ready_state": "", "has_normal_root": False,
-            "requires_normal_root": bool(normal_selector),
-        }
-    snapshot["document_id"] = _canonical_document_token(
-        snapshot.get("document_id")
-    )
-    try:
-        snapshot["document_started_at"] = max(
-            float(snapshot.get("document_started_at") or 0.0), 0.0
-        )
-    except (TypeError, ValueError):
-        snapshot["document_started_at"] = 0.0
-    snapshot["url"] = str(snapshot.get("url") or current_url)
-    snapshot["classification"] = (
-        _classify_utk_document_state(snapshot)
-        if snapshot["document_id"] else "unknown"
-    )
-    document["snapshot"] = {
-        "url": snapshot["url"], "checked_at": time.monotonic(),
-        "snapshot": dict(snapshot),
-    }
-    return snapshot
 
 
 def _pop_reload_request_if_token(runtime, request_token):
@@ -338,59 +155,6 @@ def _mark_paused_request_clean(runtime, request):
     return True
 
 
-def _pause_cleanup_due(record):
-    """判斷暫停中的刷新紀錄是否已到清理時間。"""
-
-    return bool(
-        record and not record.get("pause_cleanup_done", False)
-        and time.monotonic() >= float(record.get("pause_cleanup_retry_at") or 0.0)
-    )
-
-
-async def _abandon_recovery_probe(
-    runtime, refresh_identity, cancel_tasks, coordinator, probe,
-):
-    """放棄復原探測並安排其資源清理。"""
-
-    lease_task = probe.get("lease_task")
-    if lease_task is not None and lease_task is not asyncio.current_task():
-        if not lease_task.done():
-            lease_task.cancel()
-        await asyncio.gather(lease_task, return_exceptions=True)
-        cancel_tasks.discard(lease_task)
-    completion = await coordinator.complete_recovery_probe(
-        UTK_SPORTS_SCOPE, refresh_identity,
-        probe.get("permit_id", ""), success=False,
-    )
-    if completion.accepted or "not owned" in str(completion.error or ""):
-        current = runtime["refresh"]["recovery_probe"]
-        if current and current.get("permit_id") == probe.get("permit_id"):
-            runtime["refresh"]["recovery_probe"] = None
-    return bool(completion.accepted)
-
-
-async def _retry_abandoned_probe_cleanup(
-    runtime, refresh_identity, cancel_tasks, coordinator=None,
-):
-    """重試清理先前放棄的復原探測。"""
-
-    probe = runtime["refresh"]["recovery_probe"]
-    if not probe or not probe.get("abandon_requested"):
-        return False, False
-    if not _pause_cleanup_due(probe):
-        return True, False
-    coordinator = coordinator or get_shared_refresh_coordinator()
-    accepted = await _abandon_recovery_probe(
-        runtime, refresh_identity, cancel_tasks, coordinator, probe
-    )
-    if runtime["refresh"]["recovery_probe"] is not probe:
-        return False, True
-    probe["pause_cleanup_retry_at"] = (
-        time.monotonic() + UTK_PAUSE_CLEANUP_RETRY_SECONDS
-    )
-    return True, accepted
-
-
 async def cancel_refresh(
     tab, runtime: TabRuntime, refresh_identity, cancel_tasks, reason="", *,
     wait=False, abandon_probe=False,
@@ -422,7 +186,7 @@ async def cancel_refresh(
                 request_error = exc
         try:
             if probe is not None:
-                changed = await _abandon_recovery_probe(
+                changed = await rate_limit._abandon_recovery_probe(
                     runtime, refresh_identity, cancel_tasks, coordinator, probe
                 ) or changed
         except asyncio.CancelledError:
@@ -466,7 +230,7 @@ async def pause_refresh(
                 "shared_enqueued", False
             )
             request["pause_cleanup_retry_at"] = 0.0
-        if not _reload_request_is_awaiting(request) and _pause_cleanup_due(request):
+        if not _reload_request_is_awaiting(request) and rate_limit._pause_cleanup_due(request):
             token = request.get("request_token")
             reservation_id = str(request.get("reservation_id") or "")
             if request.get("phase") == "reserved" and reservation_id:
@@ -492,7 +256,7 @@ async def pause_refresh(
             probe["abandon_requested"] = True
             probe["pause_cleanup_done"] = False
             probe["pause_cleanup_retry_at"] = 0.0
-        _, probe_changed = await _retry_abandoned_probe_cleanup(
+        _, probe_changed = await rate_limit._retry_abandoned_probe_cleanup(
             runtime, refresh_identity, cancel_tasks, coordinator
         )
         changed = probe_changed or changed
@@ -509,140 +273,6 @@ def consume_reload_event(runtime: TabRuntime):
     return True
 
 
-async def _report_utk_rate_limit(
-    tab, runtime, refresh_identity, config_dict, document_id,
-    probe_permit_id=None, document_started_at=0.0, suspected=False,
-):
-    """回報 uTiki 限流狀態並建立復原探測資訊。"""
-
-    settings = _refresh_settings()
-    if not settings.get("enabled", True):
-        return None
-    refresh = runtime["refresh"]
-    coordinator = get_shared_refresh_coordinator()
-    _mark_utk_emergency_window()
-    report = await coordinator.report_rate_limited(
-        UTK_SPORTS_SCOPE, refresh_identity,
-        initial_cooldown_seconds=settings.get("initial_cooldown_seconds", 60),
-        max_cooldown_seconds=settings.get("max_cooldown_seconds", 240),
-        probe_permit_id=probe_permit_id,
-        document_started_at=document_started_at,
-    )
-    debug = util.create_debug_logger(config_dict)
-    if report.accepted:
-        refresh["rate_limit_observation"] = document_id
-        refresh["rate_limit_retry"] = 0.0
-    else:
-        retry_seconds = max(float(report.retry_after_seconds or 1.0), 0.5)
-        refresh["rate_limit_retry"] = time.monotonic() + retry_seconds
-        _mark_utk_emergency_window(retry_seconds + 1.0)
-    if report.accepted and report.new_incident:
-        if suspected:
-            debug.log(
-                "[UTK RATE] Ticket page stayed unrecognizable; starting a "
-                f"shared safety cooldown for {report.retry_after_seconds:.1f}s"
-            )
-        else:
-            debug.log(
-                "[UTK RATE] HTTP 429 detected; all baseball instances cooling down "
-                f"for {report.retry_after_seconds:.1f}s "
-                f"(level {report.consecutive_incidents})"
-            )
-    elif report.error:
-        debug.log(f"[UTK RATE] Failed to record HTTP 429 safely: {report.error}")
-    return report
-
-
-async def _clear_completed_recovery_probe(runtime, cancel_tasks, probe):
-    """清除已完成復原探測的本機狀態與工作。"""
-
-    if runtime["refresh"]["recovery_probe"] is not probe:
-        return False
-    lease_task = probe.get("lease_task")
-    if lease_task is not None and lease_task is not asyncio.current_task():
-        if not lease_task.done():
-            lease_task.cancel()
-        await asyncio.gather(lease_task, return_exceptions=True)
-        cancel_tasks.discard(lease_task)
-    if runtime["refresh"]["recovery_probe"] is not probe:
-        return False
-    runtime["refresh"]["recovery_probe"] = None
-    return True
-
-
-async def _finish_utk_recovery_probe(
-    tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot,
-):
-    """僅在新文件變為正常或確認限流後完成復原探測。"""
-    refresh = runtime["refresh"]
-    probe = refresh["recovery_probe"]
-    if not probe:
-        return False
-    now = time.monotonic()
-    probe.setdefault("started_at", now)
-    probe.setdefault("next_renew_at", now + UTK_RECOVERY_PROBE_RENEW_SECONDS)
-    coordinator = get_shared_refresh_coordinator()
-    if now - probe.get("started_at", now) >= UTK_RECOVERY_PROBE_MAX_SECONDS:
-        await coordinator.complete_recovery_probe(
-            UTK_SPORTS_SCOPE, refresh_identity,
-            probe.get("permit_id", ""), success=False,
-        )
-        await _clear_completed_recovery_probe(
-            runtime, cancel_tasks, probe
-        )
-        return True
-    if not probe.get("lease_task") and now >= probe.get("next_renew_at", 0.0):
-        renewed = await coordinator.renew_recovery_probe(
-            UTK_SPORTS_SCOPE, probe.get("permit_id", "")
-        )
-        if renewed is False:
-            refresh["recovery_probe"] = None
-            return False
-        probe["next_renew_at"] = now + (
-            UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
-        )
-    if snapshot.get("document_id") == probe.get("source_document_id"):
-        return False
-    classification = snapshot.get("classification")
-    if classification == "unknown":
-        return False
-    if time.monotonic() < refresh["rate_limit_retry"]:
-        return True
-    if classification == "blocked":
-        report = await _report_utk_rate_limit(
-            tab, runtime, refresh_identity, config_dict,
-            snapshot.get("document_id", ""),
-            probe_permit_id=probe.get("permit_id"),
-            document_started_at=snapshot.get("document_started_at", 0.0),
-        )
-        if report and report.accepted:
-            await _clear_completed_recovery_probe(
-                runtime, cancel_tasks, probe
-            )
-        return True
-    settings = _refresh_settings()
-    if settings.get("enabled", True):
-        completion = await coordinator.complete_recovery_probe(
-            UTK_SPORTS_SCOPE, refresh_identity, probe.get("permit_id", ""),
-            success=(classification == "normal"),
-        )
-        if completion.accepted:
-            await _clear_completed_recovery_probe(
-                runtime, cancel_tasks, probe
-            )
-            if classification == "normal":
-                util.create_debug_logger(config_dict).log(
-                    "[UTK RATE] Recovery probe succeeded; shared refresh resumed"
-                )
-        elif "not owned" in str(completion.error or ""):
-            await _clear_completed_recovery_probe(
-                runtime, cancel_tasks, probe
-            )
-        else:
-            refresh["rate_limit_retry"] = time.monotonic() + 1.0
-    return True
-
-
 async def _utk_document_guard(
     tab, runtime: TabRuntime, refresh_identity, cancel_tasks, config_dict, url=None,
 ):
@@ -651,8 +281,9 @@ async def _utk_document_guard(
     snapshot = await _inspect_utk_document(tab, runtime, url)
     document = runtime["document"]
     refresh = runtime["refresh"]
-    cleanup_pending, _ = await _retry_abandoned_probe_cleanup(
-        runtime, refresh_identity, cancel_tasks
+    cleanup_pending, _ = await rate_limit._retry_abandoned_probe_cleanup(
+        runtime, refresh_identity, cancel_tasks,
+        coordinator_factory=get_shared_refresh_coordinator,
     )
     if cleanup_pending:
         return "unknown", snapshot
@@ -672,8 +303,9 @@ async def _utk_document_guard(
                 probe["abandon_requested"] = True
                 probe["pause_cleanup_done"] = False
                 probe["pause_cleanup_retry_at"] = 0.0
-            cleanup_pending, _ = await _retry_abandoned_probe_cleanup(
-                runtime, refresh_identity, cancel_tasks
+            cleanup_pending, _ = await rate_limit._retry_abandoned_probe_cleanup(
+                runtime, refresh_identity, cancel_tasks,
+                coordinator_factory=get_shared_refresh_coordinator,
             )
             if cleanup_pending:
                 return "unknown", snapshot
@@ -681,8 +313,9 @@ async def _utk_document_guard(
         if request and request.get("phase") == "awaiting_document":
             return "unknown", snapshot
         return "disabled", snapshot
-    probe_handled = await _finish_utk_recovery_probe(
-        tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot
+    probe_handled = await rate_limit._finish_utk_recovery_probe(
+        tab, runtime, refresh_identity, cancel_tasks, config_dict, snapshot,
+        coordinator_factory=get_shared_refresh_coordinator,
     )
     classification = snapshot.get("classification", "unknown")
     if classification == "unknown":
@@ -713,10 +346,11 @@ async def _utk_document_guard(
             and refresh["rate_limit_observation"] != snapshot.get("document_id")
             and time.monotonic() >= refresh["rate_limit_retry"]
         ):
-            await _report_utk_rate_limit(
+            await rate_limit._report_utk_rate_limit(
                 tab, runtime, refresh_identity, config_dict,
                 snapshot.get("document_id", ""),
                 document_started_at=snapshot.get("document_started_at", 0.0),
+                coordinator_factory=get_shared_refresh_coordinator,
             )
         return "blocked", snapshot
     request = refresh["reload_request"]
@@ -1077,10 +711,11 @@ async def _preflight_allows_reload(
         and refresh["rate_limit_observation"] == preflight.get("document_id")
     )
     if classification == "blocked" and not (recovery_reload or follower_reload):
-        await _report_utk_rate_limit(
+        await rate_limit._report_utk_rate_limit(
             tab, runtime, refresh_identity, config_dict,
             preflight.get("document_id", ""),
             document_started_at=preflight.get("document_started_at", 0.0),
+            coordinator_factory=get_shared_refresh_coordinator,
         )
         return False
     return bool(
@@ -1088,80 +723,6 @@ async def _preflight_allows_reload(
         and preflight.get("url") == request.get("expected_url")
         and (classification != "unknown" or allow_unknown_document)
     )
-
-
-async def _renew_probe_lease(runtime, refresh_identity, permit_id, started_at):
-    """延長目前復原探測許可的租期。"""
-
-    refresh = runtime["refresh"]
-    while True:
-        await asyncio.sleep(UTK_RECOVERY_PROBE_RENEW_SECONDS)
-        current = refresh["recovery_probe"]
-        if (
-            not current or current.get("permit_id") != permit_id
-            or current.get("abandon_requested")
-        ):
-            return
-        coordinator = get_shared_refresh_coordinator()
-        if time.monotonic() - started_at >= UTK_RECOVERY_PROBE_MAX_SECONDS:
-            await coordinator.complete_recovery_probe(
-                UTK_SPORTS_SCOPE, refresh_identity, permit_id, success=False,
-            )
-            current = refresh["recovery_probe"]
-            if current and current.get("permit_id") == permit_id:
-                refresh["recovery_probe"] = None
-            return
-        renewed = await coordinator.renew_recovery_probe(
-            UTK_SPORTS_SCOPE, permit_id
-        )
-        if renewed is False:
-            current = refresh["recovery_probe"]
-            if current and current.get("permit_id") == permit_id:
-                refresh["recovery_probe"] = None
-            return
-        current["next_renew_at"] = time.monotonic() + (
-            UTK_RECOVERY_PROBE_RENEW_SECONDS if renewed else 1.0
-        )
-
-
-def _install_recovery_probe(
-    runtime, refresh_identity, cancel_tasks, decision, preflight,
-):
-    """將協調器核發的復原探測安裝至本機執行期。"""
-
-    if not decision.is_recovery_probe:
-        return
-    started_at = time.monotonic()
-    probe = {
-        "permit_id": decision.permit_id,
-        "source_document_id": preflight.get("document_id"),
-        "started_at": started_at,
-        "next_renew_at": started_at + UTK_RECOVERY_PROBE_RENEW_SECONDS,
-    }
-    runtime["refresh"]["recovery_probe"] = probe
-    lease_task = asyncio.create_task(_renew_probe_lease(
-        runtime, refresh_identity, decision.permit_id, started_at
-    ))
-    probe["lease_task"] = lease_task
-    cancel_tasks.add(lease_task)
-    lease_task.add_done_callback(cancel_tasks.discard)
-
-
-def _install_abandoned_probe_cleanup(runtime, decision, preflight):
-    """登記失去所有權之復原探測的後續清理。"""
-
-    now = time.monotonic()
-    probe = {
-        "permit_id": decision.permit_id,
-        "source_document_id": preflight.get("document_id"),
-        "started_at": now,
-        "next_renew_at": now + UTK_RECOVERY_PROBE_RENEW_SECONDS,
-        "abandon_requested": True,
-        "pause_cleanup_done": False,
-        "pause_cleanup_retry_at": 0.0,
-    }
-    runtime["refresh"]["recovery_probe"] = probe
-    return probe
 
 
 async def _commit_reserved_reload(
@@ -1191,13 +752,14 @@ async def _commit_reserved_reload(
             and (decision.status == "already_committed" or decision.error)
             and _mark_reload_awaiting(runtime, request)
         ):
-            _install_recovery_probe(
-                runtime, refresh_identity, cancel_tasks, decision, preflight
+            rate_limit._install_recovery_probe(
+                runtime, refresh_identity, cancel_tasks, decision, preflight,
+                coordinator_factory=get_shared_refresh_coordinator,
             )
             return False
         if decision.granted and decision.is_recovery_probe:
-            _install_abandoned_probe_cleanup(runtime, decision, preflight)
-            await _retry_abandoned_probe_cleanup(
+            rate_limit._install_abandoned_probe_cleanup(runtime, decision, preflight)
+            await rate_limit._retry_abandoned_probe_cleanup(
                 runtime, refresh_identity, cancel_tasks, coordinator
             )
         if decision.granted or decision.status == "already_committed":
@@ -1216,8 +778,9 @@ async def _commit_reserved_reload(
             if _mark_reload_awaiting(
                 runtime, request, reservation=reservation
             ):
-                _install_recovery_probe(
-                    runtime, refresh_identity, cancel_tasks, decision, preflight
+                rate_limit._install_recovery_probe(
+                    runtime, refresh_identity, cancel_tasks, decision, preflight,
+                    coordinator_factory=get_shared_refresh_coordinator,
                 )
             if decision.error:
                 debug.log(
@@ -1233,8 +796,9 @@ async def _commit_reserved_reload(
         runtime, request, reservation=reservation
     ):
         return False
-    _install_recovery_probe(
-        runtime, refresh_identity, cancel_tasks, decision, preflight
+    rate_limit._install_recovery_probe(
+        runtime, refresh_identity, cancel_tasks, decision, preflight,
+        coordinator_factory=get_shared_refresh_coordinator,
     )
     return await _invoke_browser_reload(tab, debug)
 

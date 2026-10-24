@@ -14,10 +14,10 @@ from urllib.parse import urlsplit
 import pytest
 import zendriver as uc
 
-from tests.ctbc_support import (
-    ctbc_identity_runtime,
-    ctbc_tab_runtime,
-    ctbc_submission_captcha_and_submit as _ctbc_captcha_and_submit,
+from tests.utiki_support import (
+    utiki_identity_runtime,
+    utiki_tab_runtime,
+    utiki_submission_captcha_and_submit as _utiki_captcha_and_submit,
     config,
 )
 
@@ -25,6 +25,7 @@ from platforms.utiki.dom import (
     CommitResult,
     SubmitDispatchResult,
     clear_conflict_selection,
+    read_clean_seat_conflict_document,
     commit_area,
     commit_date_action,
     commit_server_assigned_area,
@@ -40,7 +41,7 @@ from platforms.utiki.dom import (
 )
 from platforms.utiki.selection import (
     build_submit_plan,
-    classify_submit_dialog as _classify_ctbc_submit_dialog,
+    classify_submit_dialog as _classify_utiki_submit_dialog,
     select_area_snapshot,
     select_date_snapshot,
     select_quantity_snapshot,
@@ -48,23 +49,23 @@ from platforms.utiki.selection import (
     select_seat_snapshot,
 )
 from platforms.utiki.profiles import PageKind
-from platforms.utiki.inputs import _ctbc_login_fingerprint
-from platforms.utiki.submission import _dismiss_ctbc_dialog
+from platforms.utiki.inputs import _utiki_login_fingerprint
+from platforms.utiki.submission import _dismiss_utiki_dialog
 from platforms.utiki.navigation import (
-    _ctbc_delete_fast_navigation_marker,
-    _ctbc_read_destination_state,
-    _ctbc_read_fast_navigation_marker,
+    _utiki_delete_fast_navigation_marker,
+    _utiki_read_destination_state,
+    _utiki_read_fast_navigation_marker,
 )
 from platforms.utiki.refresh import (
     _utk_document_guard,
     build_refresh_identity,
 )
 from platforms.utiki.workflow import (
-    CTBC_SEAT_STALE_RELOAD_REASON,
-    _ctbc_purchase_state_key,
-    _ctbc_tab_identity,
+    UTIKI_SEAT_STALE_RELOAD_REASON,
+    _utiki_purchase_state_key,
+    _utiki_tab_identity,
     _state,
-    nodriver_ctbc_general_admission_main,
+    nodriver_utiki_general_admission_main,
     nodriver_utk_sports_consume_reload_event,
 )
 
@@ -87,9 +88,9 @@ def test_production_dom_contracts_in_local_browser():
 async def _run_browser_fixtures():
     browser = None
     profile = tempfile.TemporaryDirectory(
-        prefix="tickets-hunter-ctbc-fixture-"
+        prefix="tickets-hunter-utiki-fixture-"
     )
-    _clear_ctbc_test_state()
+    _clear_utiki_test_state()
     try:
         browser = await uc.start(
             user_data_dir=profile.name,
@@ -174,17 +175,17 @@ async def _run_browser_fixtures():
                     await assertion(browser)
             else:
                 await assertion(browser)
-            _clear_ctbc_test_state()
+            _clear_utiki_test_state()
     finally:
         try:
             if browser is not None:
                 await browser.stop()
         finally:
             profile.cleanup()
-            _clear_ctbc_test_state()
+            _clear_utiki_test_state()
 
 
-def _clear_ctbc_test_state():
+def _clear_utiki_test_state():
     for bucket in _state.values():
         if isinstance(bucket, (dict, list, set)):
             bucket.clear()
@@ -217,9 +218,9 @@ async def _assert_refresh_document_token_fixture(browser):
         "UTK0201_date.html",
         "?PRODUCT_ID=PRODUCT_FIXTURE",
     )
-    runtime = ctbc_tab_runtime(tab)
+    runtime = utiki_tab_runtime(tab)
     runtime["document"]["snapshot"] = None
-    identity = _ctbc_tab_identity(tab)
+    identity = _utiki_tab_identity(tab)
     refresh_identity = build_refresh_identity(identity)
     refresh_settings = {"utk_sports": {"enabled": True}}
 
@@ -597,6 +598,64 @@ async def _assert_area_fixture(browser):
         "Number(document.body.dataset.rowClicks || 0)"
     ) == 1
 
+    # The Dragons area page exposes its Send action on the verified map area,
+    # while the corresponding sale row has no inline onclick.
+    map_action_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    map_action_snapshot = await read_area_snapshot(map_action_tab)
+    map_action_target = select_area_snapshot(
+        map_action_snapshot, cfg, "P16D0B8Z",
+        require_direct_destination=False,
+    )
+    await map_action_tab.evaluate(
+        "document.querySelector('tr.saleTr[rel=\"front\"]').removeAttribute('onclick')"
+    )
+    assert await commit_server_assigned_area(
+        map_action_tab, map_action_snapshot, map_action_target,
+        cfg["ticket_number"], "b" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await map_action_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 1
+    assert await map_action_tab.evaluate(
+        "Number(document.body.dataset.rowClicks || 0)"
+    ) == 0
+    assert await commit_server_assigned_area(
+        map_action_tab, map_action_snapshot, map_action_target,
+        cfg["ticket_number"], "b" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.COMMITTED
+    assert await map_action_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 1
+
+    # An explicitly present but invalid row action must not fall back to map.
+    blank_action_tab = await _open_fixture(
+        browser,
+        "UTK0204_area.html",
+        "?PERFORMANCE_ID=P16D0B8Z&PRODUCT_ID=PRODUCT_FIXTURE",
+    )
+    blank_action_snapshot = await read_area_snapshot(blank_action_tab)
+    blank_action_target = select_area_snapshot(
+        blank_action_snapshot, cfg, "P16D0B8Z",
+        require_direct_destination=False,
+    )
+    await blank_action_tab.evaluate(
+        "document.querySelector('tr.saleTr[rel=\"front\"]').setAttribute('onclick', '')"
+    )
+    assert await commit_server_assigned_area(
+        blank_action_tab, blank_action_snapshot, blank_action_target,
+        cfg["ticket_number"], "d" * 32,
+        "ticketsHunter.ctbc.fast-navigation.v1",
+    ) is CommitResult.REJECTED
+    assert await blank_action_tab.evaluate(
+        "Number(document.body.dataset.areaClicks || 0)"
+    ) == 0
+
     ambiguous_tab = await _open_fixture(
         browser,
         "UTK0204_area.html",
@@ -902,7 +961,61 @@ async def _assert_seat_fixture(browser):
     assert snapshot == repeated
     assert snapshot.ok
     assert snapshot.page_url == await tab.evaluate("location.href")
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", snapshot.product_id
+    )
+    await tab.evaluate("document.querySelector('#CHK').value = ''")
+    assert (
+        await read_clean_seat_conflict_document(
+            tab, snapshot.page_url, "1", snapshot.product_id
+        ) == snapshot.document_id
+    )
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", "WRONG_PRODUCT"
+    )
     assert await tab.evaluate("document.body.innerHTML") == before_html
+    await tab.evaluate("document.querySelector('#QUANTITY_LIMIT').value = 'bad'")
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", snapshot.product_id
+    )
+    await tab.evaluate("document.querySelector('#QUANTITY_LIMIT').value = '2'")
+    await tab.evaluate("document.querySelector('.ticket').style.display = 'none'")
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", snapshot.product_id
+    )
+    await tab.evaluate("document.querySelector('.ticket').removeAttribute('style')")
+    await tab.evaluate(
+        "document.querySelector('.ticket').appendChild("
+        "document.querySelector('.checkNum').cloneNode(true))"
+    )
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", snapshot.product_id
+    )
+    await tab.evaluate("document.querySelector('.ticket > .checkNum').remove()")
+    await tab.evaluate(
+        "document.querySelectorAll('.ticket button[onclick*=\"setType\"]')"
+        ".forEach(button => button.disabled = true)"
+    )
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", snapshot.product_id
+    )
+    await tab.evaluate(
+        "document.querySelectorAll('.ticket button[onclick*=\"setType\"]')"
+        ".forEach(button => button.disabled = false)"
+    )
+    await tab.evaluate(
+        "document.body.insertAdjacentHTML('beforeend', "
+        "'<div class=\"ui-dialog\"><div id=\"dialog-message\">' + "
+        "'衝突</div></div>')"
+    )
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, "1", snapshot.product_id
+    )
+    await tab.evaluate("document.querySelector('.ui-dialog').remove()")
+    assert not await read_clean_seat_conflict_document(
+        tab, snapshot.page_url, snapshot.document_id, snapshot.product_id
+    )
+    await tab.evaluate("document.querySelector('#CHK').value = 'ABCD'")
     assert await click_counts(tab) == {"ticketType": 0, "seats": 0}
     plan, reason = select_seat_snapshot(
         snapshot,
@@ -916,6 +1029,12 @@ async def _assert_seat_fixture(browser):
     assert await commit_seat(tab, snapshot, plan) is CommitResult.COMMITTED
     assert await click_counts(tab) == {"ticketType": 1, "seats": 2}
     committed_snapshot = await read_seat_snapshot(tab)
+    await tab.evaluate("document.querySelector('#CHK').value = ''")
+    assert not await read_clean_seat_conflict_document(
+        tab, committed_snapshot.page_url, "1",
+        committed_snapshot.product_id,
+    )
+    await tab.evaluate("document.querySelector('#CHK').value = 'ABCD'")
     assert seat_selection_is_valid(
         committed_snapshot,
         plan.ticket_number,
@@ -1325,7 +1444,7 @@ async def _assert_seat_fixture(browser):
 
     with (
         patch(
-            "platforms.utiki.submission._ctbc_captcha",
+            "platforms.utiki.submission._utiki_captcha",
             AsyncMock(side_effect=mutate_seat_during_ocr),
         ) as captcha_solver,
         patch(
@@ -1333,7 +1452,7 @@ async def _assert_seat_fixture(browser):
             AsyncMock(side_effect=capture_seat_dispatch),
         ),
         patch(
-            "platforms.utiki.workflow._ctbc_purchase_state_key",
+            "platforms.utiki.workflow._utiki_purchase_state_key",
             return_value=("fixture-seat-wait",),
         ),
         patch(
@@ -1345,13 +1464,13 @@ async def _assert_seat_fixture(browser):
             AsyncMock(return_value=False),
         ) as reload_page,
     ):
-        assert not await _ctbc_captcha_and_submit(
+        assert not await _utiki_captcha_and_submit(
             wait_tab, wait_cfg, ocr=None, submit_plan=wait_plan
         )
     captcha_solver.assert_awaited_once()
     assert dispatch_results == [SubmitDispatchResult.STALE]
     reload_page.assert_awaited_once_with(
-        wait_tab, wait_cfg, CTBC_SEAT_STALE_RELOAD_REASON
+        wait_tab, wait_cfg, UTIKI_SEAT_STALE_RELOAD_REASON
     )
     assert await addcart_clicks(wait_tab) == 0
 
@@ -1424,7 +1543,7 @@ async def _assert_quantity_fixture(browser):
         if float(time_origin).is_integer()
         else str(time_origin)
     )
-    destination_state = await _ctbc_read_destination_state(
+    destination_state = await _utiki_read_destination_state(
         destination_tab, "general_admission"
     )
     assert destination_state["ready"]
@@ -1433,7 +1552,7 @@ async def _assert_quantity_fixture(browser):
     await destination_tab.evaluate('''document.body.appendChild(
         document.querySelector('#PRODUCT_ID').cloneNode(true)
     )''')
-    duplicate_destination_state = await _ctbc_read_destination_state(
+    duplicate_destination_state = await _utiki_read_destination_state(
         destination_tab, "general_admission"
     )
     assert not duplicate_destination_state["ready"]
@@ -1489,10 +1608,10 @@ async def _assert_quantity_fixture(browser):
         return result
 
     with patch(
-        "platforms.utiki.workflow._ctbc_attest_fast_destination",
+        "platforms.utiki.workflow._utiki_attest_destination",
         AsyncMock(return_value=True),
     ), patch(
-        "platforms.utiki.workflow._ctbc_purchase_state_key",
+        "platforms.utiki.workflow._utiki_purchase_state_key",
         return_value=("fixture-purchase",),
     ), patch(
         "platforms.utiki.submission._page_type",
@@ -1501,16 +1620,16 @@ async def _assert_quantity_fixture(browser):
         "platforms.utiki.submission.dispatch_submit",
         AsyncMock(side_effect=capture_flow_dispatch),
     ), patch(
-        "platforms.utiki.submission._observe_ctbc_submit_outcome",
+        "platforms.utiki.submission._observe_utiki_submit_outcome",
         AsyncMock(return_value=False),
     ) as observe:
-        assert not await nodriver_ctbc_general_admission_main(
+        assert not await nodriver_utiki_general_admission_main(
             flow_tab, flow_cfg, ocr=None
         )
         flow_event_count = await flow_tab.evaluate(
             "Number(document.body.dataset.quantityEvents || 0)"
         )
-        assert not await nodriver_ctbc_general_admission_main(
+        assert not await nodriver_utiki_general_admission_main(
             flow_tab, flow_cfg, ocr=None
         )
     assert dispatch_results == [SubmitDispatchResult.DISPATCHED]
@@ -1521,10 +1640,10 @@ async def _assert_quantity_fixture(browser):
     assert await flow_tab.evaluate(
         "Number(document.body.dataset.addcartClicks || 0)"
     ) == 1
-    active_submit = ctbc_tab_runtime(flow_tab)["purchase"]["active_submit"]
+    active_submit = utiki_tab_runtime(flow_tab)["purchase"]["active_submit"]
     assert active_submit["purchase_key"] == ("fixture-purchase",)
     assert active_submit["phase"] == "awaiting_result"
-    ctbc_tab_runtime(flow_tab)["purchase"]["active_submit"] = None
+    utiki_tab_runtime(flow_tab)["purchase"]["active_submit"] = None
     assert await _read_fixture_quantities(flow_tab) == {
         "FULL": "2", "OTHER": "0"
     }
@@ -1777,25 +1896,25 @@ async def _assert_quantity_fixture(browser):
             return result
 
         with patch(
-            "platforms.utiki.submission._ctbc_captcha",
+            "platforms.utiki.submission._utiki_captcha",
             AsyncMock(side_effect=mutate_during_ocr),
         ) as captcha_solver, patch(
             "platforms.utiki.submission.dispatch_submit",
             AsyncMock(side_effect=capture_dispatch),
         ), patch(
-            "platforms.utiki.workflow._ctbc_purchase_state_key",
+            "platforms.utiki.workflow._utiki_purchase_state_key",
             return_value=(f"fixture-wait-{mutation}",),
         ), patch(
             "platforms.utiki.submission._page_type",
             return_value="general_admission",
         ), patch(
-            "platforms.utiki.submission._observe_ctbc_submit_outcome",
+            "platforms.utiki.submission._observe_utiki_submit_outcome",
             AsyncMock(return_value=False),
         ) as observe, patch(
             "platforms.utiki.workflow._reload_with_interval",
             AsyncMock(return_value=False),
         ) as reload_page:
-            assert not await _ctbc_captcha_and_submit(
+            assert not await _utiki_captcha_and_submit(
                 wait_tab, wait_cfg, ocr=None,
                 submit_plan=build_submit_plan(wait_plan),
             )
@@ -1806,7 +1925,7 @@ async def _assert_quantity_fixture(browser):
         assert await wait_tab.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
         ) == 0
-        assert ctbc_tab_runtime(wait_tab)["purchase"]["active_submit"] is None
+        assert utiki_tab_runtime(wait_tab)["purchase"]["active_submit"] is None
 
     race_tab = await _open_fixture(browser, "UTK0203_quantity.html", query)
     await race_tab.evaluate("document.body.dataset.reboundOther = '1'")
@@ -1904,8 +2023,8 @@ async def _assert_quantity_fixture(browser):
     async def recovery_reload(reload_tab, _config, reason):
         nonlocal reload_calls
         reload_calls += 1
-        identity = _ctbc_tab_identity(reload_tab)
-        refresh = ctbc_identity_runtime(identity)["refresh"]
+        identity = _utiki_tab_identity(reload_tab)
+        refresh = utiki_identity_runtime(identity)["refresh"]
         if reload_calls == 1:
             refresh["reload_request"] = {"reason": reason}
             return False
@@ -1913,25 +2032,25 @@ async def _assert_quantity_fixture(browser):
         return True
 
     with patch(
-        "platforms.utiki.workflow._ctbc_attest_fast_destination",
+        "platforms.utiki.workflow._utiki_attest_destination",
         AsyncMock(return_value=True),
     ), patch(
-        "platforms.utiki.workflow._ctbc_purchase_state_key",
+        "platforms.utiki.workflow._utiki_purchase_state_key",
         return_value=("fixture-stale-quantity",),
     ), patch(
         "platforms.utiki.workflow._reload_with_interval",
         AsyncMock(side_effect=recovery_reload),
     ) as reload_page, patch(
-        "platforms.utiki.submission._ctbc_captcha_and_submit",
+        "platforms.utiki.submission._utiki_captcha_and_submit",
         AsyncMock(return_value=True),
     ) as submit_gate:
-        assert not await nodriver_ctbc_general_admission_main(
+        assert not await nodriver_utiki_general_admission_main(
             recovery_tab, recovery_cfg, ocr=None
         )
         recovery_event_count = await recovery_tab.evaluate(
             "Number(document.body.dataset.quantityEvents || 0)"
         )
-        assert not await nodriver_ctbc_general_admission_main(
+        assert not await nodriver_utiki_general_admission_main(
             recovery_tab, recovery_cfg, ocr=None
         )
     assert reload_page.await_count == 2
@@ -2013,6 +2132,50 @@ async def _assert_server_assigned_quantity_fixture(browser):
         f"/BROTHERS/UTK0201_001{query}"
     )
     try:
+        without_group_tab = await _open_fixture_url(browser, url)
+        await without_group_tab.evaluate(
+            "document.querySelector('#GROUP_ID').remove()"
+        )
+        without_group_state = await _utiki_read_destination_state(
+            without_group_tab, "server_assigned_quantity"
+        )
+        assert without_group_state["ready"]
+        assert without_group_state["group_input_present"] is False
+        assert without_group_state["group_id"] == ""
+        without_group_snapshot = await read_quantity_snapshot(without_group_tab)
+        without_group_plan = select_quantity_snapshot(
+            without_group_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert without_group_plan is not None
+        assert without_group_plan.group_hidden_present is False
+        assert await commit_quantity(
+            without_group_tab, without_group_snapshot, without_group_plan
+        ) is CommitResult.COMMITTED
+        assert await dispatch_submit(
+            without_group_tab, build_submit_plan(without_group_plan)
+        ) is SubmitDispatchResult.DISPATCHED
+        assert await without_group_tab.evaluate(
+            "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 1
+
+        unexpected_group_tab = await _open_fixture_url(browser, url)
+        unexpected_group_tab_snapshot = await read_quantity_snapshot(
+            unexpected_group_tab
+        )
+        unexpected_group_tab_plan = select_quantity_snapshot(
+            unexpected_group_tab_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert unexpected_group_tab_plan is not None
+        await unexpected_group_tab.evaluate(
+            "document.querySelector('#GROUP_ID').remove()"
+        )
+        assert await commit_quantity(
+            unexpected_group_tab, unexpected_group_tab_snapshot,
+            unexpected_group_tab_plan
+        ) is CommitResult.STALE
+
         conflict_tab = await _open_fixture_url(browser, url)
         conflict_snapshot = await read_quantity_snapshot(conflict_tab)
         assert await clear_conflict_selection(
@@ -2046,6 +2209,63 @@ async def _assert_server_assigned_quantity_fixture(browser):
         ) is SubmitDispatchResult.DISPATCHED
         assert await tab.evaluate(
             "Number(document.body.dataset.addcartClicks || 0)"
+        ) == 1
+
+        inline_tab = await _open_fixture_url(browser, url)
+        await inline_tab.evaluate('''
+            (() => {
+                const group = document.querySelector('#GROUP_ID');
+                group.remove();
+                const form = document.querySelector('form');
+                form.replaceWith(...Array.from(form.childNodes));
+                window._vr = '/BROTHERS/';
+                window.DoPost = function DoPost(_payload, _url) {
+                    const request = {type: "POST"};
+                    if (request.type === 'POST') {
+                        document.body.dataset.inlinePosts = String(
+                            Number(document.body.dataset.inlinePosts || 0) + 1);
+                    }
+                };
+                window.addShoppingCart = function addShoppingCart() {
+                    DoPost('', _vr + 'UTK0201_001/ADD_SHOPPING_CAR');
+                };
+                document.querySelector('#addcart').setAttribute(
+                    'onclick', 'addShoppingCart();return false;');
+            })()
+        ''')
+        inline_snapshot = await read_quantity_snapshot(inline_tab)
+        inline_plan = select_quantity_snapshot(
+            inline_snapshot, "全票", 2,
+            page_type="server_assigned_quantity",
+        )
+        assert inline_plan is not None
+        assert await commit_quantity(
+            inline_tab, inline_snapshot, inline_plan
+        ) is CommitResult.COMMITTED
+        inline_submit_plan = build_submit_plan(inline_plan)
+        await inline_tab.evaluate(
+            "document.querySelector('#addcart').setAttribute("
+            "'onclick', 'otherAction();return false;')"
+        )
+        assert await dispatch_submit(
+            inline_tab, inline_submit_plan
+        ) is SubmitDispatchResult.REJECTED
+        await inline_tab.evaluate('''
+            (() => {
+                document.querySelector('#addcart').setAttribute(
+                    'onclick', 'addShoppingCart();return false;');
+                window._vr = '/WRONG/';
+            })()
+        ''')
+        assert await dispatch_submit(
+            inline_tab, inline_submit_plan
+        ) is SubmitDispatchResult.REJECTED
+        await inline_tab.evaluate("window._vr = '/BROTHERS/'")
+        assert await dispatch_submit(
+            inline_tab, inline_submit_plan
+        ) is SubmitDispatchResult.DISPATCHED
+        assert await inline_tab.evaluate(
+            "Number(document.body.dataset.inlinePosts || 0)"
         ) == 1
 
         hidden_only = await _open_fixture_url(browser, url)
@@ -2194,7 +2414,7 @@ async def _assert_dialog_fixture(browser):
     assert snapshot == repeated
     assert snapshot.visible_count == 1
     assert snapshot.text == "該位置已被選走"
-    assert _classify_ctbc_submit_dialog(snapshot.text) == "seat_conflict"
+    assert _classify_utiki_submit_dialog(snapshot.text) == "seat_conflict"
     assert await tab.evaluate("document.body.innerHTML") == before_html
     assert await tab.evaluate(
         "Number(document.body.dataset.dialogClicks || 0)"
@@ -2210,10 +2430,10 @@ async def _assert_dialog_fixture(browser):
             document.body.append(account, password);
         })()
     ''')
-    assert await _ctbc_login_fingerprint(
+    assert await _utiki_login_fingerprint(
         tab, expected_dialog=snapshot
     )
-    assert await _ctbc_login_fingerprint(
+    assert await _utiki_login_fingerprint(
         tab,
         expected_dialog=replace(
             snapshot, document_id="different-document"
@@ -2282,7 +2502,7 @@ async def _assert_dialog_fixture(browser):
                 setTimeout(() => { wrapper.style.display = 'none'; }, 30);
             };
     ''')
-    assert await _dismiss_ctbc_dialog(
+    assert await _dismiss_utiki_dialog(
         delayed_tab, "該位置已被選走"
     )
     assert await delayed_tab.evaluate(
@@ -2338,7 +2558,6 @@ async def _assert_fast_marker_fixture(browser):
                 "tenant_path": profile.tenant_path,
                 "host": profile.host,
                 "map_namespace": profile.map_namespace,
-                "fast_area_prefetch": profile.fast_area_prefetch,
             }
 
         async def open_fast_tab(*, control_id="buy_btn", duplicate_row=False):
@@ -2370,6 +2589,10 @@ async def _assert_fast_marker_fixture(browser):
                 patch(
                     "platforms.utiki.selection._parse_date_target_url",
                     side_effect=parse_fixture_date_target,
+                ),
+                patch(
+                    "platforms.utiki.selection.get_utiki_tenant_profile",
+                    return_value=profile,
                 ),
             ):
                 snapshot = await read_date_snapshot(tab)
@@ -2417,7 +2640,7 @@ async def _assert_fast_marker_fixture(browser):
 
         for _ in range(100):
             if str(tab.target.url) == destination_url:
-                marker_state = await _ctbc_read_fast_navigation_marker(tab)
+                marker_state = await _utiki_read_fast_navigation_marker(tab)
                 if marker_state.get("present"):
                     break
             await tab.sleep(0.02)
@@ -2428,10 +2651,10 @@ async def _assert_fast_marker_fixture(browser):
         assert marker["nonce"] == nonce
         assert marker["source"] == source_url
         assert marker["destination"] == destination_url
-        assert not await _ctbc_delete_fast_navigation_marker(tab, "b" * 32)
-        assert (await _ctbc_read_fast_navigation_marker(tab))["marker"] == marker
-        assert await _ctbc_delete_fast_navigation_marker(tab, nonce)
-        assert not (await _ctbc_read_fast_navigation_marker(tab))["present"]
+        assert not await _utiki_delete_fast_navigation_marker(tab, "b" * 32)
+        assert (await _utiki_read_fast_navigation_marker(tab))["marker"] == marker
+        assert await _utiki_delete_fast_navigation_marker(tab, nonce)
+        assert not (await _utiki_read_fast_navigation_marker(tab))["present"]
     finally:
         server.shutdown()
         server.server_close()

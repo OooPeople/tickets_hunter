@@ -61,7 +61,6 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
         "seat_selection_mode": "manual",
     }
     config_dict["utiki"].update(utiki_behavior)
-    config_dict["ctbc"].update(utiki_behavior)
     config_dict["ocr_captcha"].update({
         "enable": False,
         "force_submit": False,
@@ -74,99 +73,99 @@ def config(date_keyword='"9/10"', area_keyword='"A"'):
     return config_dict
 
 
-class CtbcStateIsolationMixin:
-    ctbc_state = None
+class UtikiStateIsolationMixin:
+    utiki_state = None
 
     def setUp(self):
         super().setUp()
-        self._clear_ctbc_test_state()
-        self.addCleanup(self._clear_ctbc_test_state)
+        self._clear_utiki_test_state()
+        self.addCleanup(self._clear_utiki_test_state)
 
-    def _clear_ctbc_test_state(self):
-        state = self.ctbc_state or {}
+    def _clear_utiki_test_state(self):
+        state = self.utiki_state or {}
         state.get("tabs", {}).clear()
         state.get("cancel_tasks", set()).clear()
 
 
-def ctbc_tab_runtime(tab):
+def utiki_tab_runtime(tab):
     """Return the production-owned canonical runtime for one semantic fake."""
-    from platforms.utiki.workflow import _ctbc_tab_runtime
+    from platforms.utiki.workflow import _utiki_tab_runtime
 
-    return _ctbc_tab_runtime(tab)
+    return _utiki_tab_runtime(tab)
 
 
-def ctbc_navigation_config_fingerprint(config_dict):
-    from platforms.utiki.navigation import _ctbc_selection_config_fingerprint
+def utiki_navigation_config_fingerprint(config_dict):
+    from platforms.utiki.navigation import _utiki_selection_config_fingerprint
     from platforms.utiki.workflow import _get_utiki_behavior
 
-    return _ctbc_selection_config_fingerprint(
+    return _utiki_selection_config_fingerprint(
         config_dict, behavior_for_key=_get_utiki_behavior
     )
 
 
-async def ctbc_submission_captcha_and_submit(*args, **kwargs):
+async def utiki_submission_captcha_and_submit(*args, **kwargs):
     """Exercise the extracted submission owner with the live workflow registry."""
     from platforms.utiki import submission, workflow
 
-    return await submission._ctbc_captcha_and_submit(
+    return await submission._utiki_captcha_and_submit(
         *args,
-        runtime_for_tab=workflow._ctbc_tab_runtime,
-        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        runtime_for_tab=workflow._utiki_tab_runtime,
+        purchase_key_for_tab=workflow._utiki_purchase_state_key,
         reload_with_interval=workflow._reload_with_interval,
         **kwargs,
     )
 
 
-async def ctbc_submission_handle_dialog(*args, **kwargs):
+async def utiki_submission_handle_dialog(*args, **kwargs):
     from platforms.utiki import submission, workflow
 
-    return await submission._handle_ctbc_submit_dialog(
+    return await submission._handle_utiki_submit_dialog(
         *args,
-        runtime_for_tab=workflow._ctbc_tab_runtime,
-        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        runtime_for_tab=workflow._utiki_tab_runtime,
+        purchase_key_for_tab=workflow._utiki_purchase_state_key,
         **kwargs,
     )
 
 
-async def ctbc_submission_reset_captcha(*args, **kwargs):
+async def utiki_submission_reset_captcha(*args, **kwargs):
     from platforms.utiki import submission, workflow
 
-    return await submission._reset_ctbc_captcha(
+    return await submission._reset_utiki_captcha(
         *args,
-        runtime_for_tab=workflow._ctbc_tab_runtime,
-        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        runtime_for_tab=workflow._utiki_tab_runtime,
+        purchase_key_for_tab=workflow._utiki_purchase_state_key,
         **kwargs,
     )
 
 
-async def ctbc_submission_recover_captcha(*args, **kwargs):
+async def utiki_submission_recover_captcha(*args, **kwargs):
     from platforms.utiki import submission, workflow
 
-    return await submission._recover_ctbc_captcha_dialog(
+    return await submission._recover_utiki_captcha_dialog(
         *args,
-        runtime_for_tab=workflow._ctbc_tab_runtime,
-        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        runtime_for_tab=workflow._utiki_tab_runtime,
+        purchase_key_for_tab=workflow._utiki_purchase_state_key,
         **kwargs,
     )
 
 
-async def ctbc_submission_recover_conflict(*args, **kwargs):
+async def utiki_submission_recover_conflict(*args, **kwargs):
     from platforms.utiki import submission, workflow
 
-    return await submission._recover_ctbc_seat_conflict(
+    return await submission._recover_utiki_seat_conflict(
         *args,
-        runtime_for_tab=workflow._ctbc_tab_runtime,
-        purchase_key_for_tab=workflow._ctbc_purchase_state_key,
+        runtime_for_tab=workflow._utiki_tab_runtime,
+        purchase_key_for_tab=workflow._utiki_purchase_state_key,
         reload_with_interval=workflow._reload_with_interval,
         **kwargs,
     )
 
 
-def ctbc_identity_runtime(identity):
+def utiki_identity_runtime(identity):
     """Return the production-owned canonical runtime for an observed identity."""
-    from platforms.utiki.workflow import _ctbc_runtime_for_identity
+    from platforms.utiki.workflow import _utiki_runtime_for_identity
 
-    return _ctbc_runtime_for_identity(identity)
+    return _utiki_runtime_for_identity(identity)
 
 
 class FakeUtikiDomPort:
@@ -725,8 +724,8 @@ class FakeTab:
             return json.dumps(self._date_snapshot())
         if "__ticketsHunterUtikiDateCommit" in script:
             return await self._commit_date(script)
-        if self.semantic_navigation or "CtbcFastMarker" in script or (
-            "CtbcMalformedMarker" in script
+        if self.semantic_navigation or "UtikiFastMarker" in script or (
+            "UtikiMalformedMarker" in script
         ):
             result = await self._evaluate_navigation(script)
             if result is not NotImplemented:
@@ -865,7 +864,7 @@ class FakeTab:
         return "committed"
 
     async def _evaluate_navigation(self, script):
-        if "__ticketsHunterCtbcFastMarkerRead" in script:
+        if "__ticketsHunterUtikiFastMarkerRead" in script:
             if self.on_marker_read:
                 self.on_marker_read()
             if not self.storage_available:
@@ -889,7 +888,7 @@ class FakeTab:
                 "raw": raw,
                 "page_url": self.target.url,
             })
-        if "__ticketsHunterCtbcFastMarkerDelete" in script:
+        if "__ticketsHunterUtikiFastMarkerDelete" in script:
             if not self.storage_available or not self.marker_delete_allowed:
                 return False
             nonce = _script_json_constant(script, "expectedNonce")
@@ -904,7 +903,7 @@ class FakeTab:
                 self._clear_marker()
                 return True
             return False
-        if "__ticketsHunterCtbcMalformedMarkerDelete" in script:
+        if "__ticketsHunterUtikiMalformedMarkerDelete" in script:
             expected_raw = _script_json_constant(script, "expectedRaw")
             if self.on_raw_marker_delete:
                 self.on_raw_marker_delete()
@@ -912,20 +911,20 @@ class FakeTab:
                 return False
             self._clear_marker()
             return True
-        if "__ticketsHunterCtbcDestinationState" in script:
+        if "__ticketsHunterUtikiDestinationState" in script:
             result = {
                 "ready": True, "page_url": self.target.url, **self.dom_ids,
             }
             if self.on_destination_state:
                 self.on_destination_state()
             return json.dumps(result)
-        if "__ticketsHunterCtbcReturn" in script:
+        if "__ticketsHunterUtikiReturn" in script:
             source_url = _script_json_constant(script, "sourceUrl")
             if self.target.url != source_url:
                 return False
             self.target.url = _script_json_constant(script, "areaUrl")
             return True
-        if "__ticketsHunterCtbcNativeAreaCommit" in script:
+        if "__ticketsHunterUtikiNativeAreaCommit" in script:
             if self.on_native_commit:
                 self.on_native_commit()
             if self.native_clears_marker:

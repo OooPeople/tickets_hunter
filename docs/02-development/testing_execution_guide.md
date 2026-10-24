@@ -2,7 +2,7 @@
 
 **文件說明**：定義目前 repository 可執行的驗證層級、命令與結果陳述方式。
 
-**最後更新**：2026-10-15
+**最後更新**：2026-10-25
 
 ## 1. 原則
 
@@ -21,11 +21,11 @@
 ```text
 tests/
   test_cloudflare_handling.py
-  ctbc_support.py
-  test_ctbc_pure.py
-  test_ctbc_dom.py
-  test_ctbc_dom_fixtures.py
-  test_ctbc_refresh.py
+  utiki_support.py
+  test_utiki_pure.py
+  test_utiki_dom.py
+  test_utiki_dom_fixtures.py
+  test_utiki_refresh.py
   test_global_settings.py
   test_ibon_date_selection.py
   test_refresh_coordinator.py
@@ -67,7 +67,7 @@ uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt
 | D. 建置驗證 | 驗證 import、相依套件與 PyInstaller | `python build_scripts/build_local.py` |
 | E. 實機煙霧測試 | 驗證真實網站 DOM、導頁與瀏覽器行為 | 使用測試設定啟動，人工觀察並記錄範圍 |
 
-此表保留全專案的打包驗證層級；[本次 uTiki 重構](utiki-refactor/PLAN.md) 僅交付原始碼，D 層級不屬任何批次的完成條件。新增 module 或 import 也只按 PLAN 驗證正式 source caller 與 Windows x64／macOS arm64 原始碼使用路徑，不要求 PyInstaller、hidden-import、spec 或 frozen build。uTiki 只驗證 current 設定讀取／儲存及原本支援的 hot reload，不把舊設定升級、runtime fallback、dual read／dual write 或新 DB migration 列為測試義務。
+此表保留全專案的打包驗證層級。已完成的 uTiki 重構當時以原始碼交付，故其歷史結果不包含 PyInstaller／frozen build；後續修改按當次交付目標選擇驗證層級。uTiki 目前只讀 current 行為設定，其讀取、儲存及熱更新應依現行程式和變更範圍驗證，不從舊計畫推導升級或 migration 義務。
 
 開發中先跑受影響的聚焦案例。完整切片接線或整合時跑必要的預設套件，讓可執行案例完成並收集失敗；按共同根因集中處理，修復期間聚焦重驗，整批處理後再做必要的完整驗證。只有收集或環境錯誤阻擋後續案例時，排除阻礙後提早重跑完整套件以補齊結果。不訂額外固定次數，也不靠反覆推送觸發 CI 尋找下一個錯誤。
 
@@ -92,7 +92,7 @@ git diff --check
 只檢查本次修改過的 Python 檔案，例如：
 
 ```bash
-python -m py_compile src/platforms/ctbc.py tests/ctbc_support.py tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py
+python -m py_compile src/platforms/utiki/auth.py tests/utiki_support.py tests/test_utiki_pure.py tests/test_utiki_dom.py tests/test_utiki_refresh.py
 ```
 
 `py_compile` 只證明語法與匯入前編譯階段可通過，不證明行為正確。
@@ -100,15 +100,15 @@ python -m py_compile src/platforms/ctbc.py tests/ctbc_support.py tests/test_ctbc
 ### 4.3 聚焦測試
 
 ```bash
-python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py
+python -m pytest tests/test_utiki_pure.py tests/test_utiki_dom.py tests/test_utiki_refresh.py
 python -m pytest tests/test_refresh_coordinator.py
 ```
 
 也可以執行單一 test class 或 method：
 
 ```bash
-python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest
-python -m pytest tests/test_ctbc_pure.py::CtbcPureSelectionTest::test_name
+python -m pytest tests/test_utiki_pure.py::UtikiPureSelectionTest
+python -m pytest tests/test_utiki_pure.py::UtikiPureSelectionTest::test_tenant_auth_capabilities_keep_ctbc_credentials_scoped
 ```
 
 ### 4.4 完整測試
@@ -126,8 +126,8 @@ python -m unittest discover -s tests -p 'test_*.py'
 
 pytest 可以執行現有 `unittest.TestCase`。日後若新增 pytest 原生函式或 fixture 測試，unittest 不會收集它們；屆時兩個 runner 的測試數不同是預期結果，不得把 unittest 當成完整 suite。
 
-CTBC 的脫敏瀏覽器 fixture 位於 `tests/fixtures/ctbc/`，runner 是
-`tests/test_ctbc_dom_fixtures.py`。它使用本機 `file://` HTML 與 `127.0.0.1` loopback server，不連線真實售票網站，
+以中信脫敏樣本驗證共用 uTiki DOM 契約的 fixture 位於 `tests/fixtures/ctbc/`，runner 是
+`tests/test_utiki_dom_fixtures.py`。它使用本機 `file://` HTML 與 `127.0.0.1` loopback server，不連線真實售票網站，
 並同時受 `browser` marker 與 `TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1` 環境變數保護；
 因此預設 pytest 會 deselect；unittest discover 不會收集 pytest-only runner，也不會
 啟動瀏覽器。執行前需在本機安裝
@@ -136,14 +136,14 @@ Chrome、Chromium、Edge 或 Brave 等 zendriver 支援的瀏覽器。
 macOS／Linux 明確執行命令：
 
 ```bash
-TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 python -m pytest -m "browser and not live" tests/test_utiki_dom_fixtures.py
 ```
 
 Windows PowerShell 明確執行命令：
 
 ```powershell
 $env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES = "1"
-python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+python -m pytest -m "browser and not live" tests/test_utiki_dom_fixtures.py
 Remove-Item Env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
 ```
 
@@ -171,7 +171,7 @@ python -m pytest --cov=src --cov-report=term-missing
 
 ### 4.5 建置驗證
 
-本節供交付範圍包含打包的工作使用；本次 uTiki 依正式 PLAN 採 source-only，不因下列變更執行打包或把建置結果列為驗收。其他適用工作在以下情況執行：
+本節供交付範圍包含打包的工作使用；已完成的 uTiki 重構當時採 source-only。後續是否建置或列為驗收，依當次交付範圍決定。適用工作在以下情況執行：
 
 - 新增或移除 import。
 - 修改 `requirement.txt`。
@@ -196,8 +196,8 @@ python build_scripts/build_local.py
 | 平台 DOM reader 或 selector | 上述項目、合成／脫敏 fixture 或契約測試；真站可用且獲授權時另記煙霧測試 |
 | 點擊、填值、送出或 dialog recovery | 上述項目、重入／失敗案例；真站範圍依使用者授權與適用計畫 |
 | 刷新／429 協調 | 聚焦協調器測試、完整套件、多實例或時間控制測試 |
-| 設定 schema／遷移 | default、舊設定遷移、儲存回讀、UI 顯示、相關流程測試 |
-| import／相依／spec | 語法、完整套件；交付範圍包含打包時才做本地建置。本次 uTiki 新 module／import 另依 PLAN 驗證雙平台 source 路徑 |
+| 設定格式／UI | 適用的 default、current 讀取與儲存回讀、UI 顯示、熱更新及正式入口流程；只有當次需求或現行相容承諾包含舊格式遷移時才驗證 migration |
+| import／相依／spec | 語法、完整套件與正式 source 入口；交付範圍包含打包時才做本地建置，跨平台範圍依當次需求 |
 
 ## 6. 測試設計準則
 
@@ -205,7 +205,7 @@ python build_scripts/build_local.py
 
 適合驗證：
 
-- 設定正規化與遷移。
+- 設定正規化；只有當次需求或現行相容承諾包含舊格式遷移時才測遷移。
 - URL 與頁型分類。
 - 關鍵字優先順序、排除與 fallback。
 - 座位排序、連座選擇、票數 audit。
@@ -222,7 +222,7 @@ fake 應表達操作語意，例如 `read_snapshot()`、`commit_selection()`，�
 
 - inspect → decide → commit 的順序。
 - URL、document 或元素身分在 commit 前改變時 fail closed。
-- 50 ms 重複 tick 不會重複 click、reload 或 submit。
+- 短間隔或重複 tick 不會重複 click、reload 或 submit。
 - commit 失敗後不會把狀態標記成成功。
 
 ### 6.3 DOM fixture 測試
@@ -230,7 +230,7 @@ fake 應表達操作語意，例如 `read_snapshot()`、`commit_selection()`，�
 fixture 可由已脫敏的真實頁面片段，或依頁型契約手工建立的合成頁面構成，並由 production reader 在真正 DOM 環境中解析。
 不得由待測程式產生 fixture 再驗證自己。
 
-目前 runner 位於 `tests/test_ctbc_dom_fixtures.py`，並依 4.4 節的環境變數與
+目前 runner 位於 `tests/test_utiki_dom_fixtures.py`，並依 4.4 節的環境變數與
 `browser` marker 明確啟用；瀏覽器測試不得在一般 unittest discover 中無提示啟動。
 
 fixture 必須：
@@ -248,7 +248,7 @@ fixture 必須：
 
 ## 7. 實機煙霧測試
 
-本節不是執行授權。實機測試只在有合法活動、使用者明確授權測試範圍、設定與 profile，且風險可控時執行；使用指定的測試設定與專用 profile，不自行使用日常 profile，也不把內容複製到命令輸出或文件。本次 uTiki 真站驗證依正式 PLAN 另記，未執行就如實標示。
+本節不是執行授權。實機測試只在有合法活動、使用者明確授權測試範圍、設定與 profile，且風險可控時執行；使用指定的測試設定與專用 profile，不自行使用日常 profile，也不把內容複製到命令輸出或文件。uTiki 真站驗證記於[交接狀態](utiki-refactor/STATUS.md)，未執行就如實標示。
 
 建議流程：
 
@@ -276,7 +276,7 @@ fixture 必須：
 
 ```text
 - `git diff --check`：通過。
-- `python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py`：94 tests passed（此數字是當次輸出，不是永久門檻）。
+- `python -m pytest tests/test_utiki_pure.py tests/test_utiki_dom.py tests/test_utiki_refresh.py`：填入本次實際的 tests／subtests 結果；Phase 1 的 94 個 CTBC 測試是導入時快照，不是現行門檻。
 - 完整 pytest：未執行，原因是本次只修改文件。
 - 實機：未執行；售票入口已關閉，因此 dialog recovery 仍待下一次可用活動驗證。
 ```

@@ -124,7 +124,7 @@ src/（或 EXE 目錄，= util.get_app_root()）
   - `paused` = 暫停檔存在
   - `last_url` = 讀 `MAXBOT_LAST_URL.txt`
 
-前端「執行階段」頁籤的「執行中實例」面板每 2 秒輪詢 `/instances`，渲染每列的存活／執行／暫停狀態與執行網址，提供每列暫停／繼續鈕與「全部暫停」（逐一對存活實例打 `/pause?profile=<id>`）。
+前端「執行階段」頁籤的「執行中實例」面板每 2 秒輪詢 `/instances`，渲染每列的存活／執行／暫停狀態與執行網址，提供每列暫停／繼續鈕與「全部暫停」（逐一對存活實例以受保護的 POST 呼叫 `/pause?profile=<id>`）。
 
 ---
 
@@ -139,7 +139,7 @@ src/（或 EXE 目錄，= util.get_app_root()）
 
 ### 重複 RUN 與序號實例
 
-對已有存活實例的 profile 再按「搶票」：前端偵測 `/instances` 中該 profile 已存活 → 跳確認框（警告 session 互踢）→ 算出下一個空序號（`kktix-2`）→ 呼叫 `/run?profile=<name>&instance=<newid>`。
+對已有存活實例的 profile 再按「搶票」：前端偵測 `/instances` 中該 profile 已存活 → 跳確認框（警告 session 互踢）→ 算出下一個空序號（`kktix-2`）→ 儲存成功後以受保護的 POST 呼叫 `/run?profile=<name>&instance=<newid>`。
 
 後端 `RunHandler` 收 `?instance=` → `launch_maxbot(profile, instance_override)` → `util.launch_maxbot(instance=...)` 轉成 `--instance`；`--input` 仍給 profile json，故 bot 以 override 當 instance id、以 profile 設定執行。
 

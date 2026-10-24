@@ -19,6 +19,7 @@ from zendriver.core.config import Config
 import util
 import settings
 import chrome_downloader
+from ocr_models import OcrModel
 
 try:
     import ddddocr
@@ -121,16 +122,20 @@ def create_universal_ocr(config_dict):
 CONST_TIXCRAFT_TM_MODEL_PATH = "assets/model/tixcraft_tm"
 CONST_DEFAULT_UNIVERSAL_PATH = "assets/model/universal"
 
-def create_ocr_for_platform(config_dict):
-    """Create the best OCR instance for the current platform.
+def create_ocr_for_model(config_dict, preferred_model=None):
+    """Create the requested OCR model, preserving user configuration priority.
 
     Priority:
     1. use_universal=False -> None (ddddocr fallback in caller)
     2. User custom path (not the default) -> use user's path
-    3. CTBC Sports -> official ddddocr model (uppercase letters + digits)
-    4. tixcraft / ticketmaster / indievox homepage -> try tixcraft_tm model
+    3. official -> official ddddocr model
+    4. tixcraft_tm -> try tixcraft_tm model
     5. Fallback -> universal model
     """
+    if preferred_model is None:
+        preferred_model = OcrModel.UNIVERSAL
+    if not isinstance(preferred_model, OcrModel):
+        raise ValueError(f"Unknown OCR model policy: {preferred_model}")
     ocr_cfg = config_dict.get("ocr_captcha", {})
     if not ocr_cfg.get("use_universal", True):
         return None
@@ -141,35 +146,31 @@ def create_ocr_for_platform(config_dict):
     if user_path and user_path != CONST_DEFAULT_UNIVERSAL_PATH:
         return create_universal_ocr(config_dict)
 
-    # Auto-select based on homepage
-    homepage = config_dict.get("homepage", "")
-    if any(domain in homepage.lower() for domain in ("ctbcsports.com", "tix.wdragons.com")):
+    if preferred_model is OcrModel.OFFICIAL:
         try:
             ocr = ddddocr.DdddOcr(
                 show_ad=False,
                 beta=ocr_cfg.get("beta", True),
             )
-            # CTBC renders four uppercase ASCII letters/digits.  Restricting
-            # the alphabet helps the official model, while the CTBC handler
-            # still normalizes case because ddddocr may emit lowercase glyphs.
+            # This uTiki branch keeps the existing character range;
+            # the page handler still normalizes case for lowercase glyphs.
             ocr.set_ranges(5)
             debug = util.create_debug_logger(config_dict)
-            debug.log("[OCR] Auto-selected official ddddocr model for UTK Sports")
+            debug.log("[OCR] Auto-selected official ddddocr model")
             return ocr
         except Exception as exc:
             debug = util.create_debug_logger(config_dict)
-            debug.log(f"[OCR] Failed to initialize CTBC OCR model: {exc}")
+            debug.log(f"[OCR] Failed to initialize official OCR model: {exc}")
             return None
 
-    tixcraft_domains = ["tixcraft.com", "indievox.com", "ticketmaster."]
-    if any(domain in homepage for domain in tixcraft_domains):
+    if preferred_model is OcrModel.TIXCRAFT_TM:
         override = dict(config_dict)
         override["ocr_captcha"] = dict(ocr_cfg)
         override["ocr_captcha"]["path"] = CONST_TIXCRAFT_TM_MODEL_PATH
         ocr = create_universal_ocr(override)
         if ocr is not None:
             debug = util.create_debug_logger(config_dict)
-            debug.log(f"[OCR] Auto-selected tixcraft_tm model for {homepage}")
+            debug.log("[OCR] Auto-selected tixcraft_tm model")
             return ocr
 
     return create_universal_ocr(config_dict)
@@ -1441,7 +1442,7 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict, preferr
 
         # Collect all matching images rather than committing to the first DOM
         # match. Hidden login captchas often precede the visible purchase one.
-        # CTBC uses /Home/pic?TYPE= rather than the legacy /pic.aspx?TYPE= URL.
+        # uTiki sports pages can use /Home/pic?TYPE= instead of /pic.aspx?TYPE=.
         candidates = []
         order = 0
 

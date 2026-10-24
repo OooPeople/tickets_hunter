@@ -1,9 +1,5 @@
 #encoding=utf-8
-"""uTiki2 sports ticketing workflow.
-
-The CTBC site uses the same UTK naming convention as a few older ticketing
-sites. This module owns the single per-tab runtime and routes purchase work.
-"""
+"""Shared uTiki2 sports workflow and owner of the single per-tab runtime."""
 
 import asyncio
 import uuid
@@ -17,10 +13,10 @@ from . import date_area as date_area_engine
 from . import navigation as navigation_engine
 from . import purchase as purchase_engine
 from . import submission as submission_engine
-from .navigation import _get_ctbc_page_type
-from .inputs import nodriver_ctbc_inject_cookies
+from .navigation import _get_utiki_page_type
+from .inputs import nodriver_utiki_inject_cookies
 from .profiles import is_utiki_sports_url
-from .runtime import TabRuntime, new_tab_runtime as _new_ctbc_tab_runtime
+from .runtime import TabRuntime, new_tab_runtime as _new_utiki_tab_runtime
 
 
 __all__ = [
@@ -30,18 +26,18 @@ __all__ = [
     "nodriver_utk_sports_pause_refresh",
     "nodriver_utk_sports_consume_reload_event",
     "nodriver_utk_sports_health_check",
-    "nodriver_ctbc_inject_cookies",
-    "nodriver_ctbc_main",
+    "nodriver_utiki_inject_cookies",
+    "nodriver_utiki_main",
     "nodriver_utk_sports_reload",
     "nodriver_utk_sports_reload_wait",
 ]
 
 
-CTBC_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
-CTBC_QUANTITY_STALE_RELOAD_REASON = (
-    submission_engine.CTBC_QUANTITY_STALE_RELOAD_REASON
+UTIKI_AREA_ROW_SELECTOR = ".seats table.f1 > tbody > tr.saleTr"
+UTIKI_QUANTITY_STALE_RELOAD_REASON = (
+    submission_engine.UTIKI_QUANTITY_STALE_RELOAD_REASON
 )
-CTBC_SEAT_STALE_RELOAD_REASON = submission_engine.CTBC_SEAT_STALE_RELOAD_REASON
+UTIKI_SEAT_STALE_RELOAD_REASON = submission_engine.UTIKI_SEAT_STALE_RELOAD_REASON
 
 
 class _WorkflowState(TypedDict):
@@ -57,17 +53,14 @@ _UTIKI_TAB_TOKEN_ATTR = "_tickets_hunter_utiki_tab_token"
 
 
 def _get_utiki_behavior(config_dict, key, default):
-    """讀取標準租戶行為設定，並提供一期舊設定相容。"""
+    """Read the current uTiki behavior setting at the original lookup point."""
     canonical = config_dict.get("utiki")
     if isinstance(canonical, dict) and key in canonical:
         return canonical[key]
-    legacy = config_dict.get("ctbc")
-    if isinstance(legacy, dict) and key in legacy:
-        return legacy[key]
     return default
 
 
-def _ctbc_tab_identity(tab):
+def _utiki_tab_identity(tab):
     """取得不保留分頁物件參照的穩定純量識別。"""
     identity = str(getattr(tab, _UTIKI_TAB_TOKEN_ATTR, "") or "")
     if identity:
@@ -86,20 +79,20 @@ def _ctbc_tab_identity(tab):
     return identity
 
 
-def _ctbc_runtime_for_identity(identity: str) -> TabRuntime:
+def _utiki_runtime_for_identity(identity: str) -> TabRuntime:
     """依分頁識別取得或建立 uTiki 執行期。"""
 
     runtime = _state["tabs"].get(identity)
     if runtime is None:
-        runtime = _new_ctbc_tab_runtime()
+        runtime = _new_utiki_tab_runtime()
         _state["tabs"][identity] = runtime
     return runtime
 
 
-def _ctbc_tab_runtime(tab) -> TabRuntime:
+def _utiki_tab_runtime(tab) -> TabRuntime:
     """取得目前瀏覽器分頁的 uTiki 執行期。"""
 
-    return _ctbc_runtime_for_identity(_ctbc_tab_identity(tab))
+    return _utiki_runtime_for_identity(_utiki_tab_identity(tab))
 
 
 def _existing_utiki_tab_context(tab) -> tuple[str | None, TabRuntime | None]:
@@ -115,29 +108,29 @@ def _existing_utiki_tab_context(tab) -> tuple[str | None, TabRuntime | None]:
     return identity, _state["tabs"].get(identity)
 
 
-def _ctbc_tab_state_key(tab):
+def _utiki_tab_state_key(tab):
     """建立目前分頁在相容狀態表中的索引鍵。"""
 
-    identity = _ctbc_tab_identity(tab)
+    identity = _utiki_tab_identity(tab)
     return (identity, str(tab.target.url))
 
 
 is_utk_sports_url = is_utiki_sports_url
 
 
-def _ctbc_purchase_state_key(tab):
+def _utiki_purchase_state_key(tab):
     """Use workflow's current tab identity at the original lookup point."""
-    return submission_engine._ctbc_purchase_state_key(
-        tab, identity_for_tab=_ctbc_tab_identity
+    return submission_engine._utiki_purchase_state_key(
+        tab, identity_for_tab=_utiki_tab_identity
     )
 
 
 def _utk_refresh_context(tab):
     """取得目前分頁的刷新執行期與背景工作集合。"""
 
-    identity = _ctbc_tab_identity(tab)
+    identity = _utiki_tab_identity(tab)
     return (
-        _ctbc_runtime_for_identity(identity),
+        _utiki_runtime_for_identity(identity),
         refresh_engine.build_refresh_identity(identity),
     )
 
@@ -199,7 +192,7 @@ async def nodriver_utk_sports_pause_refresh(tab, reason="paused"):
 
 def nodriver_utk_sports_consume_reload_event(tab):
     """通知外層路由同網址刷新需要重新偵測 Cloudflare。"""
-    return refresh_engine.consume_reload_event(_ctbc_tab_runtime(tab))
+    return refresh_engine.consume_reload_event(_utiki_tab_runtime(tab))
 
 
 async def nodriver_utk_sports_reload(
@@ -277,81 +270,81 @@ async def _reload_with_interval(tab, config_dict, reason):
     )
 
 
-async def _poll_ctbc_quantity_reload(tab, config_dict):
+async def _poll_utiki_quantity_reload(tab, config_dict):
     """延續既有票數頁刷新，且不重設等待間隔。"""
-    request = _ctbc_tab_runtime(tab)["refresh"]["reload_request"]
-    if not request or request.get("reason") != CTBC_QUANTITY_STALE_RELOAD_REASON:
+    request = _utiki_tab_runtime(tab)["refresh"]["reload_request"]
+    if not request or request.get("reason") != UTIKI_QUANTITY_STALE_RELOAD_REASON:
         return False
     await _reload_with_interval(
-        tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON
+        tab, config_dict, UTIKI_QUANTITY_STALE_RELOAD_REASON
     )
     return True
 
 
-async def _poll_ctbc_seat_reload(tab, config_dict):
+async def _poll_utiki_seat_reload(tab, config_dict):
     """延續既有劃位頁刷新，且不重設等待間隔。"""
-    request = _ctbc_tab_runtime(tab)["refresh"]["reload_request"]
-    if not request or request.get("reason") != CTBC_SEAT_STALE_RELOAD_REASON:
+    request = _utiki_tab_runtime(tab)["refresh"]["reload_request"]
+    if not request or request.get("reason") != UTIKI_SEAT_STALE_RELOAD_REASON:
         return False
-    await _reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
+    await _reload_with_interval(tab, config_dict, UTIKI_SEAT_STALE_RELOAD_REASON)
     return True
 
 
-async def nodriver_ctbc_date_auto_select(tab, config_dict):
-    return await date_area_engine.nodriver_ctbc_date_auto_select(
+async def nodriver_utiki_date_auto_select(tab, config_dict):
+    return await date_area_engine.nodriver_utiki_date_auto_select(
         tab, config_dict,
-        identity_for_tab=_ctbc_tab_identity,
-        runtime_for_identity=_ctbc_runtime_for_identity,
+        identity_for_tab=_utiki_tab_identity,
+        runtime_for_identity=_utiki_runtime_for_identity,
         behavior_for_key=_get_utiki_behavior,
         reload_with_interval=_reload_with_interval,
         cancel_refresh=nodriver_utk_sports_cancel_refresh,
     )
 
 
-async def nodriver_ctbc_area_auto_select(tab, config_dict):
-    return await date_area_engine.nodriver_ctbc_area_auto_select(
+async def nodriver_utiki_area_auto_select(tab, config_dict):
+    return await date_area_engine.nodriver_utiki_area_auto_select(
         tab, config_dict,
-        identity_for_tab=_ctbc_tab_identity,
-        runtime_for_identity=_ctbc_runtime_for_identity,
+        identity_for_tab=_utiki_tab_identity,
+        runtime_for_identity=_utiki_runtime_for_identity,
         behavior_for_key=_get_utiki_behavior,
         reload_with_interval=_reload_with_interval,
         cancel_refresh=nodriver_utk_sports_cancel_refresh,
     )
 
 
-async def _ctbc_attest_fast_destination(tab, page_type, config_dict):
-    identity = _ctbc_tab_identity(tab)
-    return await navigation_engine._ctbc_attest_fast_destination(
+async def _utiki_attest_destination(tab, page_type, config_dict):
+    identity = _utiki_tab_identity(tab)
+    return await navigation_engine._utiki_attest_destination(
         tab, page_type, config_dict,
-        identity=identity, runtime=_ctbc_runtime_for_identity(identity),
-        runtime_for_identity=_ctbc_runtime_for_identity,
+        identity=identity, runtime=_utiki_runtime_for_identity(identity),
+        runtime_for_identity=_utiki_runtime_for_identity,
         behavior_for_key=_get_utiki_behavior,
     )
 
 
-async def _ctbc_reconcile_area_navigation(tab, current_url, config_dict=None):
-    identity = _ctbc_tab_identity(tab)
-    return await navigation_engine._ctbc_reconcile_area_navigation(
+async def _utiki_reconcile_area_navigation(tab, current_url, config_dict=None):
+    identity = _utiki_tab_identity(tab)
+    return await navigation_engine._utiki_reconcile_area_navigation(
         tab, current_url, config_dict,
-        identity=identity, runtime=_ctbc_runtime_for_identity(identity),
-        runtime_for_identity=_ctbc_runtime_for_identity,
+        identity=identity, runtime=_utiki_runtime_for_identity(identity),
+        runtime_for_identity=_utiki_runtime_for_identity,
         reload_with_interval=_reload_with_interval,
     )
 
 
-async def nodriver_ctbc_seat_main(tab, config_dict, ocr):
+async def nodriver_utiki_seat_main(tab, config_dict, ocr):
     """保留原座位頁導覽核對，再交由購票模組準備與提交。"""
-    if not await _ctbc_attest_fast_destination(tab, "seat", config_dict):
+    if not await _utiki_attest_destination(tab, "seat", config_dict):
         return False
     if _get_utiki_behavior(config_dict, "seat_selection_mode", "manual") != "manual":
         return False
     return await purchase_engine.seat_main(
         tab, config_dict, ocr,
-        runtime_for_tab=_ctbc_tab_runtime,
-        purchase_key_for_tab=_ctbc_purchase_state_key,
+        runtime_for_tab=_utiki_tab_runtime,
+        purchase_key_for_tab=_utiki_purchase_state_key,
         behavior_for_key=_get_utiki_behavior,
         reload_with_interval=_reload_with_interval,
-        poll_seat_reload=_poll_ctbc_seat_reload,
+        poll_seat_reload=_poll_utiki_seat_reload,
         cancel_refresh=nodriver_utk_sports_cancel_refresh,
     )
 
@@ -363,18 +356,18 @@ async def _nodriver_utiki_quantity_main(
     return await purchase_engine.quantity_main(
         tab, config_dict, ocr, page_type,
         expected_product_id=expected_product_id,
-        runtime_for_tab=_ctbc_tab_runtime,
-        purchase_key_for_tab=_ctbc_purchase_state_key,
+        runtime_for_tab=_utiki_tab_runtime,
+        purchase_key_for_tab=_utiki_purchase_state_key,
         behavior_for_key=_get_utiki_behavior,
         reload_with_interval=_reload_with_interval,
-        poll_quantity_reload=_poll_ctbc_quantity_reload,
+        poll_quantity_reload=_poll_utiki_quantity_reload,
         cancel_refresh=nodriver_utk_sports_cancel_refresh,
     )
 
 
-async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
+async def nodriver_utiki_general_admission_main(tab, config_dict, ocr):
     """在不劃位的 UTK0202／UTK0203 頁面選擇票數。"""
-    if not await _ctbc_attest_fast_destination(
+    if not await _utiki_attest_destination(
         tab, "general_admission", config_dict
     ):
         return False
@@ -389,12 +382,12 @@ async def nodriver_ctbc_general_admission_main(tab, config_dict, ocr):
 
 async def nodriver_utiki_server_assigned_quantity_main(tab, config_dict, ocr):
     """沿原電腦配位來源核對，接回票數頁準備。"""
-    identity = _ctbc_tab_identity(tab)
-    authorization = await navigation_engine._ctbc_server_assigned_authorization(
+    identity = _utiki_tab_identity(tab)
+    authorization = await navigation_engine._utiki_server_assigned_authorization(
         tab, config_dict, identity=identity,
-        runtime=_ctbc_runtime_for_identity(identity),
-        runtime_for_identity=_ctbc_runtime_for_identity,
-        purchase_key_for_tab=_ctbc_purchase_state_key,
+        runtime=_utiki_runtime_for_identity(identity),
+        runtime_for_identity=_utiki_runtime_for_identity,
+        purchase_key_for_tab=_utiki_purchase_state_key,
         behavior_for_key=_get_utiki_behavior,
     )
     if authorization is None:
@@ -405,61 +398,67 @@ async def nodriver_utiki_server_assigned_quantity_main(tab, config_dict, ocr):
     )
 
 
-async def _reconcile_utiki_purchase(tab, current_url, page_type, config_dict):
+async def _reconcile_utiki_purchase(tab, current_url, config_dict):
     """在外層路由前核對既有提交結果。"""
     return await submission_engine._reconcile_utiki_purchase(
-        tab, current_url, page_type, config_dict,
-        runtime_for_tab=_ctbc_tab_runtime,
-        purchase_key_for_tab=_ctbc_purchase_state_key,
+        tab, current_url, config_dict,
+        runtime_for_tab=_utiki_tab_runtime,
+        purchase_key_for_tab=_utiki_purchase_state_key,
     )
 
 
-async def _handle_ctbc_checkout(tab, config_dict):
+async def _handle_utiki_checkout(tab, config_dict, url):
     """由既有 checkout 路由交給提交模組處理通知。"""
-    return await submission_engine._handle_ctbc_checkout(
-        tab, config_dict,
-        runtime_for_tab=_ctbc_tab_runtime,
-        tab_state_key_for_tab=_ctbc_tab_state_key,
+    return await submission_engine._handle_utiki_checkout(
+        tab, config_dict, url,
+        runtime_for_tab=_utiki_tab_runtime,
+        tab_state_key_for_tab=_utiki_tab_state_key,
     )
 
 
-async def nodriver_ctbc_main(tab, url, config_dict, ocr):
-    """依頁面類型分派中信相容棒球售票自動化流程。"""
+async def nodriver_utiki_main(tab, url, config_dict, ocr):
+    """依頁面類型分派已支援 uTiki 租戶的售票流程。"""
 
-    page_type = _get_ctbc_page_type(url)
+    if str(tab.target.url) != url:
+        return tab
+    page_type = _get_utiki_page_type(url)
     if page_type != "server_assigned_quantity":
-        navigation_engine._ctbc_clear_server_assignment_for_other_page(
-            _ctbc_tab_runtime(tab)["transition"]
+        navigation_engine._utiki_clear_server_assignment_for_other_page(
+            _utiki_tab_runtime(tab)["transition"]
         )
     if await check_and_handle_pause(config_dict):
         await nodriver_utk_sports_pause_refresh(tab, "paused")
         return tab
+    if str(tab.target.url) != url:
+        return tab
 
     guard_state = await nodriver_utk_sports_health_check(tab, url, config_dict)
+    if str(tab.target.url) != url:
+        return tab
     if guard_state == "blocked":
         return tab
     if guard_state == "unknown":
         return tab
 
-    purchase_result = await _reconcile_utiki_purchase(
-        tab, url, page_type, config_dict
-    )
+    purchase_result = await _reconcile_utiki_purchase(tab, url, config_dict)
+    if str(tab.target.url) != url:
+        return tab
     if purchase_result in {"blocked", "pending"}:
         return tab
     if purchase_result == "success" and page_type != "checkout":
         return tab
 
     if page_type == "date" and config_dict.get("date_auto_select", {}).get("enable", False):
-        await nodriver_ctbc_date_auto_select(tab, config_dict)
+        await nodriver_utiki_date_auto_select(tab, config_dict)
     elif page_type == "area":
         if config_dict.get("area_auto_select", {}).get("enable", False):
-            await nodriver_ctbc_area_auto_select(tab, config_dict)
+            await nodriver_utiki_area_auto_select(tab, config_dict)
         else:
-            await _ctbc_reconcile_area_navigation(tab, url, config_dict)
+            await _utiki_reconcile_area_navigation(tab, url, config_dict)
     elif page_type == "seat":
-        await nodriver_ctbc_seat_main(tab, config_dict, ocr)
+        await nodriver_utiki_seat_main(tab, config_dict, ocr)
     elif page_type == "general_admission":
-        await nodriver_ctbc_general_admission_main(tab, config_dict, ocr)
+        await nodriver_utiki_general_admission_main(tab, config_dict, ocr)
     elif page_type == "server_assigned_quantity":
         await nodriver_utiki_server_assigned_quantity_main(
             tab, config_dict, ocr
@@ -468,7 +467,7 @@ async def nodriver_ctbc_main(tab, url, config_dict, ocr):
         await nodriver_utk_sports_cancel_refresh(
             tab, "checkout reached", wait=True, abandon_probe=True
         )
-        await _handle_ctbc_checkout(tab, config_dict)
+        await _handle_utiki_checkout(tab, config_dict, url)
     else:
         await nodriver_utk_sports_cancel_refresh(
             tab,

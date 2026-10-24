@@ -1,7 +1,12 @@
 # encoding=utf-8
 """uTiki submit records, outcome attribution, and recovery."""
 
-from .dom import CommitResult, dismiss_dialog, read_dialog_snapshot
+from .dom import (
+    CommitResult,
+    dismiss_dialog,
+    read_clean_seat_conflict_document,
+    read_dialog_snapshot,
+)
 from .profiles import PageKind
 import re
 import time
@@ -20,14 +25,14 @@ from .dom import (
     dispatch_submit,
 )
 from .inputs import (
-    _clear_ctbc_captcha_input,
-    _ctbc_captcha,
-    _ctbc_login_fingerprint,
-    _fill_ctbc_inline_login,
-    _click_ctbc_captcha_refresh,
-    _query_ctbc_captcha_input,
-    _query_ctbc_captcha_refresh,
-    _read_ctbc_captcha_image_token,
+    _clear_utiki_captcha_input,
+    _utiki_captcha,
+    _utiki_login_fingerprint,
+    _fill_utiki_inline_login,
+    _click_utiki_captcha_refresh,
+    _query_utiki_captcha_input,
+    _query_utiki_captcha_refresh,
+    _read_utiki_captcha_image_token,
 )
 from .profiles import (
     classify_utiki_page,
@@ -37,13 +42,13 @@ from .profiles import (
 )
 from .selection import (
     SubmitPlan,
-    classify_submit_dialog as _classify_ctbc_submit_dialog,
+    classify_submit_dialog as _classify_utiki_submit_dialog,
     submit_plan_is_valid,
 )
 
-CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
-CTBC_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
-CTBC_SEAT_STALE_RELOAD_REASON = "requested seats are unavailable"
+UTIKI_SUBMIT_OUTCOME_TIMEOUT_SECONDS = 10.0
+UTIKI_QUANTITY_STALE_RELOAD_REASON = "quantity state changed during commit"
+UTIKI_SEAT_STALE_RELOAD_REASON = "requested seats are unavailable"
 
 
 def _page_type(url):
@@ -51,12 +56,7 @@ def _page_type(url):
     return None if page_kind is PageKind.UNKNOWN else page_kind.value
 
 
-def _profile_dict(url):
-    profile = get_utiki_tenant_profile(url)
-    return profile.as_legacy_dict() if profile else None
-
-
-async def _get_ctbc_visible_dialog_text(tab):
+async def _get_utiki_visible_dialog_text(tab):
     """為舊呼叫端讀取目前可見對話框文字。"""
     snapshot = await read_dialog_snapshot(tab)
     if snapshot and snapshot.visible_count == 1:
@@ -64,13 +64,13 @@ async def _get_ctbc_visible_dialog_text(tab):
     return ""
 
 
-async def _ctbc_dialog_is_visible(tab):
+async def _utiki_dialog_is_visible(tab):
     """以保守規則判斷對話框是否仍可見。"""
     snapshot = await read_dialog_snapshot(tab)
     return snapshot is None or snapshot.visible_count != 0
 
 
-async def _wait_ctbc_dialog_closed(tab, snapshot):
+async def _wait_utiki_dialog_closed(tab, snapshot):
     """等待指定對話框關閉或文件狀態改變。"""
 
     for _ in range(10):
@@ -90,7 +90,7 @@ async def _wait_ctbc_dialog_closed(tab, snapshot):
     return False
 
 
-async def _dismiss_ctbc_dialog(tab, expected_text):
+async def _dismiss_utiki_dialog(tab, expected_text):
     """透過快照與提交邊界關閉指定對話框。"""
     snapshot = await read_dialog_snapshot(tab)
     if not (
@@ -99,10 +99,10 @@ async def _dismiss_ctbc_dialog(tab, expected_text):
         return False
     if await dismiss_dialog(tab, snapshot) is not CommitResult.COMMITTED:
         return False
-    return await _wait_ctbc_dialog_closed(tab, snapshot)
+    return await _wait_utiki_dialog_closed(tab, snapshot)
 
 
-def _ctbc_purchase_outcome(
+def _utiki_purchase_outcome(
     kind,
     *,
     text="",
@@ -133,14 +133,14 @@ def _ctbc_purchase_outcome(
     return record
 
 
-def _ctbc_source_document_id(context):
+def _utiki_source_document_id(context):
     """取得流程與 DOM 共用的標準文件時間來源識別。"""
     if "source_document_id" in context:
         return str(context.get("source_document_id") or "")
     return str(context.get("document_id") or "")
 
 
-def _ctbc_dialog_outcome_record(
+def _utiki_dialog_outcome_record(
     outcome,
     text,
     source_url,
@@ -149,11 +149,13 @@ def _ctbc_dialog_outcome_record(
     nonce,
     dom_document_id="",
     product_id="",
+    dialog_page_url="",
+    dialog_document_id="",
 ):
     """將已分類對話框純化為標準阻擋結果紀錄。"""
     kind = "unknown" if outcome == "rejected" else outcome
     reason = "dialog" if kind == "unknown" else ""
-    record = _ctbc_purchase_outcome(
+    record = _utiki_purchase_outcome(
         kind,
         text=text,
         reason=reason,
@@ -172,6 +174,8 @@ def _ctbc_dialog_outcome_record(
                 "clear_result": "",
                 "reload_dispatched": False,
                 "recovery_document_id": "",
+                "dialog_page_url": str(dialog_page_url or ""),
+                "dialog_document_id": str(dialog_document_id or ""),
             }
         )
     elif kind == "auth":
@@ -187,7 +191,7 @@ def _ctbc_dialog_outcome_record(
     return record
 
 
-def _ctbc_recent_submit_context(purchase, fallback_key=None):
+def _utiki_recent_submit_context(purchase, fallback_key=None):
     """在不猜測歷史結果的前提下判定對話框所屬送出操作。"""
     active = purchase.get("active_submit")
     if isinstance(active, dict) and active.get("purchase_key") is not None:
@@ -215,7 +219,7 @@ def _ctbc_recent_submit_context(purchase, fallback_key=None):
     return None, None
 
 
-def _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=None):
+def _utiki_store_purchase_outcome(purchase, purchase_key, record, active=None):
     """套用購票結果並安全清理相符的進行中送出狀態。"""
     if purchase_key is None or not isinstance(record, dict):
         return False
@@ -236,7 +240,7 @@ def _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=None):
     return True
 
 
-def _ctbc_conflict_page_kind(page_type):
+def _utiki_conflict_page_kind(page_type):
     """將頁面類型轉成衝突清理所需的選擇種類。"""
 
     return {
@@ -246,7 +250,7 @@ def _ctbc_conflict_page_kind(page_type):
     }.get(page_type)
 
 
-def _ctbc_submit_dispatched_at(value):
+def _utiki_submit_dispatched_at(value):
     """將送出時間轉成可比較的時間戳。"""
 
     if isinstance(value, dict):
@@ -257,32 +261,32 @@ def _ctbc_submit_dispatched_at(value):
         return 0.0
 
 
-def _ctbc_unknown_submit_outcome(active, reason):
+def _utiki_unknown_submit_outcome(active, reason):
     """將已送出意圖轉成需保留的未知結果。"""
-    return _ctbc_purchase_outcome(
+    return _utiki_purchase_outcome(
         "unknown",
         reason=reason,
         source_url=active.get("source_url", ""),
-        source_document_id=_ctbc_source_document_id(active),
+        source_document_id=_utiki_source_document_id(active),
         nonce=active.get("nonce", ""),
         dom_document_id=active.get("document_id", ""),
         product_id=active.get("product_id", ""),
     )
 
 
-def _ctbc_finish_active_unknown(purchase, active, reason):
+def _utiki_finish_active_unknown(purchase, active, reason):
     """以未知結果結束目前進行中的送出意圖。"""
 
     if purchase.get("active_submit") is not active:
         return False
     purchase_key = active.get("purchase_key")
-    record = _ctbc_unknown_submit_outcome(active, reason)
-    if not _ctbc_store_purchase_outcome(purchase, purchase_key, record, active=active):
+    record = _utiki_unknown_submit_outcome(active, reason)
+    if not _utiki_store_purchase_outcome(purchase, purchase_key, record, active=active):
         return False
     return True
 
 
-def _ctbc_purchase_state_key(tab, *, identity_for_tab):
+def _utiki_purchase_state_key(tab, *, identity_for_tab):
     """以購票身分而非外觀網址建立送出狀態索引鍵。"""
     identity = identity_for_tab(tab)
     current_url = str(tab.target.url)
@@ -296,7 +300,7 @@ def _ctbc_purchase_state_key(tab, *, identity_for_tab):
     )
     page_type = _page_type(purchase_url)
     query = unique_query(purchase_url)
-    profile = _profile_dict(purchase_url)
+    profile = get_utiki_tenant_profile(purchase_url)
     if (
         page_type not in ("seat", "general_admission", "server_assigned_quantity")
         or query is None
@@ -319,8 +323,8 @@ def _ctbc_purchase_state_key(tab, *, identity_for_tab):
 
     return (
         identity,
-        profile["host"],
-        profile["tenant_path"],
+        profile.host,
+        profile.tenant_path,
         page_type,
         performance_id,
         group_id,
@@ -329,7 +333,7 @@ def _ctbc_purchase_state_key(tab, *, identity_for_tab):
     )
 
 
-def _ctbc_submit_reached_checkout(source_url, destination_url):
+def _utiki_submit_reached_checkout(source_url, destination_url):
     """僅接受導向來源租戶結帳路由的送出結果。"""
     try:
         source = urlsplit(source_url)
@@ -348,7 +352,7 @@ def _ctbc_submit_reached_checkout(source_url, destination_url):
     )
 
 
-def _ctbc_captcha_reset_is_current(
+def _utiki_captcha_reset_is_current(
     tab,
     submit_key,
     outcome,
@@ -368,7 +372,7 @@ def _ctbc_captcha_reset_is_current(
     )
 
 
-def _ctbc_captcha_phase_is_current(
+def _utiki_captcha_phase_is_current(
     tab,
     submit_key,
     outcome,
@@ -381,7 +385,7 @@ def _ctbc_captcha_phase_is_current(
     """判斷驗證碼工作是否仍處於指定階段。"""
 
     return bool(
-        _ctbc_captcha_reset_is_current(
+        _utiki_captcha_reset_is_current(
             tab,
             submit_key,
             outcome,
@@ -393,11 +397,11 @@ def _ctbc_captcha_phase_is_current(
     )
 
 
-def _release_ctbc_captcha_preflight(tab, submit_key, outcome, *, runtime_for_tab):
+def _release_utiki_captcha_preflight(tab, submit_key, outcome, *, runtime_for_tab):
     """釋放驗證碼重設前置檢查所持有的狀態。"""
 
     if (
-        _ctbc_outcome_is_current(
+        _utiki_outcome_is_current(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         )
         and outcome.get("reset_phase") == "preflighting"
@@ -406,14 +410,14 @@ def _release_ctbc_captcha_preflight(tab, submit_key, outcome, *, runtime_for_tab
     return False
 
 
-async def _observe_ctbc_captcha_refresh(
+async def _observe_utiki_captcha_refresh(
     tab, config_dict, submit_key, outcome, *, runtime_for_tab, purchase_key_for_tab
 ):
     """觀察驗證碼刷新是否已產生新的圖片。"""
 
     current_document_id = runtime_for_tab(tab)["document"]["last_document"]
     source_document_id = str(outcome.get("reset_source_document_id") or "")
-    if not _ctbc_outcome_is_current(
+    if not _utiki_outcome_is_current(
         tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
     ):
         return False
@@ -429,8 +433,8 @@ async def _observe_ctbc_captcha_refresh(
     before_token = str(outcome.get("reset_before_token") or "")
     if not before_token:
         return False
-    current_token = await _read_ctbc_captcha_image_token(tab, config_dict)
-    if not _ctbc_captcha_reset_is_current(
+    current_token = await _read_utiki_captcha_image_token(tab, config_dict)
+    if not _utiki_captcha_reset_is_current(
         tab,
         submit_key,
         outcome,
@@ -445,7 +449,7 @@ async def _observe_ctbc_captcha_refresh(
     return False
 
 
-async def _dispatch_ctbc_captcha_refresh(
+async def _dispatch_utiki_captcha_refresh(
     tab,
     config_dict,
     submit_key,
@@ -457,8 +461,8 @@ async def _dispatch_ctbc_captcha_refresh(
 ):
     """送出驗證碼圖片刷新並登記觀察狀態。"""
 
-    before_token = await _read_ctbc_captcha_image_token(tab, config_dict)
-    if not _ctbc_captcha_phase_is_current(
+    before_token = await _read_utiki_captcha_image_token(tab, config_dict)
+    if not _utiki_captcha_phase_is_current(
         tab,
         submit_key,
         outcome,
@@ -467,21 +471,21 @@ async def _dispatch_ctbc_captcha_refresh(
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
     ):
-        return _release_ctbc_captcha_preflight(
+        return _release_utiki_captcha_preflight(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         )
     if not before_token:
-        return _release_ctbc_captcha_preflight(
+        return _release_utiki_captcha_preflight(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         )
     outcome["reset_before_token"] = before_token
     try:
-        refresh = await _query_ctbc_captcha_refresh(tab)
+        refresh = await _query_utiki_captcha_refresh(tab)
     except Exception:
-        return _release_ctbc_captcha_preflight(
+        return _release_utiki_captcha_preflight(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         )
-    if not _ctbc_captcha_phase_is_current(
+    if not _utiki_captcha_phase_is_current(
         tab,
         submit_key,
         outcome,
@@ -490,18 +494,18 @@ async def _dispatch_ctbc_captcha_refresh(
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
     ):
-        return _release_ctbc_captcha_preflight(
+        return _release_utiki_captcha_preflight(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         )
     if not refresh:
-        return _release_ctbc_captcha_preflight(
+        return _release_utiki_captcha_preflight(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         )
     outcome["reset_phase"] = "dispatching"
     try:
-        await _click_ctbc_captcha_refresh(refresh)
+        await _click_utiki_captcha_refresh(refresh)
     except Exception:
-        if not _ctbc_captcha_phase_is_current(
+        if not _utiki_captcha_phase_is_current(
             tab,
             submit_key,
             outcome,
@@ -512,7 +516,7 @@ async def _dispatch_ctbc_captcha_refresh(
         ):
             return False
         outcome["reset_phase"] = "unknown"
-        return await _observe_ctbc_captcha_refresh(
+        return await _observe_utiki_captcha_refresh(
             tab,
             config_dict,
             submit_key,
@@ -520,7 +524,7 @@ async def _dispatch_ctbc_captcha_refresh(
             runtime_for_tab=runtime_for_tab,
             purchase_key_for_tab=purchase_key_for_tab,
         )
-    if not _ctbc_captcha_phase_is_current(
+    if not _utiki_captcha_phase_is_current(
         tab,
         submit_key,
         outcome,
@@ -531,7 +535,7 @@ async def _dispatch_ctbc_captcha_refresh(
     ):
         return False
     outcome["reset_phase"] = "awaiting_change"
-    return await _observe_ctbc_captcha_refresh(
+    return await _observe_utiki_captcha_refresh(
         tab,
         config_dict,
         submit_key,
@@ -541,7 +545,7 @@ async def _dispatch_ctbc_captcha_refresh(
     )
 
 
-async def _reset_ctbc_captcha(
+async def _reset_utiki_captcha(
     tab,
     *,
     refresh_image,
@@ -563,7 +567,7 @@ async def _reset_ctbc_captcha(
     ):
         return False
     if refresh_image and submit_key is not None:
-        if not _ctbc_outcome_is_current(
+        if not _utiki_outcome_is_current(
             tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
         ):
             return False
@@ -580,7 +584,7 @@ async def _reset_ctbc_captcha(
         if phase == "preflighting":
             return False
         if phase:
-            return await _observe_ctbc_captcha_refresh(
+            return await _observe_utiki_captcha_refresh(
                 tab,
                 config_dict,
                 submit_key,
@@ -596,8 +600,8 @@ async def _reset_ctbc_captcha(
         outcome["reset_phase"] = "preflighting"
 
     try:
-        captcha_input = await _query_ctbc_captcha_input(tab)
-        if refresh_image and not _ctbc_captcha_phase_is_current(
+        captcha_input = await _query_utiki_captcha_input(tab)
+        if refresh_image and not _utiki_captcha_phase_is_current(
             tab,
             submit_key,
             outcome,
@@ -606,16 +610,16 @@ async def _reset_ctbc_captcha(
             runtime_for_tab=runtime_for_tab,
             purchase_key_for_tab=purchase_key_for_tab,
         ):
-            return _release_ctbc_captcha_preflight(
+            return _release_utiki_captcha_preflight(
                 tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
             )
         if refresh_image and not captcha_input:
-            return _release_ctbc_captcha_preflight(
+            return _release_utiki_captcha_preflight(
                 tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
             )
         if captcha_input:
-            await _clear_ctbc_captcha_input(captcha_input)
-            if refresh_image and not _ctbc_captcha_phase_is_current(
+            await _clear_utiki_captcha_input(captcha_input)
+            if refresh_image and not _utiki_captcha_phase_is_current(
                 tab,
                 submit_key,
                 outcome,
@@ -624,17 +628,17 @@ async def _reset_ctbc_captcha(
                 runtime_for_tab=runtime_for_tab,
                 purchase_key_for_tab=purchase_key_for_tab,
             ):
-                return _release_ctbc_captcha_preflight(
+                return _release_utiki_captcha_preflight(
                     tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
                 )
     except Exception:
         if refresh_image:
-            return _release_ctbc_captcha_preflight(
+            return _release_utiki_captcha_preflight(
                 tab, submit_key, outcome, runtime_for_tab=runtime_for_tab
             )
         return False
     if refresh_image:
-        return await _dispatch_ctbc_captcha_refresh(
+        return await _dispatch_utiki_captcha_refresh(
             tab,
             config_dict,
             submit_key,
@@ -646,31 +650,31 @@ async def _reset_ctbc_captcha(
     return True
 
 
-def _ctbc_outcome_is_current(tab, submit_key, record, *, runtime_for_tab):
+def _utiki_outcome_is_current(tab, submit_key, record, *, runtime_for_tab):
     """判斷購票結果是否仍屬於目前文件與送出意圖。"""
 
     return runtime_for_tab(tab)["purchase"]["outcomes"].get(submit_key) is record
 
 
-def _ctbc_conflict_is_current(
+def _utiki_conflict_is_current(
     tab, submit_key, record, *, runtime_for_tab, purchase_key_for_tab
 ):
     """判斷座位或票數衝突是否仍可安全清理。"""
 
     return bool(
-        _ctbc_outcome_is_current(
+        _utiki_outcome_is_current(
             tab, submit_key, record, runtime_for_tab=runtime_for_tab
         )
         and purchase_key_for_tab(tab) == submit_key
     )
 
 
-async def _clear_ctbc_conflict_selection(
+async def _clear_utiki_conflict_selection(
     tab, config_dict, submit_key, record, *, runtime_for_tab, purchase_key_for_tab
 ):
     """清除目前送出衝突所對應的座位或票數選擇。"""
 
-    if not _ctbc_conflict_is_current(
+    if not _utiki_conflict_is_current(
         tab,
         submit_key,
         record,
@@ -684,7 +688,7 @@ async def _clear_ctbc_conflict_selection(
     if clear_phase:
         return False
     record["clear_phase"] = "dispatching"
-    page_kind = _ctbc_conflict_page_kind(record.get("page_type"))
+    page_kind = _utiki_conflict_page_kind(record.get("page_type"))
     try:
         result = await clear_conflict_selection(
             tab,
@@ -696,9 +700,9 @@ async def _clear_ctbc_conflict_selection(
     except Exception as exc:
         result = None
         util.create_debug_logger(config_dict).log(
-            f"[CTBC] Conflict clear outcome is unknown: {exc}"
+            f"[UTIKI] Conflict clear outcome is unknown: {exc}"
         )
-    if not _ctbc_outcome_is_current(
+    if not _utiki_outcome_is_current(
         tab, submit_key, record, runtime_for_tab=runtime_for_tab
     ):
         return False
@@ -706,7 +710,7 @@ async def _clear_ctbc_conflict_selection(
     record["clear_result"] = (
         result.value if isinstance(result, CommitResult) else "unknown"
     )
-    return _ctbc_conflict_is_current(
+    return _utiki_conflict_is_current(
         tab,
         submit_key,
         record,
@@ -715,7 +719,7 @@ async def _clear_ctbc_conflict_selection(
     )
 
 
-async def _apply_ctbc_dialog_effects(
+async def _apply_utiki_dialog_effects(
     tab,
     config_dict,
     submit_key,
@@ -733,10 +737,10 @@ async def _apply_ctbc_dialog_effects(
         return
     if outcome == "auth":
         debug.log(
-            "[CTBC LOGIN] Authentication rejected; waiting for credentials to change"
+            "[UTIKI LOGIN] Authentication rejected; waiting for credentials to change"
         )
     elif outcome == "captcha":
-        reset_complete = await _reset_ctbc_captcha(
+        reset_complete = await _reset_utiki_captcha(
             tab,
             refresh_image=True,
             submit_key=submit_key,
@@ -746,9 +750,9 @@ async def _apply_ctbc_dialog_effects(
         )
         if reset_complete and purchase["outcomes"].get(submit_key) is record:
             purchase["outcomes"].pop(submit_key, None)
-        debug.log(f"[CTBC CAPTCHA] Server rejected captcha: {record['text']}")
+        debug.log(f"[UTIKI CAPTCHA] Server rejected captcha: {record['text']}")
     elif outcome == "seat_conflict":
-        if not _ctbc_conflict_is_current(
+        if not _utiki_conflict_is_current(
             tab,
             submit_key,
             record,
@@ -757,8 +761,8 @@ async def _apply_ctbc_dialog_effects(
         ):
             return
         record["dialog_dismissed"] = True
-        debug.log(f"[CTBC SEAT] Selected seats were rejected: {record['text']}")
-        if not await _clear_ctbc_conflict_selection(
+        debug.log(f"[UTIKI SEAT] Selected seats were rejected: {record['text']}")
+        if not await _clear_utiki_conflict_selection(
             tab,
             config_dict,
             submit_key,
@@ -769,9 +773,9 @@ async def _apply_ctbc_dialog_effects(
             return
         if record.get("clear_result") != CommitResult.COMMITTED.value:
             debug.log(
-                "[CTBC] Local selection clear was not committed; reload remains pending"
+                "[UTIKI] Local selection clear was not committed; reload remains pending"
             )
-        if not _ctbc_conflict_is_current(
+        if not _utiki_conflict_is_current(
             tab,
             submit_key,
             record,
@@ -779,14 +783,14 @@ async def _apply_ctbc_dialog_effects(
             purchase_key_for_tab=purchase_key_for_tab,
         ):
             return
-        await _reset_ctbc_captcha(
+        await _reset_utiki_captcha(
             tab,
             refresh_image=False,
             submit_key=submit_key,
             runtime_for_tab=runtime_for_tab,
             purchase_key_for_tab=purchase_key_for_tab,
         )
-        if not _ctbc_conflict_is_current(
+        if not _utiki_conflict_is_current(
             tab,
             submit_key,
             record,
@@ -795,12 +799,12 @@ async def _apply_ctbc_dialog_effects(
         ):
             return
     elif outcome == "success":
-        debug.log("[CTBC] Cart accepted; same-page resubmit is blocked")
+        debug.log("[UTIKI] Cart accepted; same-page resubmit is blocked")
     else:
-        debug.log(f"[CTBC] Submit blocked after {outcome}: {record['text']}")
+        debug.log(f"[UTIKI] Submit blocked after {outcome}: {record['text']}")
 
 
-async def _handle_ctbc_submit_dialog(
+async def _handle_utiki_submit_dialog(
     tab,
     config_dict,
     submit_key=None,
@@ -818,15 +822,15 @@ async def _handle_ctbc_submit_dialog(
     if dialog_snapshot is None:
         dialog_snapshot = await read_dialog_snapshot(tab)
     if dialog_snapshot is None:
-        debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
+        debug.log("[UTIKI] Submit dialog observation is invalid; action blocked")
         return "rejected"
     if dialog_snapshot.visible_count == 0:
         return None
 
     current_key = submit_key if submit_key is not None else purchase_key_for_tab(tab)
-    submit_key, context = _ctbc_recent_submit_context(purchase, current_key)
+    submit_key, context = _utiki_recent_submit_context(purchase, current_key)
     if submit_key is None:
-        debug.log("[CTBC] Submit dialog appeared outside a valid purchase context")
+        debug.log("[UTIKI] Submit dialog appeared outside a valid purchase context")
         return "rejected"
     active = context if context is purchase.get("active_submit") else None
     context_source = context.get("source_url", "") if isinstance(context, dict) else ""
@@ -834,7 +838,7 @@ async def _handle_ctbc_submit_dialog(
     context_dom_document = ""
     context_product_id = ""
     if isinstance(context, dict):
-        context_document = _ctbc_source_document_id(context)
+        context_document = _utiki_source_document_id(context)
         context_dom_document = str(
             context.get("dom_document_id") or context.get("document_id") or ""
         )
@@ -843,11 +847,11 @@ async def _handle_ctbc_submit_dialog(
     page_type = _page_type(source_url)
     dialog_text = dialog_snapshot.text
     outcome = (
-        _classify_ctbc_submit_dialog(dialog_text)
+        _classify_utiki_submit_dialog(dialog_text)
         if dialog_snapshot.visible_count == 1 and dialog_text
         else "rejected"
     )
-    record = _ctbc_dialog_outcome_record(
+    record = _utiki_dialog_outcome_record(
         outcome,
         dialog_text,
         source_url,
@@ -860,21 +864,23 @@ async def _handle_ctbc_submit_dialog(
         context.get("nonce", "") if isinstance(context, dict) else "",
         context_dom_document,
         context_product_id,
+        dialog_snapshot.page_url,
+        dialog_snapshot.document_id,
     )
-    if not _ctbc_store_purchase_outcome(purchase, submit_key, record, active=active):
+    if not _utiki_store_purchase_outcome(purchase, submit_key, record, active=active):
         return "rejected"
     if outcome == "rejected":
-        debug.log("[CTBC] Unknown or ambiguous dialog preserved; action blocked")
+        debug.log("[UTIKI] Unknown or ambiguous dialog preserved; action blocked")
         return outcome
 
     if outcome == "auth":
         try:
-            fingerprint = await _ctbc_login_fingerprint(
+            fingerprint = await _utiki_login_fingerprint(
                 tab, expected_dialog=dialog_snapshot
             )
         except Exception as exc:
             debug.log(
-                "[CTBC LOGIN] Credential fingerprint observation failed; "
+                "[UTIKI LOGIN] Credential fingerprint observation failed; "
                 f"document-scoped blocker retained: {exc}"
             )
         else:
@@ -883,13 +889,13 @@ async def _handle_ctbc_submit_dialog(
     dismiss_result = await dismiss_dialog(tab, dialog_snapshot)
     if (
         dismiss_result is not CommitResult.COMMITTED
-        or not await _wait_ctbc_dialog_closed(tab, dialog_snapshot)
+        or not await _wait_utiki_dialog_closed(tab, dialog_snapshot)
     ):
         debug.log(
-            f"[CTBC] Visible dialog changed before it could be dismissed: {dialog_text}"
+            f"[UTIKI] Visible dialog changed before it could be dismissed: {dialog_text}"
         )
         return "rejected" if outcome == "success" else outcome
-    await _apply_ctbc_dialog_effects(
+    await _apply_utiki_dialog_effects(
         tab,
         config_dict,
         submit_key,
@@ -901,7 +907,7 @@ async def _handle_ctbc_submit_dialog(
     return outcome
 
 
-async def _recover_ctbc_captcha_dialog(
+async def _recover_utiki_captcha_dialog(
     tab, config_dict, *, runtime_for_tab, purchase_key_for_tab
 ):
     """從驗證碼錯誤對話框恢復至可再次送出的狀態。"""
@@ -911,9 +917,9 @@ async def _recover_ctbc_captcha_dialog(
     outcome = purchase["outcomes"].get(submit_key)
     if not isinstance(outcome, dict) or outcome.get("kind") != "captcha":
         return False
-    if await _ctbc_dialog_is_visible(tab):
+    if await _utiki_dialog_is_visible(tab):
         return True
-    reset_complete = await _reset_ctbc_captcha(
+    reset_complete = await _reset_utiki_captcha(
         tab,
         refresh_image=True,
         submit_key=submit_key,
@@ -925,15 +931,15 @@ async def _recover_ctbc_captcha_dialog(
         purchase["outcomes"].pop(submit_key, None)
     debug = util.create_debug_logger(config_dict)
     if reset_complete:
-        debug.log("[CTBC CAPTCHA] Dialog disappeared; captcha was reset before retry")
+        debug.log("[UTIKI CAPTCHA] Dialog disappeared; captcha was reset before retry")
     else:
         debug.log(
-            "[CTBC CAPTCHA] Captcha refresh outcome is unknown; retry remains blocked"
+            "[UTIKI CAPTCHA] Captcha refresh outcome is unknown; retry remains blocked"
         )
     return True
 
 
-async def _recover_ctbc_seat_conflict(
+async def _recover_utiki_seat_conflict(
     tab, config_dict, *, runtime_for_tab, purchase_key_for_tab, reload_with_interval
 ):
     """從座位或票數衝突恢復至可重新選擇的狀態。"""
@@ -947,9 +953,9 @@ async def _recover_ctbc_seat_conflict(
 
     current_document_id = runtime["document"]["last_document"]
     if not pending.get("dialog_dismissed", False):
-        if await _ctbc_dialog_is_visible(tab):
+        if await _utiki_dialog_is_visible(tab):
             return True
-        if not _ctbc_conflict_is_current(
+        if not _utiki_conflict_is_current(
             tab,
             submit_key,
             pending,
@@ -959,7 +965,7 @@ async def _recover_ctbc_seat_conflict(
             return False
         pending["dialog_dismissed"] = True
 
-    if not await _clear_ctbc_conflict_selection(
+    if not await _clear_utiki_conflict_selection(
         tab,
         config_dict,
         submit_key,
@@ -980,7 +986,110 @@ async def _recover_ctbc_seat_conflict(
             return False
         return True
 
-    if not _ctbc_conflict_is_current(
+    # Only the observed conflict dialog identifies the document that rejected
+    # this submit. Manual submits do not have an active_submit source document.
+    dialog_document_id = str(pending.get("dialog_document_id") or "")
+    dialog_page_url = str(pending.get("dialog_page_url") or "")
+    current_url = str(tab.target.url)
+    health = runtime["document"].get("snapshot") or {}
+    health_snapshot = health.get("snapshot") or {}
+    refresh = runtime["refresh"]
+    ocr_config = config_dict.get("ocr_captcha", {})
+    no_automatic_submit = bool(
+        not pending.get("nonce")
+        and not (
+            ocr_config.get("enable", False)
+            and ocr_config.get("force_submit", False)
+        )
+    )
+    eligible_page = bool(
+        no_automatic_submit
+        and pending.get("page_type") == "seat"
+        and dialog_document_id
+        and current_document_id
+        and dialog_page_url == current_url == pending.get("source_url")
+        and refresh.get("reload_request") is None
+        and refresh.get("recovery_probe") is None
+        and runtime["purchase"].get("active_submit") is None
+    )
+    observed_current = False
+    if eligible_page:
+        # The site may replace the document after this tick's health check.
+        # Keep the blocker until the next tick classifies that new document.
+        try:
+            observed = await read_dialog_snapshot(tab)
+        except Exception:
+            observed = None
+        if runtime_for_tab(tab) is not runtime or not _utiki_conflict_is_current(
+            tab,
+            submit_key,
+            pending,
+            runtime_for_tab=runtime_for_tab,
+            purchase_key_for_tab=purchase_key_for_tab,
+        ):
+            return False
+        if observed is not None:
+            if (
+                observed.page_url != current_url
+                or observed.visible_count != 0
+                or (
+                    observed.document_id
+                    and observed.document_id != dialog_document_id
+                    and observed.document_id != current_document_id
+                )
+            ):
+                return True
+            observed_current = observed.document_id == current_document_id
+    if (
+        observed_current
+        and current_document_id != dialog_document_id
+        and health_snapshot.get("classification") == "normal"
+        and health_snapshot.get("document_id") == current_document_id
+        and health_snapshot.get("url") == current_url
+        and refresh.get("reload_request") is None
+        and refresh.get("recovery_probe") is None
+        and runtime["purchase"].get("active_submit") is None
+    ):
+        new_document_id = ""
+        if health_snapshot.get("ready_state") == "complete":
+            try:
+                new_document_id = await read_clean_seat_conflict_document(
+                    tab,
+                    current_url,
+                    dialog_document_id,
+                    str(pending.get("product_id") or ""),
+                )
+            except Exception:
+                pass
+        latest_health = (runtime["document"].get("snapshot") or {}).get(
+            "snapshot"
+        ) or {}
+        if runtime_for_tab(tab) is not runtime or not _utiki_conflict_is_current(
+            tab,
+            submit_key,
+            pending,
+            runtime_for_tab=runtime_for_tab,
+            purchase_key_for_tab=purchase_key_for_tab,
+        ):
+            return False
+        if new_document_id and new_document_id != current_document_id:
+            return True
+        if (
+            new_document_id
+            and str(tab.target.url) == current_url
+            and runtime["document"]["last_document"] == current_document_id
+            and latest_health.get("classification") == "normal"
+            and latest_health.get("document_id") == current_document_id
+            and latest_health.get("url") == current_url
+            and runtime["refresh"].get("reload_request") is None
+            and runtime["refresh"].get("recovery_probe") is None
+            and runtime["purchase"].get("active_submit") is None
+        ):
+            outcomes.pop(submit_key, None)
+            # Let the next outer tick inspect the new document before selecting.
+            return True
+
+    if not _utiki_conflict_is_current(
         tab,
         submit_key,
         pending,
@@ -990,7 +1099,7 @@ async def _recover_ctbc_seat_conflict(
         return False
     reload_reason = "selected seats were taken"
     reload_completed = await reload_with_interval(tab, config_dict, reload_reason)
-    if not _ctbc_conflict_is_current(
+    if not _utiki_conflict_is_current(
         tab,
         submit_key,
         pending,
@@ -1021,7 +1130,7 @@ async def _recover_ctbc_seat_conflict(
     return True
 
 
-def _ctbc_auth_failure_is_active(
+def _utiki_auth_failure_is_active(
     tab, submit_key, login_fingerprint, *, runtime_for_tab
 ):
     """判斷登入失敗是否仍屬於目前文件與送出操作。"""
@@ -1050,7 +1159,7 @@ def _ctbc_auth_failure_is_active(
     return True
 
 
-async def _observe_ctbc_submit_outcome(
+async def _observe_utiki_submit_outcome(
     tab, config_dict, source_url, submit_key, *, runtime_for_tab, purchase_key_for_tab
 ):
     """歸納加入購物車送出後第一個可觀察結果。"""
@@ -1058,7 +1167,6 @@ async def _observe_ctbc_submit_outcome(
     result = await _reconcile_utiki_purchase(
         tab,
         str(tab.target.url),
-        _page_type(str(tab.target.url)),
         config_dict,
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
@@ -1067,21 +1175,23 @@ async def _observe_ctbc_submit_outcome(
 
 
 async def _reconcile_utiki_purchase(
-    tab, current_url, page_type, config_dict, *, runtime_for_tab, purchase_key_for_tab
+    tab, current_url, config_dict, *, runtime_for_tab, purchase_key_for_tab
 ):
     """在執行頁面效果前協調延遲出現的送出結果。"""
     debug = util.create_debug_logger(config_dict)
     runtime = runtime_for_tab(tab)
     purchase = runtime["purchase"]
     snapshot = await read_dialog_snapshot(tab)
+    if runtime_for_tab(tab) is not runtime or str(tab.target.url) != current_url:
+        return None
     if snapshot is None:
-        debug.log("[CTBC] Submit dialog observation is invalid; action blocked")
+        debug.log("[UTIKI] Submit dialog observation is invalid; action blocked")
         return "blocked"
     if snapshot.visible_count:
         current_key = purchase_key_for_tab(tab)
-        submit_key, context = _ctbc_recent_submit_context(purchase, current_key)
+        submit_key, context = _utiki_recent_submit_context(purchase, current_key)
         source_url = context.get("source_url", "") if isinstance(context, dict) else ""
-        outcome = await _handle_ctbc_submit_dialog(
+        outcome = await _handle_utiki_submit_dialog(
             tab,
             config_dict,
             submit_key=submit_key,
@@ -1098,25 +1208,25 @@ async def _reconcile_utiki_purchase(
     if isinstance(active, dict):
         context_key, context = active.get("purchase_key"), active
     else:
-        context_key, context = _ctbc_recent_submit_context(
+        context_key, context = _utiki_recent_submit_context(
             purchase, purchase_key_for_tab(tab)
         )
     if not isinstance(context, dict) or context_key is None:
         return None
     source_url = str(context.get("source_url") or "")
-    if _ctbc_submit_reached_checkout(source_url, current_url):
+    if _utiki_submit_reached_checkout(source_url, current_url):
         if active is None and not (
             context.get("kind") == "unknown"
             and context.get("reason") in {"submit_outcome", "dispatch_unknown"}
         ):
             return "success" if context.get("kind") == "success" else "blocked"
-        record = _ctbc_purchase_outcome(
+        record = _utiki_purchase_outcome(
             "success",
             source_url=source_url,
-            source_document_id=_ctbc_source_document_id(context),
+            source_document_id=_utiki_source_document_id(context),
             nonce=context.get("nonce", ""),
         )
-        _ctbc_store_purchase_outcome(purchase, context_key, record, active=active)
+        _utiki_store_purchase_outcome(purchase, context_key, record, active=active)
         return "success"
     destination_key = purchase_key_for_tab(tab)
     if active is None:
@@ -1127,18 +1237,18 @@ async def _reconcile_utiki_purchase(
             if context.get("kind") in {"auth", "captcha", "seat_conflict"}
             else "blocked"
         )
-    dispatched_at = _ctbc_submit_dispatched_at(active)
+    dispatched_at = _utiki_submit_dispatched_at(active)
     if (
         dispatched_at
-        and time.monotonic() - dispatched_at < CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS
+        and time.monotonic() - dispatched_at < UTIKI_SUBMIT_OUTCOME_TIMEOUT_SECONDS
     ):
         return "pending"
-    _ctbc_finish_active_unknown(purchase, active, "submit_outcome")
-    debug.log("[CTBC] Submit outcome is unknown; automatic resubmit is blocked")
+    _utiki_finish_active_unknown(purchase, active, "submit_outcome")
+    debug.log("[UTIKI] Submit outcome is unknown; automatic resubmit is blocked")
     return "blocked"
 
 
-async def _dispatch_ctbc_submit(
+async def _dispatch_utiki_submit(
     tab, config_dict, submit_key, submit_plan, *, runtime_for_tab, reload_with_interval
 ):
     """送出一次加入購物車操作，並等待後續確認結果。"""
@@ -1166,15 +1276,15 @@ async def _dispatch_ctbc_submit(
         if result is not SubmitDispatchResult.DISPATCHED:
             if purchase.get("active_submit") is not dispatch_state:
                 return False
-            debug.log(f"[CTBC] Submit dispatch {result.value}; click blocked")
+            debug.log(f"[UTIKI] Submit dispatch {result.value}; click blocked")
             if (
                 result is SubmitDispatchResult.STALE
                 and str(tab.target.url) == submit_plan.page_url
             ):
                 reason = (
-                    CTBC_SEAT_STALE_RELOAD_REASON
+                    UTIKI_SEAT_STALE_RELOAD_REASON
                     if submit_plan.page_kind is PageKind.RESERVED_SEAT
-                    else CTBC_QUANTITY_STALE_RELOAD_REASON
+                    else UTIKI_QUANTITY_STALE_RELOAD_REASON
                 )
                 try:
                     await reload_with_interval(tab, config_dict, reason)
@@ -1186,8 +1296,8 @@ async def _dispatch_ctbc_submit(
                     purchase["active_submit"] = None
             return False
     except Exception as exc:
-        _ctbc_finish_active_unknown(purchase, dispatch_state, "dispatch_unknown")
-        debug.log(f"[CTBC] Submit dispatch outcome is unknown: {exc}")
+        _utiki_finish_active_unknown(purchase, dispatch_state, "dispatch_unknown")
+        debug.log(f"[UTIKI] Submit dispatch outcome is unknown: {exc}")
         return False
     if purchase.get("active_submit") is not dispatch_state:
         return False
@@ -1196,7 +1306,7 @@ async def _dispatch_ctbc_submit(
     return True
 
 
-async def _ctbc_captcha_and_submit(
+async def _utiki_captcha_and_submit(
     tab,
     config_dict,
     ocr,
@@ -1218,17 +1328,17 @@ async def _ctbc_captcha_and_submit(
         "general_admission",
         "server_assigned_quantity",
     ):
-        debug.log("[CTBC] Purchase identity is incomplete; automatic submit is blocked")
+        debug.log("[UTIKI] Purchase identity is incomplete; automatic submit is blocked")
         return False
     if (
         not isinstance(submit_plan, SubmitPlan)
         or not submit_plan_is_valid(submit_plan)
         or submit_plan.page_kind.value != page_type
     ):
-        debug.log("[CTBC] Submit plan does not match the purchase page")
+        debug.log("[UTIKI] Submit plan does not match the purchase page")
         return False
 
-    dialog_outcome = await _handle_ctbc_submit_dialog(
+    dialog_outcome = await _handle_utiki_submit_dialog(
         tab,
         config_dict,
         submit_key=submit_key,
@@ -1237,7 +1347,7 @@ async def _ctbc_captcha_and_submit(
     )
     if dialog_outcome is not None:
         return dialog_outcome == "success"
-    if await _recover_ctbc_captcha_dialog(
+    if await _recover_utiki_captcha_dialog(
         tab,
         config_dict,
         runtime_for_tab=runtime_for_tab,
@@ -1246,35 +1356,35 @@ async def _ctbc_captcha_and_submit(
         return False
     active = purchase.get("active_submit")
     if isinstance(active, dict):
-        dispatched_at = _ctbc_submit_dispatched_at(active)
+        dispatched_at = _utiki_submit_dispatched_at(active)
         if (
             not dispatched_at
-            or time.monotonic() - dispatched_at >= CTBC_SUBMIT_OUTCOME_TIMEOUT_SECONDS
+            or time.monotonic() - dispatched_at >= UTIKI_SUBMIT_OUTCOME_TIMEOUT_SECONDS
         ):
-            _ctbc_finish_active_unknown(purchase, active, "submit_outcome")
-            debug.log("[CTBC] Submit outcome is unknown; automatic resubmit is blocked")
+            _utiki_finish_active_unknown(purchase, active, "submit_outcome")
+            debug.log("[UTIKI] Submit outcome is unknown; automatic resubmit is blocked")
         return False
     outcome = purchase["outcomes"].get(submit_key)
     if isinstance(outcome, dict) and outcome.get("kind") != "auth":
         return False
 
     try:
-        login_ready = await _fill_ctbc_inline_login(tab, config_dict)
+        login_ready = await _fill_utiki_inline_login(tab, config_dict)
         if not login_ready:
-            debug.log("[CTBC LOGIN] Waiting for login or CTBC account settings")
+            debug.log("[UTIKI LOGIN] Waiting for login or configured account settings")
             return False
-        login_fingerprint = await _ctbc_login_fingerprint(tab)
+        login_fingerprint = await _utiki_login_fingerprint(tab)
     except Exception as exc:
         debug.log(
-            "[CTBC LOGIN] Credential observation failed; "
+            "[UTIKI LOGIN] Credential observation failed; "
             f"previous authentication blocker retained: {exc}"
         )
         return False
-    if _ctbc_auth_failure_is_active(
+    if _utiki_auth_failure_is_active(
         tab, submit_key, login_fingerprint, runtime_for_tab=runtime_for_tab
     ):
         debug.log(
-            "[CTBC LOGIN] Previous authentication failure; waiting for credentials to change"
+            "[UTIKI LOGIN] Previous authentication failure; waiting for credentials to change"
         )
         return False
 
@@ -1288,7 +1398,7 @@ async def _ctbc_captcha_and_submit(
     )
     captcha_ready = isinstance(captcha_value, str) and len(captcha_value) == 4
     if not captcha_ready and config_dict.get("ocr_captcha", {}).get("enable", False):
-        captcha_ready = await _ctbc_captcha(tab, config_dict, ocr)
+        captcha_ready = await _utiki_captcha(tab, config_dict, ocr)
 
     # With OCR disabled, keep the selections and wait for manual input.  The
     # next loop iteration detects the four-character value and continues.
@@ -1301,7 +1411,7 @@ async def _ctbc_captcha_and_submit(
     if not ocr_config.get("enable", False) or not ocr_config.get("force_submit", False):
         return True
 
-    dialog_outcome = await _handle_ctbc_submit_dialog(
+    dialog_outcome = await _handle_utiki_submit_dialog(
         tab,
         config_dict,
         submit_key=submit_key,
@@ -1316,7 +1426,7 @@ async def _ctbc_captcha_and_submit(
     if isinstance(outcome, dict):
         return False
 
-    if not await _dispatch_ctbc_submit(
+    if not await _dispatch_utiki_submit(
         tab,
         config_dict,
         submit_key,
@@ -1325,8 +1435,8 @@ async def _ctbc_captcha_and_submit(
         reload_with_interval=reload_with_interval,
     ):
         return False
-    debug.log("[CTBC] Add-to-cart submitted")
-    return await _observe_ctbc_submit_outcome(
+    debug.log("[UTIKI] Add-to-cart submitted")
+    return await _observe_utiki_submit_outcome(
         tab,
         config_dict,
         current_url,
@@ -1336,14 +1446,28 @@ async def _ctbc_captcha_and_submit(
     )
 
 
-async def _handle_ctbc_checkout(
-    tab, config_dict, *, runtime_for_tab, tab_state_key_for_tab
+async def _handle_utiki_checkout(
+    tab, config_dict, expected_url, *, runtime_for_tab, tab_state_key_for_tab
 ):
-    """處理中信相容售票的結帳頁狀態。"""
+    """處理已支援 uTiki 租戶的結帳頁狀態。"""
+
+    current_url = str(tab.target.url)
+    if current_url != expected_url or _page_type(current_url) != "checkout":
+        return
+    profile = get_utiki_tenant_profile(current_url)
+    if profile is None:
+        return
 
     purchase = runtime_for_tab(tab)["purchase"]
-    purchase_key, context = _ctbc_recent_submit_context(purchase)
-    if purchase_key is not None and isinstance(context, dict) and context.get("nonce"):
+    purchase_key, context = _utiki_recent_submit_context(purchase)
+    if (
+        purchase_key is not None
+        and isinstance(context, dict)
+        and context.get("nonce")
+        and _utiki_submit_reached_checkout(
+            context.get("source_url", ""), current_url
+        )
+    ):
         checkout_key = ("submit", purchase_key, str(context["nonce"]))
     else:
         checkout_key = ("location", tab_state_key_for_tab(tab))
@@ -1353,5 +1477,5 @@ async def _handle_ctbc_checkout(
     checkout_notified.add(checkout_key)
     if config_dict.get("advanced", {}).get("play_sound", {}).get("order", False):
         play_sound_while_ordering(config_dict)
-    send_discord_notification(config_dict, "order", "CTBC Sports")
-    send_telegram_notification(config_dict, "order", "CTBC Sports")
+    send_discord_notification(config_dict, "order", profile.name)
+    send_telegram_notification(config_dict, "order", profile.name)

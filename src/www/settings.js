@@ -17,9 +17,9 @@ const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
-const ctbc_seat_selection_mode = document.querySelector('#ctbc_seat_selection_mode');
-const ctbc_ticket_type_keyword = document.querySelector('#ctbc_ticket_type_keyword');
-const ctbc_seat_sorting = document.querySelector('#ctbc_seat_sorting');
+const utiki_seat_selection_mode = document.querySelector('#utiki_seat_selection_mode');
+const utiki_ticket_type_keyword = document.querySelector('#utiki_ticket_type_keyword');
+const utiki_seat_sorting = document.querySelector('#utiki_seat_sorting');
 const keyword_exclude = document.querySelector('#keyword_exclude');
 
 // advance
@@ -77,6 +77,7 @@ const ibonqware = document.querySelector('#ibonqware');
 const funone_session_cookie = document.querySelector('#funone_session_cookie');
 const fansigo_cookie = document.querySelector('#fansigo_cookie');
 const ctbc_cookie = document.querySelector('#ctbc_cookie');
+const wdragons_cookie = document.querySelector('#wdragons_cookie');
 const fansigo_account = document.querySelector('#fansigo_account');
 const fansigo_password = document.querySelector('#fansigo_password');
 const facebook_account = document.querySelector('#facebook_account');
@@ -129,11 +130,9 @@ function update_settings_action_state()
 
 function utiki_behavior_setting(config, key, fallback)
 {
-    for (const sectionName of ['utiki', 'ctbc']) {
-        const section = config && config[sectionName];
-        if (section && Object.prototype.hasOwnProperty.call(section, key)) {
-            return section[key];
-        }
+    const section = config && config.utiki;
+    if (section && Object.prototype.hasOwnProperty.call(section, key)) {
+        return section[key];
     }
     return fallback;
 }
@@ -496,20 +495,20 @@ function renderBasicTabTranslations() {
     setRowLabelForField('area_select_mode', fieldLabel('Area selection order', 'area_select_mode'));
     setRowLabelForField('area_keyword', fieldLabel('Area keywords', 'area_keyword'));
     setRowLabelForField('area_auto_fallback', fieldLabel('Area fallback', 'area_auto_fallback'));
-    setRowLabelForField('ctbc_seat_selection_mode', fieldLabel('Baseball seat selection', 'ctbc_seat_selection_mode'));
-    applyOrRestore('#ctbc_seat_selection_mode option[value="manual"]', 'textContent', 'Manual seat map');
-    applyOrRestore('#ctbc_seat_selection_mode option[value="computer"]', 'textContent', 'Website computer assignment');
-    setNearestFormText('ctbc_seat_selection_mode', 'Manual seat selection remains the default. Website computer assignment is enabled only for verified platforms and still follows the area keywords.');
-    setNearestFormText('ctbc_ticket_type_keyword', 'Used on the seat page. Defaults to Full Ticket and does not inherit area or exclusion keywords. Enter 身心 to select the disability ticket explicitly.');
-    setRowLabelForField('ctbc_seat_sorting', fieldLabel('Baseball seat ordering', 'ctbc_seat_sorting'));
+    setRowLabelForField('utiki_seat_selection_mode', fieldLabel('Baseball seat selection', 'utiki_seat_selection_mode'));
+    applyOrRestore('#utiki_seat_selection_mode option[value="manual"]', 'textContent', 'Manual seat map');
+    applyOrRestore('#utiki_seat_selection_mode option[value="computer"]', 'textContent', 'Website computer assignment');
+    setNearestFormText('utiki_seat_selection_mode', 'Manual seat selection remains the default. Website computer assignment is enabled only for verified platforms and still follows the area keywords.');
+    setNearestFormText('utiki_ticket_type_keyword', 'Used on the seat page. Defaults to Full Ticket and does not inherit area or exclusion keywords. Enter 身心 to select the disability ticket explicitly.');
+    setRowLabelForField('utiki_seat_sorting', fieldLabel('Baseball seat ordering', 'utiki_seat_sorting'));
     setRowLabelForField('keyword_exclude', fieldLabel('Exclude keywords', 'keyword_exclude'));
 
-    applyOrRestore('#ctbc_seat_sorting option[value="display"]', 'textContent', 'Seat-map display order (top to bottom)');
-    applyOrRestore('#ctbc_seat_sorting option[value="row_seat"]', 'textContent', 'Smaller row, then smaller seat');
-    applyOrRestore('#ctbc_seat_sorting option[value="row_asc_aisle"]', 'textContent', 'Smaller row, aisle seat');
-    applyOrRestore('#ctbc_seat_sorting option[value="row_asc_seat_desc"]', 'textContent', 'Smaller row, then larger seat');
-    applyOrRestore('#ctbc_seat_sorting option[value="row_desc_seat_asc"]', 'textContent', 'Larger row, then smaller seat');
-    setNearestFormText('ctbc_seat_sorting', 'The default prioritizes smaller row and seat numbers. Each option directly defines seat priority.');
+    applyOrRestore('#utiki_seat_sorting option[value="display"]', 'textContent', 'Seat-map display order (top to bottom)');
+    applyOrRestore('#utiki_seat_sorting option[value="row_seat"]', 'textContent', 'Smaller row, then smaller seat');
+    applyOrRestore('#utiki_seat_sorting option[value="row_asc_aisle"]', 'textContent', 'Smaller row, aisle seat');
+    applyOrRestore('#utiki_seat_sorting option[value="row_asc_seat_desc"]', 'textContent', 'Smaller row, then larger seat');
+    applyOrRestore('#utiki_seat_sorting option[value="row_desc_seat_asc"]', 'textContent', 'Larger row, then smaller seat');
+    setNearestFormText('utiki_seat_sorting', 'The default prioritizes smaller row and seat numbers. Each option directly defines seat priority.');
 
     const versionLabel = document.querySelector('#maxbot_version')?.closest('.row')?.querySelector('label.col-sm-2');
     if (versionLabel) {
@@ -674,6 +673,9 @@ function renderAutofillTabTranslations() {
     setRowLabelForField('ctbc_cookie', fieldLabel('CTBC Sports cookie set', 'ctbc_cookie'));
     applyOrRestore('#ctbc_cookie', 'placeholder', 'Paste the complete Cookie header (all CTBC_ cookies)');
     setNearestFormText('ctbc_cookie', 'Cookie is preferred; expired cookies fall back to the account and password below. Treat it as a login credential and never share it.');
+    setRowLabelForField('wdragons_cookie', fieldLabel('Wei Chuan Dragons cookie set', 'wdragons_cookie'));
+    applyOrRestore('#wdragons_cookie', 'placeholder', 'Paste the complete Cookie header (WDRAGONS| cookies)');
+    setNearestFormText('wdragons_cookie', 'If the cookies expire, obtain a new set. Automatic account/password login is unavailable for this site. Treat cookies as login credentials and never share them.');
     setRowLabelForField('discount_code', fieldLabel('Discount / member code', 'discount_code'));
 
     setInputGroupTexts('fansigo_account', ['Email', 'Password']);
@@ -697,7 +699,7 @@ function renderAutofillTabTranslations() {
     setRowLabelForField('kham_account', 'Kham');
     setRowLabelForField('ctbc_account', 'CTBC Sports');
     setRowLabelForField('ticket_account', 'Ticket.com.tw');
-    setRowLabelForField('ctbc_ticket_type_keyword', 'Baseball ticket-type keyword');
+    setRowLabelForField('utiki_ticket_type_keyword', 'Baseball ticket-type keyword');
     setRowLabelForField('udn_account', 'UDN');
     setRowLabelForField('ticketplus_account', 'TicketPlus');
     setRowLabelForField('cityline_account', 'Cityline');
@@ -850,9 +852,10 @@ function applyLanguage(language) {
 function uiText(key, extra = '') {
     const messages = {
         'reset_done': { 'zh-TW': '已重設目前 profile；職棒共用刷新設定維持不變', en: 'Profile reset; shared baseball refresh settings were kept' },
+        'control_failed': { 'zh-TW': '控制指令未確認；請先檢查目前狀態，必要時再手動操作。', en: 'Control request was not confirmed. Check the current state before trying again manually.' },
         'launching': { 'zh-TW': '啟動 MaxBot 主程式中...', en: 'Launching Tickets Hunter...' },
         'launch_sent': { 'zh-TW': '啟動指令已發送，請稍候瀏覽器視窗開啟...', en: 'Launch request sent. Please wait for the browser window...' },
-        'launch_failed': { 'zh-TW': `啟動失敗：無法連線到後端服務 (${extra})`, en: `Launch failed: cannot connect to the backend service (${extra})` },
+        'launch_failed': { 'zh-TW': `啟動指令未確認；請先檢查執行中實例 (${extra})`, en: `Launch request was not confirmed. Check running instances first (${extra}).` },
         'save_failed': { 'zh-TW': `儲存失敗：${extra}`, en: `Save failed: ${extra}` },
         'saving': { 'zh-TW': '儲存中...', en: 'Saving...' },
         'saved': { 'zh-TW': '已存檔', en: 'Saved' },
@@ -1135,15 +1138,23 @@ function isTixcraftFamily(url) {
 
 function isTixcraftSoftBlockScope(url) {
     if (!url) return false;
-    return ['tixcraft.com', 'teamear.com', 'indievox.com'].some(domain => url.includes(domain));
+    try {
+        const parsed = new URL(url);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+        const host = parsed.hostname.toLowerCase();
+        return ['tixcraft.com', 'teamear.com', 'indievox.com'].some(
+            domain => host === domain || host.endsWith(`.${domain}`)
+        );
+    } catch (_error) {
+        return false;
+    }
 }
 
 // Platform detection map
 const PLATFORM_MAP = [
-    { key: 'tixcraft',    domains: ['tixcraft.com', 'teamear.com', 'indievox.com', 'ticketmaster.'] },
+    { key: 'tixcraft',    domains: ['tixcraft.com', 'teamear.com', 'indievox.com', 'ticketmaster.sg', 'ticketmaster.com'] },
     { key: 'kktix',       domains: ['kktix.com', 'kktix.cc'] },
     { key: 'ibon',        domains: ['ibon.com'] },
-    { key: 'ctbc',        domains: ['tix.ctbcsports.com', 'tix.wdragons.com'] },
     { key: 'famiticket',  domains: ['famiticket.com'] },
     { key: 'kham',        domains: ['kham.com.tw'] },
     { key: 'ticket',      domains: ['ticket.com.tw'] },
@@ -1158,8 +1169,17 @@ const PLATFORM_MAP = [
 
 function detectPlatform(url) {
     if (!url) return null;
+    if (detectUtikiTenant(url)) return 'utiki';
+    let host;
+    try {
+        const parsed = new URL(url);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+        host = parsed.hostname.toLowerCase();
+    } catch (_error) {
+        return null;
+    }
     for (const platform of PLATFORM_MAP) {
-        if (platform.domains.some(d => url.includes(d))) {
+        if (platform.domains.some(d => host === d || host.endsWith(`.${d}`))) {
             return platform.key;
         }
     }
@@ -1168,16 +1188,40 @@ function detectPlatform(url) {
 
 let _lastPlatform = undefined;
 
+const UTIKI_TENANT_BY_HOST = Object.freeze({
+    'tix.ctbcsports.com': 'ctbc',
+    'tix.wdragons.com': 'wdragons',
+});
+
+function detectUtikiTenant(url) {
+    try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'https:' || (parsed.port && parsed.port !== '443') || parsed.username || parsed.password) {
+            return null;
+        }
+        return Object.prototype.hasOwnProperty.call(UTIKI_TENANT_BY_HOST, parsed.hostname)
+            ? UTIKI_TENANT_BY_HOST[parsed.hostname] : null;
+    } catch (_error) {
+        return null;
+    }
+    return null;
+}
+
 function updatePlatformFields(url) {
     const platform = detectPlatform(url);
-    if (platform === _lastPlatform) {
+    const tenant = platform === 'utiki' ? detectUtikiTenant(url) : null;
+    const visibilityKey = `${platform}:${tenant}`;
+    if (visibilityKey === _lastPlatform) {
         updateTixcraftSoftBlockDelayVisibility(url);
         return;
     }
-    _lastPlatform = platform;
+    _lastPlatform = visibilityKey;
     const fields = $('[data-under]').addClass('disappear');
     if (platform) {
         fields.filter(`[data-under~="${platform}"]`).removeClass('disappear');
+    }
+    if (tenant) {
+        fields.filter(`[data-under~="${tenant}"]`).removeClass('disappear');
     }
     updateTixcraftSoftBlockDelayVisibility(url);
     updateCitylineHintVisibility();
@@ -1355,6 +1399,7 @@ function load_settins_to_form(settings)
         funone_session_cookie.value = settings.accounts.funone_session_cookie || '';
         fansigo_cookie.value = settings.accounts.fansigo_cookie || '';
         ctbc_cookie.value = settings.accounts.ctbc_cookie || '';
+        wdragons_cookie.value = settings.accounts.wdragons_cookie || '';
         fansigo_account.value = settings.accounts.fansigo_account || '';
         fansigo_password.value = settings.accounts.fansigo_password || '';
         facebook_account.value = settings.accounts.facebook_account;
@@ -1376,18 +1421,18 @@ function load_settins_to_form(settings)
         ctbc_password.value = settings.accounts.ctbc_password || '';
         ticket_password.value = settings.accounts.ticket_password;
 
-        const savedCtbcSeatSelectionMode = utiki_behavior_setting(settings, 'seat_selection_mode', 'manual');
-        ctbc_seat_selection_mode.value = ['manual', 'computer'].includes(savedCtbcSeatSelectionMode)
-            ? savedCtbcSeatSelectionMode
+        const savedUtikiSeatSelectionMode = utiki_behavior_setting(settings, 'seat_selection_mode', 'manual');
+        utiki_seat_selection_mode.value = ['manual', 'computer'].includes(savedUtikiSeatSelectionMode)
+            ? savedUtikiSeatSelectionMode
             : 'manual';
-        ctbc_ticket_type_keyword.value = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
-        const savedCtbcSeatSorting = utiki_behavior_setting(settings, 'seat_sorting', 'row_seat');
-        const validCtbcSeatSortings = [
+        utiki_ticket_type_keyword.value = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
+        const savedUtikiSeatSorting = utiki_behavior_setting(settings, 'seat_sorting', 'row_seat');
+        const validUtikiSeatSortings = [
             'display', 'row_seat', 'row_asc_aisle',
             'row_asc_seat_desc', 'row_desc_seat_asc'
         ];
-        ctbc_seat_sorting.value = validCtbcSeatSortings.includes(savedCtbcSeatSorting)
-            ? savedCtbcSeatSorting
+        utiki_seat_sorting.value = validUtikiSeatSortings.includes(savedUtikiSeatSorting)
+            ? savedUtikiSeatSorting
             : 'row_seat';
         udn_password.value = settings.accounts.udn_password;
         ticketplus_password.value = settings.accounts.ticketplus_password;
@@ -1553,6 +1598,27 @@ function global_settings_are_equal(left, right)
         && a.max_cooldown_seconds === b.max_cooldown_seconds;
 }
 
+let controlTokenRequest = null;
+
+function control_post(url)
+{
+    if (!controlTokenRequest) {
+        controlTokenRequest = $.getJSON('/control-token');
+        controlTokenRequest.fail(function() { controlTokenRequest = null; });
+    }
+    return controlTokenRequest.then(function(data) {
+        if (!data || typeof data.token !== 'string' || !data.token) {
+            controlTokenRequest = null;
+            return $.Deferred().reject({ responseText: '' }, 'invalid token response').promise();
+        }
+        return $.ajax({
+            url: url,
+            method: 'POST',
+            headers: { 'X-XSRFToken': data.token }
+        }).fail(function() { controlTokenRequest = null; });
+    });
+}
+
 function maxbot_reset_api()
 {
     if (current_profile !== 'default') {
@@ -1560,10 +1626,9 @@ function maxbot_reset_api()
         return;
     }
     let api_url = "/reset";
-    $.get( api_url, function() {
-        //alert( "success" );
-    })
+    control_post(api_url)
     .done(function(data) {
+        //alert( "success" );
         //alert( "second success" );
         //console.log(data);
         settings = data;
@@ -1572,7 +1637,7 @@ function maxbot_reset_api()
         run_message(uiText('reset_done'));
     })
     .fail(function() {
-        //alert( "error" );
+        message(uiText('control_failed'));
     })
     .always(function() {
         //alert( "finished" );
@@ -1645,9 +1710,7 @@ function maxbot_run_api(instance_override, targetProfile = current_profile)
     if (instance_override) {
         api_url += (profile_query(targetProfile) ? '&' : '?') + 'instance=' + encodeURIComponent(instance_override);
     }
-    $.get( api_url, function() {
-        //alert( "success" );
-    })
+    control_post(api_url)
     .done(function(data) {
         run_message(uiText('launch_sent'));
         console.log("[MaxBot] Launch API response:", data);
@@ -1665,15 +1728,13 @@ function maxbot_run_api(instance_override, targetProfile = current_profile)
 function maxbot_shutdown_api()
 {
     let api_url = "/shutdown";
-    $.get( api_url, function() {
-        //alert( "success" );
-    })
+    control_post(api_url)
     .done(function(data) {
         //alert( "second success" );
         window.close();
     })
     .fail(function() {
-        //alert( "error" );
+        message(uiText('control_failed'));
     })
     .always(function() {
         //alert( "finished" );
@@ -1796,6 +1857,7 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.funone_session_cookie = funone_session_cookie.value;
             settings.accounts.fansigo_cookie = fansigo_cookie.value;
             settings.accounts.ctbc_cookie = ctbc_cookie.value;
+            settings.accounts.wdragons_cookie = wdragons_cookie.value;
             settings.accounts.fansigo_account = fansigo_account.value;
             settings.accounts.fansigo_password = fansigo_password.value;
             settings.accounts.facebook_account = facebook_account.value;
@@ -1817,13 +1879,9 @@ function save_changes_to_dict(silent_flag)
             settings.accounts.ctbc_password = ctbc_password.value;
             settings.accounts.ticket_password = ticket_password.value;
             if (!settings.utiki) settings.utiki = {};
-            if (!settings.ctbc) settings.ctbc = {};
-            settings.utiki.seat_selection_mode = ctbc_seat_selection_mode.value || 'manual';
-            settings.utiki.ticket_type_keyword = ctbc_ticket_type_keyword.value || '全票';
-            settings.utiki.seat_sorting = ctbc_seat_sorting.value || 'row_seat';
-            settings.ctbc.seat_selection_mode = settings.utiki.seat_selection_mode;
-            settings.ctbc.ticket_type_keyword = settings.utiki.ticket_type_keyword;
-            settings.ctbc.seat_sorting = settings.utiki.seat_sorting;
+            settings.utiki.seat_selection_mode = utiki_seat_selection_mode.value || 'manual';
+            settings.utiki.ticket_type_keyword = utiki_ticket_type_keyword.value || '全票';
+            settings.utiki.seat_sorting = utiki_seat_sorting.value || 'row_seat';
             settings.accounts.udn_password = udn_password.value;
             settings.accounts.ticketplus_password = ticketplus_password.value;
             settings.advanced.discount_code = discount_code.value;
@@ -1922,14 +1980,12 @@ function maxbot_pause_api()
 {
     let api_url = "/pause" + profile_query();
     if(settings) {
-        $.get( api_url, function() {
-            //alert( "success" );
-        })
+        control_post(api_url)
         .done(function(data) {
             //alert( "second success" );
         })
         .fail(function() {
-            //alert( "error" );
+            message(uiText('control_failed'));
         })
         .always(function() {
             //alert( "finished" );
@@ -1941,14 +1997,12 @@ function maxbot_resume_api()
 {
     let api_url = "/resume" + profile_query();
     if(settings) {
-        $.get( api_url, function() {
-            //alert( "success" );
-        })
+        control_post(api_url)
         .done(function(data) {
             //alert( "second success" );
         })
         .fail(function() {
-            //alert( "error" );
+            message(uiText('control_failed'));
         })
         .always(function() {
             //alert( "finished" );
@@ -1985,25 +2039,25 @@ function check_unsaved_fields()
                 $("#"+f).removeClass("is-invalid");
             }
         });
-        if (ctbc_seat_selection_mode) {
+        if (utiki_seat_selection_mode) {
             const savedValue = utiki_behavior_setting(settings, 'seat_selection_mode', 'manual');
-            ctbc_seat_selection_mode.classList.toggle(
+            utiki_seat_selection_mode.classList.toggle(
                 'is-invalid',
-                ctbc_seat_selection_mode.value !== savedValue
+                utiki_seat_selection_mode.value !== savedValue
             );
         }
-        if (ctbc_ticket_type_keyword) {
+        if (utiki_ticket_type_keyword) {
             const savedValue = utiki_behavior_setting(settings, 'ticket_type_keyword', '全票');
-            ctbc_ticket_type_keyword.classList.toggle(
+            utiki_ticket_type_keyword.classList.toggle(
                 'is-invalid',
-                ctbc_ticket_type_keyword.value !== savedValue
+                utiki_ticket_type_keyword.value !== savedValue
             );
         }
-        if (ctbc_seat_sorting) {
+        if (utiki_seat_sorting) {
             const savedValue = utiki_behavior_setting(settings, 'seat_sorting', 'row_seat');
-            ctbc_seat_sorting.classList.toggle(
+            utiki_seat_sorting.classList.toggle(
                 'is-invalid',
-                ctbc_seat_sorting.value !== savedValue
+                utiki_seat_sorting.value !== savedValue
             );
         }
         const field_list_accounts = [
@@ -2012,6 +2066,7 @@ function check_unsaved_fields()
             "funone_session_cookie",
             "fansigo_cookie",
             "ctbc_cookie",
+            "wdragons_cookie",
             "fansigo_account",
             "fansigo_password",
             "facebook_account",
@@ -2232,17 +2287,23 @@ function instances_dashboard_api() {
 }
 
 function instance_pause(id) {
-    $.get('/pause' + instance_query(id)).always(instances_dashboard_api);
+    control_post('/pause' + instance_query(id))
+        .fail(function() { message(uiText('control_failed')); })
+        .always(instances_dashboard_api);
 }
 
 function instance_resume(id) {
-    $.get('/resume' + instance_query(id)).always(instances_dashboard_api);
+    control_post('/resume' + instance_query(id))
+        .fail(function() { message(uiText('control_failed')); })
+        .always(instances_dashboard_api);
 }
 
 function instance_stop(id) {
     // Irreversible (closes the browser, ends the process) -> require confirmation.
     if (!window.confirm(uiText('stop_confirm', id))) return;
-    $.get('/stop' + instance_query(id)).always(instances_dashboard_api);
+    control_post('/stop' + instance_query(id))
+        .fail(function() { message(uiText('control_failed')); })
+        .always(instances_dashboard_api);
 }
 
 function pause_all_instances() {
@@ -2250,9 +2311,24 @@ function pause_all_instances() {
     // non-paused instance individually (no global pause file).
     $.get('/instances').done(function(data) {
         const rows = (data && data.instances) ? data.instances : [];
-        rows.filter(function(it){ return it.alive && !it.paused; })
-            .forEach(function(it){ $.get('/pause' + instance_query(it.id)); });
-        setTimeout(instances_dashboard_api, 300);
+        const targets = rows.filter(function(it){ return it.alive && !it.paused; });
+        if (!targets.length) {
+            instances_dashboard_api();
+            return;
+        }
+        let remaining = targets.length;
+        let failed = false;
+        targets.forEach(function(it) {
+            control_post('/pause' + instance_query(it.id))
+                .fail(function() { failed = true; })
+                .always(function() {
+                    remaining--;
+                    if (remaining === 0) {
+                        if (failed) message(uiText('control_failed'));
+                        instances_dashboard_api();
+                    }
+                });
+        });
     });
 }
 

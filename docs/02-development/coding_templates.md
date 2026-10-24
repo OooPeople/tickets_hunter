@@ -7,7 +7,7 @@
 
 > Tickets Hunter 多平台搶票系統統一程式碼範本庫
 
-**適用界線**：本頁函式骨架、通用 retry、清單與評分供適用的既有平台參考，不直接套為 [本次 uTiki 等價重構](utiki-refactor/PLAN.md) 的實作或完成標準。uTiki 的目前程式與能力邊界以 `944e934` 實碼及 [STATUS](utiki-refactor/STATUS.md) 為準。
+**適用界線**：本頁函式骨架、通用 retry、清單與評分供適用的平台參考，不自動成為 uTiki 的功能或完成標準。uTiki 目前能力與驗證見 [STATUS](utiki-refactor/STATUS.md)，具體邊界由現行程式及其測試決定；[原重構計畫](archive/utiki-refactor/PLAN.md)僅供歷史追溯。
 
 ## 📚 **文件參考指南**
 

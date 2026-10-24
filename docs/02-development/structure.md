@@ -1,9 +1,9 @@
 # 函式結構分析與平台索引
 
 **文件說明**：提供 Tickets Hunter 專案的模組結構、核心函式索引、平台實作分析與功能完整度評分
-**最後更新**：2026-10-23
+**最後更新**：2026-10-24
 
-uTiki 模組索引反映批次 5 接線及批次 6 前架構清理後的現況；後續目標架構與本次等價驗收依 [正式 PLAN](utiki-refactor/PLAN.md)，目前進度依 [STATUS](utiki-refactor/STATUS.md)。下列跨平台評分是參考分類，不作為本次 uTiki 的功能待辦或完成門檻。
+uTiki 模組索引描述目前的 current 設定與正式 source 接線；實際能力、驗證與待處理事項見 [STATUS](utiki-refactor/STATUS.md)。[已完成的重構計畫](archive/utiki-refactor/PLAN.md)只作歷史參考。下列跨平台評分是通用參考分類，不自動成為 uTiki 功能待辦或完成門檻。
 
 ---
 
@@ -76,7 +76,7 @@ uTiki 模組索引反映批次 5 接線及批次 6 前架構清理後的現況�
 - **platforms/kham.py** - KHAM + ticket.com.tw + UDN 平台（21 函式）
 - **platforms/hkticketing.py** - HKTicketing + GalaxyMacau + Ticketek 平台（30 函式）
 - **platforms/utiki/** - uTiki2 職棒售票家族（tenant profile、日期／區域選擇、導航、購票、提交、refresh infrastructure 與 workflow）
-- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade，新邏輯不得加在此檔
+- **platforms/ctbc.py** - 舊公開名稱的無狀態相容 facade；舊 Cookie 入口僅作中信租戶核對與共用函式轉接
 
 ### 🌐 支援平台清單
 
@@ -391,7 +391,7 @@ FunOne Tickets 主流程 (Feature 011)
 
 ### ⚾ **uTiki2 職棒售票家族**
 
-#### 目前模組邊界（批次 5 後、批次 6 前架構清理後）
+#### 目前模組邊界
 
 ```text
 platforms/utiki/
@@ -411,18 +411,27 @@ platforms/utiki/
 ├── purchase.py   # 已通過原導覽核對的座位／票數頁準備與提交編排
 └── workflow.py   # 唯一 per-tab registry／lifecycle、頁面路由與跨模組協調
 
-platforms/ctbc.py  # 相容 facade；只 re-export，不持有狀態
+platforms/ctbc.py  # 相容 facade；舊 Cookie 入口核對中信租戶，不持有狀態
 ```
 
-- 已驗證 tenant：中信育樂、味全龍。
+- 明確支援的 tenant 為中信育樂與味全龍；未知主機即使使用相似頁型，也不自動取得 uTiki 能力。
+
+| 租戶 | HTTPS 主機 | Cookie／頁內帳密 | fast 區域預取 | 網站電腦配位 | 預設 OCR 政策 |
+| --- | --- | --- | --- | --- | --- |
+| 中信育樂 | `tix.ctbcsports.com` | 中信 Cookie／中信帳密 | 啟用 | 未啟用 | 官方 ddddocr |
+| 味全龍 | `tix.wdragons.com` | 味全 Cookie／無頁內帳密 | 未啟用 | 啟用 | 官方 ddddocr |
+
+主入口先以精確租戶 profile 選 OCR 政策，再交共用工廠建立模型；新增租戶須明確決定能力，不因同為 uTiki 自動繼承現有兩站政策。
 - `workflow.py` 用 `runtime.py` constructor 為分頁建立 canonical mutable runtime，保留 tab identity、registry、get-or-create／existing-only lookup 與 cleanup 所有權；單向傳入同一 runtime、tab identity 與 cancel-task registry 給 `refresh.py`。refresh 不得反向 import workflow 或建立 mirror state。
 - `document_health.py` 只觀察與分類文件，並依原時點快取 snapshot；`rate_limit.py` 管理原有 429 marker／回報與 probe／lease，沿用同一 runtime 及共享 coordinator，不直接 reload。`refresh.py` 保留 request 建立、預約、送出、等待新文件、暫停／恢復／取消與結果消費的完整生命週期；workflow 的正式 refresh facade 未改。
 - 日期／區域候選由 `date_area.py` 選出，native／fast dispatch、pending、marker、目的頁核對及原電腦配位來源紀錄由 `navigation.py` 管理；座位與一般票數頁仍從 workflow 原頁型入口執行導覽核對，通過後交給 `purchase.py`。正式依賴為 workflow → date_area → navigation 與 workflow → navigation；identity、runtime／transition 及真正需要的窄 callback 顯式傳入，沒有共用 access dict、第二個 registry 或反向 workflow import。
 - `runtime.py` 只建立 document、transition、purchase、refresh 四份正式 record；原空 `action` 沒有 production consumer，已於批次 6 前清理移除。`rate_limit.py` 在原查詢時點直接取得共享 coordinator，沒有 production `coordinator_factory` 測試接縫。
 - 購票準備在 `purchase.py`，提交與恢復狀態寫入在 `submission.py`，登入及 CAPTCHA browser 輸入在 `inputs.py`；三者都不反向 import workflow。
-- 共用行為設定以 `utiki.ticket_type_keyword` 與 `utiki.seat_sorting` 為準；`ctbc.*` 目前只保留降版相容鏡像。
+- uTiki 行為設定只讀寫 current `utiki` section，包含 `ticket_type_keyword`、`seat_sorting` 與 `seat_selection_mode`；舊 `ctbc` 行為鍵不再用於補值、runtime fallback、UI 雙寫或熱更新。
+- `platforms/ctbc.py` 仍是無狀態公開名稱 facade，正式 source caller 不經此檔；既有 build spec 尚引用它，打包清理留待獨立工作。
+- 共用流程的正式函式與內部識別名稱使用 `utiki` 或實際職責；`nodriver_ctbc_main` 僅由舊 `platforms/ctbc.py` facade 指向同一個 `workflow.nodriver_utiki_main`，不持有第二份狀態。Cookie 解析／注入與頁內登入的共用執行函式以 `utiki` 命名；各站是否啟用及憑證來源由租戶政策決定：中信支援自己的 Cookie 與頁內帳密，味全支援自己的 Cookie，沒有頁內帳密備援。中信專屬 fast 預取保留中信名稱；跨頁 marker、reload reason 與設定鍵的既有字串值未因命名清理改動。
 - `accounts.ctbc_*` 仍只屬於中信 tenant，不得因共用引擎而套用到其他 hostname。
-- 詳細依賴方向與副作用規則見 [程式碼邊界](code-boundaries.md)，本次待實作的架構與順序見 [uTiki 正式計畫](utiki-refactor/PLAN.md)。
+- 詳細依賴方向與副作用規則見[程式碼邊界](code-boundaries.md)；目前能力、驗證及後續工作見 [STATUS](utiki-refactor/STATUS.md)，原重構範圍見[封存計畫](archive/utiki-refactor/PLAN.md)。
 
 ### 🎪 **Fansigo** (platforms/fansigo.py)
 
@@ -706,7 +715,7 @@ with_pause_check(task_func, config_dict, *args, **kwargs)      # ✅
 
 ## 📊 功能完整度評分（基於標準架構）
 
-> **評分標準**：根據 [ticket_automation_standard.md](./ticket_automation_standard.md) 定義的 12 階段功能架構作跨平台參考評分；uTiki 本次的能力邊界與驗收依正式 PLAN 及 `944e934` 實碼。
+> **評分標準**：根據 [ticket_automation_standard.md](./ticket_automation_standard.md) 定義的 12 階段功能架構作跨平台參考評分；uTiki 目前能力以現行程式、測試與實際驗證為準，評分不設定新的功能門檻。
 
 ### 評分方式說明
 

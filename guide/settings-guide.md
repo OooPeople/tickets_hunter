@@ -503,7 +503,7 @@ python settings.py
 #### 自訂 OCR 模型
 型別：字串 | 預設：空白
 
-指定自訂 OCR 模型的目錄路徑，目前**僅支援 Ticketmaster 平台**。
+指定自訂 OCR 模型的目錄路徑。正式 source 入口啟用 OCR、`use_universal=true` 且路徑不是預設 `assets/model/universal` 時，會優先嘗試此目錄的模型；此選擇不限定 Ticketmaster。
 
 在圖形介面中顯示為：**自訂 OCR 模型**（文字框）
 
@@ -515,10 +515,10 @@ python settings.py
 3. 在圖形介面填入路徑：`assets/ocr_model`
 
 **錯誤處理**：
-- 路徑未設定 → 使用預設 ddddocr 模型
-- 檔案不存在 → 顯示警告，自動使用預設模型
+- 路徑未設定或維持預設路徑 → 依平台的既有模型選擇規則處理
+- 自訂模型檔案不存在 → 記錄載入失敗，正式 source 入口回退到 ddddocr
 
-**注意**：此功能目前僅支援 Ticketmaster 平台。
+**注意**：`use_universal=false` 時不載入此目錄；OCR 關閉時不建立 OCR 模型。
 
 ---
 
@@ -1217,17 +1217,19 @@ iBon 的 Cookie qware，用於快速登入。
 - 圖形介面會顯示警告：`將密碼保存到設定檔中可能會讓您的密碼被盜。`
 - `cityline_password` 目前圖形介面無對應欄位，僅能直接編輯 settings.json
 
-中信育樂的座位頁另有 `utiki.ticket_type_keyword`，預設為 `全票`。它與「區域關鍵字」分開：例如區域關鍵字可填 `A`，票種關鍵字填 `全票`。座位優先規則則可透過 [`utiki.seat_sorting`](#職棒座位排序依據utikiseat_sorting) 在座位圖顯示順序與排數、座號之間切換。
+已支援的 uTiki 租戶共用 `utiki.ticket_type_keyword`，預設為 `全票`。它與「區域關鍵字」分開：例如區域關鍵字可填 `A`，票種關鍵字填 `全票`。座位優先規則則可透過 [`utiki.seat_sorting`](#職棒座位排序依據utikiseat_sorting) 在座位圖顯示順序與排數、座號之間切換。
 
 `utiki.ticket_type_keyword` 是明確的票種選擇，因此不會套用共用的「排除關鍵字」。例如票種關鍵字填入 `身心` 時，即使排除關鍵字包含 `身心`／`身障`，仍會正確選擇身心障礙票；排除規則仍正常套用在日期與區域候選。
 
-`ctbc.ticket_type_keyword` 與 `ctbc.seat_sorting` 只是目前為降版相容保留的鏡像；手動編輯 `settings.json` 時請修改 `utiki.*`，新版程式會以它為準。
+uTiki 行為設定只讀取 current `utiki.*`；歷史 `ctbc.ticket_type_keyword` 與 `ctbc.seat_sorting` 不再作為鏡像或執行時 fallback。手動編輯設定時請修改 `utiki.*`。
 
-味全龍官方售票網沿用相同的日期、區域與票種設定。啟動後可先暫停程式並手動登入，再返回活動日期頁繼續；味全龍在選區後會查詢該票價區的站方公告，因此程式會保留原生選區導頁，不會略過公告確認。
+味全龍官方售票網沿用相同的日期、區域與票種設定。可在 `accounts.wdragons_cookie` 貼上已登入味全龍售票網的完整 Cookie request header；程式只會取用 `WDRAGONS|...` 名稱的 Cookie，並注入 `tix.wdragons.com`。Cookie 失效時需重新取得，目前沒有味全龍帳號密碼自動登入備援；仍可暫停程式手動登入，再返回活動日期頁繼續。味全龍支援 current `utiki.seat_selection_mode` 的 `computer` 模式：選區後使用網站的電腦配位，再進入票數頁選票種；實際座位由網站決定。程式保留網站的原生選區導頁與後續頁面核對，不會略過站方公告確認。中信是否啟用電腦配位仍由其獨立租戶能力決定。
 
 中信育樂也支援 `accounts.ctbc_cookie` 自動登入。由於登入狀態由多個 `CTBC_...` Cookie 組成，請在已登入的 Chrome 開啟開發人員工具，從 Network 的主要 `UTK...` 文件請求複製完整 `Cookie` request header。程式只會注入 `CTBC_` 開頭的 Cookie，並讓頁面重新產生防偽 Cookie；Cookie 過期時會回退到 `ctbc_account` / `ctbc_password`。
 
-中信育樂的驗證碼會自動使用 ddddocr 官方 beta 模型與原始尺寸圖片辨識，不受「使用通用 OCR 模型」的預設模型影響；自訂非預設模型路徑時則仍尊重自訂模型。
+兩站的 Cookie 設定分開保存，依設定首頁與目前分頁的站點核對後才注入。快速建立設定檔仍會複製目前設定的所有欄位；若以中信按鈕建立檔案後將首頁改為味全龍，請填寫味全龍 Cookie 欄位，並確認複製過來的其他登入資料是否仍需保留。
+
+正式 source 入口啟用 OCR、`use_universal=true` 且使用預設模型路徑時，會先以設定首頁的精確 HTTPS 主機辨識租戶；目前中信與味全的租戶 profile 明確選用官方 ddddocr 模型，`beta` 依設定值。驗證碼圖片優先以原尺寸擷取，失敗時沿用 DOM 截圖備援。自訂非預設模型路徑會優先嘗試自訂模型；`use_universal=false` 時由正式入口採用原 ddddocr fallback。新增租戶須各自確認模型能力，不因同為 uTiki 自動沿用這兩站的設定。
 
 **⚠️ UDN 登入是半自動的**：
 - 程式會自動填寫帳號密碼

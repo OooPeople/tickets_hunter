@@ -44,8 +44,16 @@ class DateActionPlan:
     tenant_path: str = ""
     host: str = ""
     map_namespace: str = ""
-    fast_area_prefetch: bool = False
+    fast_area_prefetch_eligible: bool = False
     action_token: str = ""
+
+
+@dataclass(frozen=True)
+class DateControlAction:
+    kind: str
+    target: dict | None = None
+    token: str = ""
+    can_skip_native_click: bool = False
 
 
 @dataclass(frozen=True)
@@ -600,19 +608,42 @@ def _parse_date_target_url(target_value, current_url):
         "tenant_path": profile.tenant_path,
         "host": profile.host,
         "map_namespace": profile.map_namespace,
-        "fast_area_prefetch": profile.fast_area_prefetch,
     }
 
 
 def _parse_date_target(onclick, current_url):
-    """從場次按鈕事件解析一般導覽目標。"""
+    """解析場次按鈕的目標與是否可略過原生點擊。"""
 
+    destination = (
+        r"location\.href\s*=\s*(?P<quote>['\"])(?P<url>[^'\"]+)"
+        r"(?P=quote)\s*;?\s*"
+    )
     match = re.fullmatch(
-        r"\s*location\.href\s*=\s*(?P<quote>['\"])(?P<url>[^'\"]+)"
-        r"(?P=quote)\s*;?\s*",
+        r"\s*" + destination,
         str(onclick or ""),
     )
-    return _parse_date_target_url(match.group("url"), current_url) if match else None
+    if match:
+        target = _parse_date_target_url(match.group("url"), current_url)
+        if target:
+            return DateControlAction(
+                "normal", target, can_skip_native_click=True
+            )
+        return None
+
+    # This fixed Appier prelude is a button format, not a tenant capability.
+    # Preserve its side effect by committing through the native control.
+    literal = r'''(?:'[^'\\]*'|"[^"\\]*")'''
+    pair = literal + r"\s*:\s*" + literal
+    analytics = (
+        r"\s*appier\(\s*" + literal + r"\s*,\s*" + literal
+        + r"\s*,\s*\{\s*" + pair + r"\s*,\s*" + pair
+        + r"\s*\}\s*\)\s*;\s*"
+    )
+    match = re.fullmatch(analytics + destination, str(onclick or ""))
+    if match is None:
+        return None
+    target = _parse_date_target_url(match.group("url"), current_url)
+    return DateControlAction("normal", target) if target else None
 
 
 def _parse_vip_date_token(onclick, current_url):
@@ -666,14 +697,14 @@ def _classify_date_control(fingerprint, current_url):
         target = _parse_date_target_url(
             control.get("resolved_href") or control.get("href"), current_url
         )
-        return ("anchor_native", target, "") if target else None
+        return DateControlAction("anchor_native", target) if target else None
 
-    target = _parse_date_target(onclick, current_url)
-    if target:
-        return "normal", target, ""
+    action = _parse_date_target(onclick, current_url)
+    if action:
+        return action
     vip_token = _parse_vip_date_token(onclick, current_url)
     if vip_token:
-        return "vip_native", None, vip_token
+        return DateControlAction("vip_native", token=vip_token)
     control_type = control.get("type", "").lower()
     if (
         tag_name != "BUTTON"
@@ -683,7 +714,16 @@ def _classify_date_control(fingerprint, current_url):
         or not _safe_date_button_handler(onclick)
     ):
         return None
-    return "structural_native", None, ""
+    return DateControlAction("structural_native")
+
+
+def _fast_area_prefetch_eligible(action, page_url):
+    """只有租戶支援且按鈕可略過原生點擊時才使用快速導覽。"""
+
+    if action.kind != "normal" or not action.can_skip_native_click or not action.target:
+        return False
+    profile = get_utiki_tenant_profile(page_url)
+    return bool(profile and profile.fast_area_prefetch)
 
 
 def _date_candidates(snapshot, config_dict):
@@ -736,13 +776,13 @@ def select_date_snapshot(snapshot, config_dict):
     if target_index is None:
         return None
     target = candidates[target_index]
-    action_kind, date_target, action_token = target["action"]
-    date_target = date_target or {}
+    action = target["action"]
+    date_target = action.target or {}
     return DateActionPlan(
         row_index=target["row_index"],
         control_index=target["control_index"],
         text=target["text"],
-        action_kind=action_kind,
+        action_kind=action.kind,
         onclick=dict(target["fingerprint"]).get("onclick", ""),
         control_fingerprint=target["fingerprint"],
         target_url=date_target.get("target_url", ""),
@@ -751,8 +791,10 @@ def select_date_snapshot(snapshot, config_dict):
         tenant_path=date_target.get("tenant_path", ""),
         host=date_target.get("host", ""),
         map_namespace=date_target.get("map_namespace", ""),
-        fast_area_prefetch=bool(date_target.get("fast_area_prefetch", False)),
-        action_token=action_token,
+        fast_area_prefetch_eligible=_fast_area_prefetch_eligible(
+            action, snapshot.page_url
+        ),
+        action_token=action.token,
     )
 
 
@@ -766,7 +808,7 @@ def date_plan_matches_snapshot(snapshot, plan):
         not snapshot.ok or not snapshot.page_url or not snapshot.document_id
         or classify_utiki_page(snapshot.page_url) != PageKind.DATE
         or type(plan.row_index) is not int or type(plan.control_index) is not int
-        or type(plan.fast_area_prefetch) is not bool
+        or type(plan.fast_area_prefetch_eligible) is not bool
         or not 0 <= plan.row_index < len(snapshot.rows)
     ):
         return False
@@ -785,20 +827,19 @@ def date_plan_matches_snapshot(snapshot, plan):
     action = _classify_date_control(fingerprint, snapshot.page_url)
     if not action:
         return False
-    action_kind, target, action_token = action
-    target = target or {}
+    target = action.target or {}
     return (
-        plan.action_kind == action_kind
-        and plan.action_token == action_token
+        plan.action_kind == action.kind
+        and plan.action_token == action.token
         and (
             plan.target_url, plan.performance_id, plan.product_id,
             plan.tenant_path, plan.host, plan.map_namespace,
-            plan.fast_area_prefetch,
+            plan.fast_area_prefetch_eligible,
         ) == (
             target.get("target_url", ""), target.get("performance_id", ""),
             target.get("product_id", ""), target.get("tenant_path", ""),
             target.get("host", ""), target.get("map_namespace", ""),
-            bool(target.get("fast_area_prefetch", False)),
+            _fast_area_prefetch_eligible(action, snapshot.page_url),
         )
     )
 
@@ -1834,6 +1875,8 @@ def classify_submit_dialog(dialog_text):
         and any(marker in text for marker in ("超過", "超出", "已達", "上限"))
     ):
         return "quota"
-    if "成功" in text and "加入購物車" in text:
+    if ("成功" in text and "加入購物車" in text) or re.fullmatch(
+        r"加入購物車完成[，,]\s*請於\s*15\s*分鐘內完成結帳[！!]?", text
+    ):
         return "success"
     return "rejected"

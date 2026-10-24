@@ -1,9 +1,10 @@
 """Compatibility facade for the renamed uTiki2 sports engine."""
 
+from platforms.utiki.profiles import get_utiki_tenant_profile
 from platforms.utiki.workflow import (
     is_utk_sports_url,
-    nodriver_ctbc_inject_cookies,
-    nodriver_ctbc_main,
+    nodriver_utiki_inject_cookies,
+    nodriver_utiki_main as nodriver_ctbc_main,
     nodriver_utk_sports_cancel_refresh,
     nodriver_utk_sports_cleanup_tab,
     nodriver_utk_sports_consume_reload_event,
@@ -12,6 +13,14 @@ from platforms.utiki.workflow import (
     nodriver_utk_sports_reload,
     nodriver_utk_sports_reload_wait,
 )
+
+
+async def nodriver_ctbc_inject_cookies(tab, config_dict):
+    """Keep the legacy CTBC entry limited to its original tenant."""
+    profile = get_utiki_tenant_profile(str(tab.target.url))
+    if profile is None or profile.key != "ctbc_brothers":
+        return False
+    return await nodriver_utiki_inject_cookies(tab, config_dict)
 
 
 __all__ = [

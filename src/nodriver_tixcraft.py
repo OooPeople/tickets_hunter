@@ -60,6 +60,8 @@ except Exception as exc:
     pass
 
 from nodriver_common import *
+from nodriver_common import create_ocr_for_model
+from ocr_models import OcrModel
 from platforms.facebook import *
 from platforms.fansigo import *
 from platforms.cityline import *
@@ -72,7 +74,7 @@ from platforms.ibon import *
 from platforms.kham import *
 from platforms.utiki import (
     is_utk_sports_url,
-    nodriver_ctbc_inject_cookies,
+    nodriver_utiki_inject_cookies,
     nodriver_utiki_main,
     nodriver_utk_sports_cancel_refresh,
     nodriver_utk_sports_cleanup_tab,
@@ -82,6 +84,8 @@ from platforms.utiki import (
     nodriver_utk_sports_reload,
     nodriver_utk_sports_reload_wait,
 )
+from platforms.utiki.auth import get_tenant_auth_profile
+from platforms.utiki.profiles import get_utiki_tenant_profile
 from platforms.hkticketing import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
@@ -101,13 +105,40 @@ logging.basicConfig()
 logger = logging.getLogger('logger')
 
 
-def _should_inject_ctbc_cookies(homepage):
-    """Limit CTBC account cookies to the exact configured CTBC origin."""
+def _utiki_cookie_login_profile(homepage, current_url):
+    """Use Cookie credentials only on the configured uTiki tenant's own page."""
+    configured = get_tenant_auth_profile(homepage)
+    current = get_tenant_auth_profile(current_url)
+    if (
+        configured is not None
+        and configured.supports_cookie_login
+        and current is not None
+        and current.tenant_key == configured.tenant_key
+    ):
+        return configured
+    return None
+
+
+def _ocr_model_for_homepage(homepage):
+    """Resolve the homepage host before choosing a site-specific OCR model."""
+    tenant = get_utiki_tenant_profile(homepage)
+    if tenant is not None:
+        return tenant.ocr_model
     try:
-        host = (urllib.parse.urlsplit(str(homepage or "")).hostname or "").lower()
+        parsed = urllib.parse.urlsplit(str(homepage or ""))
+        host = (parsed.hostname or "").lower()
     except ValueError:
-        return False
-    return host == "tix.ctbcsports.com" and is_utk_sports_url(homepage)
+        return OcrModel.UNIVERSAL
+    if parsed.scheme.lower() not in {"http", "https"} or parsed.username or parsed.password:
+        return OcrModel.UNIVERSAL
+    if (
+        host in {"tixcraft.com", "indievox.com"}
+        or host.endswith((".tixcraft.com", ".indievox.com"))
+        or host in {"ticketmaster.sg", "ticketmaster.com"}
+        or host.endswith((".ticketmaster.sg", ".ticketmaster.com"))
+    ):
+        return OcrModel.TIXCRAFT_TM
+    return OcrModel.UNIVERSAL
 
 
 async def _pause_utk_refresh(tab, url, last_url):
@@ -128,7 +159,8 @@ async def nodriver_goto_homepage(driver, config_dict):
     debug = util.create_debug_logger(config_dict)
     tab = None
     homepage = config_dict["homepage"]
-    if 'kktix.c' in homepage:
+    utiki_homepage = is_utk_sports_url(homepage)
+    if not utiki_homepage and 'kktix.c' in homepage:
         # for like human.
         try:
             tab = await driver.get(homepage)
@@ -142,27 +174,27 @@ async def nodriver_goto_homepage(driver, config_dict):
             if not is_kktix_login_page(homepage):
                 homepage = CONST_KKTIX_SIGN_IN_URL % (homepage)
 
-    if 'famiticket.com' in homepage:
+    if not utiki_homepage and 'famiticket.com' in homepage:
         if len(config_dict["accounts"]["fami_account"])>0:
             homepage = CONST_FAMI_SIGN_IN_URL
 
-    if 'kham.com' in homepage:
+    if not utiki_homepage and 'kham.com' in homepage:
         if len(config_dict["accounts"]["kham_account"])>0:
             homepage = CONST_KHAM_SIGN_IN_URL
 
-    if 'ticket.com.tw' in homepage:
+    if not utiki_homepage and 'ticket.com.tw' in homepage:
         if len(config_dict["accounts"]["ticket_account"])>0:
             homepage = CONST_TICKET_SIGN_IN_URL
 
-    if 'udnfunlife.com' in homepage:
+    if not utiki_homepage and 'udnfunlife.com' in homepage:
         if len(config_dict["accounts"]["udn_account"])>0:
             homepage = CONST_UDN_SIGN_IN_URL
 
-    if 'urbtix.hk' in homepage:
+    if not utiki_homepage and 'urbtix.hk' in homepage:
         if len(config_dict["accounts"]["urbtix_account"])>0:
             homepage = CONST_URBTIX_SIGN_IN_URL
 
-    if 'cityline.com' in homepage:
+    if not utiki_homepage and 'cityline.com' in homepage:
         if len(config_dict["accounts"]["cityline_account"])>0:
             if 'cityline.com.hk' in homepage:
                 # HK events (shows.cityline.com.hk) live on the .com.hk realm and their
@@ -173,7 +205,7 @@ async def nodriver_goto_homepage(driver, config_dict):
             else:
                 homepage = CONST_CITYLINE_SIGN_IN_URL
 
-    if 'hkticketing.com' in homepage:
+    if not utiki_homepage and 'hkticketing.com' in homepage:
         if len(config_dict["accounts"]["hkticketing_account"])>0:
             if 'hkt.hkticketing.com' in homepage:
                 # Type02: hkt.hkticketing.com SPA
@@ -183,7 +215,7 @@ async def nodriver_goto_homepage(driver, config_dict):
                 homepage = CONST_HKTICKETING_SIGN_IN_URL
 
     # https://ticketplus.com.tw/*
-    if 'ticketplus.com.tw' in homepage:
+    if not utiki_homepage and 'ticketplus.com.tw' in homepage:
         if len(config_dict["accounts"]["ticketplus_account"]) > 1:
             homepage = "https://ticketplus.com.tw/"
 
@@ -203,7 +235,7 @@ async def nodriver_goto_homepage(driver, config_dict):
     if 'ticketmaster.' in homepage:
         tixcraft_family = True
 
-    if tixcraft_family:
+    if tixcraft_family and not utiki_homepage:
         # Determine correct cookie domain and name based on homepage
         # Each site uses different session cookie names (Issue #207)
         if 'ticketmaster.sg' in homepage:
@@ -294,7 +326,7 @@ async def nodriver_goto_homepage(driver, config_dict):
 
                 debug.log(f"[TIXCRAFT] {cookie_name} cookie set successfully (fallback method)")
 
-    if 'ibon.com' in homepage:
+    if not utiki_homepage and 'ibon.com' in homepage:
         # ibon fires a window.alert() on homepage load ("會員登入方式調整").
         # Register the global handler now so any future alert is auto-dismissed,
         # then clear the dialog that already opened during the driver.get() above
@@ -357,7 +389,7 @@ async def nodriver_goto_homepage(driver, config_dict):
         # 這樣可以避免完全中斷搶票流程
 
     # FunOne cookie injection (same pattern as TixCraft/iBon)
-    if 'tickets.funone.io' in homepage:
+    if not utiki_homepage and 'tickets.funone.io' in homepage:
         funone_cookie = config_dict["accounts"].get("funone_session_cookie", "").strip()
         if len(funone_cookie) > 1:
             debug.log(f"[FUNONE] Setting ticket_session cookie, length: {len(funone_cookie)}")
@@ -391,29 +423,34 @@ async def nodriver_goto_homepage(driver, config_dict):
             except Exception as e:
                 debug.log(f"[FUNONE] Error setting cookie: {str(e)}")
 
-    if _should_inject_ctbc_cookies(homepage):
-        if await nodriver_ctbc_inject_cookies(tab, config_dict):
+    cookie_login = _utiki_cookie_login_profile(
+        homepage, str(tab.target.url) if tab is not None else ""
+    )
+    if cookie_login is not None:
+        if await nodriver_utiki_inject_cookies(tab, config_dict):
             try:
                 reloaded = await nodriver_utk_sports_reload_wait(
                     tab,
                     config_dict,
-                    "apply CTBC cookie session",
+                    cookie_login.cookie_reload_reason,
                     apply_local_interval=False,
                     allow_unknown_document=True,
                 )
                 if not reloaded:
-                    debug.log("[CTBC COOKIE] Shared reload was cancelled")
+                    debug.log("[UTIKI COOKIE] Shared reload was cancelled")
                     return tab
                 await asyncio.sleep(random.uniform(1.0, 1.5))
                 login_state = await tab.evaluate(
                     'typeof _ul !== "undefined" ? String(_ul) : ""'
                 )
                 if login_state == "1":
-                    debug.log("[CTBC COOKIE] Logged in successfully")
+                    debug.log("[UTIKI COOKIE] Logged in successfully")
                 else:
-                    debug.log("[CTBC COOKIE] Cookie set applied; session may be expired")
+                    debug.log("[UTIKI COOKIE] Cookie set applied; session may be expired")
             except Exception as exc:
-                debug.log(f"[CTBC COOKIE] Reload or verification failed: {exc}")
+                debug.log(
+                    f"[UTIKI COOKIE] Reload or verification failed: {type(exc).__name__}"
+                )
 
     return tab
 
@@ -753,7 +790,7 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
-                    "ocr_captcha", "tixcraft", "kktix", "utiki", "ctbc", "cityline",
+                    "ocr_captcha", "tixcraft", "kktix", "utiki", "cityline",
                     "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:
@@ -1017,7 +1054,9 @@ async def main(args):
     Captcha_Browser = None
     try:
         if config_dict["ocr_captcha"]["enable"]:
-            ocr = create_ocr_for_platform(config_dict)
+            ocr = create_ocr_for_model(
+                config_dict, _ocr_model_for_homepage(config_dict.get("homepage", ""))
+            )
             if ocr is None:
                 ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
                 ocr.set_ranges(1)
@@ -1181,8 +1220,9 @@ async def main(args):
             await asyncio.sleep(0.1)
             continue
 
+        utiki_page = is_utk_sports_url(url)
         utk_health_state = None
-        if is_utk_sports_url(url):
+        if utiki_page:
             # Rate-limit recovery must remain active while refresh_datetime is
             # waiting; otherwise a pre-sale 429 would only be noticed at the
             # target second and consume the entire cooldown after opening.
@@ -1205,6 +1245,16 @@ async def main(args):
         # Cloudflare and 429 recovery keep progressing before the target time.
         if await check_refresh_datetime_gate(tab, config_dict, refresh_datetime_state):
             await asyncio.sleep(0.1)
+            continue
+
+        if utiki_page:
+            try:
+                tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
+            except BaseException:
+                await nodriver_utk_sports_cleanup_tab(
+                    tab, "uTiki handler failed"
+                )
+                raise
             continue
 
         # for kktix.cc and kktix.com
@@ -1237,15 +1287,6 @@ async def main(args):
 
         if 'ibon.com' in url:
             await nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser)
-
-        if is_utk_sports_url(url):
-            try:
-                tab = await nodriver_utiki_main(tab, url, config_dict, ocr)
-            except BaseException:
-                await nodriver_utk_sports_cleanup_tab(
-                    tab, "uTiki handler failed"
-                )
-                raise
 
         kham_family = False
         if 'kham.com.tw' in url:

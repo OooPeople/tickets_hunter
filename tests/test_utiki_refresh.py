@@ -15,12 +15,12 @@ from nodriver_tixcraft import (
     main as nodriver_main,
 )
 
-from tests.ctbc_support import (
-    CtbcStateIsolationMixin,
+from tests.utiki_support import (
+    UtikiStateIsolationMixin,
     FakeSubmitTab,
     FakeTab,
-    ctbc_identity_runtime,
-    ctbc_tab_runtime,
+    utiki_identity_runtime,
+    utiki_tab_runtime,
     config,
 )
 
@@ -43,10 +43,10 @@ from platforms.utiki.refresh import (
     build_refresh_identity,
 )
 from platforms.utiki.workflow import (
-    _ctbc_purchase_state_key,
-    _ctbc_tab_identity,
+    _utiki_purchase_state_key,
+    _utiki_tab_identity,
     _state,
-    nodriver_ctbc_main,
+    nodriver_utiki_main,
     nodriver_utk_sports_cancel_refresh,
     nodriver_utk_sports_cleanup_tab,
     nodriver_utk_sports_consume_reload_event,
@@ -73,8 +73,8 @@ def _patch_coordinator_lookups(coordinator):
         yield
 
 
-class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
-    ctbc_state = _state
+class UtikiSharedRefreshTest(UtikiStateIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    utiki_state = _state
 
     class _StopOuterLoop(Exception):
         pass
@@ -280,7 +280,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 "has_normal_root": False,
             })],
         )
-        runtime = ctbc_identity_runtime(_ctbc_tab_identity(tab))
+        runtime = utiki_identity_runtime(_utiki_tab_identity(tab))
         snapshot = await _inspect_utk_document(tab, runtime)
         self.assertEqual("blocked", snapshot["classification"])
         self.assertEqual("123", snapshot["document_id"])
@@ -331,8 +331,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
         tab.evaluate = AsyncMock(side_effect=evaluate)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         classifications = []
         for _ in range(3):
             snapshot = await _inspect_utk_document(tab, runtime, force=True)
@@ -395,8 +395,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             CTBC_DATE_ROW_SELECTOR, [], url=source,
             evaluate_results=[json.dumps(item) for item in snapshots],
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         refresh_identity = build_refresh_identity(identity)
 
         with patch(
@@ -431,8 +431,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 "ready_state": "complete", "has_normal_root": True,
             })],
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         runtime["document"]["last_document"] = "123"
 
         with patch(
@@ -475,8 +475,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tracked = source + "&utm_source=test#fragment"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         request = {
             "request_token": "await-observation", "phase": "awaiting_document",
             "source_document_token": "100", "paused": False,
@@ -522,7 +522,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_different_reason_cannot_advance_unfinished_reload(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         inspect = AsyncMock()
         original_deadline = time.monotonic() + 60.0
 
@@ -560,7 +560,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_completed_reload_is_not_returned_to_different_reason(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         completed = {
             "request_token": "completed-owner",
             "phase": "completed",
@@ -603,7 +603,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_missing_reason_completed_cannot_be_claimed(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         completed = {
             "request_token": "legacy-completed",
             "phase": "completed",
@@ -640,7 +640,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_guard_cannot_advance_a_replacement_reload_request(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         completed = {
             "request_token": "completed-a", "phase": "completed",
             "reason": "reason-a", "paused": False, "deadline_at": 0.0,
@@ -676,7 +676,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
         tab.evaluate = AsyncMock(side_effect=RuntimeError("execution failed"))
-        runtime = ctbc_identity_runtime(_ctbc_tab_identity(tab))
+        runtime = utiki_identity_runtime(_utiki_tab_identity(tab))
 
         snapshot = await _inspect_utk_document(tab, runtime, force=True)
 
@@ -708,15 +708,15 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 error="",
             ),
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
                     _patch_coordinator_lookups(coordinator), \
-                    patch("platforms.utiki.workflow.nodriver_ctbc_date_auto_select", AsyncMock()) as select:
-                await nodriver_ctbc_main(tab, source, config(), ocr=None)
-                await nodriver_ctbc_main(tab, source, config(), ocr=None)
+                    patch("platforms.utiki.workflow.nodriver_utiki_date_auto_select", AsyncMock()) as select:
+                await nodriver_utiki_main(tab, source, config(), ocr=None)
+                await nodriver_utiki_main(tab, source, config(), ocr=None)
             select.assert_not_awaited()
             self.assertEqual(1, coordinator.report_rate_limited.await_count)
         finally:
@@ -730,8 +730,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_completed_same_reason_cannot_fake_next_conflict_reload(self):
         tab = FakeSubmitTab(dialog="")
         source = str(tab.target.url)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         runtime["document"]["last_document"] = "100"
         runtime["refresh"]["reload_request"] = {
             "request_token": "old-conflict",
@@ -747,7 +747,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             "started_at": time.monotonic(),
             "next_renew_at": float("inf"),
         }
-        submit_key = _ctbc_purchase_state_key(tab)
+        submit_key = _utiki_purchase_state_key(tab)
         conflict = {
             "kind": "seat_conflict", "source_url": source,
             "source_document_id": "100", "nonce": "a" * 32,
@@ -778,10 +778,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             "platforms.utiki.refresh._inspect_utk_document",
             AsyncMock(return_value=snapshot),
         ), _patch_coordinator_lookups(coordinator), patch(
-            "platforms.utiki.workflow._ctbc_attest_fast_destination",
+            "platforms.utiki.workflow._utiki_attest_destination",
             AsyncMock(return_value=True),
         ):
-            await nodriver_ctbc_main(tab, source, config(), ocr=None)
+            await nodriver_utiki_main(tab, source, config(), ocr=None)
 
         request = runtime["refresh"]["reload_request"]
         self.assertEqual("selected seats were taken", request["reason"])
@@ -797,8 +797,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_checkout_cleans_exact_refresh_work_and_keeps_runtime(self):
         checkout_url = "https://tix.ctbcsports.com/BROTHERS/UTK0206_"
         tab = FakeSubmitTab(dialog="", url=checkout_url)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         runtime["document"]["last_document"] = "100"
         request = {
             "request_token": "checkout-request",
@@ -850,8 +850,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             ) as discord, patch(
                 "platforms.utiki.submission.send_telegram_notification",
             ) as telegram:
-                await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
-                await nodriver_ctbc_main(tab, checkout_url, cfg, ocr=None)
+                await nodriver_utiki_main(tab, checkout_url, cfg, ocr=None)
+                await nodriver_utiki_main(tab, checkout_url, cfg, ocr=None)
             self.assertTrue(lease_task.done())
             self.assertTrue(lease_task.cancelled())
             self.assertNotIn(lease_task, _state["cancel_tasks"])
@@ -882,7 +882,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         for cleanup_kind in ("completed", "abandon"):
             with self.subTest(cleanup_kind=cleanup_kind):
                 tab = FakeSubmitTab(dialog="")
-                runtime = ctbc_tab_runtime(tab)
+                runtime = utiki_tab_runtime(tab)
                 lease_started = asyncio.Event()
                 lease_finalizing = asyncio.Event()
                 initial_wait = asyncio.Event()
@@ -967,11 +967,11 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             "platforms.utiki.workflow.nodriver_utk_sports_health_check",
             health,
         ), patch(
-            "platforms.utiki.workflow.nodriver_ctbc_seat_main", dispatch,
+            "platforms.utiki.workflow.nodriver_utiki_seat_main", dispatch,
         ):
             self.assertIs(
                 tab,
-                await nodriver_ctbc_main(
+                await nodriver_utiki_main(
                     tab, str(tab.target.url), config(), ocr=None
                 ),
             )
@@ -1001,8 +1001,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_driver_missing_cleanup_uses_existing_runtime(self):
         tab = FakeSubmitTab(dialog="")
-        identity = _ctbc_tab_identity(tab)
-        ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        utiki_identity_runtime(identity)
         with patch(
             "platforms.utiki.workflow.refresh_engine.cancel_refresh",
             AsyncMock(return_value=False),
@@ -1029,8 +1029,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 _state["tabs"].clear()
                 tab = FakeTab("", [], url=source)
                 tab.target.target_id = f"outer-{label}"
-                identity = _ctbc_tab_identity(tab)
-                ctbc_identity_runtime(identity)
+                identity = _utiki_tab_identity(tab)
+                utiki_identity_runtime(identity)
 
                 driver, _handler = await self._run_outer_main_case(
                     tab,
@@ -1047,8 +1047,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab("", [], url=source)
         tab.target.target_id = "outer-silent-websocket"
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
 
         with patch("nodriver_tixcraft.get_url_error_count", return_value=15):
             driver, _handler = await self._run_outer_main_case(
@@ -1068,8 +1068,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab("", [], url=source)
         tab.target.target_id = "outer-handler-failure"
-        identity = _ctbc_tab_identity(tab)
-        ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        utiki_identity_runtime(identity)
         handler = AsyncMock(side_effect=HandlerFailed)
 
         with self.assertRaises(HandlerFailed):
@@ -1090,8 +1090,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         cfg = config()
         tab = FakeSubmitTab(dialog="")
         source = str(tab.target.url)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         driver = types.SimpleNamespace(
             main_tab=None,
             config=types.SimpleNamespace(port=0),
@@ -1198,13 +1198,13 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 error="",
             ),
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
                     _patch_coordinator_lookups(coordinator):
-                await nodriver_ctbc_main(tab, source, config(), ocr=None)
+                await nodriver_utiki_main(tab, source, config(), ocr=None)
             self.assertTrue(tab.reloaded)
             self.assertEqual(
                 "probe-reload", runtime["refresh"]["recovery_probe"]["permit_id"]
@@ -1236,8 +1236,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             error="",
         )
         coordinator = self.coordinator_for(decision)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(
@@ -1275,7 +1275,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_reload_exception_stays_awaiting_until_new_document(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         initial = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -1313,7 +1313,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_cancel_after_browser_reload_starts_is_sticky_awaiting(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         current = {"document_id": "100"}
         reload_started = asyncio.Event()
 
@@ -1364,7 +1364,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_commit_error_is_sticky_and_never_dispatches_browser_reload(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -1398,7 +1398,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_already_committed_waits_for_document_without_redispatch(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         initial = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -1434,7 +1434,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_late_commit_replay_cannot_reopen_completed_request(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         reservation = self.reservation("late-replay", probe=True)
         for phase, status, error in (
             ("awaiting_document", "already_committed", ""),
@@ -1479,7 +1479,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_commit_exception_respects_exact_pause_release_result(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         reservation = self.reservation("pause-race")
         for released in (True, False):
             with self.subTest(released=released):
@@ -1596,8 +1596,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             commit_refresh=AsyncMock(side_effect=commit),
             release_refresh=AsyncMock(return_value=True),
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
@@ -1619,8 +1619,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         tab = FakeSubmitTab(dialog="")
         cfg = config()
         cfg["advanced"]["auto_reload_page_interval"] = 7.25
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         snapshot = {
             "classification": "normal",
             "document_id": str(tab.target.url) + "|100",
@@ -1670,8 +1670,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         tab = FakeSubmitTab(dialog="")
         cfg = config()
         cfg["advanced"]["auto_reload_page_interval"] = 5.0
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         snapshot = {
             "classification": "normal", "document_id": "100",
             "url": str(tab.target.url),
@@ -1770,7 +1770,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_reserved_pause_releases_shared_work_but_keeps_intent(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_identity_runtime(_ctbc_tab_identity(tab))
+        runtime = utiki_identity_runtime(_utiki_tab_identity(tab))
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -1824,7 +1824,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             ))
 
         coordinator.release_refresh.assert_awaited_once_with(
-            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "utk-sports", build_refresh_identity(_utiki_tab_identity(tab)),
             reservation_id, request_token=token, drop_request=True,
         )
         coordinator.commit_refresh.assert_awaited_once()
@@ -1834,7 +1834,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_pause_during_normal_commit_preserves_intent_until_resume(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -1898,7 +1898,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_awaiting_pause_observes_then_consumes_only_after_resume(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         source = str(tab.target.url)
         request = {
             "request_token": "paused-awaiting", "phase": "awaiting_document",
@@ -1936,7 +1936,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_completed_probe_is_not_consumed_before_probe_completion(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         request = {
             "request_token": "probe-awaiting-completion", "phase": "completed",
             "source_document_token": "100", "completed_document_token": "101",
@@ -1965,7 +1965,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_paused_probe_commit_retries_cleanup_before_resume(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2076,7 +2076,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_pause_release_before_reservation_missing_keeps_request(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2126,7 +2126,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_pause_during_rate_limit_report_does_not_pop_request(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         initial = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2176,7 +2176,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_pause_while_release_is_awaited_does_not_pop_request(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         initial = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2224,7 +2224,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_temporary_pause_cleanup_failure_keeps_local_intent(self):
         tab = FakeSubmitTab(dialog="")
         cfg = config()
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100",
             "url": str(tab.target.url),
@@ -2271,7 +2271,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         tab = FakeSubmitTab(dialog="")
         cfg = config()
         cfg["advanced"]["auto_reload_page_interval"] = 10.0
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100",
             "url": str(tab.target.url),
@@ -2305,7 +2305,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
         self.assertIsNone(runtime["refresh"]["reload_request"])
         coordinator.cancel_request.assert_awaited_once_with(
-            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "utk-sports", build_refresh_identity(_utiki_tab_identity(tab)),
             request_token=token,
         )
         coordinator.reserve_refresh.assert_not_awaited()
@@ -2337,8 +2337,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )),
             release_refresh=AsyncMock(return_value=False),
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         try:
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._utk_document_guard", AsyncMock(return_value=("normal", snapshot))), \
@@ -2372,8 +2372,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             )),
             release_refresh=AsyncMock(return_value=True),
         )
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         replacement = {"request_token": "replacement-preflight"}
         old_tokens = []
 
@@ -2406,7 +2406,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_cancelled_reserve_collects_and_releases_late_result(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2448,7 +2448,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 await task
 
         coordinator.release_refresh.assert_awaited_once_with(
-            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "utk-sports", build_refresh_identity(_utiki_tab_identity(tab)),
             "reservation-late",
             request_token=old_request["request_token"], drop_request=True,
         )
@@ -2457,7 +2457,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_cancelled_pause_check_releases_without_popping_replacement(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2496,7 +2496,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
                 )
 
         coordinator.release_refresh.assert_awaited_once_with(
-            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "utk-sports", build_refresh_identity(_utiki_tab_identity(tab)),
             "reservation-1", request_token=old_tokens[0], drop_request=True,
         )
         coordinator.commit_refresh.assert_not_awaited()
@@ -2504,13 +2504,13 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     def test_old_coroutine_cannot_pop_a_new_local_reload_request(self):
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [])
-        identity = _ctbc_tab_identity(tab)
-        refresh = ctbc_identity_runtime(identity)["refresh"]
+        identity = _utiki_tab_identity(tab)
+        refresh = utiki_identity_runtime(identity)["refresh"]
         refresh["reload_request"] = {"request_token": "new-token"}
         try:
             self.assertIsNone(
                 _pop_reload_request_if_token(
-                    ctbc_identity_runtime(identity), "old-token"
+                    utiki_identity_runtime(identity), "old-token"
                 )
             )
             self.assertEqual(
@@ -2523,7 +2523,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_old_reload_completion_cannot_mutate_replacement_request(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         snapshot = {
             "classification": "normal", "document_id": "100", "url": source,
         }
@@ -2614,7 +2614,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             await asyncio.wait_for(command_returned.wait(), timeout=1.0)
             await real_sleep(0)
             self.assertFalse(waiter.done())
-            request = ctbc_tab_runtime(tab)["refresh"]["reload_request"]
+            request = utiki_tab_runtime(tab)["refresh"]["reload_request"]
             self.assertEqual("awaiting_document", request["phase"])
             self.assertEqual("100", request["source_document_token"])
             current["document_id"] = "101"
@@ -2641,7 +2641,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_reload_wait_pause_resumes_same_intent_and_dispatches_once(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         request = {
             "request_token": "wait-resume", "paused": False,
             "deadline_at": 130.0,
@@ -2732,8 +2732,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_old_429_follower_reloads_without_reopening_the_incident(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         snapshot = {
             "classification": "blocked",
             "document_id": source + "|old-429",
@@ -2778,8 +2778,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_probe_429_passes_its_permit_for_backoff_escalation(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         runtime["refresh"]["recovery_probe"] = {
             "permit_id": "probe-1",
             "source_document_id": source + "|old",
@@ -2818,7 +2818,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             with patch("platforms.utiki.rate_limit.load_global_settings", return_value=self.global_settings), \
                     patch("platforms.utiki.refresh._inspect_utk_document", AsyncMock(return_value=snapshot)), \
                     _patch_coordinator_lookups(coordinator):
-                await nodriver_ctbc_main(tab, source, config(), ocr=None)
+                await nodriver_utiki_main(tab, source, config(), ocr=None)
             self.assertEqual(
                 "probe-1",
                 coordinator.report_rate_limited.await_args.kwargs["probe_permit_id"],
@@ -2837,7 +2837,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_recovery_probe_completes_only_after_production_observes_new_document(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         current = {"document_id": "100"}
 
         async def inspect(*_args, **_kwargs):
@@ -2875,7 +2875,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             ))
 
         coordinator.complete_recovery_probe.assert_awaited_once_with(
-            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "utk-sports", build_refresh_identity(_utiki_tab_identity(tab)),
             "real-probe", success=True,
         )
         self.assertIsNone(runtime["refresh"]["recovery_probe"])
@@ -2884,8 +2884,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_probe_lease_is_renewed_until_document_is_classified(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         runtime["refresh"]["recovery_probe"] = {
             "permit_id": "probe-renew",
             "source_document_id": source + "|old",
@@ -2926,8 +2926,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_pause_abandons_owned_probe_without_marking_recovery_success(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         runtime["refresh"]["recovery_probe"] = {
             "permit_id": "probe-pause",
             "source_document_id": source + "|old",
@@ -2955,7 +2955,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_paused_probe_cleanup_failure_is_rate_limited(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         probe = {
             "permit_id": "probe-paused-retry",
             "source_document_id": "100",
@@ -2987,7 +2987,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_paused_probe_cleanup_retries_when_document_token_is_missing(self):
         tab = FakeSubmitTab(dialog="")
         source = str(tab.target.url)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         runtime["refresh"]["recovery_probe"] = {
             "permit_id": "probe-missing-document",
             "source_document_id": "100",
@@ -3036,8 +3036,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_abandon_probe_cancels_only_its_registered_lease_task(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         snapshot = {
             "classification": "normal",
             "document_id": source + "|old",
@@ -3116,12 +3116,12 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_cleanup_exact_runtime_cleans_probe_and_keeps_other_tasks(self):
         first = FakeTab("", [], url="https://example.com/")
         first.target.target_id = "cleanup-first"
-        first_identity = _ctbc_tab_identity(first)
-        first_runtime = ctbc_identity_runtime(first_identity)
+        first_identity = _utiki_tab_identity(first)
+        first_runtime = utiki_identity_runtime(first_identity)
         second = FakeTab("", [], url="https://example.com/")
         second.target.target_id = "cleanup-second"
-        second_identity = _ctbc_tab_identity(second)
-        second_runtime = ctbc_identity_runtime(second_identity)
+        second_identity = _utiki_tab_identity(second)
+        second_runtime = utiki_identity_runtime(second_identity)
 
         lease_task = asyncio.create_task(asyncio.Event().wait())
         unrelated = asyncio.create_task(asyncio.Event().wait())
@@ -3171,13 +3171,13 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_cleanup_detaches_before_await_and_preserves_replacement(self):
         tab = FakeTab("", [], url="https://example.com/")
         tab.target.target_id = "cleanup-replacement"
-        identity = _ctbc_tab_identity(tab)
-        old_runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        old_runtime = utiki_identity_runtime(identity)
         replacements = []
 
         async def replace_after_detach(*_args, **_kwargs):
             self.assertNotIn(identity, _state["tabs"])
-            replacement = ctbc_tab_runtime(tab)
+            replacement = utiki_tab_runtime(tab)
             replacements.append(replacement)
             return False
 
@@ -3195,7 +3195,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_temporary_probe_completion_failure_can_be_retried(self):
         source = "https://tix.ctbcsports.com/BROTHERS/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_identity_runtime(_ctbc_tab_identity(tab))
+        runtime = utiki_identity_runtime(_utiki_tab_identity(tab))
         lease_task = asyncio.create_task(asyncio.Event().wait())
         _state["cancel_tasks"].add(lease_task)
         probe = {
@@ -3242,14 +3242,14 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_expired_reload_deadline_does_not_create_guard_coroutine(self):
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [])
-        identity = _ctbc_tab_identity(tab)
+        identity = _utiki_tab_identity(tab)
         guard = AsyncMock()
         with patch(
             "platforms.utiki.refresh._utk_document_guard", guard
         ), patch("platforms.utiki.refresh.time.monotonic", return_value=10.0):
             result = await _guard_for_reload(
                 tab,
-                ctbc_identity_runtime(identity),
+                utiki_identity_runtime(identity),
                 build_refresh_identity(identity),
                 _state["cancel_tasks"],
                 config(),
@@ -3260,7 +3260,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_awaiting_deadline_final_observation_is_bounded(self):
         tab = FakeSubmitTab(dialog="")
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         runtime["refresh"]["reload_request"] = {
             "request_token": "bounded-observation", "phase": "awaiting_document",
             "source_document_token": "100", "paused": False,
@@ -3320,7 +3320,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
         tab.reload = AsyncMock(side_effect=tab.reload)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         disabled = {
             "utk_sports": dict(self.global_settings["utk_sports"], enabled=False)
         }
@@ -3366,7 +3366,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_disabled_protection_rejects_stale_queued_source(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         runtime["refresh"]["reload_request"] = {
             "request_token": "disabled-stale", "phase": "queued",
             "document_id": "100", "source_document_token": "100",
@@ -3400,7 +3400,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
         tab.reload = AsyncMock(side_effect=tab.reload)
-        runtime = ctbc_tab_runtime(tab)
+        runtime = utiki_tab_runtime(tab)
         current = {"document_id": "100"}
         enabled = {"value": True}
         deadline = time.monotonic() + 30.0
@@ -3465,7 +3465,7 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
 
         coordinator.reserve_refresh.assert_awaited_once()
         coordinator.cancel_request.assert_awaited_once_with(
-            "utk-sports", build_refresh_identity(_ctbc_tab_identity(tab)),
+            "utk-sports", build_refresh_identity(_utiki_tab_identity(tab)),
             request_token=token,
         )
         tab.reload.assert_awaited_once()
@@ -3473,8 +3473,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_disabled_guard_still_observes_document_changes(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         disabled = {
             "utk_sports": dict(self.global_settings["utk_sports"], enabled=False)
         }
@@ -3519,8 +3519,8 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
     async def test_persistent_unknown_document_never_opens_shared_cooldown(self):
         source = "https://tix.wdragons.com/UTK0201_?PRODUCT_ID=P1"
         tab = FakeTab(CTBC_DATE_ROW_SELECTOR, [], url=source)
-        identity = _ctbc_tab_identity(tab)
-        runtime = ctbc_identity_runtime(identity)
+        identity = _utiki_tab_identity(tab)
+        runtime = utiki_identity_runtime(identity)
         snapshot = {
             "classification": "unknown",
             "document_id": source + "|unknown",
@@ -3559,10 +3559,10 @@ class CtbcSharedRefreshTest(CtbcStateIsolationMixin, unittest.IsolatedAsyncioTes
             runtime["document"]["last_document"] = ""
 
 
-class CtbcEmergencyMarkerTest(
-    CtbcStateIsolationMixin, unittest.IsolatedAsyncioTestCase
+class UtikiEmergencyMarkerTest(
+    UtikiStateIsolationMixin, unittest.IsolatedAsyncioTestCase
 ):
-    ctbc_state = _state
+    utiki_state = _state
 
     def setUp(self):
         super().setUp()

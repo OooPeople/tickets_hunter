@@ -1,6 +1,7 @@
 """DOM snapshots and atomic commits for the uTiki2 ticketing family."""
 
 import json
+import math
 import re
 from enum import Enum
 from urllib.parse import urlsplit
@@ -293,6 +294,123 @@ async def clear_conflict_selection(
         raise RuntimeError("conflict clear outcome is unknown")
 
 
+CONST_CLEAN_SEAT_CONFLICT_DOCUMENT_SCRIPT = r'''
+        (() => {
+            // __ticketsHunterUtikiCleanConflictDocument
+            const expected = __TICKETS_HUNTER_CLEAN_CONFLICT_JSON__;
+            const documentId = String(performance.timeOrigin);
+            if (location.href !== expected.pageUrl ||
+                !Number.isFinite(Number(documentId)) ||
+                Number(documentId) <= 0 ||
+                documentId === expected.oldDocumentId ||
+                document.readyState !== 'complete') return 'not-clean';
+            const query = new URLSearchParams(location.search);
+            const hiddenMatches = (selector, key) => {
+                const inputs = document.querySelectorAll(selector);
+                const values = query.getAll(key);
+                return inputs.length === 1 && values.length === 1 &&
+                    /^[A-Za-z0-9_-]+$/.test(values[0]) &&
+                    inputs[0].value === values[0];
+            };
+            if (!hiddenMatches('#PERFORMANCE_ID', 'PERFORMANCE_ID') ||
+                !hiddenMatches('#GROUP_ID', 'GROUP_ID') ||
+                !hiddenMatches('#PRICE_AREA_ID', 'PERFORMANCE_PRICE_AREA_ID')) {
+                return 'not-clean';
+            }
+            const products = document.querySelectorAll('#PRODUCT_ID');
+            if (products.length !== 1 ||
+                !/^[A-Za-z0-9_-]+$/.test(products[0].value || '') ||
+                (expected.productId &&
+                    products[0].value !== expected.productId)) {
+                return 'not-clean';
+            }
+            const visible = element => {
+                if (!element || !element.isConnected || element.hidden ||
+                    element.closest('[hidden], [inert], [aria-hidden="true"]')) {
+                    return false;
+                }
+                const style = getComputedStyle(element);
+                return style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    element.getClientRects().length > 0;
+            };
+            if (Array.from(document.querySelectorAll('#dialog-message'))
+                .some(message => visible(message.closest('.ui-dialog')) &&
+                    visible(message))) return 'not-clean';
+            const captcha = document.querySelectorAll('#CHK');
+            const roots = document.querySelectorAll('#TBL');
+            const tickets = document.querySelectorAll('.ticket');
+            const limits = document.querySelectorAll('#QUANTITY_LIMIT');
+            if (captcha.length !== 1 || captcha[0].value.trim() !== '' ||
+                roots.length !== 1 || !visible(roots[0]) ||
+                tickets.length !== 1 || !visible(tickets[0]) ||
+                limits.length !== 1 ||
+                !/^\d+$/.test((limits[0].value || '').trim()) ||
+                !window.seats || typeof window.seats !== 'object' ||
+                Array.isArray(window.seats)) return 'not-clean';
+            const ticketTypes = Array.from(tickets[0].querySelectorAll(
+                'button[onclick*="setType"]'));
+            if (!ticketTypes.length || ticketTypes.length > 100 ||
+                ticketTypes.some(button => {
+                    const counters = button.querySelectorAll('.checkNum');
+                    return counters.length !== 1 || !counters[0].id ||
+                        !counters[0].getAttribute('val');
+                }) || !ticketTypes.some(button =>
+                    !button.disabled && visible(button) &&
+                    button.getAttribute('aria-disabled') !== 'true'
+                )) return 'not-clean';
+            const selected = seat => {
+                const inline = (seat.getAttribute('style') || '').toLowerCase();
+                const background = (getComputedStyle(seat).backgroundImage || '')
+                    .toLowerCase();
+                return inline.includes('icon_chair_select') ||
+                    background.includes('icon_chair_select');
+            };
+            const counters = Array.from(tickets[0].querySelectorAll('.checkNum'));
+            const counterIds = counters.map(counter => counter.id || '');
+            if (!counters.length || counterIds.some(id => !id) ||
+                new Set(counterIds).size !== counterIds.length ||
+                counters.some(counter => {
+                const value = (counter.textContent || '').trim();
+                return !/^\d+$/.test(value) || Number(value) !== 0;
+            })) return 'not-clean';
+            const seats = Array.from(roots[0].querySelectorAll('td[title]'));
+            if (seats.length > 5000 || seats.some(selected) ||
+                Object.values(window.seats).some(
+                    seat => seat && String(seat.A || '') !== '')) {
+                return 'not-clean';
+            }
+            return documentId;
+        })()'''
+
+
+async def read_clean_seat_conflict_document(
+    tab, expected_url, old_document_id, expected_product_id="",
+):
+    """唯讀確認網站新劃位文件已清空，回傳新 token 或空字串。"""
+    if (
+        classify_utiki_page(expected_url) is not PageKind.RESERVED_SEAT
+        or not old_document_id
+    ):
+        return ""
+    intent = json.dumps({
+        "pageUrl": expected_url,
+        "oldDocumentId": old_document_id,
+        "productId": expected_product_id,
+    }, ensure_ascii=False)
+    script = CONST_CLEAN_SEAT_CONFLICT_DOCUMENT_SCRIPT.replace(
+        "__TICKETS_HUNTER_CLEAN_CONFLICT_JSON__", intent, 1
+    )
+    result = await tab.evaluate(script)
+    if not isinstance(result, str) or result == old_document_id:
+        return ""
+    try:
+        token = float(result)
+    except (TypeError, ValueError):
+        return ""
+    return result if math.isfinite(token) and token > 0 else ""
+
+
 CONST_DATE_SNAPSHOT_SCRIPT = r'''
         (() => {
             // __ticketsHunterUtikiDateSnapshot
@@ -394,7 +512,7 @@ def _valid_fast_date_destination(snapshot, plan, destination_url, marker_key, tt
         return not marker_key and ttl_ms in (0, None)
     fingerprint = dict(plan.control_fingerprint)
     if (
-        plan.action_kind != "normal" or not plan.fast_area_prefetch
+        plan.action_kind != "normal" or not plan.fast_area_prefetch_eligible
         or fingerprint.get("tag_name") != "BUTTON"
         or fingerprint.get("id") != "buy_btn"
         or not isinstance(marker_key, str) or not 0 < len(marker_key) <= 256
@@ -790,7 +908,7 @@ async def commit_area(
     marker_key_json = json.dumps(fast_marker_key)
     raw_result = await tab.evaluate(fr'''
         (() => {{
-            // __ticketsHunterCtbcNativeAreaCommit
+            // __ticketsHunterUtikiNativeAreaCommit
             const pageUrl = {page_url_json};
             const documentId = {document_id_json};
             const areaId = {rel_json};
@@ -998,7 +1116,7 @@ CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
                     price: normalizePrice(match[2]), status: match[3]
                 } : null;
             };
-            const targetRow = () => {
+            const targetControl = () => {
                 const area = document.querySelector(
                     `#mapdata area#${CSS.escape(intent.areaId)}`);
                 if (!area) return null;
@@ -1023,20 +1141,25 @@ CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
                         'td[data-title^="票價"]')?.textContent;
                     const status = row.querySelector(
                         'td[data-title^="空位"]')?.textContent;
-                    const rowAction = parseAction(
-                        row.getAttribute('onclick'));
+                    const rowActionRaw = row.getAttribute('onclick');
+                    const rowAction = rowActionRaw === null ? null :
+                        parseAction(rowActionRaw);
+                    const rowActionMatches = rowActionRaw === null || (
+                        rowAction && rowAction.name === intent.actionName &&
+                        rowAction.stableArgs.length === intent.actionArgs.length &&
+                        rowAction.stableArgs.every((value, index) =>
+                            value === intent.actionArgs[index]) &&
+                        hasTickets(rowAction.status));
                     return normalizeArea(areaText) ===
                         normalizeArea(intent.area) &&
                         normalizePrice(priceText) ===
                         normalizePrice(intent.price) && hasTickets(status) &&
-                        rowAction && rowAction.name === intent.actionName &&
-                        rowAction.stableArgs.length ===
-                            intent.actionArgs.length &&
-                        rowAction.stableArgs.every((value, index) =>
-                            value === intent.actionArgs[index]) &&
-                        hasTickets(rowAction.status);
+                        rowActionMatches;
                 });
-                return rows.length === 1 ? rows[0] : null;
+                if (rows.length !== 1) return null;
+                // Some tenants expose the verified Send action only on the map.
+                // Keep row-click behavior when the row has its own action.
+                return rows[0].hasAttribute('onclick') ? rows[0] : area;
             };
 
             const root = document.documentElement;
@@ -1083,10 +1206,10 @@ CONST_SERVER_ASSIGNED_AREA_COMMIT_SCRIPT = r'''
                 state.manual.classList.contains('active') ||
                 state.checkbox.checked) return 'rejected';
 
-            const row = targetRow();
-            if (!row) return 'rejected';
+            const control = targetControl();
+            if (!control) return 'rejected';
             root.setAttribute(commitMarker, intent.navigationNonce);
-            row.click();
+            control.click();
             return 'committed';
         })()
 
@@ -1886,7 +2009,9 @@ CONST_QUANTITY_COMMIT_SCRIPT = r'''
                         exactHiddenMatches(
                             '#PERFORMANCE_ID', plan.performanceId) &&
                         exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
-                        exactHiddenMatches('#GROUP_ID', plan.groupId) &&
+                        optionalHiddenMatches(
+                            '#GROUP_ID', plan.groupId,
+                            plan.groupHiddenPresent) &&
                         exactHiddenMatches(
                             '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId);
                 return exactQuery('PERFORMANCE_ID', plan.performanceId) &&
@@ -2101,7 +2226,9 @@ CONST_SUBMIT_SCRIPT = r'''
                         plan.priceAreaHiddenPresent) :
                     exactHiddenMatches('#PERFORMANCE_ID', plan.performanceId) &&
                     exactHiddenMatches('#PRODUCT_ID', plan.productId) &&
-                    exactHiddenMatches('#GROUP_ID', plan.groupId) &&
+                    optionalHiddenMatches(
+                        '#GROUP_ID', plan.groupId,
+                        plan.groupHiddenPresent) &&
                     exactHiddenMatches(
                         '#PERFORMANCE_PRICE_AREA_ID', plan.priceAreaId);
                 return routeValid && hiddenValid &&
@@ -2359,19 +2486,49 @@ CONST_SUBMIT_SCRIPT = r'''
             if (!button) return 'rejected';
             if (plan.pageType === 'server_assigned_quantity') {
                 const form = button.form;
-                if (!form) return 'rejected';
-                const method = (
-                    button.hasAttribute('formmethod') ?
-                        button.formMethod : form.method
-                ).toLowerCase();
-                if (method !== 'post') return 'rejected';
-                const action = new URL(
-                    button.hasAttribute('formaction') ?
-                        button.formAction : form.action,
-                    location.href
-                );
                 const expectedPath = location.pathname.replace(/\/+$/, '') +
                     '/ADD_SHOPPING_CAR';
+                let action;
+                if (form) {
+                    const method = (
+                        button.hasAttribute('formmethod') ?
+                            button.formMethod : form.method
+                    ).toLowerCase();
+                    if (method !== 'post') return 'rejected';
+                    action = new URL(
+                        button.hasAttribute('formaction') ?
+                            button.formAction : form.action,
+                        location.href
+                    );
+                } else {
+                    // The native uTiki button can submit through DoPost
+                    // without an associated form. Accept only the observed
+                    // handler and its same-origin POST destination.
+                    const handler = window.addShoppingCart;
+                    const post = window.DoPost;
+                    const base = window._vr;
+                    if (button.getAttribute('onclick') !==
+                            'addShoppingCart();return false;' ||
+                        typeof handler !== 'function' ||
+                        typeof post !== 'function' ||
+                        typeof base !== 'string' || !base) return 'rejected';
+                    const handlerSource = Function.prototype.toString.call(
+                        handler);
+                    const postSource = Function.prototype.toString.call(post);
+                    if (!handlerSource.includes('DoPost(') ||
+                        !handlerSource.includes(
+                            'UTK0201_001/ADD_SHOPPING_CAR') ||
+                        !/\btype\s*:\s*['"]POST['"]/.test(postSource)) {
+                        return 'rejected';
+                    }
+                    try {
+                        action = new URL(
+                            base + 'UTK0201_001/ADD_SHOPPING_CAR',
+                            location.href);
+                    } catch (_error) {
+                        return 'rejected';
+                    }
+                }
                 if (action.origin !== location.origin ||
                     action.pathname !== expectedPath ||
                     action.search || action.hash) return 'rejected';

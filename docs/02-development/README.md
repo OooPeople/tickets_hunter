@@ -2,13 +2,13 @@
 
 **文件說明**：Tickets Hunter 開發規範、架構、測試與設計提案的入口。
 
-**最後更新**：2026-10-15
+**最後更新**：2026-10-24
 
 ## 依任務找主文件
 
 每次協作與 Git 授權先看 [AGENTS.md](../../AGENTS.md)；向 upstream 提公開 PR 的流程見 [CONTRIBUTING.md](../../CONTRIBUTING.md)，本機工作不以公開 PR 的 Issue 步驟為前置條件。修改程式時從 [結構索引](structure.md) 定位目前入口，跨模組責任看 [程式碼邊界](code-boundaries.md)，驗證命令看 [測試指南](testing_execution_guide.md)，審查格式看 [工程審查指南](engineering-review.md)。
 
-本次 uTiki 等價重構的行為、驗收與施工順序依 [正式計畫](utiki-refactor/PLAN.md)，實際進度見 [STATUS](utiki-refactor/STATUS.md)；[舊計畫](utiki-refactor-plan.md) 僅供歷史參考。十二階段只作通用功能分類，不增加本次的購票功能或 gate。
+uTiki 目前能力與交接見 [STATUS](utiki-refactor/STATUS.md)，正式程式結構與責任見[結構索引](structure.md)和[程式碼邊界](code-boundaries.md)。[已完成的重構計畫](archive/utiki-refactor/PLAN.md)與[更早的提案](archive/utiki-refactor/utiki-refactor-plan.md)僅供歷史追溯；十二階段只作通用功能分類，不自動增加購票功能或 gate。
 
 ## 文件責任
 
@@ -24,9 +24,10 @@
 | [logic_flowcharts.md](logic_flowcharts.md) | 常見判斷流程 | 理解既有邏輯時 |
 | [ticket_seat_selection_algorithm.md](ticket_seat_selection_algorithm.md) | 座位選擇演算法 | 手動劃位相關工作 |
 | [sound_notification_system.md](sound_notification_system.md) | 通知音效設計 | 通知相關工作 |
-| [utiki-refactor/PLAN.md](utiki-refactor/PLAN.md) | 本次 uTiki 等價重構的目標與施工順序 | 本次施工與審查 |
-| [utiki-refactor/STATUS.md](utiki-refactor/STATUS.md) | 本次實際基準、進度與阻礙 | 查核目前狀態 |
-| [utiki-refactor-plan.md](utiki-refactor-plan.md) | 已取代的歷史計畫 | 查閱歷史脈絡 |
+| [utiki-refactor/STATUS.md](utiki-refactor/STATUS.md) | uTiki 現版能力、驗證結果與待處理事項 | 接手相關工作 |
+| [archive/utiki-refactor/PLAN.md](archive/utiki-refactor/PLAN.md) | 已完成重構的施工紀錄 | 查閱歷史脈絡 |
+| [archive/utiki-refactor/BATCH6_WORKPLAN.md](archive/utiki-refactor/BATCH6_WORKPLAN.md) | 批次 6 當時執行計畫 | 查閱歷史脈絡 |
+| [archive/utiki-refactor/utiki-refactor-plan.md](archive/utiki-refactor/utiki-refactor-plan.md) | 更早的歷史提案 | 查閱歷史脈絡 |
 
 ## 依工作類型導航
 
@@ -47,6 +48,8 @@
 - [購買資格驗證](../03-mechanisms/19-purchase-qualification.md)
 
 ### 打包與發行
+
+以下是全專案的通用文件。已完成的 uTiki 重構當時僅交付原始碼；後續工作是否打包，依當次需求決定，不由歷史計畫設定永久門檻。
 
 - [PyInstaller 打包指南](../07-deployment/pyinstaller_packaging_guide.md)
 - [本地打包快速開始](../../build_scripts/QUICK_START.md)

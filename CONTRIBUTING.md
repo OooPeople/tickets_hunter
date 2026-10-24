@@ -98,6 +98,8 @@ git remote add upstream https://github.com/bouob/tickets_hunter.git
 
 ### 3. 建立分支
 
+以下命令只示範準備向原作者提出公開 PR 的分支；本 fork 接收原作者更新時，依 [AGENTS.md](AGENTS.md) 與[工程審查指南](docs/02-development/engineering-review.md)審查差異，不以這組 merge 命令或 upstream Issue／PR 作固定前置。
+
 ```bash
 # 同步最新版本
 git fetch upstream

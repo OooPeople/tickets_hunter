@@ -310,7 +310,7 @@ const HELP_CONTENT = {
     link: null
   },
 
-  ctbc_seat_sorting: {
+  utiki_seat_sorting: {
     title: '職棒座位排序依據',
     short: '直接指定座位圖順序，或排數與座號的優先方向',
     detail: `
@@ -344,6 +344,16 @@ const HELP_CONTENT = {
         <li>貼入此欄位；程式只會取用名稱以 <code>CTBC_</code> 開頭的 Cookie</li>
       </ol>
       <p class="text-warning-emphasis small mb-0">Cookie 等同登入憑證，請勿分享。Cookie 失效時程式會回退到帳號密碼；若未設定帳密，請重新登入 Chrome 並複製新的 Cookie。</p>`,
+    link: null
+  },
+
+  wdragons_cookie: {
+    title: '味全龍 Cookie',
+    short: '貼上已登入味全龍售票網的完整 Cookie header',
+    detail: `
+      <p>程式目前只處理名稱以 <code>WDRAGONS|</code> 開頭的味全龍 Cookie。請複製完整的同站 Request Cookie header；這些 Cookie 只會注入味全龍網域，不會使用中信 Cookie。</p>
+      <p>可在已登入的味全龍售票頁開啟 Chrome 開發人員工具，從 Network 的同站請求複製 Request Headers 中的 Cookie 值。若 Cookie 失效，需重新取得；味全龍目前沒有帳號密碼自動登入備援。</p>
+      <p class="text-warning-emphasis small mb-0">Cookie 等同登入憑證，請勿分享。</p>`,
     link: null
   },
 
@@ -1226,7 +1236,7 @@ const HELP_CONTENT_EN_META = {
       </ol>
       <p class="text-muted small mb-0">If both account credentials and a cookie are filled in, the bot uses the cookie first.</p>`,
   },
-  ctbc_seat_sorting: {
+  utiki_seat_sorting: {
     title: 'Baseball seat ordering',
     short: 'Directly choose display order or the preferred row/seat number directions.',
     detailHtml: `
@@ -1258,6 +1268,14 @@ const HELP_CONTENT_EN_META = {
         <li>Paste it here. Only cookie names beginning with <code>CTBC_</code> are injected.</li>
       </ol>
       <p class="text-warning-emphasis small mb-0">Treat this cookie set as a login credential and never share it. If it expires, account/password login is used as a fallback.</p>`,
+  },
+  wdragons_cookie: {
+    title: 'Wei Chuan Dragons cookie set',
+    short: 'Paste the complete Cookie header from a logged-in Wei Chuan Dragons session.',
+    detailHtml: `
+      <p>The program currently handles Dragons cookies whose names begin with <code>WDRAGONS|</code>. Copy the complete same-site request Cookie header. Those cookies are injected only into the Dragons domain; CTBC cookies are not used.</p>
+      <p>In a logged-in Dragons page, open Chrome DevTools and copy the Cookie value from Request Headers of a same-site Network request. If the cookies expire, obtain a new set. Automatic account/password login is not available for this site.</p>
+      <p class="text-warning-emphasis small mb-0">Treat cookies as login credentials and never share them.</p>`,
   },
   idle_keyword: {
     title: 'System time pause keywords',

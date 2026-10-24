@@ -8,10 +8,11 @@ import time
 import util
 from . import navigation
 from .dom import read_area_snapshot, read_date_snapshot
+from .profiles import get_utiki_tenant_profile
 from .selection import (
     AreaSnapshot,
     DateSnapshot,
-    select_area_snapshot as _select_ctbc_area_snapshot,
+    select_area_snapshot as _select_utiki_area_snapshot,
     select_date_snapshot,
 )
 
@@ -112,7 +113,7 @@ async def _ctbc_prefetch_area_snapshot(tab, date_target):
     """,
         await_promise=True,
     )
-    return navigation._decode_ctbc_json_result(raw_value)
+    return navigation._decode_utiki_json_result(raw_value)
 
 
 async def _ctbc_try_fast_area_navigation(
@@ -132,8 +133,8 @@ async def _ctbc_try_fast_area_navigation(
     if transition["pending_navigation"]:
         return True
     date_target = navigation._ctbc_date_target_payload(date_plan)
-    if not date_target or not date_plan.fast_area_prefetch:
-        debug.log("[UTK SPORTS] Native area flow required by this platform")
+    if not date_target or not date_plan.fast_area_prefetch_eligible:
+        debug.log("[UTK SPORTS] Native date button click required")
         return False
     started = time.monotonic()
     try:
@@ -152,7 +153,7 @@ async def _ctbc_try_fast_area_navigation(
     if time.monotonic() - started > CTBC_FAST_PATH_TTL_SECONDS:
         debug.log("[CTBC FAST] Native area-page fallback: snapshot expired")
         return False
-    target = _select_ctbc_area_snapshot(
+    target = _select_utiki_area_snapshot(
         snapshot,
         config_dict,
         date_target["performance_id"],
@@ -177,19 +178,19 @@ async def _ctbc_try_fast_area_navigation(
     )
 
 
-async def nodriver_ctbc_date_auto_select(
+async def nodriver_utiki_date_auto_select(
     tab, config_dict, *, identity_for_tab, runtime_for_identity,
     behavior_for_key, reload_with_interval, cancel_refresh,
 ):
-    """依設定自動選擇中信相容售票場次。"""
+    """依設定自動選擇已支援 uTiki 租戶的售票場次。"""
 
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
-    if navigation._get_ctbc_page_type(current_url) != "date":
+    if navigation._get_utiki_page_type(current_url) != "date":
         return False
     identity = identity_for_tab(tab)
     runtime = runtime_for_identity(identity)
-    if not await navigation._ctbc_reconcile_navigation_source(
+    if not await navigation._utiki_reconcile_navigation_source(
         tab, current_url, "date", config_dict,
         identity=identity, runtime=runtime,
         runtime_for_identity=runtime_for_identity,
@@ -200,8 +201,8 @@ async def nodriver_ctbc_date_auto_select(
         config_dict, "seat_selection_mode", "manual"
     )
     if seat_selection_mode == "computer":
-        profile = navigation._get_utk_sports_profile(current_url)
-        if not profile or not profile.get("supports_server_assignment", False):
+        profile = get_utiki_tenant_profile(current_url)
+        if not profile or not profile.supports_server_assignment:
             debug.log(
                 "[UTK SPORTS] Website computer assignment is not enabled "
                 "for this platform"
@@ -213,7 +214,7 @@ async def nodriver_ctbc_date_auto_select(
         try:
             snapshot = await read_date_snapshot(tab)
         except Exception as exc:
-            debug.log(f"[CTBC DATE] Failed to inspect date table: {exc}")
+            debug.log(f"[UTIKI DATE] Failed to inspect date table: {exc}")
             snapshot = None
         if isinstance(snapshot, DateSnapshot) and snapshot.ok and snapshot.rows:
             break
@@ -223,7 +224,7 @@ async def nodriver_ctbc_date_auto_select(
             snapshot.reason if isinstance(snapshot, DateSnapshot) else "invalid-result"
         )
         if (
-            navigation._get_ctbc_page_type(str(getattr(tab.target, "url", "")))
+            navigation._get_utiki_page_type(str(getattr(tab.target, "url", "")))
             != "date"
         ):
             return False
@@ -233,7 +234,7 @@ async def nodriver_ctbc_date_auto_select(
         return False
     if (
         snapshot.page_url != current_url
-        or navigation._get_ctbc_page_type(snapshot.page_url) != "date"
+        or navigation._get_utiki_page_type(snapshot.page_url) != "date"
     ):
         return False
 
@@ -259,27 +260,27 @@ async def nodriver_ctbc_date_auto_select(
             ):
                 return True
         identity = identity_for_tab(tab)
-        return await navigation._ctbc_commit_native_date(
+        return await navigation._utiki_commit_native_date(
             tab, snapshot, plan, debug, identity=identity,
             transition=runtime_for_identity(identity)["transition"],
             runtime_for_identity=runtime_for_identity,
         )
     except Exception as exc:
-        debug.log(f"[CTBC DATE] Click failed: {exc}")
+        debug.log(f"[UTIKI DATE] Click failed: {exc}")
         return False
 
 
-async def nodriver_ctbc_area_auto_select(
+async def nodriver_utiki_area_auto_select(
     tab, config_dict, *, identity_for_tab, runtime_for_identity,
     behavior_for_key, reload_with_interval, cancel_refresh,
 ):
-    """依設定自動選擇中信相容售票區域。"""
+    """依設定自動選擇已支援 uTiki 租戶的售票區域。"""
 
     debug = util.create_debug_logger(config_dict)
     current_url = str(getattr(getattr(tab, "target", None), "url", ""))
     identity = identity_for_tab(tab)
     runtime = runtime_for_identity(identity)
-    if not await navigation._ctbc_reconcile_area_navigation(
+    if not await navigation._utiki_reconcile_area_navigation(
         tab, current_url, config_dict, identity=identity, runtime=runtime,
         runtime_for_identity=runtime_for_identity,
         reload_with_interval=reload_with_interval,
@@ -289,8 +290,8 @@ async def nodriver_ctbc_area_auto_select(
         config_dict, "seat_selection_mode", "manual"
     )
     if seat_selection_mode == "computer":
-        profile = navigation._get_utk_sports_profile(current_url)
-        if not profile or not profile.get("supports_server_assignment", False):
+        profile = get_utiki_tenant_profile(current_url)
+        if not profile or not profile.supports_server_assignment:
             debug.log(
                 "[UTK SPORTS] Website computer assignment is not enabled "
                 "for this platform"
@@ -299,7 +300,7 @@ async def nodriver_ctbc_area_auto_select(
     try:
         snapshot = await read_area_snapshot(tab)
     except Exception as exc:
-        debug.log(f"[CTBC AREA] Action-ready wait failed: {exc}")
+        debug.log(f"[UTIKI AREA] Action-ready wait failed: {exc}")
         snapshot = None
     if not isinstance(snapshot, AreaSnapshot) or not snapshot.ok:
         reason = (
@@ -311,11 +312,11 @@ async def nodriver_ctbc_area_auto_select(
         return False
 
     page_url = snapshot.page_url
-    query = navigation._ctbc_unique_query(page_url)
+    query = navigation._utiki_unique_query(page_url)
     performance_id = query.get("PERFORMANCE_ID", "") if query else ""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", performance_id):
         return False
-    target = _select_ctbc_area_snapshot(
+    target = _select_utiki_area_snapshot(
         snapshot, config_dict, performance_id, require_direct_destination=False
     )
     if target is None:
@@ -326,7 +327,7 @@ async def nodriver_ctbc_area_auto_select(
 
     await cancel_refresh(tab, "available area found")
     identity = identity_for_tab(tab)
-    return await navigation._ctbc_commit_native_area(
+    return await navigation._utiki_commit_native_area(
         tab, config_dict, snapshot, target, seat_selection_mode, debug,
         identity=identity,
         transition=runtime_for_identity(identity)["transition"],

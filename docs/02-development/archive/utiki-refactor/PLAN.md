@@ -1,5 +1,7 @@
 # uTiki 架構重做計畫
 
+> **歷史封存（2026-10-25）**：本計畫記錄已完成重構的當時決策、批次與驗證。文中「正式」「本次」「下一步」均指當時施工，不是目前版本的功能上限、工作待辦或驗收門檻。現況與交接請看 [STATUS.md](../../utiki-refactor/STATUS.md)。
+
 ## 決策與範圍
 
 以 `944e934546f3dd36b1b4891a5a4fa359b8ade17f` 的實際行為作為基準，重新整理 uTiki 家族的責任、狀態存取與呼叫關係。架構改善的交付條件是：**原本能完成的操作繼續能完成，原本可人工介入後接手的情況繼續可接手，程式更容易定位、理解與修改。**
@@ -7,6 +9,8 @@
 日期、區域、票種、張數、座位、登入、驗證碼、錯誤恢復、暫停、設定熱更新、刷新及通知，都屬於保留範圍。使用者已允許大幅調整內部架構；這不包含新增指定 Cookie/session 資格、設定版本相等、來源導航證明或其他原本沒有的操作門檻。
 
 **本次僅重整架構並等價重現 `944e934` 的既有功能，不擴充功能範圍。** 原本未支援的功能不列為本次待補項目、後續實作批次或完成條件；重構結束後，如有新增需求，再另行討論。
+
+本計畫保留批次 0–6 當時的施工範圍與函式名稱作歷史對照。重構後經使用者另行授權的命名清理或產品改善，依 [STATUS.md](../../utiki-refactor/STATUS.md) 記錄實際變更與驗證；`944e934` 仍是原行為基準，不限制後續已明確授權的差異。
 
 **本次交付僅限原始碼使用。** 正式 source caller 須能在 Windows x64 與 macOS arm64 以原始碼執行；PyInstaller、exe、安裝包、frozen runtime、hidden-import／spec、release packaging 與發布流程均不屬本次施工或驗收。新增 module 也不因此要求 frozen resource 或產品打包驗證。既有 build scripts 與 release infrastructure 保留，待原始碼版本穩定使用後另開工作處理打包。
 
@@ -16,7 +20,7 @@
 
 本計畫採用 `944e934` 的來源碼重新分工。`a47fd07` 僅提供可獨立採用的設計經驗；`facebook_monitor_py` 僅提供職責劃分與生命週期管理的參考。
 
-**文件狀態：本次正式施工計畫；目標架構的實作進度以 [STATUS.md](STATUS.md) 為準。** 本文件記錄使用者確認的修改範圍、行為保留與驗證方式。
+**當時文件狀態：正式施工計畫。** 本文件記錄當時確認的修改範圍、行為保留與驗證方式；目前狀態以 [STATUS.md](../../utiki-refactor/STATUS.md) 為準。
 
 ### 固定參考版本
 
@@ -443,7 +447,7 @@ STATUS 只需下列短摘要與一張必要時才出現的缺口表；不用另�
 | 5 拆刷新觀察與429管理 | document_health、rate_limit；refresh保留完整request生命週期 | queued/reserved/awaiting各暫停點、429/probe、document與caller歸屬等價 |
 | 6 收斂整合 | 移除無正式 caller 的舊設定轉接、同步實際模組責任／索引／驗證文件，檢查正式 source 入口只有一條 | 完整測試、Windows x64／macOS arm64 原始碼使用路徑、current 設定讀取／儲存／hot reload、同情境舊新差異表及 PLAN 所需驗證範圍；文件反映實際完成狀態 |
 
-每批可以回到固定基準比較，不需要在使用者操作介面加入模式選擇、旗標或遷移確認。只有外部既有呼叫端需要的 facade 才保留；私有測試 import 可以跟隨責任位置調整，不為舊私有測試建立永久轉送層。
+每批可以回到固定基準比較，不需要在使用者操作介面加入模式選擇、旗標或遷移確認。只有外部既有呼叫端需要的 facade 才保留；既有 build spec 仍明示引用、且本次排除打包清理的純 re-export facade 可暫留，待獨立打包工作一併評估退役。私有測試 import 可以跟隨責任位置調整，不為舊私有測試建立永久轉送層。
 
 ## 驗證方式
 
@@ -484,12 +488,12 @@ UUID 等每次不同的值可以按對應操作正規化；token 的相等關係
 
 ### 既有測試優先使用
 
-沿用 `test_ctbc_pure.py`、`test_ctbc_dom.py`、`test_ctbc_refresh.py`、`test_utiki_dom_contract.py` 與 `test_ctbc_dom_fixtures.py`。既有 local browser fixture 已執行正式 DOM reader／committer；不必先另造一套測試框架。[fixture runner][fixture-runner]
+本計畫編寫時沿用 `test_ctbc_pure.py`、`test_ctbc_dom.py`、`test_ctbc_refresh.py`、`test_utiki_dom_contract.py` 與 `test_ctbc_dom_fixtures.py`。後續共用測試檔改為 `test_utiki_*` 命名；現行可執行路徑見下方命令與[測試指南][testing]。既有 local browser fixture 已執行正式 DOM reader／committer；不必先另造一套測試框架。[fixture runner][fixture-runner]
 
 批次0的一次原版基準及雙平台命令見後面的「批次0命令」。實作期間依 repository 的 [測試指南][testing] 選受影響層級；以下 `python` 表示已選定的虛擬環境 interpreter，不是隨手使用全域Python。聚焦測試用於對應改動，全套用於整合驗證；新增 module 應核對正式 source caller 的 import 與執行路徑，最終在 Windows x64、macOS arm64 驗證原始碼使用。不要求純文件修改把所有命令重跑一遍，也不以打包作任何批次的完成條件：
 
 ```bash
-python -m pytest tests/test_ctbc_pure.py tests/test_ctbc_dom.py tests/test_ctbc_refresh.py tests/test_utiki_dom_contract.py
+python -m pytest tests/test_utiki_pure.py tests/test_utiki_dom.py tests/test_utiki_refresh.py tests/test_utiki_dom_contract.py
 python -m pytest
 ```
 
@@ -520,7 +524,7 @@ python -m pytest
 2. 上述功能與操作情境的舊新對照；等價保留944既有功能與能力邊界，不新增功能或操作限制。
 3. 每一個核心狀態有明確的建立、更新與清理責任；一筆提交或刷新不跨多套模型重複表示。
 4. 修改選座、登入、提交恢復或刷新時，可以直接找到相應責任；不需要先理解通用claim、authority與policy框架。
-5. production規模及新增抽象用途的報告；保留的 facade 有正式 source caller，不為舊設定相容保留無 caller 的轉接。
+5. production規模及新增抽象用途的報告；保留的 facade 有正式 source caller，或是仍被本次不處理的既有 build spec 明示引用的純 re-export 暫留。不得為舊設定相容保留無理由轉接。
 6. 實際執行的測試、fixture、Windows x64／macOS arm64 source 使用及 PLAN 所需實機範圍；未執行的部分照實列出。current uTiki 設定可正常讀取、儲存並依原支援範圍 hot reload；不要求舊設定 upgrade、runtime fallback、dual read／dual write、新 DB migration 或 frozen build。
 7. 精簡的AGENTS與清楚的PLAN／STATUS／專責文件分工；舊計畫不再冒充現行施工依據，文件中的模組、命令與完成狀態符合實際結果。
 
@@ -687,7 +691,7 @@ Windows的第二行改為 `uv pip install --python .\.venv\Scripts\python.exe -r
 **POSIX／Bash：**
 
 ```bash
-TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 .venv/bin/python -m pytest -m "browser and not live" tests/test_ctbc_dom_fixtures.py
+TICKETS_HUNTER_RUN_BROWSER_FIXTURES=1 .venv/bin/python -m pytest -m "browser and not live" tests/test_utiki_dom_fixtures.py
 utiki_browser_exit_code=$?
 ```
 
@@ -697,7 +701,7 @@ utiki_browser_exit_code=$?
 $UtikiPreviousBrowserFlag = $env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES
 try {
     $env:TICKETS_HUNTER_RUN_BROWSER_FIXTURES = '1'
-    & .\.venv\Scripts\python.exe -m pytest -m 'browser and not live' tests/test_ctbc_dom_fixtures.py
+    & .\.venv\Scripts\python.exe -m pytest -m 'browser and not live' tests/test_utiki_dom_fixtures.py
     $UtikiBrowserExitCode = $LASTEXITCODE
 }
 finally {

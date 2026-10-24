@@ -24,32 +24,26 @@ from .profiles import (
 )
 from .selection import AreaActionPlan, DateActionPlan, DateSnapshot
 
-CTBC_PENDING_NAVIGATION_TTL_SECONDS = 15.0
-CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
-CTBC_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
+UTIKI_PENDING_NAVIGATION_TTL_SECONDS = 15.0
+UTIKI_FAST_MARKER_CLOCK_SKEW_SECONDS = 1.0
+# Keep the historical storage key so an existing tab can reconcile its marker.
+UTIKI_FAST_MARKER_KEY = "ticketsHunter.ctbc.fast-navigation.v1"
 
 
-def _get_utk_sports_profile(url):
-    """取得網址所屬的 uTiki 棒球租戶設定。"""
-
-    profile = get_utiki_tenant_profile(url)
-    return profile.as_legacy_dict() if profile else None
-
-
-def _get_ctbc_page_type(url):
-    """判別網址所屬的中信相容售票頁面類型。"""
+def _get_utiki_page_type(url):
+    """判別已支援 uTiki 網址的頁面類型。"""
 
     page_kind = classify_utiki_page(url)
     return None if page_kind is PageKind.UNKNOWN else page_kind.value
 
 
-def _ctbc_unique_query(url):
-    """讀取沒有重複鍵的中信相容網址查詢參數。"""
+def _utiki_unique_query(url):
+    """讀取沒有重複鍵的 uTiki 網址查詢參數。"""
 
     return unique_query(url)
 
 
-def _ctbc_area_action_payload(plan):
+def _utiki_area_action_payload(plan):
     """將區域計畫轉成瀏覽器提交資料。"""
 
     if not isinstance(plan, AreaActionPlan):
@@ -77,19 +71,18 @@ def _ctbc_date_target_payload(plan):
         "tenant_path": plan.tenant_path,
         "host": plan.host,
         "map_namespace": plan.map_namespace,
-        "fast_area_prefetch": plan.fast_area_prefetch,
     }
 
 
-def _build_ctbc_destination_url(area_url, target):
+def _build_utiki_destination_url(area_url, target):
     """依區域網址與目標建立可驗證的目的地網址。"""
 
-    if _get_ctbc_page_type(area_url) != "area":
+    if _get_utiki_page_type(area_url) != "area":
         return None
     source = urlsplit(area_url)
     if target.get("route") not in {"0202", "0205"}:
         return None
-    area_query = _ctbc_unique_query(area_url)
+    area_query = _utiki_unique_query(area_url)
     if (area_query or {}).get("PERFORMANCE_ID") != target.get("performance_id"):
         return None
     path = f"{source.path.rsplit('/', 1)[0]}/UTK{target['route']}_"
@@ -106,13 +99,13 @@ def _build_ctbc_destination_url(area_url, target):
 def _build_utiki_server_assignment_destination_url(area_url, target):
     """建立 uTiki 電腦配位的票數頁目的地網址。"""
 
-    if _get_ctbc_page_type(area_url) != "area":
+    if _get_utiki_page_type(area_url) != "area":
         return None
     try:
         source = urlsplit(area_url)
     except ValueError:
         return None
-    area_query = _ctbc_unique_query(area_url)
+    area_query = _utiki_unique_query(area_url)
     token = re.compile(r"[A-Za-z0-9_-]+")
     performance_id = str(target.get("performance_id") or "")
     group_id = str(target.get("group_id") or "")
@@ -136,13 +129,13 @@ def _build_utiki_server_assignment_destination_url(area_url, target):
         }
     )
     destination = urlunsplit(("https", source.netloc, path, query, ""))
-    if _get_ctbc_page_type(destination) != "server_assigned_quantity":
+    if _get_utiki_page_type(destination) != "server_assigned_quantity":
         return None
     return destination
 
 
-def _ctbc_same_origin(first, second):
-    """判斷兩個中信相容售票網址是否同源。"""
+def _utiki_same_origin(first, second):
+    """判斷兩個 uTiki 售票網址是否同源。"""
 
     return same_origin(first, second)
 
@@ -158,7 +151,7 @@ def _pop_pending_navigation_if_nonce(identity, nonce, *, runtime_for_identity):
     return None
 
 
-def _ctbc_pending_navigation_is_current(identity, pending, *, runtime_for_identity):
+def _utiki_pending_navigation_is_current(identity, pending, *, runtime_for_identity):
     """判斷待處理導覽是否仍屬於目前分頁狀態。"""
 
     current = runtime_for_identity(identity)["transition"][
@@ -167,8 +160,8 @@ def _ctbc_pending_navigation_is_current(identity, pending, *, runtime_for_identi
     return bool(current and pending and current.get("nonce") == pending.get("nonce"))
 
 
-def _decode_ctbc_json_result(raw_value):
-    """將中信相容頁面的回傳值解碼為 JSON 資料。"""
+def _decode_utiki_json_result(raw_value):
+    """將 uTiki 頁面的回傳值解碼為 JSON 資料。"""
 
     if isinstance(raw_value, str):
         try:
@@ -178,7 +171,7 @@ def _decode_ctbc_json_result(raw_value):
     return util.parse_nodriver_result(raw_value)
 
 
-def _ctbc_selection_config_fingerprint(config_dict, *, behavior_for_key):
+def _utiki_selection_config_fingerprint(config_dict, *, behavior_for_key):
     """建立影響選位結果之設定的穩定指紋。"""
 
     area_config = config_dict.get("area_auto_select", {})
@@ -199,7 +192,7 @@ def _ctbc_selection_config_fingerprint(config_dict, *, behavior_for_key):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _ctbc_navigation_urls_match(first_url, second_url):
+def _utiki_navigation_urls_match(first_url, second_url):
     """判斷兩個導覽網址是否代表同一標準目的地。"""
 
     try:
@@ -207,19 +200,19 @@ def _ctbc_navigation_urls_match(first_url, second_url):
         second = urlsplit(str(second_url or ""))
     except ValueError:
         return False
-    first_query = _ctbc_unique_query(first_url)
-    second_query = _ctbc_unique_query(second_url)
+    first_query = _utiki_unique_query(first_url)
+    second_query = _utiki_unique_query(second_url)
     return bool(
         not first.fragment
         and not second.fragment
-        and _ctbc_same_origin(first, second)
+        and _utiki_same_origin(first, second)
         and first.path == second.path
         and first_query is not None
         and first_query == second_query
     )
 
 
-def _ctbc_new_pending_navigation(
+def _utiki_new_pending_navigation(
     kind,
     source_url,
     area_url,
@@ -239,11 +232,11 @@ def _ctbc_new_pending_navigation(
         )
         route = "0201_001"
     elif selection_mode == "manual":
-        destination_url = _build_ctbc_destination_url(area_url, target)
+        destination_url = _build_utiki_destination_url(area_url, target)
         route = target.get("route")
     else:
         return None
-    area_query = _ctbc_unique_query(area_url)
+    area_query = _utiki_unique_query(area_url)
     if (
         not destination_url
         or area_query is None
@@ -266,25 +259,25 @@ def _ctbc_new_pending_navigation(
         "product_id": area_query.get("PRODUCT_ID"),
         "group_id": target.get("group_id"),
         "price_area_id": target.get("price_area_id"),
-        "config_fingerprint": _ctbc_selection_config_fingerprint(
+        "config_fingerprint": _utiki_selection_config_fingerprint(
             config_dict, behavior_for_key=behavior_for_key
         ),
         "created_at": time.monotonic(),
     }
 
 
-def _ctbc_new_date_native_pending(
+def _utiki_new_date_native_pending(
     snapshot, plan, *, identity, document_for_identity,
 ):
     """為已原子提交的原生場次點擊建立跨文件防護。"""
     if not isinstance(snapshot, DateSnapshot) or not isinstance(plan, DateActionPlan):
         return None
     source_url = snapshot.page_url
-    source_query = _ctbc_unique_query(source_url)
-    profile = _get_utk_sports_profile(source_url)
+    source_query = _utiki_unique_query(source_url)
+    profile = get_utiki_tenant_profile(source_url)
     product_id = str((source_query or {}).get("PRODUCT_ID") or "")
     if (
-        _get_ctbc_page_type(source_url) != "date"
+        _get_utiki_page_type(source_url) != "date"
         or not profile
         or not re.fullmatch(r"[A-Za-z0-9_-]+", product_id)
         or plan.action_kind
@@ -299,8 +292,8 @@ def _ctbc_new_date_native_pending(
     area_url = str(plan.target_url or "")
     if area_url and (
         plan.action_kind not in {"normal", "anchor_native"}
-        or _get_ctbc_page_type(area_url) != "area"
-        or (_ctbc_unique_query(area_url) or {}).get("PRODUCT_ID") != product_id
+        or _get_utiki_page_type(area_url) != "area"
+        or (_utiki_unique_query(area_url) or {}).get("PRODUCT_ID") != product_id
     ):
         return None
     document = document_for_identity(identity)
@@ -312,36 +305,36 @@ def _ctbc_new_date_native_pending(
         "source_document_id": document["last_document"],
         "area_url": area_url,
         "product_id": product_id,
-        "tenant_path": profile["tenant_path"],
-        "host": profile["host"],
+        "tenant_path": profile.tenant_path,
+        "host": profile.host,
         "action_kind": plan.action_kind,
         "created_at": time.monotonic(),
     }
 
 
-def _ctbc_date_native_area_matches(pending, current_url):
+def _utiki_date_native_area_matches(pending, current_url):
     """判斷原生場次導覽是否到達預期區域頁。"""
 
     if not isinstance(pending, dict) or pending.get("kind") != "DATE_NATIVE":
         return False
     source_url = str(pending.get("source_url") or "")
-    source_profile = _get_utk_sports_profile(source_url)
-    current_profile = _get_utk_sports_profile(current_url)
-    current_query = _ctbc_unique_query(current_url)
+    source_profile = get_utiki_tenant_profile(source_url)
+    current_profile = get_utiki_tenant_profile(current_url)
+    current_query = _utiki_unique_query(current_url)
     try:
         source = urlsplit(source_url)
         current = urlsplit(current_url)
     except ValueError:
         return False
     if (
-        _get_ctbc_page_type(current_url) != "area"
+        _get_utiki_page_type(current_url) != "area"
         or not source_profile
         or not current_profile
-        or source_profile["host"] != pending.get("host")
-        or source_profile["tenant_path"] != pending.get("tenant_path")
-        or current_profile["host"] != pending.get("host")
-        or current_profile["tenant_path"] != pending.get("tenant_path")
-        or not _ctbc_same_origin(source, current)
+        or source_profile.host != pending.get("host")
+        or source_profile.tenant_path != pending.get("tenant_path")
+        or current_profile.host != pending.get("host")
+        or current_profile.tenant_path != pending.get("tenant_path")
+        or not _utiki_same_origin(source, current)
         or current_query is None
         or set(current_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}
         or current_query.get("PRODUCT_ID") != pending.get("product_id")
@@ -349,13 +342,13 @@ def _ctbc_date_native_area_matches(pending, current_url):
         return False
     area_url = str(pending.get("area_url") or "")
     return (
-        _ctbc_navigation_urls_match(current_url, area_url)
+        _utiki_navigation_urls_match(current_url, area_url)
         if area_url
         else current.path == f"{pending.get('tenant_path', '')}/UTK0204_"
     )
 
 
-def _ctbc_pending_from_fast_marker(marker):
+def _utiki_pending_from_fast_marker(marker):
     """從快速導覽標記還原待處理導覽。"""
 
     if (
@@ -376,19 +369,19 @@ def _ctbc_pending_from_fast_marker(marker):
         destination = urlsplit(destination_url)
     except (TypeError, ValueError):
         return None
-    source_query = _ctbc_unique_query(source_url)
-    destination_query = _ctbc_unique_query(destination_url)
-    page_type = _get_ctbc_page_type(destination_url)
+    source_query = _utiki_unique_query(source_url)
+    destination_query = _utiki_unique_query(destination_url)
+    page_type = _get_utiki_page_type(destination_url)
     token = re.compile(r"[A-Za-z0-9_-]+")
     max_expiry = time.time() * 1000 + 1000 * (
-        CTBC_PENDING_NAVIGATION_TTL_SECONDS + CTBC_FAST_MARKER_CLOCK_SKEW_SECONDS
+        UTIKI_PENDING_NAVIGATION_TTL_SECONDS + UTIKI_FAST_MARKER_CLOCK_SKEW_SECONDS
     )
     if (
         not re.fullmatch(r"[a-f0-9]{32}", nonce)
         or not 0 < expires_at <= max_expiry
-        or _get_ctbc_page_type(source_url) != "date"
+        or _get_utiki_page_type(source_url) != "date"
         or page_type not in {"seat", "general_admission"}
-        or not _ctbc_same_origin(source, destination)
+        or not _utiki_same_origin(source, destination)
         or source.path.rsplit("/", 1)[0] != destination.path.rsplit("/", 1)[0]
         or source_query is None
         or destination_query is None
@@ -427,7 +420,7 @@ def _ctbc_pending_from_fast_marker(marker):
     created_at = (
         time.monotonic()
         + (expires_at - time.time() * 1000) / 1000
-        - CTBC_PENDING_NAVIGATION_TTL_SECONDS
+        - UTIKI_PENDING_NAVIGATION_TTL_SECONDS
     )
     return {
         "kind": "FAST",
@@ -447,7 +440,7 @@ def _ctbc_pending_from_fast_marker(marker):
     }
 
 
-def _ctbc_fast_marker_matches_pending(marker_pending, pending):
+def _utiki_fast_marker_matches_pending(marker_pending, pending):
     """判斷快速標記與待處理導覽是否屬於同一意圖。"""
 
     if not marker_pending or not pending or pending.get("kind") != "FAST":
@@ -458,19 +451,19 @@ def _ctbc_fast_marker_matches_pending(marker_pending, pending):
         if marker_pending.get(key) != pending.get(key):
             return False
     return all(
-        _ctbc_navigation_urls_match(marker_pending.get(key), pending.get(key))
+        _utiki_navigation_urls_match(marker_pending.get(key), pending.get(key))
         for key in ("source_url", "area_url", "destination_url")
     )
 
 
-async def _ctbc_read_fast_navigation_marker(tab):
+async def _utiki_read_fast_navigation_marker(tab):
     """讀取頁面儲存的快速導覽標記。"""
 
-    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    marker_key_json = json.dumps(UTIKI_FAST_MARKER_KEY)
     try:
         raw_value = await tab.evaluate(
             f"""(() => {{
-            // __ticketsHunterCtbcFastMarkerRead
+            // __ticketsHunterUtikiFastMarkerRead
             try {{
                 const raw = sessionStorage.getItem({marker_key_json});
                 if (raw === null) return JSON.stringify({{
@@ -498,7 +491,7 @@ async def _ctbc_read_fast_navigation_marker(tab):
         )
     except Exception:
         return {"available": False, "present": False, "marker": None}
-    result = _decode_ctbc_json_result(raw_value)
+    result = _decode_utiki_json_result(raw_value)
     return (
         result
         if isinstance(result, dict)
@@ -510,15 +503,15 @@ async def _ctbc_read_fast_navigation_marker(tab):
     )
 
 
-async def _ctbc_delete_fast_navigation_marker(tab, nonce):
+async def _utiki_delete_fast_navigation_marker(tab, nonce):
     """刪除 nonce 相符的快速導覽標記。"""
 
-    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    marker_key_json = json.dumps(UTIKI_FAST_MARKER_KEY)
     nonce_json = json.dumps(nonce)
     try:
         return await tab.evaluate(
             f"""(() => {{
-            // __ticketsHunterCtbcFastMarkerDelete
+            // __ticketsHunterUtikiFastMarkerDelete
             const expectedNonce = {nonce_json};
             try {{
                 const raw = sessionStorage.getItem({marker_key_json});
@@ -536,15 +529,15 @@ async def _ctbc_delete_fast_navigation_marker(tab, nonce):
         return False
 
 
-async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
+async def _utiki_delete_malformed_fast_marker(tab, expected_raw):
     """刪除仍與觀察值相同的格式錯誤快速標記。"""
 
-    marker_key_json = json.dumps(CTBC_FAST_MARKER_KEY)
+    marker_key_json = json.dumps(UTIKI_FAST_MARKER_KEY)
     expected_raw_json = json.dumps(expected_raw)
     try:
         return await tab.evaluate(
             f"""(() => {{
-            // __ticketsHunterCtbcMalformedMarkerDelete
+            // __ticketsHunterUtikiMalformedMarkerDelete
             const expectedRaw = {expected_raw_json};
             try {{
                 const current = sessionStorage.getItem({marker_key_json});
@@ -562,13 +555,13 @@ async def _ctbc_delete_malformed_fast_marker(tab, expected_raw):
         return False
 
 
-async def _ctbc_commit_native_date(
+async def _utiki_commit_native_date(
     tab, snapshot, plan, debug, *, identity, transition, runtime_for_identity,
 ):
     """先安裝跨文件意圖，再送出一次原生場次點擊。"""
     if transition["pending_navigation"]:
         return False
-    pending = _ctbc_new_date_native_pending(
+    pending = _utiki_new_date_native_pending(
         snapshot, plan, identity=identity,
         document_for_identity=lambda key: runtime_for_identity(key)["document"],
     )
@@ -578,31 +571,31 @@ async def _ctbc_commit_native_date(
     try:
         committed = await commit_date_action(tab, snapshot, plan, pending["nonce"])
     except Exception as exc:
-        if _ctbc_pending_navigation_is_current(
+        if _utiki_pending_navigation_is_current(
             identity, pending, runtime_for_identity=runtime_for_identity
         ):
             pending["phase"] = "DISPATCH_UNKNOWN"
-        debug.log(f"[CTBC DATE] Click failed: {exc}")
+        debug.log(f"[UTIKI DATE] Click failed: {exc}")
         return False
     if committed is CommitResult.REJECTED:
         _pop_pending_navigation_if_nonce(
             identity, pending["nonce"], runtime_for_identity=runtime_for_identity
         )
-        debug.log(f"[CTBC DATE] Native commit rejected ({plan.action_kind})")
+        debug.log(f"[UTIKI DATE] Native commit rejected ({plan.action_kind})")
         return False
-    if _ctbc_pending_navigation_is_current(
+    if _utiki_pending_navigation_is_current(
         identity, pending, runtime_for_identity=runtime_for_identity
     ):
         pending["phase"] = "DISPATCH_UNKNOWN"
     if committed is CommitResult.COMMITTED:
-        debug.log(f"[CTBC DATE] Selected ({plan.action_kind}): {plan.text}")
+        debug.log(f"[UTIKI DATE] Selected ({plan.action_kind}): {plan.text}")
         return True
     outcome = committed.value if isinstance(committed, CommitResult) else "unknown"
-    debug.log(f"[CTBC DATE] Native commit {outcome} ({plan.action_kind})")
+    debug.log(f"[UTIKI DATE] Native commit {outcome} ({plan.action_kind})")
     return False
 
 
-def _ctbc_server_assignment_pending_is_expected(pending):
+def _utiki_server_assignment_pending_is_expected(pending):
     """判斷待處理導覽是否為預期的電腦配位流程。"""
 
     return bool(
@@ -614,7 +607,7 @@ def _ctbc_server_assignment_pending_is_expected(pending):
     )
 
 
-def _ctbc_server_assignment_is_authorized(
+def _utiki_server_assignment_is_authorized(
     tab, transition, *, purchase_key_for_tab,
 ):
     """判斷目前分頁是否獲准進入電腦配位票數頁。"""
@@ -635,7 +628,7 @@ def _ctbc_server_assignment_is_authorized(
     return None
 
 
-def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
+def _utiki_destination_is_valid(expected, page_type, current_url, dom_ids):
     """驗證快速導覽目的地的路由、網址與 DOM 身分。"""
 
     if not isinstance(expected, dict) or not isinstance(dom_ids, dict):
@@ -654,27 +647,27 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
         return False
     area_url = str(expected.get("area_url") or "")
     if (
-        _get_ctbc_page_type(current_url) != expected_page_type
-        or _get_ctbc_page_type(area_url) != "area"
+        _get_utiki_page_type(current_url) != expected_page_type
+        or _get_utiki_page_type(area_url) != "area"
     ):
         return False
     current = urlsplit(current_url)
     area = urlsplit(area_url)
-    if not _ctbc_same_origin(current, area):
+    if not _utiki_same_origin(current, area):
         return False
     if route == "0202" and current.path.rsplit("/", 1)[-1] not in {
         "UTK0202_",
         "UTK0203_",
     }:
         return False
-    area_query = _ctbc_unique_query(area_url)
+    area_query = _utiki_unique_query(area_url)
     if area_query is None or set(area_query) != {"PERFORMANCE_ID", "PRODUCT_ID"}:
         return False
     if area_query.get("PERFORMANCE_ID") != expected.get(
         "performance_id"
     ) or area_query.get("PRODUCT_ID") != expected.get("product_id"):
         return False
-    query = _ctbc_unique_query(current_url)
+    query = _utiki_unique_query(current_url)
     expected_query_keys = {"PERFORMANCE_ID", "GROUP_ID", "PERFORMANCE_PRICE_AREA_ID"}
     if route == "0201_001":
         expected_query_keys.add("ATYPE")
@@ -689,15 +682,20 @@ def _ctbc_fast_destination_is_valid(expected, page_type, current_url, dom_ids):
         return False
     if route == "0201_001" and query.get("ATYPE") != "N":
         return False
+    # The server-assigned page may carry GROUP_ID only in its exact URL.
+    # If a DOM input exists, it still has to agree with that URL identity.
+    group_matches = str(dom_ids.get("group_id") or "") == expected.get("group_id")
+    if route == "0201_001" and dom_ids.get("group_input_present") is False:
+        group_matches = not dom_ids.get("group_id")
     return (
         str(dom_ids.get("performance_id") or "") == expected.get("performance_id")
         and str(dom_ids.get("product_id") or "") == expected.get("product_id")
-        and str(dom_ids.get("group_id") or "") == expected.get("group_id")
+        and group_matches
         and str(dom_ids.get("price_area_id") or "") == expected.get("price_area_id")
     )
 
 
-def _ctbc_date_native_direct_pending(pending, page_type):
+def _utiki_date_native_direct_pending(pending, page_type):
     """判斷原生場次導覽是否直接到達票券頁。"""
 
     return bool(
@@ -709,17 +707,17 @@ def _ctbc_date_native_direct_pending(pending, page_type):
     )
 
 
-def _ctbc_date_native_direct_state_is_valid(pending, page_type, state):
+def _utiki_date_native_direct_state_is_valid(pending, page_type, state):
     """驗證原生場次直接導覽的目的地文件狀態。"""
 
     if not isinstance(state, dict) or not state.get("ready"):
         return False
     source_url = str(pending.get("source_url") or "")
     current_url = str(state.get("page_url") or "")
-    source_profile = _get_utk_sports_profile(source_url)
-    current_profile = _get_utk_sports_profile(current_url)
-    source_query = _ctbc_unique_query(source_url)
-    query = _ctbc_unique_query(current_url)
+    source_profile = get_utiki_tenant_profile(source_url)
+    current_profile = get_utiki_tenant_profile(current_url)
+    source_query = _utiki_unique_query(source_url)
+    query = _utiki_unique_query(current_url)
     try:
         source = urlsplit(source_url)
         current = urlsplit(current_url)
@@ -737,13 +735,13 @@ def _ctbc_date_native_direct_state_is_valid(pending, page_type, state):
         or not current_profile
         or source_query is None
         or query is None
-        or _get_ctbc_page_type(source_url) != "date"
-        or _get_ctbc_page_type(current_url) != page_type
+        or _get_utiki_page_type(source_url) != "date"
+        or _get_utiki_page_type(current_url) != page_type
         or current.path not in expected_paths[page_type]
-        or not _ctbc_same_origin(source, current)
+        or not _utiki_same_origin(source, current)
         or any(
-            profile.get("host") != pending.get("host")
-            or profile.get("tenant_path") != pending.get("tenant_path")
+            profile.host != pending.get("host")
+            or profile.tenant_path != pending.get("tenant_path")
             for profile in (source_profile, current_profile)
         )
         or source_query.get("PRODUCT_ID") != pending.get("product_id")
@@ -769,11 +767,11 @@ def _ctbc_date_native_direct_state_is_valid(pending, page_type, state):
     ) and str(state.get("product_id") or "") == pending.get("product_id")
 
 
-async def _ctbc_return_to_native_area(tab, expected, source_url):
+async def _utiki_return_to_native_area(tab, expected, source_url):
     """返回來源區域頁，讓原生導覽流程重新接手。"""
 
     area_url = str(expected.get("area_url") or "")
-    if _get_ctbc_page_type(area_url) != "area" or _get_ctbc_page_type(
+    if _get_utiki_page_type(area_url) != "area" or _get_utiki_page_type(
         source_url
     ) not in {"seat", "general_admission", "server_assigned_quantity"}:
         return False
@@ -782,7 +780,7 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
     try:
         return await tab.evaluate(
             f"""(() => {{
-            // __ticketsHunterCtbcReturn
+            // __ticketsHunterUtikiReturn
             const areaUrl = {area_url_json};
             const sourceUrl = {source_url_json};
             if (location.href !== sourceUrl) return false;
@@ -794,21 +792,21 @@ async def _ctbc_return_to_native_area(tab, expected, source_url):
         return False
 
 
-async def _ctbc_return_current_pending(
+async def _utiki_return_current_pending(
     tab, identity, pending, source_url, *, runtime_for_identity,
 ):
     """將目前待處理導覽保留至返回來源頁後繼續。"""
 
-    if not _ctbc_pending_navigation_is_current(
+    if not _utiki_pending_navigation_is_current(
         identity, pending, runtime_for_identity=runtime_for_identity
     ):
         return False
     pending["phase"] = "RETURNING"
     pending["return_source_url"] = source_url
-    return await _ctbc_return_to_native_area(tab, pending, source_url)
+    return await _utiki_return_to_native_area(tab, pending, source_url)
 
 
-async def _ctbc_read_destination_state(tab, page_type):
+async def _utiki_read_destination_state(tab, page_type):
     """讀取目的地頁面的文件與商品身分狀態。"""
 
     marker_selectors = (
@@ -820,13 +818,11 @@ async def _ctbc_read_destination_state(tab, page_type):
     price_area_selector_json = json.dumps(
         "#PRICE_AREA_ID" if page_type == "seat" else "#PERFORMANCE_PRICE_AREA_ID"
     )
-    group_required_json = (
-        "true" if page_type in {"seat", "server_assigned_quantity"} else "false"
-    )
+    group_required_json = "true" if page_type == "seat" else "false"
     raw_value = await tab.evaluate(
         f"""
         (() => new Promise(resolve => {{
-            // __ticketsHunterCtbcDestinationState
+            // __ticketsHunterUtikiDestinationState
             let observer = null;
             let timer = null;
             let poller = null;
@@ -863,6 +859,7 @@ async def _ctbc_read_destination_state(tab, page_type):
                     document_id: documentId,
                     performance_id: performanceInput.value || '',
                     product_id: productInput.value || '',
+                    group_input_present: !!groupInput,
                     group_id: groupInput ? (groupInput.value || '') : '',
                     price_area_id: priceAreaInput.value || ''}});
                 return true;
@@ -879,29 +876,29 @@ async def _ctbc_read_destination_state(tab, page_type):
     """,
         await_promise=True,
     )
-    return _decode_ctbc_json_result(raw_value)
+    return _decode_utiki_json_result(raw_value)
 
 
-async def _ctbc_clear_source_navigation(
+async def _utiki_clear_source_navigation(
     tab, identity, pending, marker_present, marker_pending, *, runtime_for_identity
 ):
     """清除來源頁待處理導覽與相符快速標記。"""
 
-    if not _ctbc_pending_navigation_is_current(
+    if not _utiki_pending_navigation_is_current(
         identity, pending, runtime_for_identity=runtime_for_identity
     ):
         return False
     if pending.get("kind") == "FAST" and marker_present:
-        if not _ctbc_fast_marker_matches_pending(marker_pending, pending):
+        if not _utiki_fast_marker_matches_pending(marker_pending, pending):
             _pop_pending_navigation_if_nonce(
                 identity, pending.get("nonce"),
                 runtime_for_identity=runtime_for_identity,
             )
             return False
-        if not await _ctbc_delete_fast_navigation_marker(tab, marker_pending["nonce"]):
+        if not await _utiki_delete_fast_navigation_marker(tab, marker_pending["nonce"]):
             return False
     elif pending.get("kind") == "NATIVE" and marker_present:
-        if not await _ctbc_delete_fast_navigation_marker(tab, marker_pending["nonce"]):
+        if not await _utiki_delete_fast_navigation_marker(tab, marker_pending["nonce"]):
             return False
     return (
         _pop_pending_navigation_if_nonce(
@@ -912,7 +909,7 @@ async def _ctbc_clear_source_navigation(
     )
 
 
-def _ctbc_reduce_date_native_navigation(
+def _utiki_reduce_date_native_navigation(
     identity,
     pending,
     current_url,
@@ -929,7 +926,7 @@ def _ctbc_reduce_date_native_navigation(
         if (
             document_changed
             and not marker_present
-            and _ctbc_date_native_area_matches(pending, current_url)
+            and _utiki_date_native_area_matches(pending, current_url)
         ):
             return (
                 _pop_pending_navigation_if_nonce(
@@ -956,7 +953,7 @@ def _ctbc_reduce_date_native_navigation(
     return None
 
 
-async def _ctbc_reconcile_navigation_source(
+async def _utiki_reconcile_navigation_source(
     tab, current_url, page_type, config_dict, *,
     identity, runtime, runtime_for_identity, reload_with_interval,
 ):
@@ -964,10 +961,10 @@ async def _ctbc_reconcile_navigation_source(
 
     transition = runtime["transition"]
     observed_pending = transition["pending_navigation"]
-    marker_state = await _ctbc_read_fast_navigation_marker(tab)
+    marker_state = await _utiki_read_fast_navigation_marker(tab)
     pending = transition["pending_navigation"]
     if observed_pending:
-        if not _ctbc_pending_navigation_is_current(
+        if not _utiki_pending_navigation_is_current(
             identity, observed_pending,
             runtime_for_identity=runtime_for_identity,
         ):
@@ -979,13 +976,13 @@ async def _ctbc_reconcile_navigation_source(
     if not storage_available and not pending:
         return True
     marker_present = storage_available and bool(marker_state.get("present"))
-    marker_pending = _ctbc_pending_from_fast_marker(
+    marker_pending = _utiki_pending_from_fast_marker(
         marker_state.get("marker") if marker_present else None
     )
     if storage_available and marker_present and not marker_pending:
         raw = marker_state.get("raw")
         if isinstance(raw, str):
-            await _ctbc_delete_malformed_fast_marker(tab, raw)
+            await _utiki_delete_malformed_fast_marker(tab, raw)
         return False
 
     current_document = str(runtime["document"]["last_document"] or "")
@@ -1002,7 +999,7 @@ async def _ctbc_reconcile_navigation_source(
             transition["pending_navigation"] = pending
 
     expected_url = pending.get("source_url" if page_type == "date" else "area_url")
-    exact_source = _ctbc_navigation_urls_match(current_url, expected_url)
+    exact_source = _utiki_navigation_urls_match(current_url, expected_url)
     source_document = str(pending.get("source_document_id") or "")
     if not source_document and current_document:
         pending["source_document_id"] = current_document
@@ -1012,7 +1009,7 @@ async def _ctbc_reconcile_navigation_source(
     )
     reload_requested_at = float(pending.get("reload_requested_at") or 0)
     if pending.get("kind") == "DATE_NATIVE":
-        date_result = _ctbc_reduce_date_native_navigation(
+        date_result = _utiki_reduce_date_native_navigation(
             identity,
             pending,
             current_url,
@@ -1026,14 +1023,14 @@ async def _ctbc_reconcile_navigation_source(
         if date_result is not None or page_type == "area":
             return bool(date_result)
     elif document_changed and (exact_source or reload_requested_at):
-        return await _ctbc_clear_source_navigation(
+        return await _utiki_clear_source_navigation(
             tab, identity, pending, marker_present, marker_pending,
             runtime_for_identity=runtime_for_identity,
         )
 
     pending_expired = (
         time.monotonic() - pending.get("created_at", 0)
-        >= CTBC_PENDING_NAVIGATION_TTL_SECONDS
+        >= UTIKI_PENDING_NAVIGATION_TTL_SECONDS
     )
     marker_active = bool(
         pending.get("kind") == "FAST"
@@ -1046,25 +1043,25 @@ async def _ctbc_reconcile_navigation_source(
         or marker_active
         or (
             reload_requested_at
-            and now - reload_requested_at < CTBC_PENDING_NAVIGATION_TTL_SECONDS
+            and now - reload_requested_at < UTIKI_PENDING_NAVIGATION_TTL_SECONDS
         )
     ):
         return False
-    if not _ctbc_pending_navigation_is_current(
+    if not _utiki_pending_navigation_is_current(
         identity, pending, runtime_for_identity=runtime_for_identity
     ):
         return False
     reloaded = await reload_with_interval(
         tab, config_dict, f"{page_type} navigation outcome unknown"
     )
-    if reloaded and _ctbc_pending_navigation_is_current(
+    if reloaded and _utiki_pending_navigation_is_current(
         identity, pending, runtime_for_identity=runtime_for_identity
     ):
         pending["reload_requested_at"] = now
     return False
 
 
-async def _ctbc_attest_pending_destination(
+async def _utiki_attest_pending_destination(
     tab, page_type, pending, debug, stale_marker_nonce="", *,
     identity, runtime_for_identity,
 ):
@@ -1072,9 +1069,9 @@ async def _ctbc_attest_pending_destination(
 
     runtime = runtime_for_identity(identity)
     try:
-        state = await _ctbc_read_destination_state(tab, page_type)
+        state = await _utiki_read_destination_state(tab, page_type)
     except Exception as exc:
-        debug.log(f"[CTBC NAV] Destination attestation failed: {exc}")
+        debug.log(f"[UTIKI NAV] Destination attestation failed: {exc}")
         return False
     current_url = str(state.get("page_url") or "") if isinstance(state, dict) else ""
     current_document = str(runtime["document"]["last_document"] or "")
@@ -1089,7 +1086,7 @@ async def _ctbc_attest_pending_destination(
         and state_document == current_document
         and source_document
         and state_document != source_document
-        and _ctbc_fast_destination_is_valid(pending, page_type, current_url, state)
+        and _utiki_destination_is_valid(pending, page_type, current_url, state)
     ):
         current = runtime["transition"]["pending_navigation"]
         if not current or current.get("nonce") != pending.get("nonce"):
@@ -1097,7 +1094,7 @@ async def _ctbc_attest_pending_destination(
         marker_nonce = (
             pending["nonce"] if pending.get("kind") == "FAST" else stale_marker_nonce
         )
-        if marker_nonce and not await _ctbc_delete_fast_navigation_marker(
+        if marker_nonce and not await _utiki_delete_fast_navigation_marker(
             tab, marker_nonce
         ):
             return False
@@ -1105,33 +1102,33 @@ async def _ctbc_attest_pending_destination(
             identity, pending["nonce"],
             runtime_for_identity=runtime_for_identity,
         )
-        debug.log(f"[CTBC {pending.get('kind')}] Destination IDs verified")
+        debug.log(f"[UTIKI {pending.get('kind')}] Destination IDs verified")
         return removed is not None
     if isinstance(state, dict) and state.get("document_ready") != "complete":
-        debug.log("[CTBC NAV] Destination is still loading")
+        debug.log("[UTIKI NAV] Destination is still loading")
         return False
-    debug.log("[CTBC NAV] Destination mismatch; returning to native area flow")
-    await _ctbc_return_current_pending(
+    debug.log("[UTIKI NAV] Destination mismatch; returning to native area flow")
+    await _utiki_return_current_pending(
         tab, identity, pending, current_url,
         runtime_for_identity=runtime_for_identity,
     )
     return False
 
 
-async def _ctbc_attest_date_native_direct_destination(
+async def _utiki_attest_date_native_direct_destination(
     tab, page_type, pending, debug, *, identity, runtime_for_identity,
 ):
     """驗證原生場次導覽直接抵達的票券頁。"""
 
-    if not _ctbc_date_native_direct_pending(pending, page_type):
+    if not _utiki_date_native_direct_pending(pending, page_type):
         return None
     runtime = runtime_for_identity(identity)
     try:
-        state = await _ctbc_read_destination_state(tab, page_type)
+        state = await _utiki_read_destination_state(tab, page_type)
     except Exception as exc:
-        debug.log(f"[CTBC DATE] Direct destination attestation failed: {exc}")
+        debug.log(f"[UTIKI DATE] Direct destination attestation failed: {exc}")
         return False
-    if not _ctbc_pending_navigation_is_current(
+    if not _utiki_pending_navigation_is_current(
         identity, pending, runtime_for_identity=runtime_for_identity
     ):
         return False
@@ -1145,22 +1142,22 @@ async def _ctbc_attest_date_native_direct_destination(
         and source_document
         and current_document == state_document
         and state_document != source_document
-        and _ctbc_date_native_direct_state_is_valid(pending, page_type, state)
+        and _utiki_date_native_direct_state_is_valid(pending, page_type, state)
     ):
         removed = _pop_pending_navigation_if_nonce(
             identity, pending["nonce"],
             runtime_for_identity=runtime_for_identity,
         )
-        debug.log("[CTBC DATE] Direct destination IDs verified")
+        debug.log("[UTIKI DATE] Direct destination IDs verified")
         return removed is not None
     if isinstance(state, dict) and state.get("document_ready") != "complete":
-        debug.log("[CTBC DATE] Direct destination is still loading")
+        debug.log("[UTIKI DATE] Direct destination is still loading")
     else:
-        debug.log("[CTBC DATE] Direct destination mismatch; pending retained")
+        debug.log("[UTIKI DATE] Direct destination mismatch; pending retained")
     return False
 
 
-async def _ctbc_attest_fast_destination(
+async def _utiki_attest_destination(
     tab, page_type, config_dict, *,
     identity, runtime, runtime_for_identity, behavior_for_key,
 ):
@@ -1168,10 +1165,10 @@ async def _ctbc_attest_fast_destination(
     transition = runtime["transition"]
     debug = util.create_debug_logger(config_dict)
     observed_pending = transition["pending_navigation"]
-    marker_state = await _ctbc_read_fast_navigation_marker(tab)
+    marker_state = await _utiki_read_fast_navigation_marker(tab)
     pending = transition["pending_navigation"]
     if observed_pending:
-        if not _ctbc_pending_navigation_is_current(
+        if not _utiki_pending_navigation_is_current(
             identity, observed_pending,
             runtime_for_identity=runtime_for_identity,
         ):
@@ -1180,7 +1177,7 @@ async def _ctbc_attest_fast_destination(
     elif pending:
         return False
     current_url = str(marker_state.get("page_url") or str(tab.target.url))
-    direct_result = await _ctbc_attest_date_native_direct_destination(
+    direct_result = await _utiki_attest_date_native_direct_destination(
         tab, page_type, pending, debug,
         identity=identity, runtime_for_identity=runtime_for_identity,
     )
@@ -1191,7 +1188,7 @@ async def _ctbc_attest_fast_destination(
             return True
         if pending.get("kind") == "NATIVE":
             if pending.get("phase") == "RETURNING":
-                await _ctbc_return_current_pending(
+                await _utiki_return_current_pending(
                     tab,
                     identity,
                     pending,
@@ -1199,27 +1196,27 @@ async def _ctbc_attest_fast_destination(
                     runtime_for_identity=runtime_for_identity,
                 )
                 return False
-            return await _ctbc_attest_pending_destination(
+            return await _utiki_attest_pending_destination(
                 tab, page_type, pending, debug,
                 identity=identity, runtime_for_identity=runtime_for_identity,
             )
-        debug.log("[CTBC FAST] Marker storage unavailable; returning to native flow")
-        await _ctbc_return_current_pending(
+        debug.log("[UTIKI FAST MARKER] Marker storage unavailable; returning to native flow")
+        await _utiki_return_current_pending(
             tab, identity, pending, current_url,
             runtime_for_identity=runtime_for_identity,
         )
         return False
     marker_present = bool(marker_state.get("present"))
     marker = marker_state.get("marker") if marker_present else None
-    marker_pending = _ctbc_pending_from_fast_marker(marker)
+    marker_pending = _utiki_pending_from_fast_marker(marker)
     if marker_present and not marker_pending:
         raw = marker_state.get("raw")
         if isinstance(raw, str):
-            await _ctbc_delete_malformed_fast_marker(tab, raw)
+            await _utiki_delete_malformed_fast_marker(tab, raw)
         return False
     if pending and pending.get("kind") == "NATIVE":
         if pending.get("phase") == "RETURNING":
-            await _ctbc_return_current_pending(
+            await _utiki_return_current_pending(
                 tab,
                 identity,
                 pending,
@@ -1233,7 +1230,7 @@ async def _ctbc_attest_fast_destination(
         stale_marker_nonce = (
             marker_nonce if re.fullmatch(r"[a-f0-9]{32}", marker_nonce) else ""
         )
-        return await _ctbc_attest_pending_destination(
+        return await _utiki_attest_pending_destination(
             tab, page_type, pending, debug, stale_marker_nonce,
             identity=identity, runtime_for_identity=runtime_for_identity,
         )
@@ -1246,20 +1243,20 @@ async def _ctbc_attest_fast_destination(
         if transition["pending_navigation"]:
             return False
         transition["pending_navigation"] = marker_pending
-        await _ctbc_return_current_pending(
+        await _utiki_return_current_pending(
             tab, identity, marker_pending, current_url,
             runtime_for_identity=runtime_for_identity,
         )
         return False
     if pending.get("phase") == "RETURNING":
-        await _ctbc_return_current_pending(
+        await _utiki_return_current_pending(
             tab, identity, pending, pending.get("return_source_url", ""),
             runtime_for_identity=runtime_for_identity,
         )
         return False
     marker_matches = bool(
-        _ctbc_fast_marker_matches_pending(marker_pending, pending)
-        and _ctbc_navigation_urls_match(
+        _utiki_fast_marker_matches_pending(marker_pending, pending)
+        and _utiki_navigation_urls_match(
             marker_pending.get("destination_url"),
             marker_state.get("page_url") or str(tab.target.url),
         )
@@ -1267,33 +1264,33 @@ async def _ctbc_attest_fast_destination(
     )
     pending_valid = bool(
         pending.get("config_fingerprint")
-        == _ctbc_selection_config_fingerprint(
+        == _utiki_selection_config_fingerprint(
             config_dict, behavior_for_key=behavior_for_key
         )
         and time.monotonic() - pending.get("created_at", 0)
-        <= CTBC_PENDING_NAVIGATION_TTL_SECONDS
+        <= UTIKI_PENDING_NAVIGATION_TTL_SECONDS
     )
     if not marker_matches or not pending_valid:
         debug.log(
-            "[CTBC FAST] Provenance mismatch or expiry; returning to native area flow"
+            "[UTIKI FAST MARKER] Provenance mismatch or expiry; returning to native area flow"
         )
-        await _ctbc_return_current_pending(
+        await _utiki_return_current_pending(
             tab, identity, pending, current_url,
             runtime_for_identity=runtime_for_identity,
         )
         return False
-    return await _ctbc_attest_pending_destination(
+    return await _utiki_attest_pending_destination(
         tab, page_type, pending, debug,
         identity=identity, runtime_for_identity=runtime_for_identity,
     )
 
 
-async def _ctbc_reconcile_area_navigation(
+async def _utiki_reconcile_area_navigation(
     tab, current_url, config_dict=None, *,
     identity, runtime, runtime_for_identity, reload_with_interval,
 ):
     """在抵達新文件前阻止重複送出區域操作。"""
-    return await _ctbc_reconcile_navigation_source(
+    return await _utiki_reconcile_navigation_source(
         tab, current_url, "area", config_dict or {},
         identity=identity, runtime=runtime,
         runtime_for_identity=runtime_for_identity,
@@ -1317,8 +1314,8 @@ async def _ctbc_dispatch_fast_area_navigation(
     behavior_for_key,
 ):
     """送出已選定的 fast 目的地並追蹤結果。"""
-    target_action = _ctbc_area_action_payload(target)
-    pending = _ctbc_new_pending_navigation(
+    target_action = _utiki_area_action_payload(target)
+    pending = _utiki_new_pending_navigation(
         "FAST",
         date_snapshot.page_url,
         date_target["url"],
@@ -1340,15 +1337,15 @@ async def _ctbc_dispatch_fast_area_navigation(
             date_plan,
             pending["nonce"],
             fast_destination_url=pending["destination_url"],
-            fast_marker_key=CTBC_FAST_MARKER_KEY,
-            fast_marker_ttl_ms=int(CTBC_PENDING_NAVIGATION_TTL_SECONDS * 1000),
+            fast_marker_key=UTIKI_FAST_MARKER_KEY,
+            fast_marker_ttl_ms=int(UTIKI_PENDING_NAVIGATION_TTL_SECONDS * 1000),
         )
     except Exception as exc:
         pending["phase"] = "DISPATCH_UNKNOWN"
         debug.log(f"[CTBC FAST] Dispatch outcome unknown: {exc}")
         return True
     if committed is CommitResult.REJECTED:
-        await _ctbc_delete_fast_navigation_marker(tab, pending["nonce"])
+        await _utiki_delete_fast_navigation_marker(tab, pending["nonce"])
         _pop_pending_navigation_if_nonce(
             identity, pending["nonce"], runtime_for_identity=runtime_for_identity
         )
@@ -1367,7 +1364,7 @@ async def _ctbc_dispatch_fast_area_navigation(
     return True
 
 
-async def _ctbc_commit_native_area(
+async def _utiki_commit_native_area(
     tab,
     config_dict,
     snapshot,
@@ -1384,11 +1381,11 @@ async def _ctbc_commit_native_area(
     page_url = snapshot.page_url
     if transition["pending_navigation"]:
         return False
-    pending = _ctbc_new_pending_navigation(
+    pending = _utiki_new_pending_navigation(
         "NATIVE",
         page_url,
         page_url,
-        _ctbc_area_action_payload(target),
+        _utiki_area_action_payload(target),
         config_dict,
         selection_mode=seat_selection_mode,
         identity=identity,
@@ -1410,7 +1407,7 @@ async def _ctbc_commit_native_area(
             target,
             config_dict.get("ticket_number", 1),
             pending["nonce"],
-            CTBC_FAST_MARKER_KEY,
+            UTIKI_FAST_MARKER_KEY,
         )
         if commit_result is CommitResult.REJECTED or (
             seat_selection_mode == "manual" and commit_result is CommitResult.STALE
@@ -1419,53 +1416,53 @@ async def _ctbc_commit_native_area(
                 identity, pending["nonce"], runtime_for_identity=runtime_for_identity
             )
             debug.log(
-                "[CTBC AREA] Area commit "
+                "[UTIKI AREA] Area commit "
                 f"{commit_result.value}; no navigation row click was sent"
             )
             return False
         if seat_selection_mode == "computer" and commit_result is CommitResult.STALE:
             pending["phase"] = "DISPATCH_UNKNOWN"
             debug.log(
-                "[CTBC AREA] Computer-assignment preparation changed "
+                "[UTIKI AREA] Computer-assignment preparation changed "
                 "document; navigation outcome is unknown"
             )
             return False
         if commit_result is not CommitResult.COMMITTED:
             raise RuntimeError("area commit returned an unknown result")
         pending["phase"] = "DISPATCH_UNKNOWN"
-        debug.log(f"[CTBC AREA] Selected: {target.text} ({target.status})")
+        debug.log(f"[UTIKI AREA] Selected: {target.text} ({target.status})")
         return True
     except Exception as exc:
         pending["phase"] = "DISPATCH_UNKNOWN"
-        debug.log(f"[CTBC AREA] Click failed: {exc}")
+        debug.log(f"[UTIKI AREA] Click failed: {exc}")
         return False
 
 
-async def _ctbc_server_assigned_authorization(
+async def _utiki_server_assigned_authorization(
     tab, config_dict, *, identity, runtime, runtime_for_identity,
     purchase_key_for_tab, behavior_for_key,
 ):
     """只為原電腦配位票數頁維持既有來源紀錄。"""
     transition = runtime["transition"]
     current_url = str(tab.target.url)
-    profile = _get_utk_sports_profile(current_url)
+    profile = get_utiki_tenant_profile(current_url)
     if (
         behavior_for_key(config_dict, "seat_selection_mode", "manual")
         != "computer"
         or not profile
-        or not profile.get("supports_server_assignment", False)
+        or not profile.supports_server_assignment
     ):
         transition["server_assignment_authorized"] = None
         return None
     pending = transition["pending_navigation"]
-    authorization = _ctbc_server_assignment_is_authorized(
+    authorization = _utiki_server_assignment_is_authorized(
         tab, transition, purchase_key_for_tab=purchase_key_for_tab
     )
     if pending:
-        if not _ctbc_server_assignment_pending_is_expected(pending):
+        if not _utiki_server_assignment_pending_is_expected(pending):
             transition["server_assignment_authorized"] = None
             return None
-        if not await _ctbc_attest_fast_destination(
+        if not await _utiki_attest_destination(
             tab, "server_assigned_quantity", config_dict,
             identity=identity, runtime=runtime,
             runtime_for_identity=runtime_for_identity,
@@ -1485,5 +1482,5 @@ async def _ctbc_server_assigned_authorization(
     return authorization
 
 
-def _ctbc_clear_server_assignment_for_other_page(transition):
+def _utiki_clear_server_assignment_for_other_page(transition):
     transition["server_assignment_authorized"] = None

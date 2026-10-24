@@ -1,6 +1,8 @@
 # uTiki2 職棒售票引擎重構計劃
 
-**文件狀態**：歷史計畫；已由 [本次正式計畫](utiki-refactor/PLAN.md) 取代，不再作本次施工指令。下文保留當時的核准與 Phase 紀錄。
+> **歷史封存（2026-10-25）**：這是更早的提案，不是目前版本的功能、施工或驗收依據；保留原有 Phase 與 Issue 供追溯。
+
+**文件狀態**：歷史計畫；後來的重構見[已封存的施工計畫](PLAN.md)。下文保留當時的核准與 Phase 紀錄。
 
 **建立日期**：2026-10-15
 
@@ -655,7 +657,7 @@ AREA
 - 未取得的活動／頁面／彈窗證據。
 - 是否執行 PyInstaller build 與 GitHub release CI。
 
-詳細命令依 [測試執行指南](testing_execution_guide.md)。
+詳細命令依 [測試執行指南](../../testing_execution_guide.md)。
 
 ## 10. 相容與發布策略
 
@@ -701,7 +703,7 @@ AREA
 ### 核准後的執行規則
 
 1. 只先建立 Phase 1 的 Issue／branch 與詳細 checklist。
-2. 每完成一個 Phase，依 [工程審查指南](engineering-review.md) 自審並由第二位審查者覆核。
+2. 每完成一個 Phase，依 [工程審查指南](../../engineering-review.md) 自審並由第二位審查者覆核。
 3. 維護者一次核准本計劃後，代理可在本地連續執行後續 Phase；每一 Phase 的合併 gate 與第二位審查者覆核通過即可進下一 Phase，不需逐次等待人工回覆。
 4. GitHub CI 只有在 branch 實際推送後才是可觀察 gate；未推送時以文件列出的本地 pytest／build gate 繼續，不能把「本機通過」寫成「CI 通過」。release gate 可以阻擋發布或 capability 啟用，但在功能仍 fail closed／disabled 時不阻擋後續本地重構。
 5. 遇到 P0／P1、無法安全修正的 P2、上游語意衝突、新 production dependency、需要改變既定使用方式、實機證據推翻 route／DOM／recovery 假設，或測試／build gate 無法通過時才停止並請維護者決定。

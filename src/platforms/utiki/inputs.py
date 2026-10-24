@@ -13,39 +13,39 @@ from nodriver_common import nodriver_get_captcha_image_from_dom_snapshot
 from .auth import (
     cookie_domain_is_in_scope,
     get_tenant_auth_profile,
-    parse_ctbc_cookie_string,
+    parse_utiki_cookie_string,
 )
 from .selection import DialogSnapshot
 
 
-async def _query_ctbc_captcha_input(tab):
+async def _query_utiki_captcha_input(tab):
     return await tab.query_selector("#CHK")
 
 
-async def _clear_ctbc_captcha_input(captcha_input):
+async def _clear_utiki_captcha_input(captcha_input):
     return await captcha_input.apply('function(el) { el.value = ""; }')
 
 
-async def _query_ctbc_captcha_refresh(tab):
+async def _query_utiki_captcha_refresh(tab):
     return await tab.query_selector("#chang_pic")
 
 
-async def _click_ctbc_captcha_refresh(refresh):
+async def _click_utiki_captcha_refresh(refresh):
     return await refresh.click()
 
 
-async def nodriver_ctbc_inject_cookies(tab, config_dict):
-    """注入複製的中信售票 Cookie，並保留帳號密碼備援。"""
+async def nodriver_utiki_inject_cookies(tab, config_dict):
+    """依已啟用租戶的政策注入 Cookie。"""
     debug = util.create_debug_logger(config_dict)
     auth_profile = get_tenant_auth_profile(str(tab.target.url))
     if not auth_profile or not auth_profile.supports_cookie_login:
-        debug.log("[CTBC COOKIE] Cookie login is unavailable for this tenant")
+        debug.log("[UTIKI COOKIE] Cookie login is unavailable for this tenant")
         return False
     raw_value = config_dict.get("accounts", {}).get(auth_profile.cookie_config_key, "")
-    cookies = parse_ctbc_cookie_string(raw_value)
+    cookies = parse_utiki_cookie_string(raw_value, auth_profile)
     if not cookies:
         if str(raw_value or "").strip():
-            debug.log("[CTBC COOKIE] No valid CTBC session cookies were found")
+            debug.log("[UTIKI COOKIE] No valid tenant session cookies were found")
         return False
 
     try:
@@ -65,7 +65,9 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
                 except Exception:
                     pass
     except Exception as exc:
-        debug.log(f"[CTBC COOKIE] Could not clear the current CTBC cookie set: {exc}")
+        debug.log(
+            f"[UTIKI COOKIE] Could not clear the current cookie set: {type(exc).__name__}"
+        )
 
     injected = 0
     for name, value in cookies:
@@ -83,16 +85,18 @@ async def nodriver_ctbc_inject_cookies(tab, config_dict):
             if result is not False:
                 injected += 1
         except Exception as exc:
-            debug.log(f"[CTBC COOKIE] Failed to inject {name}: {exc}")
+            debug.log(
+                f"[UTIKI COOKIE] Failed to inject {name}: {type(exc).__name__}"
+            )
 
     if injected != len(cookies):
-        debug.log(f"[CTBC COOKIE] Injected {injected}/{len(cookies)} cookies")
+        debug.log(f"[UTIKI COOKIE] Injected {injected}/{len(cookies)} cookies")
         return False
-    debug.log(f"[CTBC COOKIE] Injected {injected} session cookies")
+    debug.log(f"[UTIKI COOKIE] Injected {injected} session cookies")
     return True
 
 
-async def _fill_ctbc_inline_login(tab, config_dict):
+async def _fill_utiki_inline_login(tab, config_dict):
     """在支援的租戶頁面填入並送出登入資料。"""
 
     state_raw = await tab.evaluate(
@@ -154,7 +158,7 @@ async def _fill_ctbc_inline_login(tab, config_dict):
     return bool(result)
 
 
-async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
+async def _utiki_login_fingerprint(tab, *, expected_dialog=None):
     """建立登入對話框與目前文件的識別指紋。"""
 
     if expected_dialog is not None and not isinstance(expected_dialog, DialogSnapshot):
@@ -227,29 +231,29 @@ async def _ctbc_login_fingerprint(tab, *, expected_dialog=None):
     return hashlib.sha256(material).hexdigest()
 
 
-def _ctbc_captcha_image_token(image_bytes):
+def _utiki_captcha_image_token(image_bytes):
     """在不保留圖片位元組下建立驗證碼圖片識別。"""
     if not isinstance(image_bytes, (bytes, bytearray, memoryview)) or not image_bytes:
         return ""
     return hashlib.sha256(bytes(image_bytes)).hexdigest()
 
 
-async def _read_ctbc_captcha_image_token(tab, config_dict):
+async def _read_utiki_captcha_image_token(tab, config_dict):
     """讀取目前驗證碼圖片的非敏感識別。"""
 
     try:
-        image_bytes = await _get_ctbc_captcha_image_bytes(tab, config_dict)
+        image_bytes = await _get_utiki_captcha_image_bytes(tab, config_dict)
     except Exception:
         return ""
-    return _ctbc_captcha_image_token(image_bytes)
+    return _utiki_captcha_image_token(image_bytes)
 
 
-def _normalize_ctbc_captcha_answer(answer):
+def _normalize_utiki_captcha_answer(answer):
     """將 OCR 結果正規化為四個大寫 ASCII 字元。"""
     return re.sub(r"[^A-Za-z0-9]", "", str(answer or "")).upper()
 
 
-async def _get_ctbc_captcha_image_bytes(tab, config_dict):
+async def _get_utiki_captcha_image_bytes(tab, config_dict):
     """以原始 90×25 解析度擷取同源驗證碼圖片。"""
     debug = util.create_debug_logger(config_dict)
     try:
@@ -275,10 +279,10 @@ async def _get_ctbc_captcha_image_bytes(tab, config_dict):
             if separator and encoded:
                 image_bytes = base64.b64decode(encoded, validate=True)
                 if image_bytes:
-                    debug.log(f"[CTBC CAPTCHA] Native image: {len(image_bytes)} bytes")
+                    debug.log(f"[UTIKI CAPTCHA] Native image: {len(image_bytes)} bytes")
                     return image_bytes
     except Exception as exc:
-        debug.log(f"[CTBC CAPTCHA] Native image capture failed: {exc}")
+        debug.log(f"[UTIKI CAPTCHA] Native image capture failed: {exc}")
 
     # Keep the shared DOM screenshot path as a compatibility fallback for
     # browsers that block canvas extraction or change the captcha origin.
@@ -287,12 +291,12 @@ async def _get_ctbc_captcha_image_bytes(tab, config_dict):
     )
 
 
-async def _ctbc_captcha(tab, config_dict, ocr):
-    """讀取並辨識目前頁面的中信相容驗證碼。"""
+async def _utiki_captcha(tab, config_dict, ocr):
+    """讀取並辨識目前 uTiki 頁面的驗證碼。"""
 
     debug = util.create_debug_logger(config_dict)
     if not ocr:
-        debug.log("[CTBC CAPTCHA] OCR engine is unavailable")
+        debug.log("[UTIKI CAPTCHA] OCR engine is unavailable")
         return False
 
     for _ in range(10):
@@ -308,17 +312,17 @@ async def _ctbc_captcha(tab, config_dict, ocr):
             break
         await tab.sleep(0.1)
 
-    image_bytes = await _get_ctbc_captcha_image_bytes(tab, config_dict)
+    image_bytes = await _get_utiki_captcha_image_bytes(tab, config_dict)
     if not image_bytes:
-        debug.log("[CTBC CAPTCHA] Captcha image was not captured")
+        debug.log("[UTIKI CAPTCHA] Captcha image was not captured")
         return False
     try:
-        answer = _normalize_ctbc_captcha_answer(ocr.classification(image_bytes))
+        answer = _normalize_utiki_captcha_answer(ocr.classification(image_bytes))
     except Exception as exc:
-        debug.log(f"[CTBC CAPTCHA] OCR failed: {exc}")
+        debug.log(f"[UTIKI CAPTCHA] OCR failed: {exc}")
         return False
     if len(answer) != 4:
-        debug.log(f"[CTBC CAPTCHA] OCR returned an invalid length: {len(answer)}")
+        debug.log(f"[UTIKI CAPTCHA] OCR returned an invalid length: {len(answer)}")
         refresh = await tab.query_selector("#chang_pic")
         if refresh:
             await refresh.click()
@@ -331,5 +335,5 @@ async def _ctbc_captcha(tab, config_dict, ocr):
     await captcha_input.click()
     await captcha_input.apply('function(el) { el.value = ""; }')
     await captcha_input.send_keys(answer)
-    debug.log("[CTBC CAPTCHA] Four-character answer filled")
+    debug.log("[UTIKI CAPTCHA] Four-character answer filled")
     return True

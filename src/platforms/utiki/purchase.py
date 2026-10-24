@@ -19,8 +19,8 @@ from .selection import (
     select_seat_snapshot,
 )
 from .submission import (
-    CTBC_QUANTITY_STALE_RELOAD_REASON,
-    CTBC_SEAT_STALE_RELOAD_REASON,
+    UTIKI_QUANTITY_STALE_RELOAD_REASON,
+    UTIKI_SEAT_STALE_RELOAD_REASON,
 )
 
 
@@ -36,27 +36,27 @@ async def seat_main(
     poll_seat_reload,
     cancel_refresh,
 ):
-    """執行中信相容售票的劃位頁主要流程。"""
+    """執行已支援 uTiki 租戶的劃位頁主要流程。"""
 
     submit_key = purchase_key_for_tab(tab)
     if submit_key is None:
         return False
     purchase = runtime_for_tab(tab)["purchase"]
-    dialog_outcome = await submission_engine._handle_ctbc_submit_dialog(
+    dialog_outcome = await submission_engine._handle_utiki_submit_dialog(
         tab,
         config_dict,
         submit_key=submit_key,
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
     )
-    if await submission_engine._recover_ctbc_captcha_dialog(
+    if await submission_engine._recover_utiki_captcha_dialog(
         tab,
         config_dict,
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
     ):
         return False
-    if await submission_engine._recover_ctbc_seat_conflict(
+    if await submission_engine._recover_utiki_seat_conflict(
         tab,
         config_dict,
         runtime_for_tab=runtime_for_tab,
@@ -76,13 +76,13 @@ async def seat_main(
     try:
         snapshot = await read_seat_snapshot(tab)
     except Exception as exc:
-        debug.log(f"[CTBC SEAT] Seat snapshot failed: {exc}")
+        debug.log(f"[UTIKI SEAT] Seat snapshot failed: {exc}")
         return False
     if not isinstance(snapshot, SeatSnapshot) or not snapshot.ok:
         reason = (
             snapshot.reason if isinstance(snapshot, SeatSnapshot) else "invalid-result"
         )
-        debug.log(f"[CTBC SEAT] Reserved-seat page was not ready: {reason}")
+        debug.log(f"[UTIKI SEAT] Reserved-seat page was not ready: {reason}")
         return False
 
     ticket_number = int(config_dict.get("ticket_number", 1))
@@ -96,19 +96,19 @@ async def seat_main(
     )
     if plan is None:
         if reason == "seats-unavailable":
-            await reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
+            await reload_with_interval(tab, config_dict, UTIKI_SEAT_STALE_RELOAD_REASON)
         elif reason == "ticket-type-unavailable":
-            debug.log(f"[CTBC SEAT] No ticket type matched: {keyword}")
+            debug.log(f"[UTIKI SEAT] No ticket type matched: {keyword}")
         else:
-            debug.log(f"[CTBC SEAT] Reserved-seat snapshot rejected: {reason}")
+            debug.log(f"[UTIKI SEAT] Reserved-seat snapshot rejected: {reason}")
         return False
 
     await cancel_refresh(tab, "reserved-seat plan ready")
     try:
         commit_result = await commit_seat(tab, snapshot, plan)
     except Exception as exc:
-        debug.log(f"[CTBC SEAT] Seat commit outcome is unknown: {exc}")
-        await reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
+        debug.log(f"[UTIKI SEAT] Seat commit outcome is unknown: {exc}")
+        await reload_with_interval(tab, config_dict, UTIKI_SEAT_STALE_RELOAD_REASON)
         return False
     if not await _reduce_utiki_seat_commit(
         tab,
@@ -121,9 +121,9 @@ async def seat_main(
         return False
     submit_plan = build_submit_plan(plan)
     if submit_plan is None:
-        debug.log("[CTBC SEAT] Reserved-seat submit plan was rejected")
+        debug.log("[UTIKI SEAT] Reserved-seat submit plan was rejected")
         return False
-    return await submission_engine._ctbc_captcha_and_submit(
+    return await submission_engine._utiki_captcha_and_submit(
         tab,
         config_dict,
         ocr,
@@ -140,17 +140,17 @@ async def _reduce_utiki_seat_commit(
     """歸納劃位提交結果，避免過早進入送出流程。"""
     if commit_result in {CommitResult.STALE, CommitResult.REJECTED}:
         outcome = commit_result.value
-        debug.log(f"[CTBC SEAT] Seat commit {outcome}; waiting to reload")
-        await reload_with_interval(tab, config_dict, CTBC_SEAT_STALE_RELOAD_REASON)
+        debug.log(f"[UTIKI SEAT] Seat commit {outcome}; waiting to reload")
+        await reload_with_interval(tab, config_dict, UTIKI_SEAT_STALE_RELOAD_REASON)
         return False
     if commit_result is not CommitResult.COMMITTED:
-        debug.log("[CTBC SEAT] Seat commit outcome was unknown; submit blocked")
+        debug.log("[UTIKI SEAT] Seat commit outcome was unknown; submit blocked")
         return False
     if plan.action == "clear":
-        debug.log("[CTBC SEAT] Cleared an invalid reserved-seat selection")
+        debug.log("[UTIKI SEAT] Cleared an invalid reserved-seat selection")
         return False
     debug.log(
-        f"[CTBC SEAT] Reserved-seat selection ready: "
+        f"[UTIKI SEAT] Reserved-seat selection ready: "
         f"{plan.ticket_number} x {plan.ticket_type_name}"
     )
     return True
@@ -162,9 +162,9 @@ async def _reduce_utiki_quantity_commit(
     """歸納票數提交結果，避免過早進入送出流程。"""
     if commit_result is CommitResult.STALE:
         debug.log(
-            f"[CTBC {label}] Quantity state changed during commit; " "waiting to reload"
+            f"[UTIKI {label}] Quantity state changed during commit; " "waiting to reload"
         )
-        await reload_with_interval(tab, config_dict, CTBC_QUANTITY_STALE_RELOAD_REASON)
+        await reload_with_interval(tab, config_dict, UTIKI_QUANTITY_STALE_RELOAD_REASON)
         return False
     if commit_result is not CommitResult.COMMITTED:
         outcome = (
@@ -172,9 +172,9 @@ async def _reduce_utiki_quantity_commit(
             if isinstance(commit_result, CommitResult)
             else "unknown"
         )
-        debug.log(f"[CTBC {label}] Quantity commit {outcome}; submit blocked")
+        debug.log(f"[UTIKI {label}] Quantity commit {outcome}; submit blocked")
         return False
-    debug.log(f"[CTBC {label}] Selected {plan.ticket_number} x " f"{plan.target_name}")
+    debug.log(f"[UTIKI {label}] Selected {plan.ticket_number} x " f"{plan.target_name}")
     return True
 
 
@@ -201,21 +201,21 @@ async def quantity_main(
     if submit_key is None:
         return False
     purchase = runtime_for_tab(tab)["purchase"]
-    dialog_outcome = await submission_engine._handle_ctbc_submit_dialog(
+    dialog_outcome = await submission_engine._handle_utiki_submit_dialog(
         tab,
         config_dict,
         submit_key=submit_key,
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
     )
-    if await submission_engine._recover_ctbc_captcha_dialog(
+    if await submission_engine._recover_utiki_captcha_dialog(
         tab,
         config_dict,
         runtime_for_tab=runtime_for_tab,
         purchase_key_for_tab=purchase_key_for_tab,
     ):
         return False
-    if await submission_engine._recover_ctbc_seat_conflict(
+    if await submission_engine._recover_utiki_seat_conflict(
         tab,
         config_dict,
         runtime_for_tab=runtime_for_tab,
@@ -234,7 +234,7 @@ async def quantity_main(
     try:
         snapshot = await read_quantity_snapshot(tab)
     except Exception as exc:
-        debug.log(f"[CTBC {label}] Quantity snapshot failed: {exc}")
+        debug.log(f"[UTIKI {label}] Quantity snapshot failed: {exc}")
         return False
     if not isinstance(snapshot, QuantitySnapshot) or not snapshot.ok:
         reason = (
@@ -242,14 +242,14 @@ async def quantity_main(
             if isinstance(snapshot, QuantitySnapshot)
             else "invalid-result"
         )
-        debug.log(f"[CTBC {label}] Quantity page was not ready: {reason}")
+        debug.log(f"[UTIKI {label}] Quantity page was not ready: {reason}")
         return False
     if (
         page_type == "server_assigned_quantity"
         and snapshot.product_id != expected_product_id
     ):
         debug.log(
-            "[CTBC SERVER ASSIGNMENT] Product identity changed after "
+            "[UTIKI SERVER ASSIGNMENT] Product identity changed after "
             "destination attestation"
         )
         return False
@@ -260,14 +260,14 @@ async def quantity_main(
         snapshot, keyword, ticket_number, page_type=page_type
     )
     if plan is None:
-        debug.log(f"[CTBC {label}] No available ticket type matched: {keyword}")
+        debug.log(f"[UTIKI {label}] No available ticket type matched: {keyword}")
         return False
 
     await cancel_refresh(tab, "ticket type found")
     try:
         commit_result = await commit_quantity(tab, snapshot, plan)
     except Exception as exc:
-        debug.log(f"[CTBC {label}] Quantity commit outcome is unknown: {exc}")
+        debug.log(f"[UTIKI {label}] Quantity commit outcome is unknown: {exc}")
         return False
     if not await _reduce_utiki_quantity_commit(
         tab,
@@ -281,9 +281,9 @@ async def quantity_main(
         return False
     submit_plan = build_submit_plan(plan)
     if submit_plan is None:
-        debug.log(f"[CTBC {label}] Quantity submit plan was rejected")
+        debug.log(f"[UTIKI {label}] Quantity submit plan was rejected")
         return False
-    return await submission_engine._ctbc_captcha_and_submit(
+    return await submission_engine._utiki_captcha_and_submit(
         tab,
         config_dict,
         ocr,

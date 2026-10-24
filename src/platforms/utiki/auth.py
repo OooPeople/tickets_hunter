@@ -14,15 +14,33 @@ class TenantAuthProfile:
     cookie_scope_domain: str = ""
     cookie_set_host: str = ""
     cookie_name_prefix: str = ""
+    cookie_name_separator: str = ""
+    cookie_reload_reason: str = ""
     account_key: str = ""
     password_key: str = ""
     inline_login_origin: str = ""
+
+    def __post_init__(self):
+        cookie_fields = (
+            self.cookie_config_key,
+            self.cookie_scope_domain,
+            self.cookie_set_host,
+            self.cookie_name_prefix,
+            self.cookie_reload_reason,
+        )
+        if (any(cookie_fields) or self.cookie_name_separator) and not all(cookie_fields):
+            raise ValueError("Cookie login policy must specify all required fields")
+        inline_fields = (
+            self.account_key, self.password_key, self.inline_login_origin
+        )
+        if any(inline_fields) and not all(inline_fields):
+            raise ValueError("Inline login policy must specify all required fields")
 
     @property
     def supports_cookie_login(self):
         """判斷目前租戶是否支援 Cookie 登入。"""
 
-        return bool(self.cookie_config_key and self.cookie_set_host)
+        return bool(self.cookie_config_key)
 
     @property
     def supports_inline_login(self):
@@ -33,18 +51,30 @@ class TenantAuthProfile:
         )
 
 
-TENANT_AUTH_PROFILES = MappingProxyType({
-    "ctbc_brothers": TenantAuthProfile(
+_AUTH_PROFILES = (
+    TenantAuthProfile(
         tenant_key="ctbc_brothers",
+        cookie_reload_reason="apply CTBC cookie session",
         cookie_config_key="ctbc_cookie",
         cookie_scope_domain="ctbcsports.com",
         cookie_set_host=CTBC_DOMAIN,
         cookie_name_prefix="CTBC_",
+        cookie_name_separator="|",
         account_key="ctbc_account",
         password_key="ctbc_password",
         inline_login_origin=f"https://{CTBC_DOMAIN}",
     ),
-    "wei_chuan_dragons": TenantAuthProfile(tenant_key="wei_chuan_dragons"),
+    TenantAuthProfile(
+        tenant_key="wei_chuan_dragons",
+        cookie_reload_reason="apply WDragons cookie session",
+        cookie_config_key="wdragons_cookie",
+        cookie_scope_domain="wdragons.com",
+        cookie_set_host="tix.wdragons.com",
+        cookie_name_prefix="WDRAGONS|",
+    ),
+)
+TENANT_AUTH_PROFILES = MappingProxyType({
+    profile.tenant_key: profile for profile in _AUTH_PROFILES
 })
 
 
@@ -89,8 +119,10 @@ def _cookie_pairs_from_json(raw):
     ]
 
 
-def parse_ctbc_cookie_string(raw_value):
-    """從 Cookie 標頭或 JSON 匯出內容解析中信售票工作階段 Cookie。"""
+def parse_utiki_cookie_string(raw_value, auth_profile):
+    """依租戶的名稱規則解析 Cookie 標頭或 JSON 匯出內容。"""
+    if not auth_profile or not auth_profile.cookie_name_prefix:
+        return []
     raw = str(raw_value or "").strip()
     if not raw:
         return []
@@ -110,7 +142,15 @@ def parse_ctbc_cookie_string(raw_value):
     result = []
     seen = set()
     for name, value in cookie_pairs:
-        if not name.startswith("CTBC_") or "|" not in name or not value or name in seen:
+        if (
+            not name.startswith(auth_profile.cookie_name_prefix)
+            or (
+                auth_profile.cookie_name_separator
+                and auth_profile.cookie_name_separator not in name
+            )
+            or not value
+            or name in seen
+        ):
             continue
         result.append((name, value))
         seen.add(name)

@@ -14,6 +14,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime
+from pathlib import PureWindowsPath
 
 import tornado
 from tornado.web import Application
@@ -156,11 +157,6 @@ URL_CHROME_DRIVER = 'https://chromedriver.chromium.org/'
 URL_FIREFOX_DRIVER = 'https://github.com/mozilla/geckodriver/releases'
 URL_EDGE_DRIVER = 'https://developer.microsoft.com/zh-tw/microsoft-edge/tools/webdriver/'
 
-UTIKI_BEHAVIOR_KEYS = (
-    "ticket_type_keyword",
-    "seat_sorting",
-    "seat_selection_mode",
-)
 UTIKI_SEAT_SORTINGS = (
     "display",
     "row_seat",
@@ -210,10 +206,6 @@ def get_default_config():
     config_dict["utiki"]["seat_sorting"] = "row_seat"
     config_dict["utiki"]["seat_selection_mode"] = "manual"
 
-    # Keep a non-sensitive compatibility mirror while older releases still
-    # read the CTBC-specific section.
-    config_dict['ctbc'] = dict(config_dict["utiki"])
-
     config_dict['cityline']={}
 
     config_dict['tixcraft']={}
@@ -235,6 +227,7 @@ def get_default_config():
     config_dict["accounts"]["funone_session_cookie"] = ""
     config_dict["accounts"]["fansigo_cookie"] = ""
     config_dict["accounts"]["ctbc_cookie"] = ""
+    config_dict["accounts"]["wdragons_cookie"] = ""
     config_dict["accounts"]["fansigo_account"] = ""
     config_dict["accounts"]["fansigo_password"] = ""
     config_dict["accounts"]["facebook_account"] = ""
@@ -354,18 +347,6 @@ def migrate_config(config_dict):
     if config_dict is None:
         return config_dict
 
-    # uTiki family behavior is canonical. Copy legacy values only when each
-    # canonical key is absent; an explicit empty value must remain authoritative.
-    legacy_utiki = config_dict.get("ctbc")
-    canonical_utiki = config_dict.get("utiki")
-    if not isinstance(canonical_utiki, dict):
-        canonical_utiki = {}
-    if isinstance(legacy_utiki, dict):
-        for key in UTIKI_BEHAVIOR_KEYS:
-            if key not in canonical_utiki and key in legacy_utiki:
-                canonical_utiki[key] = legacy_utiki[key]
-    config_dict["utiki"] = canonical_utiki
-
     # Migrate ocr_model_path from advanced to ocr_captcha.path
     if "advanced" in config_dict and "ocr_model_path" in config_dict["advanced"]:
         if "ocr_captcha" not in config_dict:
@@ -398,7 +379,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "utiki", "ctbc", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
+    for section in ["advanced", "kktix", "tixcraft", "utiki", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -416,10 +397,6 @@ def migrate_config(config_dict):
         config_dict["utiki"]["seat_selection_mode"] = default["utiki"][
             "seat_selection_mode"
         ]
-
-    # Mirror only the compatibility allowlist; credentials stay in accounts.
-    for key in UTIKI_BEHAVIOR_KEYS:
-        config_dict["ctbc"][key] = config_dict["utiki"][key]
 
     # Top-level scalar fields (auto-fill any missing non-section keys)
     dict_sections = {k for k, v in default.items() if isinstance(v, dict)}
@@ -658,8 +635,34 @@ class VersionHandler(tornado.web.RequestHandler):
     def get(self):
         self.write({"version":self.application.version})
 
-class ShutdownHandler(tornado.web.RequestHandler):
+def _check_control_request_source(handler):
+    """Restrict browser controls to the local settings page's origin."""
+    host = handler.request.headers.get("Host", "")
+    match = re.fullmatch(r"(?:127\.0\.0\.1|localhost):([0-9]{1,5})", host, re.IGNORECASE)
+    if not match or not 1 <= int(match.group(1)) <= 65535:
+        raise tornado.web.HTTPError(403)
+    origin = handler.request.headers.get("Origin")
+    if origin is not None and origin.lower() != "http://" + host.lower():
+        raise tornado.web.HTTPError(403)
+
+
+class ControlTokenHandler(tornado.web.RequestHandler):
     def get(self):
+        _check_control_request_source(self)
+        self.set_header("Cache-Control", "no-store")
+        self.set_header("X-Content-Type-Options", "nosniff")
+        self.write({"token": self.xsrf_token.decode("ascii")})
+
+
+class ControlActionHandler(tornado.web.RequestHandler):
+    def prepare(self):
+        if self.request.method == "POST":
+            _check_control_request_source(self)
+            self.check_xsrf_cookie()
+
+
+class ShutdownHandler(ControlActionHandler):
+    def post(self):
         global GLOBAL_SERVER_SHUTDOWN
         GLOBAL_SERVER_SHUTDOWN = True
         self.write({"showdown": GLOBAL_SERVER_SHUTDOWN})
@@ -684,8 +687,8 @@ class InstancesHandler(tornado.web.RequestHandler):
         instances = [get_instance_status(name) for name in list_instance_ids()]
         self.write({"instances": instances})
 
-class PauseHandler(tornado.web.RequestHandler):
-    def get(self):
+class PauseHandler(ControlActionHandler):
+    def post(self):
         profile_name = self.get_query_argument("profile", "")
         if profile_name and not is_valid_profile_name(profile_name):
             self.set_status(400)
@@ -694,8 +697,8 @@ class PauseHandler(tornado.web.RequestHandler):
         maxbot_idle(profile_name)
         self.write({"pause": True})
 
-class ResumeHandler(tornado.web.RequestHandler):
-    def get(self):
+class ResumeHandler(ControlActionHandler):
+    def post(self):
         profile_name = self.get_query_argument("profile", "")
         if profile_name and not is_valid_profile_name(profile_name):
             self.set_status(400)
@@ -704,8 +707,8 @@ class ResumeHandler(tornado.web.RequestHandler):
         maxbot_resume(profile_name)
         self.write({"resume": True})
 
-class StopHandler(tornado.web.RequestHandler):
-    def get(self):
+class StopHandler(ControlActionHandler):
+    def post(self):
         profile_name = self.get_query_argument("profile", "")
         if profile_name and not is_valid_profile_name(profile_name):
             self.set_status(400)
@@ -714,8 +717,8 @@ class StopHandler(tornado.web.RequestHandler):
         maxbot_stop(profile_name)
         self.write({"stop": True})
 
-class RunHandler(tornado.web.RequestHandler):
-    def get(self):
+class RunHandler(ControlActionHandler):
+    def post(self):
         profile_name = self.get_query_argument("profile", "")
         if profile_name and not is_valid_profile_name(profile_name):
             self.set_status(400)
@@ -803,8 +806,8 @@ class GlobalSettingsHandler(tornado.web.RequestHandler):
             "revision": global_settings_revision(normalized),
         })
 
-class ResetJsonHandler(tornado.web.RequestHandler):
-    def get(self):
+class ResetJsonHandler(ControlActionHandler):
+    def post(self):
         # Reset only applies to the default profile; named profiles are
         # managed via /profiles (delete and recreate instead).
         profile_name = self.get_query_argument("profile", "")
@@ -951,33 +954,57 @@ class ProfilesHandler(tornado.web.RequestHandler):
             return
         self.write({"success": True})
 
+def _sendkey_target_path(token):
+    """Keep the existing <token>.tmp file in the application directory."""
+    if not isinstance(token, str) or not token:
+        raise ValueError("invalid token")
+    if any(char in '<>:"/\\|?*' or ord(char) < 32 or ord(char) == 127 for char in token):
+        raise ValueError("invalid token")
+
+    filename = token + ".tmp"
+    if PureWindowsPath(filename).is_reserved():
+        raise ValueError("invalid token")
+
+    app_root = os.path.realpath(util.get_app_root())
+    target_path = os.path.join(app_root, filename)
+    if os.path.normcase(os.path.realpath(target_path)) != os.path.normcase(target_path):
+        raise ValueError("invalid token")
+    return target_path
+
+
 class SendkeyHandler(tornado.web.RequestHandler):
     def post(self):
         self.set_header("Access-Control-Allow-Origin", "*")
         self.set_header("Access-Control-Allow-Headers", "x-requested-with")
         self.set_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
 
-        _body = None
-        is_pass_check = True
-        errorMessage = ""
-        errorCode = 0
+        try:
+            body = json.loads(self.request.body)
+        except (ValueError, UnicodeDecodeError):
+            self.set_status(400)
+            self.write({"return": False, "error": "invalid JSON"})
+            return
 
-        if is_pass_check:
-            is_pass_check = False
-            try :
-                _body = json.loads(self.request.body)
-                is_pass_check = True
-            except Exception:
-                errorMessage = "wrong json format"
-                errorCode = 1001
-                pass
+        if not isinstance(body, dict):
+            self.set_status(400)
+            self.write({"return": False, "error": "invalid JSON object"})
+            return
 
-        if is_pass_check:
-            app_root = util.get_app_root()
-            if "token" in _body:
-                tmp_file = _body["token"] + ".tmp"
-                config_filepath = os.path.join(app_root, tmp_file)
-                util.save_json(_body, config_filepath)
+        try:
+            target_path = _sendkey_target_path(body.get("token"))
+        except ValueError:
+            self.set_status(400)
+            self.write({"return": False, "error": "invalid token"})
+            return
+
+        serialized = json.dumps(body, indent=4)
+        try:
+            with open(target_path, "w", encoding="utf-8") as outfile:
+                outfile.write(serialized)
+        except OSError:
+            self.set_status(500)
+            self.write({"return": False, "error": "failed to save"})
+            return
 
         self.write({"return": True})
 
@@ -1191,6 +1218,7 @@ async def main_server():
 
     app = Application([
         ("/version", VersionHandler),
+        ("/control-token", ControlTokenHandler),
         ("/shutdown", ShutdownHandler),
         ("/sendkey", SendkeyHandler),
 
@@ -1215,7 +1243,8 @@ async def main_server():
         ("/query", QueryHandler),
         ("/question", QuestionHandler),
         ('/(.*)', NoCacheStaticFileHandler, {"path": os.path.join(SCRIPT_DIR, 'www')}),
-    ])
+    ], xsrf_cookie_name="_th_control_xsrf",
+       xsrf_cookie_kwargs={"httponly": True, "samesite": "Strict"})
     app.ocr = ocr;
     app.version = CONST_APP_VERSION;
 

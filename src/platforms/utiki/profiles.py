@@ -6,6 +6,8 @@ from enum import Enum
 from types import MappingProxyType
 from urllib.parse import parse_qsl, urlsplit
 
+from ocr_models import OcrModel
+
 
 class PageKind(str, Enum):
     UNKNOWN = "unknown"
@@ -25,23 +27,14 @@ class TenantProfile:
     tenant_path: str
     map_namespace: str
     fast_area_prefetch: bool
+    ocr_model: OcrModel
     supports_server_assignment: bool = False
 
-    def as_legacy_dict(self):
-        """將租戶設定轉成舊版呼叫端使用的字典。"""
-
-        return {
-            "name": self.name,
-            "host": self.host,
-            "tenant_path": self.tenant_path,
-            "map_namespace": self.map_namespace,
-            "fast_area_prefetch": self.fast_area_prefetch,
-            "supports_server_assignment": self.supports_server_assignment,
-        }
-
+    def __post_init__(self):
+        if not isinstance(self.ocr_model, OcrModel):
+            raise ValueError("Unknown tenant OCR model policy")
 
 CTBC_DOMAIN = "tix.ctbcsports.com"
-CTBC_MAP_DOMAIN = "imgs2.utiki.com.tw"
 
 _TENANTS = (
     TenantProfile(
@@ -51,6 +44,7 @@ _TENANTS = (
         tenant_path="/BROTHERS",
         map_namespace="CTBC_SPORTS",
         fast_area_prefetch=True,
+        ocr_model=OcrModel.OFFICIAL,
     ),
     TenantProfile(
         key="wei_chuan_dragons",
@@ -59,6 +53,8 @@ _TENANTS = (
         tenant_path="",
         map_namespace="WDRAGONS",
         fast_area_prefetch=False,
+        supports_server_assignment=True,
+        ocr_model=OcrModel.OFFICIAL,
     ),
 )
 

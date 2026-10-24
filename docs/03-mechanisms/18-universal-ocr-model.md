@@ -42,16 +42,16 @@ path/custom.onnx 或 charsets.json 不存在 → 記 log，return None
 
 回傳 `None` 代表「不用自訓練模型」，由呼叫端回退官方 ddddocr。
 
-### `create_ocr_for_platform(config_dict)`
+### `create_ocr_for_model(config_dict, preferred_model)`
 
-在 `create_universal_ocr` 之上，依平台首頁自動挑模型（常數 `CONST_TIXCRAFT_TM_MODEL_PATH` / `CONST_DEFAULT_UNIVERSAL_PATH`）：
+正式入口先解析首頁主機：uTiki 依精確 HTTPS 租戶 profile 的 `ocr_model` 能力選型，TixCraft 家族依首頁主機選型，其他站使用通用模型。工廠只根據明確的 `preferred_model` 建立模型（常數 `CONST_TIXCRAFT_TM_MODEL_PATH` / `CONST_DEFAULT_UNIVERSAL_PATH`）：
 
 ```
 1. use_universal == False                          → None（呼叫端回退 ddddocr）
 2. path 為非預設的自訂路徑                          → 用使用者自訂路徑（create_universal_ocr）
-3. homepage 含 tixcraft.com / indievox.com / ticketmaster.
-   → 嘗試 tixcraft_tm；載入成功則用之，否則往下
-4. 其餘情況                                         → universal
+3. preferred_model == official                     → 官方 ddddocr + `set_ranges(5)`
+4. preferred_model == tixcraft_tm                  → 嘗試 tixcraft_tm；載入失敗則回退 universal
+5. preferred_model == universal                    → universal
 ```
 
 決策中以淺複製 `config_dict` 覆寫 `ocr_captcha.path` 為 tixcraft_tm 路徑後再交給 `create_universal_ocr`，不改動原設定。
@@ -64,13 +64,14 @@ path/custom.onnx 或 charsets.json 不存在 → 記 log，return None
 
 ```python
 if config_dict["ocr_captcha"]["enable"]:
-    ocr = create_ocr_for_platform(config_dict)   # 依 homepage 自動挑模型
+    model = _ocr_model_for_homepage(config_dict["homepage"])
+    ocr = create_ocr_for_model(config_dict, model)
     if ocr is None:                              # 未啟用 / 模型缺失
         ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])
         ocr.set_ranges(1)                         # 回退官方模型才需限定字元集
 ```
 
-因為 `create_ocr_for_platform` 已依 homepage 決定模型，非 TixCraft 家族平台（如 KHAM）在此即取得 universal 實例，再經參數傳入（如 `nodriver_kham_auto_ocr(tab, config_dict, ocr, ...)`）。
+未指定專用模型的 uTiki 租戶，以及其他平台（例如 KHAM），在此取得 universal 實例，再經參數傳入（如 `nodriver_kham_auto_ocr(tab, config_dict, ocr, ...)`）。
 
 ---
 
@@ -78,7 +79,8 @@ if config_dict["ocr_captcha"]["enable"]:
 
 | 平台 | 取得模型方式 | 實際模型 | 回退（模型缺失） |
 |------|-------------|---------|-----------------|
-| **TixCraft / Ticketmaster.sg / indievox** | 主迴圈 `create_ocr_for_platform` | tixcraft_tm（缺則 universal） | 官方 ddddocr + `set_ranges(1)` |
+| **TixCraft / Ticketmaster.sg / indievox** | 主迴圈解析首頁主機後呼叫 `create_ocr_for_model` | tixcraft_tm（缺則 universal） | 官方 ddddocr + `set_ranges(1)` |
+| **中信育樂／味全龍 uTiki** | 精確租戶 profile 選 `official` | 官方 ddddocr + `set_ranges(5)` | 無專用模型時依主入口原 fallback |
 | **iBon** | 驗證碼流程內直接 `create_universal_ocr` | universal | 官方 ddddocr + `set_ranges(0)` |
 | **KHAM** | 主迴圈傳入的 OCR 實例 | universal | 同主迴圈回退 |
 | **FunOne** | **不使用自訓練模型** | 官方 ddddocr（硬編） | — |
@@ -95,11 +97,12 @@ if config_dict["ocr_captcha"]["enable"]:
    → 呼叫 set_ranges(N) 限定字元集
 ```
 
-`set_ranges(N)` **僅在回退到官方 ddddocr 時生效**；自訓練模型的字元集由 `charsets.json` 決定，無需此呼叫。各平台的 N 值（ddddocr 內建範圍）：
+`set_ranges(N)` 用於官方 ddddocr，包括 uTiki 明確選用官方模型及主入口回退；自訓練模型的字元集由 `charsets.json` 決定，無需此呼叫。各平台的 N 值（ddddocr 內建範圍）：
 
 | 平台 | `set_ranges` | 字元範圍 | 依據 |
 |------|-------------|---------|------|
 | TixCraft 家族 | `1` | 純小寫 a-z | `nodriver_tixcraft.py` 啟動回退 |
+| 中信育樂／味全龍 uTiki | `5` | 大寫 A-Z + 數字 0-9 | 租戶 profile 的官方模型政策 |
 | iBon | `0` | 純數字 0-9 | `ibon.py` 驗證碼流程回退 |
 | FunOne | `5` | 大寫 A-Z + 數字 0-9 | `funone.py`（程式碼註解明載） |
 
@@ -138,7 +141,7 @@ FunOne 驗證碼為大寫英數，通用模型實測準確率不足，因此硬�
 
 ### Q4：我可以用自己訓練的模型嗎？
 
-可以。把 `custom.onnx` + `charsets.json` 放到任意目錄，將 `ocr_captcha.path` 指向該目錄（非預設值）。此時自動挑模型停用，一律使用你的路徑（見 `create_ocr_for_platform` 第 2 條）。模型訓練流程見 `captcha-trainer` skill。
+可以。啟用 OCR 與 `use_universal` 時，把 `custom.onnx` + `charsets.json` 放到任意目錄，將 `ocr_captcha.path` 指向該目錄（非預設值）；自訂路徑優先於站點自動選型（見 `create_ocr_for_model` 第 2 條）。模型訓練流程見 `captcha-trainer` skill。
 
 ---
 

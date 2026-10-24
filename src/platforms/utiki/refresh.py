@@ -373,7 +373,7 @@ async def _invoke_browser_reload(tab, debug):
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        debug.log(f"[CTBC] Reload dispatch outcome is unknown: {exc}")
+        debug.log(f"[UTIKI] Reload dispatch outcome is unknown: {exc}")
     return False
 
 
@@ -576,7 +576,7 @@ def _get_reload_request(
         "pause_cleanup_retry_at": 0.0,
     }
     refresh["reload_request"] = request
-    debug.log(f"[CTBC] {reason}; queued for shared refresh")
+    debug.log(f"[UTIKI] {reason}; queued for shared refresh")
     return request
 
 
